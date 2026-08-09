@@ -1,0 +1,60 @@
+# Operator Agent 配置文件模板
+# 使用方法:
+#   cp config.example.yaml config.yaml
+#   然后按实际情况修改 config.yaml (不要把真实 config.yaml 提交到 git)
+
+# LLM 配置
+llm:
+  base_url: "https://your-llm-endpoint.example.com/v1"
+  model: "your-model-name"
+  temperature: 0.3
+  max_tokens: 4096
+  timeout: 120
+  # api_key 从环境变量 LLM_API_KEY 读取
+
+  # 降级模型 (主模型失败时自动切换)
+  fallback:
+    model: "your-fallback-model"
+    base_url: "https://your-fallback-endpoint.example.com/v1"
+    # api_key 从环境变量 HY_API_KEY 读取 (或与主模型使用同一 env var)
+
+# 远程执行配置
+remote:
+  # 连接模式: ssh (推荐) / http / local / auto (自动检测)
+  mode: "auto"
+  # 远程工作目录 - uv 环境将在此目录下自动配置
+  work_dir: "/path/to/operator_agent_runner"
+  ssh:
+    host: "your-gpu-server.example.com"
+    port: 22
+    user: "your-ssh-user"
+    key_path: ""  # 从环境变量 REMOTE_SSH_KEY 读取，默认 ~/.ssh/id_rsa
+    runner_path: "/path/to/operator_agent_runner/run_kernel.py"
+  http:
+    url: "http://your-gpu-server.example.com:8091"
+
+# Prompt 模板目录
+prompts_dir: "operator_agent/prompts"
+
+# 优化配置
+optimization:
+  max_rounds: 3
+  # 性能验收: 相对 NumPy 参考 baseline 的最低加速比
+  min_speedup: 1.0
+  # legacy: 无参考实现算子的绝对 GFLOPS 回退目标
+  target_gflops: 10.0
+
+# 硬件预设
+hardware_presets:
+  nvidia_gpu:
+    compute_units: 128
+    warp_size: 32
+    vector_width: 128
+  mock_gpu:
+    compute_units: 64
+    warp_size: 32
+    vector_width: 64
+  ascend:
+    compute_units: 64
+    warp_size: 16
+    vector_width: 128

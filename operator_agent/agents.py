@@ -1,0 +1,615 @@
+"""Agent 算子生成模块
+Designer: LLM 驱动设计 UnifiedSketch
+Coder:   LLM 驱动生成目标代码
+Search:   LLM 驱动性能优化建议
+prompt 模板均从 prompts/ 目录加载，支持热更新"""
+
+import json
+from typing import Optional
+from .schemas import (
+    TaskSchema, UnifiedSketch, TilingStrategy, MemoryPlan,
+    PipelineStage, TaskComplexity,
+)
+from .kernel_db import KernelDatabase
+from .prompt_manager import PromptManager
+from .fixer import FixerAgent
+from .triton_opt_rules import TritonOptimizationRules
+
+
+class DesignerAgent:
+    """
+    Designer Agent
+    职责: 根据算子 Spec + 硬件信息 + RAG 案例，生成 Unified Sketch
+    基于 LLM 驱动生成
+    """
+
+    def __init__(self, kernel_db: KernelDatabase, llm=None, prompt_manager: Optional[PromptManager] = None):
+        self.kernel_db = kernel_db
+        self.llm = llm
+        self.pm = prompt_manager or PromptManager()
+        self.name = "Designer"
+        self._agent_role = "designer"
+        self._skill_name = "triton_skill"
+
+    MAX_SKETCH_ATTEMPTS = 3   # Sketch 生成 + 最多 2 次带 schema 校验反馈重试
+
+    def run(self, task: TaskSchema, hardware_info: dict) -> UnifiedSketch:
+        if self.llm is None:
+            raise RuntimeError("LLM 未配置，规则模板已移除")
+
+        similar = self.kernel_db.search(
+            algorithm=task.source.kernel_type,
+            hardware=task.target.hardware,
+            dsl=task.target.dsl,
+        )
+
+        feedback = ""
+        sketch = None
+        for attempt in range(1, self.MAX_SKETCH_ATTEMPTS + 1):
+            sketch = self._llm_generate_sketch(task, hardware_info, similar, feedback)
+            issues = sketch.validate()
+            if not issues:
+                if attempt > 1:
+                    print(f"  [Designer] 第 {attempt} 次尝试 Sketch 通过 schema 校验")
+                break
+            # 仅输出非 warning 项作为真正失败依据, warnings 单独 print
+            hard_errors = [e for e in issues if not e.startswith("[WARNING]")]
+            for w in [e for e in issues if e.startswith("[WARNING]")]:
+                print(f"  [Designer] {w}")
+            if not hard_errors:
+                # 全部是 warnings, 允许放行 (允许探索新算子/新硬件)
+                break
+            print(f"  [Designer] 第 {attempt} 次 Sketch schema 校验失败: {'; '.join(hard_errors[:3])}")
+            feedback = (
+                "\n\n[上一轮 Designer 输出未通过本地 schema 校验, 请按以下修正后重新生成 JSON:\n"
+                + "\n".join(f"  - {e}" for e in hard_errors)
+                + "\n  仍返回严格同结构的 JSON (algorithm/tiling/memory_plan/pipeline/target_dsl/optimization_hints), 不要输出解释或代码.]\n"
+            )
+
+        print(f"  [Designer] LLM 生成 Sketch: algorithm={sketch.algorithm}, "
+              f"tiling=({sketch.tiling.block_m}x{sketch.tiling.block_n}x{sketch.tiling.block_k})")
+        if similar:
+            print(f"  [Designer] RAG 命中 {len(similar)} 个相似案例")
+        return sketch
+
+    def _llm_generate_sketch(self, task: TaskSchema, hardware_info: dict, similar: list, feedback: str = "") -> UnifiedSketch:
+        rag_context = self._build_rag_context(similar)
+
+        # ---- 提取硬件约束用于 tile 选择 ----
+        cc = str(hardware_info.get("compute_capability", ""))
+        hw_name = str(hardware_info.get("name", "")).lower()
+        # 根据 compute_capability 推断共享内存和 SM 参数
+        # A100: 164KB/SM (可配置到 48KB 默认), 2048 threads/SM, 32 blocks/SM
+        # H100: 228KB/SM, 2048 threads/SM, 32 blocks/SM
+        is_a100 = cc.startswith("8.0") or "a100" in hw_name
+        is_h100 = cc.startswith("9.0") or "h100" in hw_name or "h200" in hw_name
+        if is_h100:
+            shared_mem_kb, max_threads, max_blocks = 228, 2048, 32
+        elif is_a100:
+            shared_mem_kb, max_threads, max_blocks = 164, 2048, 32
+        else:
+            shared_mem_kb = hardware_info.get("memory", {}).get("local", {}).get("size", "128KB")
+            if isinstance(shared_mem_kb, str):
+                shared_mem_kb = int(shared_mem_kb.replace("KB", "").replace("/SM", "").strip()) if "KB" in shared_mem_kb else 128
+            max_threads = hardware_info.get("compute_units", 128) * 2  # rough estimate
+            max_blocks = 32
+
+        # 可用共享内存 (扣除系统预留 ~10%)
+        usable_shared_mem_kb = int(shared_mem_kb * 0.9)
+
+        # ── SKILL 选择策略 ──
+        # triton_skill 中包含大量 tl.* / @triton.jit 专用指令
+        # 当 dsl != "triton" (例如昆仑芯 python / cuda_c 兼容层) 时, 强制不注入该 skill
+        # 否则 LLM 很容易被诱导写出 Triton 代码 -> 在非 NVIDIA 硬件上编译必挂
+        effective_skill = (
+            self._skill_name if (task.target.dsl or "").lower() == "triton" else None
+        )
+
+        prompt = self.pm.render(
+            "designer_sketch",
+            _agent_role=self._agent_role,
+            _skill_name=effective_skill,
+            kernel_type=task.source.kernel_type,
+            hardware=task.target.hardware,
+            dsl=task.target.dsl,
+            precision=task.constraints.precision.value,
+            complexity=task.source.complexity.value,
+            hardware_info=json.dumps(hardware_info, ensure_ascii=False, indent=2),
+            rag_context=rag_context or "无",
+            shared_mem_kb=str(shared_mem_kb),
+            usable_shared_mem_kb=str(usable_shared_mem_kb),
+            max_threads_per_sm=str(max_threads),
+            max_blocks_per_sm=str(max_blocks),
+        )
+
+        # 追加上一轮校验反馈 (不为空时, 让 LLM 根据错误修正 JSON 输出)
+        if feedback:
+            prompt = prompt + feedback
+
+        result = self.llm.chat_json(messages=[{"role": "user", "content": prompt}], temperature=0.3, max_tokens=2048, caller_tag="Designer")
+
+        return UnifiedSketch(
+            algorithm=result.get("algorithm", task.source.kernel_type),
+            version=1,
+            tiling=TilingStrategy(**result.get("tiling", {})),
+            memory_plan=MemoryPlan(**result.get("memory_plan", {})),
+            pipeline=[PipelineStage(**p) for p in result.get("pipeline", [])],
+            target_dsl=task.target.dsl,
+            optimization_hints=result.get("optimization_hints", []),
+        )
+
+    @staticmethod
+    def _build_rag_context(similar: list) -> str:
+        if not similar:
+            return ""
+        lines = []
+        for i, r in enumerate(similar[:3]):
+            line = f"案例{i+1}: algorithm={r.algorithm}, hardware={r.hardware}, "
+            line += f"performance={r.performance} GFLOPS, tags={r.tags}"
+            if r.sketch:
+                line += f", sketch_tiling={r.sketch.get('tiling', {})}"
+            lines.append(line)
+        return "\n".join(lines)
+
+
+class CoderAgent:
+    """
+    Coder Agent
+    职责: 根据 Sketch + RAG 参考，生成目标代码
+    基于 LLM 驱动生成
+    """
+
+    def __init__(self, kernel_db: KernelDatabase, llm=None, prompt_manager: Optional[PromptManager] = None,
+                 pipeline=None):
+        self.kernel_db = kernel_db
+        self.llm = llm
+        self.pm = prompt_manager or PromptManager()
+        self.name = "Coder"
+        self._agent_role = "coder"
+        self._skill_name = "triton_skill"
+        # 可选注入 CoderPipeline (Plan→并行采样→筛选→修复→回退)
+        # 默认 None: 走 legacy 单线程生成+预检重试, 保持兼容
+        self.pipeline = pipeline
+
+    def run(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None, **kwargs) -> str:
+        if self.llm is None:
+            raise RuntimeError("LLM 未配置，规则模板已移除")
+
+        # 注入了 CoderPipeline 时走优化流程 (Plan→并行采样→筛选→修复→回退)
+        if self.pipeline is not None:
+            code = self.pipeline.run(sketch, task, optimization_recipes=optimization_recipes, **kwargs)
+            print(f"  [Coder] Pipeline 生成代码: {len(code)} chars, language={sketch.target_dsl}")
+            return code
+
+        code = self._llm_generate_code(sketch, task, optimization_recipes=optimization_recipes)
+        print(f"  [Coder] LLM 生成代码: {len(code)} chars, language={sketch.target_dsl}")
+        return code
+
+    MAX_GENERATE_ATTEMPTS = 3   # 首次生成 + 最多 2 次带预检反馈重试
+    MAX_REF_CODE_CHARS = 2000   # 注入 prompt 的参考代码上限 (摘要级注入, 控制上下文)
+
+    def _llm_generate_code(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None) -> str:
+        similar = self.kernel_db.search(algorithm=task.source.kernel_type, hardware=task.target.hardware, dsl=sketch.target_dsl)
+        ref_code = similar[0].code if similar else ""
+        if len(ref_code) > self.MAX_REF_CODE_CHARS:
+            ref_code = ref_code[:self.MAX_REF_CODE_CHARS] + "\n# ... (参考代码已截断)"
+
+        if sketch.target_dsl == "triton":
+            template_name = "coder_generate_triton"
+            effective_skill = self._skill_name
+        elif sketch.target_dsl == "cuda_c":
+            # C++ (PyTorch C++ Extension): 使用专用模板, 不注入 triton_skill
+            template_name = "coder_generate_cuda_c"
+            effective_skill = None
+        else:
+            template_name = "coder_generate"
+            # 非 triton DSL: 不注入 triton_skill (tl.* / @triton.jit 暗示会严重干扰昆仑芯等非 NVIDIA 硬件的代码生成)
+            effective_skill = None
+
+        optimization_hints = "\n".join(f"- {h}" for h in sketch.optimization_hints) if sketch.optimization_hints else "无"
+        if optimization_recipes:
+            optimization_hints = f"[Planner选中的优化配方]\n{optimization_recipes}\n\n[Designer优化建议]\n{optimization_hints}"
+
+        prompt = self.pm.render(
+            template_name,
+            _agent_role=self._agent_role,
+            _skill_name=effective_skill,
+            kernel_type=task.source.kernel_type,
+            hardware=task.target.hardware,
+            dsl=sketch.target_dsl,
+            precision=task.constraints.precision.value,
+            sketch=json.dumps(sketch.to_dict(), ensure_ascii=False, indent=2),
+            ref_code=ref_code or "无",
+            optimization_hints=optimization_hints,
+            block_m=sketch.tiling.block_m,
+            block_n=sketch.tiling.block_n,
+            block_k=sketch.tiling.block_k,
+        )
+
+        # 生成 -> 预检 -> 带反馈重试: 拦截输出截断/语法错误, 避免必然失败的编译轮
+        feedback = ""
+        code = ""
+        for attempt in range(1, self.MAX_GENERATE_ATTEMPTS + 1):
+            raw = self.llm.chat([{"role": "user", "content": prompt + feedback}], temperature=0.1, max_tokens=40960, caller_tag="Coder")
+            code = self._clean_code(raw)
+            ok, issues = self._validate_code(code, sketch.target_dsl)
+            if ok:
+                if attempt > 1:
+                    print(f"  [Coder] 第 {attempt} 次尝试通过预检")
+                return code
+            print(f"  [Coder] 代码预检失败 ({'; '.join(issues)})")
+            feedback = self._build_retry_feedback(issues)
+        print(f"  [Coder] 预检连续未通过，返回最后一次生成结果")
+        return code
+
+    @staticmethod
+    def _validate_code(code: str, dsl: str = "python") -> tuple:
+        """
+        生成后预检 (不进沙箱的静态检查):
+        - 截断检测: 括号不配对 / 结尾悬空 (max_tokens 截断的典型特征)
+        - 结构检测: kernel 入口函数 / @triton.jit 装饰器
+        - 语法检测: Python 系 DSL 用 compile() 验证语法
+        - cuda_c 特检: 必须含 load_inline 和 _CPP_SOURCE
+        返回 (是否通过, 问题列表)
+        """
+        if not code or not code.strip():
+            return False, ["代码为空"]
+        issues = []
+
+        for open_ch, close_ch in (("(", ")"), ("[", "]"), ("{", "}")):
+            if code.count(open_ch) != code.count(close_ch):
+                issues.append(f"括号 {open_ch}{close_ch} 不配对 (疑似输出截断)")
+                break
+
+        stripped = code.rstrip()
+        if stripped.endswith(("(", ",", ":", "\\", "+", "-", "*", "/", "=")):
+            issues.append("代码结尾悬空 (疑似输出截断)")
+
+        if "def kernel" not in code:
+            issues.append("缺少 kernel 入口函数")
+
+        # 只要 dsl != "triton" (即 python/cuda_c/opencl 等) 就禁止出现 import triton / @triton.jit
+        # 这是昆仑芯/昇腾等非 Nvidia 硬件的关键防线
+        if dsl != "triton":
+            if "import triton" in code or "from triton" in code or "@triton.jit" in code:
+                issues.append(
+                    f"禁止: dsl={dsl!r} 但代码里出现了 Triton API (import triton / @triton.jit 等)。"
+                    " 昆仑芯/昇腾/其他非 Nvidia 硬件必须使用纯 Python/PyTorch/NumPy，不能用 Triton/CUDA。"
+                )
+
+        if dsl == "triton" and "@triton.jit" not in code:
+            issues.append("缺少 @triton.jit 装饰器")
+
+        # cuda_c (PyTorch C++ Extension) 专用预检
+        if dsl == "cuda_c":
+            if "load_inline" not in code:
+                issues.append("cuda_c 代码缺少 load_inline 调用 (PyTorch C++ Extension JIT 编译)")
+            if "_CPP_SOURCE" not in code and "cpp_sources" not in code:
+                issues.append("cuda_c 代码缺少 C++ 源码 (_CPP_SOURCE 或 cpp_sources)")
+            # 不走 Python compile() — 因为代码中包含 C++ 字符串，虽然 Python 语法合法，
+            # 但 compile 无法检查 C++ 内容，直接跳过即可
+        elif dsl in ("python", "triton"):
+            try:
+                compile(code, "<generated>", "exec")
+            except SyntaxError as e:
+                issues.append(f"语法错误: {e.msg} (第 {e.lineno} 行)")
+
+        return (not issues, issues)
+
+    @staticmethod
+    def _build_retry_feedback(issues: list) -> str:
+        bullets = "\n".join(f"- {i}" for i in issues)
+        return (
+            f"\n\n## 上次生成未通过预检\n{bullets}\n"
+            f"请重新输出完整代码: 以 `import` 开头，包含 kernel 入口函数，"
+            f"括号配对完整，不要中途截断，不要输出解释。"
+        )
+
+    @staticmethod
+    def _clean_code(raw: str) -> str:
+        """清理 LLM 生成的代码"""
+        code = raw.strip()
+
+        for end_tag in ["</think>", "</thinking>"]:
+            idx = code.find(end_tag)
+            if idx != -1:
+                code = code[idx + len(end_tag):]
+                break
+
+        code = code.strip()
+
+        if code.startswith("```"):
+            lines = code.split("\n")
+            start = 1
+            if start < len(lines) and lines[start].strip().startswith(("python", "triton", "cpp", "cuda", "c++")):
+                start += 1
+            code = "\n".join(lines[start:])
+
+        if code.rstrip().endswith("```"):
+            code = code.rstrip()[:-3]
+
+        code = code.strip()
+
+        # 非 Triton 代码: 走通用提取，避免下方 Triton 专用清理管道
+        # 因起始标记不匹配把纯 Python/CUDA 代码误删为空串
+        if not any(m in code for m in ("import triton", "@triton.jit", "from triton", "triton.language")):
+            extracted = FixerAgent._extract_code(code)
+            return extracted if extracted else code
+
+        valid_start_markers = ("import triton", "import torch", "from triton", "@triton.jit")
+        found_idx = -1
+        for marker in valid_start_markers:
+            idx = code.find(marker)
+            if idx >= 0 and (found_idx == -1 or idx < found_idx):
+                found_idx = idx
+        if found_idx >= 0:
+            code = code[found_idx:]
+
+        code = code.strip()
+
+        lines = code.split("\n")
+        cleaned_lines = []
+        in_code = False
+        for line in lines:
+            stripped = line.strip()
+            
+            if stripped.startswith(valid_start_markers):
+                in_code = True
+                
+            if in_code:
+                if stripped == "```":
+                    break
+                if stripped.startswith("**") and not "@triton" in stripped and not "def " in stripped and not "import" in stripped:
+                    break
+                if stripped.startswith("*   ") or stripped.startswith("    *   "):
+                    continue
+                if stripped.startswith("    *") and len(stripped) > 6 and not stripped[6].isspace():
+                    continue
+                if "`" in stripped and ("import" in stripped or "def " in stripped or "@triton" in stripped):
+                    stripped = stripped.replace("`", "")
+                    line = " " * (len(line) - len(stripped)) + stripped
+                cleaned_lines.append(line)
+
+        if cleaned_lines:
+            first_line_stripped = cleaned_lines[0].strip()
+            first_line_indent = len(cleaned_lines[0]) - len(first_line_stripped)
+            
+            if first_line_indent == 0:
+                pass
+            else:
+                min_indent = None
+                for line in cleaned_lines:
+                    stripped = line.strip()
+                    if stripped:
+                        indent = len(line) - len(stripped)
+                        if min_indent is None or indent < min_indent:
+                            min_indent = indent
+                if min_indent and min_indent > 0:
+                    cleaned_lines = [line[min_indent:] if len(line) >= min_indent else line for line in cleaned_lines]
+
+        code = "\n".join(cleaned_lines).strip()
+
+        if code.startswith("@triton.jit"):
+            lines = code.split("\n")
+            if len(lines) > 1 and lines[1].strip().startswith("def "):
+                if lines[1].startswith("    def "):
+                    min_indent = 4
+                    fixed_lines = [lines[0]]
+                    for line in lines[1:]:
+                        if len(line) >= min_indent and line[:min_indent].isspace():
+                            fixed_lines.append(line[min_indent:])
+                        else:
+                            fixed_lines.append(line)
+                    code = "\n".join(fixed_lines)
+
+        # 清理 docstring：只删除"无意义"的 LLM 残留 markdown 文本 (如包含 ``` 或 >10 行超长、
+        # 或出现 ## 标题、含有 __all__/author 等与算法无关的 docstring)；保留 kernel 算法 docstring
+        for quote in ['"""', "'''"]:
+            while quote in code:
+                start_idx = code.index(quote)
+                end_idx = code.find(quote, start_idx + 3)
+                if end_idx == -1:
+                    # 未闭合的三引号：尽量保留到行末
+                    end_of_line = code.find("\n", start_idx)
+                    if end_of_line == -1:
+                        code = code[:start_idx]
+                    else:
+                        code = code[:start_idx] + code[end_of_line + 1:]
+                    continue
+                body = code[start_idx + 3:end_idx]
+                keep = True
+                body_lines = [l.strip() for l in body.split("\n") if l.strip()]
+                if not body_lines:
+                    keep = False
+                if any(tok in body for tok in ("```", "****", "__all__", "__version__", "Author:", "License")):
+                    keep = False
+                if any(l.startswith("## ") or l.startswith("### ") for l in body_lines):
+                    keep = False
+                # 单独的参数/返回 doc 超过 14 行往往是 LLM 在写说明书而非注释
+                if len(body_lines) > 14:
+                    # 包含至少一个"算法/Flash/分块/累加/指针/softmax/归约"等关键词则保留
+                    kw = ("算法", "Flash", "分块", "累加", "指针", "softmax", "归约",
+                          "精度", "边界", "causal", "Tensor Core", "Tiling", "tile")
+                    if not any(k.lower() in body.lower() for k in kw):
+                        keep = False
+                if not keep:
+                    code = code[:start_idx] + code[end_idx + 3:]
+                else:
+                    # 保留 docstring: 将开始/结束引号都替换为占位符,
+                    # 避免 while 循环再次把开始引号当作"未闭合"而删掉整行
+                    code = code[:start_idx] + "\x00\x03\x04" + body + "\x00\x01\x02" + code[end_idx + 3:]
+            # 最后还原起止引号占位符
+            code = code.replace("\x00\x03\x04", quote).replace("\x00\x01\x02", quote)
+
+        lines = code.split("\n")
+        cleaned_lines = []
+        for line in lines:
+            stripped = line.strip()
+            # 仅删除明显由 LLM 生成的"结构化注释"（# ## 标题、# --- 分隔、过长的 TODO 占位），
+            # 保留普通中文/英文行注释 (# 参数说明 / # 加载 tile / # softmax 更新 等)
+            if stripped.startswith("#") and not stripped.startswith("#!"):
+                body = stripped.lstrip("#").strip()
+                if not body:
+                    continue  # 空的 ## 注释
+                if (body.startswith("## ") or body.startswith("### ")
+                        or len(set(body)) == 1 and body[0] in "-=*~"):
+                    continue  # # ## 标题 / # ---- 分隔线
+                if body.lower().startswith(("note:", "todo:", "fixme:", "warning:")) and len(body) > 60:
+                    continue
+            cleaned_lines.append(line)
+
+        code = "\n".join(cleaned_lines).strip()
+
+        if "@triton.jit" in code and "import triton" not in code:
+            code = "import triton\nimport triton.language as tl\nimport torch\n" + code
+        elif "@triton.jit" in code:
+            if "import triton.language as tl" not in code:
+                import_triton_idx = code.find("import triton")
+                if import_triton_idx >= 0:
+                    end_of_line = code.find("\n", import_triton_idx)
+                    if end_of_line > 0:
+                        code = code[:end_of_line] + "\nimport triton.language as tl" + code[end_of_line:]
+            if "import torch" not in code:
+                import_triton_idx = code.find("import triton")
+                if import_triton_idx >= 0:
+                    end_of_line = code.find("\n", import_triton_idx)
+                    if end_of_line > 0:
+                        code = code[:end_of_line] + "\nimport torch" + code[end_of_line:]
+
+        return code.strip()
+
+
+class SearchAgent:
+    """
+    Search Agent (性能优化)
+    职责: 当 L3 验证未通过时，分析瓶颈并提出优化建议
+    基于 LLM 驱动分析
+    """
+
+    def __init__(self, llm=None, prompt_manager: Optional[PromptManager] = None):
+        self.llm = llm
+        self.pm = prompt_manager or PromptManager()
+        self.name = "Search"
+        self._agent_role = "search"
+        self._skill_name = "triton_skill"
+
+    def run(self, sketch: UnifiedSketch, perf_data: dict) -> tuple[UnifiedSketch, str]:
+        if self.llm is None:
+            raise RuntimeError("LLM 未配置，规则模板已移除")
+
+        try:
+            new_sketch, suggestion = self._llm_optimize(sketch, perf_data)
+        except Exception as e:
+            # LLM 优化失败时回退到规则优化, 不中断整个任务
+            print(f"  [Search] LLM 优化失败 ({e}), 回退规则优化")
+            return self._rule_optimize(sketch, perf_data)
+        print(f"  [Search] LLM 优化建议: {suggestion}")
+        return new_sketch, suggestion
+
+    def _llm_optimize(self, sketch, perf_data) -> tuple[UnifiedSketch, str]:
+        speedup = perf_data.get("speedup", 0)
+        target_speedup = perf_data.get("target_speedup", 1.0)
+        achieve_pct = speedup / target_speedup * 100 if target_speedup > 0 else 0.0
+
+        # ---- 提取 Roofline 分析数据 (Verifier 注入) ----
+        hw_peak_gflops = perf_data.get("hw_peak_gflops", 0)
+        hw_peak_bandwidth = perf_data.get("hw_peak_bandwidth_gbs", 0)
+        gflops_util = perf_data.get("gflops_utilization_pct", 0)
+        bw_util = perf_data.get("bandwidth_utilization_pct", 0)
+        ai = perf_data.get("arithmetic_intensity", 0)
+        ridge_point = perf_data.get("ridge_point", 0)
+        roofline_bound = perf_data.get("roofline_bound", "unknown")
+        hw_name = perf_data.get("hw_name", "unknown")
+        hw_cc = perf_data.get("hw_compute_capability", "unknown")
+
+        # ---- 构建优化历史 (避免重复失败的策略) ----
+        history_lines = perf_data.get("optimization_history", [])
+        history_text = "无" if not history_lines else "\n".join(
+            f"- 第{i}轮: tile={h.get('tiling', 'N/A')}, GFLOPS={h.get('gflops', 0):.2f}, "
+            f"策略={h.get('stage', 'N/A')}, 结果={h.get('outcome', 'N/A')}"
+            for i, h in enumerate(history_lines, 1)
+        )
+
+        # ── SKILL 选择策略 ──
+        # triton_skill 的 §3 是 NVIDIA 专用的性能优化优先级
+        # 当 sketch.target_dsl != "triton" 时, 不注入以免把优化方向带偏
+        effective_skill = (
+            self._skill_name if (sketch.target_dsl or "").lower() == "triton" else None
+        )
+
+        prompt = self.pm.render(
+            "search_optimize",
+            _agent_role=self._agent_role,
+            _skill_name=effective_skill,
+            sketch=json.dumps(sketch.to_dict(), ensure_ascii=False, indent=2),
+            speedup=f"{speedup:.2f}",
+            target_speedup=f"{target_speedup:.2f}",
+            achieve_ratio=f"{achieve_pct:.1f}",
+            bound_type=perf_data.get("bound_type", "unknown"),
+            current_gflops=f"{perf_data.get('gflops', 0):.2f}",
+            avg_time_ms=f"{perf_data.get('avg_time_ms', 0):.4f}",
+            memory_bandwidth_gbs=f"{perf_data.get('memory_bandwidth_gbs', 0):.2f}",
+            # ---- Roofline 数据 ----
+            hw_peak_gflops=f"{hw_peak_gflops:.1f}",
+            hw_peak_bandwidth_gbs=f"{hw_peak_bandwidth:.1f}",
+            gflops_utilization_pct=f"{gflops_util:.1f}",
+            bandwidth_utilization_pct=f"{bw_util:.1f}",
+            arithmetic_intensity=f"{ai:.4f}",
+            ridge_point=f"{ridge_point:.2f}",
+            roofline_bound=roofline_bound,
+            name_bound=perf_data.get("name_bound", "unknown"),
+            hw_name=hw_name,
+            hw_compute_capability=hw_cc,
+            optimization_history=history_text,
+        )
+
+        # max_tokens 调高至 4096, 避免 thinking 占满后 JSON 没输出
+        result = self.llm.chat_json([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=4096, caller_tag="Search")
+
+        new_tiling = result.get("new_tiling", {})
+        tiling = TilingStrategy(
+            block_m=new_tiling.get("block_m", sketch.tiling.block_m),
+            block_n=new_tiling.get("block_n", sketch.tiling.block_n),
+            block_k=new_tiling.get("block_k", sketch.tiling.block_k),
+        ) if new_tiling else sketch.tiling
+
+        new_hints = result.get("new_hints", [])
+        suggestion = result.get("suggestion", "LLM优化")
+
+        new_sketch = UnifiedSketch(
+            algorithm=sketch.algorithm, version=sketch.version + 1,
+            tiling=tiling, memory_plan=sketch.memory_plan, pipeline=sketch.pipeline,
+            target_dsl=sketch.target_dsl,
+            optimization_hints=sketch.optimization_hints + new_hints,
+        )
+        return new_sketch, suggestion
+
+    def _rule_optimize(self, sketch: UnifiedSketch, perf_data: dict) -> tuple[UnifiedSketch, str]:
+        """
+        规则优化回退: 基于 TritonOptimizationRules 智能调整 tiling
+        根据 bound 类型和硬件特性推荐最优 tiling 组合
+        """
+        old_bm, old_bn, old_bk = sketch.tiling.block_m, sketch.tiling.block_n, sketch.tiling.block_k
+        bound = perf_data.get("bound_type", "unknown")
+        hw_name = perf_data.get("hw_name", "unknown")
+        hw_cc = perf_data.get("hw_compute_capability", "unknown")
+
+        new_tiling, reason = TritonOptimizationRules.recommend_tiling(
+            sketch.tiling, bound, hw_name, hw_cc
+        )
+        new_bm, new_bn, new_bk = new_tiling.block_m, new_tiling.block_n, new_tiling.block_k
+
+        # 生成优化提示
+        current_gflops = perf_data.get("gflops", 0)
+        target_gflops = perf_data.get("target_gflops", current_gflops) if current_gflops > 0 else 0
+        hints = TritonOptimizationRules.generate_optimization_hints(
+            bound, current_gflops, target_gflops, new_tiling, "float32"
+        )
+
+        new_sketch = UnifiedSketch(
+            algorithm=sketch.algorithm, version=sketch.version + 1,
+            tiling=new_tiling, memory_plan=sketch.memory_plan,
+            pipeline=sketch.pipeline, target_dsl=sketch.target_dsl,
+            optimization_hints=sketch.optimization_hints + hints,
+        )
+        return new_sketch, f"规则优化: tile {old_bm}x{old_bn}x{old_bk}→{new_bm}x{new_bn}x{new_bk} ({reason})"

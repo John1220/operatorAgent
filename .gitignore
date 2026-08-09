@@ -1,0 +1,39 @@
+# ─── Python / 缓存 ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+*.egg
+.venv/
+venv/
+env/
+.python-version
+
+# ─── IDE / 系统 ───
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.uploads/
+.trae-html-share-packages/
+
+# ─── 运行期产物 (本项目) ───
+output/
+logs/
+debug/
+tests/golden_registry.json
+triton/
+
+# ─── 本地私有配置 (敏感信息) ───
+config.yaml
+# 请使用 config.example.yaml 作为模板, 拷贝为 config.yaml 后填入真实值
+
+# ─── 临时调试脚本 (以下划线开头, 便于开发期随手写小脚本) ───
+_debug*.py
+_*.py

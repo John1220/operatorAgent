@@ -1,0 +1,181 @@
+"""算子产物持久化存储
+将生成的算子代码、Sketch、验证结果、性能数据保存到本地文件系统
+
+目录结构:
+  output/<kernel_type>/<hardware>/<kernel_id>_<timestamp>/
+    code.py          - 生成的算子代码
+    sketch.json     - 设计草图
+    result.json     - 完整产物 (含验证结果和性能数据)
+    benchmark.json  - 性能基准数据 (如果有)支持从目录加载历史产物，用于回溯和对比"""
+
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+from .schemas import KernelArtifact
+
+
+class ArtifactStore:
+    """算子产物持久化存储"""
+
+    def __init__(self, output_dir: Optional[str] = None):
+        if output_dir:
+            self.output_dir = Path(output_dir)
+        else:
+            self.output_dir = Path(__file__).parent.parent / "output"
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def save(self, artifact: KernelArtifact, task=None) -> Path:
+        kernel_type = task.source.kernel_type if task else "unknown"
+        hardware = task.target.hardware if task else "unknown"
+        language = task.target.dsl if task else "python"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dir_name = f"{timestamp}_{artifact.kernel_id}"
+        artifact_dir = self.output_dir / kernel_type / hardware / dir_name
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        ext = self._lang_ext(language)
+
+        # 1. 保存代码文件
+        code_path = artifact_dir / f"code.{ext}"
+        code_path.write_text(artifact.code, encoding="utf-8")
+
+        # 2. 保存 Sketch
+        sketch_path = artifact_dir / "sketch.json"
+        if artifact.sketch:
+            sketch_path.write_text(
+                json.dumps(artifact.sketch.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        # 3. 保存完整产物
+        result_data = {
+            "kernel_id": artifact.kernel_id,
+            "task_id": artifact.task_id,
+            "language": language,
+            "all_passed": artifact.all_passed,
+            "created_at": datetime.fromtimestamp(artifact.created_at).isoformat(),
+            "saved_at": datetime.now().isoformat(),
+        }
+        if task:
+            result_data["task"] = task.to_dict()
+        if artifact.iteration_history:
+            result_data["iteration_history"] = artifact.iteration_history
+        result_path = artifact_dir / "result.json"
+        result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 4. 保存验证结果
+        if artifact.verification_results:
+            verify_data = []
+            for v in artifact.verification_results:
+                verify_data.append({
+                    "level": v.level.value,
+                    "passed": v.passed,
+                    "message": v.message,
+                    "metrics": v.metrics,
+                })
+            verify_path = artifact_dir / "verification.json"
+            verify_path.write_text(json.dumps(verify_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 5. 保存性能数据
+        if artifact.benchmark_data:
+            bench_path = artifact_dir / "benchmark.json"
+            bench_path.write_text(
+                json.dumps(artifact.benchmark_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        return artifact_dir
+
+    def list_all(self, kernel_type: str = "", hardware: str = "") -> list[dict]:
+        results = []
+        base = self.output_dir
+        if kernel_type:
+            base = base / kernel_type
+        if hardware and kernel_type:
+            base = base / hardware
+        if not base.exists():
+            return results
+        for hw_dir in sorted(base.iterdir()) if not hardware and kernel_type and hw_dir.is_dir() else [base]:
+            if not hw_dir.is_dir():
+                continue
+            for artifact_dir in sorted(hw_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                if not artifact_dir.is_dir():
+                    continue
+                result_file = artifact_dir / "result.json"
+                if not result_file.exists():
+                    continue
+                try:
+                    data = json.loads(result_file.read_text(encoding="utf-8"))
+                    data["_dir"] = str(artifact_dir)
+                    results.append(data)
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        return results
+
+    def load(self, artifact_dir: str) -> Optional[KernelArtifact]:
+        dir_path = Path(artifact_dir)
+        if not dir_path.is_dir():
+            return None
+        result_file = dir_path / "result.json"
+        if not result_file.exists():
+            return None
+        from .schemas import UnifiedSketch, TilingStrategy, MemoryPlan, PipelineStage, VerificationResult, VerificationLevel
+        data = json.loads(result_file.read_text(encoding="utf-8"))
+        code_path = dir_path / self._find_code_file(dir_path)
+        code = code_path.read_text(encoding="utf-8") if code_path else ""
+        sketch = None
+        sketch_file = dir_path / "sketch.json"
+        if sketch_file.exists():
+            sketch_data = json.loads(sketch_file.read_text(encoding="utf-8"))
+            sketch = UnifiedSketch(
+                algorithm=sketch_data.get("algorithm", ""),
+                version=sketch_data.get("version", 1),
+                tiling=TilingStrategy(**sketch_data.get("tiling", {})),
+                memory_plan=MemoryPlan(**sketch_data.get("memory_plan", {})),
+                pipeline=[PipelineStage(**p) for p in sketch_data.get("pipeline", [])],
+                target_dsl=sketch_data.get("target_dsl", "python"),
+                optimization_hints=sketch_data.get("optimization_hints", []),
+            )
+        verification_results = []
+        verify_file = dir_path / "verification.json"
+        if verify_file.exists():
+            for v in json.loads(verify_file.read_text(encoding="utf-8")):
+                verification_results.append(VerificationResult(
+                    level=VerificationLevel(v["level"]),
+                    passed=v["passed"],
+                    message=v.get("message", ""),
+                    metrics=v.get("metrics", {}),
+                ))
+        benchmark_data = {}
+        bench_file = dir_path / "benchmark.json"
+        if bench_file.exists():
+            benchmark_data = json.loads(bench_file.read_text(encoding="utf-8"))
+        return KernelArtifact(
+            kernel_id=data.get("kernel_id", ""),
+            task_id=data.get("task_id", ""),
+            code=code,
+            sketch=sketch,
+            verification_results=verification_results,
+            benchmark_data=benchmark_data,
+        )
+
+    @staticmethod
+    def _lang_ext(language: str) -> str:
+        ext_map = {"python": "py", "triton": "py", "cuda": "cu", "hlsl": "hlsl", "mlir": "mlir"}
+        return ext_map.get(language.lower(), language.lower())
+
+    @staticmethod
+    def _find_code_file(dir_path: Path) -> Optional[Path]:
+        for name in ("code.py", "code.cu", "code.triton.py"):
+            p = dir_path / name
+            if p.exists():
+                return p
+        for p in dir_path.iterdir():
+            if p.suffix in (".py", ".cu", ".c", ".cc") and p.name != "__init__.py":
+                return p
+        return None
+
+    def __repr__(self) -> str:
+        return f"ArtifactStore(dir={self.output_dir})"
