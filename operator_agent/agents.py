@@ -99,7 +99,7 @@ class DesignerAgent:
 
         # ── SKILL 选择策略 ──
         # triton_skill 中包含大量 tl.* / @triton.jit 专用指令
-        # 当 dsl != "triton" (例如昆仑芯 python / cuda_c 兼容层) 时, 强制不注入该 skill
+        # 当 dsl != "triton" (例如昇腾等硬件的 python / cuda_c 兼容层) 时, 强制不注入该 skill
         # 否则 LLM 很容易被诱导写出 Triton 代码 -> 在非 NVIDIA 硬件上编译必挂
         effective_skill = (
             self._skill_name if (task.target.dsl or "").lower() == "triton" else None
@@ -203,7 +203,7 @@ class CoderAgent:
             effective_skill = None
         else:
             template_name = "coder_generate"
-            # 非 triton DSL: 不注入 triton_skill (tl.* / @triton.jit 暗示会严重干扰昆仑芯等非 NVIDIA 硬件的代码生成)
+            # 非 triton DSL: 不注入 triton_skill (tl.* / @triton.jit 暗示会严重干扰非 NVIDIA 硬件的代码生成)
             effective_skill = None
 
         optimization_hints = "\n".join(f"- {h}" for h in sketch.optimization_hints) if sketch.optimization_hints else "无"
@@ -269,12 +269,12 @@ class CoderAgent:
             issues.append("缺少 kernel 入口函数")
 
         # 只要 dsl != "triton" (即 python/cuda_c/opencl 等) 就禁止出现 import triton / @triton.jit
-        # 这是昆仑芯/昇腾等非 Nvidia 硬件的关键防线
+        # 这是昇腾等非 Nvidia 硬件的关键防线
         if dsl != "triton":
             if "import triton" in code or "from triton" in code or "@triton.jit" in code:
                 issues.append(
                     f"禁止: dsl={dsl!r} 但代码里出现了 Triton API (import triton / @triton.jit 等)。"
-                    " 昆仑芯/昇腾/其他非 Nvidia 硬件必须使用纯 Python/PyTorch/NumPy，不能用 Triton/CUDA。"
+                    " 昇腾/其他非 Nvidia 硬件必须使用纯 Python/PyTorch/NumPy，不能用 Triton/CUDA。"
                 )
 
         if dsl == "triton" and "@triton.jit" not in code:

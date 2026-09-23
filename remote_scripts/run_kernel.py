@@ -1,4 +1,4 @@
-"""Remote kernel runner - deployed on remote GPU server (152.136.252.171)
+"""Remote kernel runner - 部署在远程 GPU 服务器上执行 (当前: algorithm-h20, 8×H20)
 Supports both Python (numpy/torch) and Triton kernel execution.
 
 Actions:
@@ -6,6 +6,9 @@ Actions:
   compile   - L1 compile check
   execute   - L2 functional run (single iteration)
   benchmark - L3 performance measurement (multiple iterations)
+
+环境变量:
+  OPERATOR_AGENT_GPU - 固定使用的 GPU 卡号; 未设置时按 (低利用率, 高显存余量) 自动选
 """
 
 import sys
@@ -23,11 +26,12 @@ _GPU_SELECTION_LOG: str = ""
 
 
 def _query_gpu_memory() -> list[dict]:
-    """查询所有 GPU 的显存状态。优先 nvidia-smi，回退 torch.cuda。"""
+    """查询所有 GPU 的显存与利用率。优先 nvidia-smi，回退 torch.cuda。"""
     try:
         import subprocess
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,name,memory.free,memory.total",
+            ["nvidia-smi",
+             "--query-gpu=index,name,memory.free,memory.total,utilization.gpu",
              "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10,
         )
@@ -36,18 +40,25 @@ def _query_gpu_memory() -> list[dict]:
             for line in result.stdout.strip().split("\n"):
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) >= 4:
+                    util = None
+                    if len(parts) >= 5:
+                        try:
+                            util = int(parts[4])
+                        except ValueError:
+                            util = None
                     gpus.append({
                         "index": int(parts[0]),
                         "name": parts[1],
                         "free_mb": int(parts[2]),
                         "total_mb": int(parts[3]),
+                        "util_pct": util,
                     })
             if gpus:
                 return gpus
     except Exception:
         pass
 
-    # 回退: torch.cuda
+    # 回退: torch.cuda (拿不到利用率)
     try:
         import torch
         if torch.cuda.is_available():
@@ -60,6 +71,7 @@ def _query_gpu_memory() -> list[dict]:
                     "name": props.name,
                     "free_mb": free // (1024 * 1024),
                     "total_mb": total // (1024 * 1024),
+                    "util_pct": None,
                 })
             return gpus
     except Exception:
@@ -68,19 +80,81 @@ def _query_gpu_memory() -> list[dict]:
     return []
 
 
+def _fmt_gpu(g: dict) -> str:
+    util = g.get("util_pct")
+    util_s = f"{util}%" if util is not None else "util=?"
+    return (f"GPU {g['index']} ({g['name']}): "
+            f"{g['free_mb'] / 1024:.1f}/{g['total_mb'] / 1024:.1f} GB 空闲, {util_s}")
+
+
+def _sample_gpu_idle():
+    """采样选中 GPU 的测量前状态: (利用率%, 其他进程数)。拿不到返回 (None, None)。
+
+    利用率统计的是"有 kernel 在跑的时间占比", 我们自己的 benchmark 会把它顶到
+    100%, 所以只能在测量前采样。其他计算进程数比利用率更可靠地反映是否被共享,
+    故一并返回 (排除本进程自己)。
+    """
+    util, others = None, None
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["nvidia-smi", f"--id={_SELECTED_GPU_ID}",
+             "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            util = int(r.stdout.strip().splitlines()[0])
+        r2 = subprocess.run(
+            ["nvidia-smi", f"--id={_SELECTED_GPU_ID}",
+             "--query-compute-apps=pid", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r2.returncode == 0:
+            pids = set()
+            for line in r2.stdout.strip().splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.add(int(line))
+            pids.discard(os.getpid())
+            others = len(pids)
+    except Exception:
+        pass
+    return util, others
+
+
 def _auto_select_gpu() -> tuple[int, str]:
-    """选择显存余量最大的 GPU。返回 (device_id, log_message)。"""
+    """选择用于执行/基准测试的 GPU。返回 (device_id, log_message)。
+
+    可通过 OPERATOR_AGENT_GPU 固定卡号 —— 共享机器上必须固定, 否则同一次运行的
+    L1/L2/L3 会各自重选、落在不同卡上, 加速比不可比。
+    """
     gpus = _query_gpu_memory()
+    pinned = os.environ.get("OPERATOR_AGENT_GPU", "").strip()
+    if pinned:
+        try:
+            pid = int(pinned)
+        except ValueError:
+            pid = None
+        if pid is not None:
+            g = next((x for x in gpus if x["index"] == pid), None)
+            if g:
+                return pid, f"使用固定 GPU (OPERATOR_AGENT_GPU={pid}): {_fmt_gpu(g)}"
+            return pid, f"使用固定 GPU (OPERATOR_AGENT_GPU={pid}), 但 nvidia-smi 未列出该卡"
+
     if not gpus:
         return 0, "无 GPU 信息, 使用默认 device=0"
 
-    best = max(gpus, key=lambda g: g["free_mb"])
-    lines = [f"共 {len(gpus)} 张 GPU, 自动选择余量最大的:"]
+    # 以利用率为主、显存余量为辅: 一张卡可能余量很大却正被别人跑满,
+    # 在那上面测出来的加速比是噪声。利用率未知时按最坏 (100%) 处理。
+    def score(g):
+        util = g.get("util_pct")
+        return (-(100 if util is None else util), g["free_mb"])
+
+    best = max(gpus, key=score)
+    lines = [f"共 {len(gpus)} 张 GPU, 按 (低利用率, 高显存余量) 选择:"]
     for g in gpus:
         marker = " ← 选中" if g["index"] == best["index"] else ""
-        free_gb = g["free_mb"] / 1024
-        total_gb = g["total_mb"] / 1024
-        lines.append(f"  GPU {g['index']} ({g['name']}): {free_gb:.1f}/{total_gb:.1f} GB 空闲{marker}")
+        lines.append(f"  {_fmt_gpu(g)}{marker}")
     return best["index"], "\n".join(lines)
 
 
@@ -833,7 +907,8 @@ def get_gpu_info() -> dict:
                 info["gpu_memory"] = [
                     {"id": g["index"], "name": g["name"],
                      "free_gb": round(g["free_mb"] / 1024, 1),
-                     "total_gb": round(g["total_mb"] / 1024, 1)}
+                     "total_gb": round(g["total_mb"] / 1024, 1),
+                     "util_pct": g.get("util_pct")}
                     for g in gpus
                 ]
             try:
@@ -872,16 +947,23 @@ if __name__ == "__main__":
         result = run_verify(code, inputs, payload.get("kernel_type", ""),
                             float(payload.get("max_error", 1e-5)),
                             precision=payload.get("precision", ""))
-    elif action == "benchmark":
-        warmup = payload.get("warmup", 3)
-        repeat = payload.get("repeat", 10)
-        result = run_benchmark(code, inputs, warmup, repeat)
-    elif action == "benchmark_with_baselines":
-        result = run_benchmark_with_baselines(
-            code, inputs, payload.get("kernel_type", ""),
-            payload.get("warmup", 10), payload.get("repeat", 30),
-            precision=payload.get("precision", ""),
-        )
+    elif action in ("benchmark", "benchmark_with_baselines"):
+        # 共享机器: 只在测量前采一次卡上占用情况。被其他租户占用会让加速比失真,
+        # 把实测占用随结果返回, 由控制端标记污染, 而不是静默采信这个数字。
+        util_before, other_procs = _sample_gpu_idle()
+        if action == "benchmark":
+            result = run_benchmark(code, inputs,
+                                   payload.get("warmup", 3), payload.get("repeat", 10))
+        else:
+            result = run_benchmark_with_baselines(
+                code, inputs, payload.get("kernel_type", ""),
+                payload.get("warmup", 10), payload.get("repeat", 30),
+                precision=payload.get("precision", ""),
+            )
+        if isinstance(result, dict):
+            result["gpu_util_pct"] = util_before
+            result["gpu_other_procs"] = other_procs
+            result["selected_gpu"] = _SELECTED_GPU_ID
     else:
         result = {"success": False, "error": f"Unknown action: {action}"}
 

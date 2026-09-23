@@ -49,7 +49,7 @@ class FixerAgent:
         修复失败代码 (带预检+重试闭环，和 CoderAgent._llm_generate_code 一致)
 
         关键防御:
-        - 当 task.target.dsl != "triton" (昆仑芯/昇腾等) 时, 不注入 triton_skill
+        - 当 task.target.dsl != "triton" (昇腾等非 NVIDIA 硬件) 时, 不注入 triton_skill
           否则 LLM 看到 SKILL 里的 tl.* 指令会继续输出 Triton -> 编译无限失败
         - 修复生成后走与 Coder 同一套 _validate_code 预检 (含"非 triton 禁止 Triton API")
           有问题就带反馈最多重试 MAX_FIX_ATTEMPTS 次
@@ -225,12 +225,12 @@ class FixerAgent:
         if "def kernel" not in code:
             issues.append("缺少 kernel 入口函数")
 
-        # 跨硬件 API 禁令: dsl != "triton" 时禁止 Triton (昆仑芯/昇腾等新硬件核心防线)
+        # 跨硬件 API 禁令: dsl != "triton" 时禁止 Triton (昇腾等非 NVIDIA 新硬件核心防线)
         if (dsl or "").lower() != "triton":
             if "import triton" in code or "from triton" in code or "@triton.jit" in code:
                 issues.append(
                     f"禁止: dsl={dsl!r} 但代码里出现了 Triton API (import triton / @triton.jit 等)。"
-                    " 昆仑芯/昇腾/其他非 Nvidia 硬件必须使用纯 Python/PyTorch/NumPy，不能用 Triton/CUDA。"
+                    " 昇腾/其他非 Nvidia 硬件必须使用纯 Python/PyTorch/NumPy，不能用 Triton/CUDA。"
                 )
 
         if (dsl or "").lower() == "triton" and "@triton.jit" not in code:

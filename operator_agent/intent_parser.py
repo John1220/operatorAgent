@@ -42,7 +42,6 @@ class IntentParser:
     HARDWARE_KEYWORDS = {
         "nvidia_gpu": ["nvidia", "cuda", "gpu", "英伟达"],
         "mock_gpu": ["mock", "mock_gpu", "模拟gpu"],
-        "kunlunxin": ["kunlunxin", "kunlun", "昆仑芯", "xpu"],
         "iluvatar": ["iluvatar", "天数", "corex"],
         "cambricon": ["cambricon", "寒武纪", "mlu"],
         "ascend": ["ascend", "昇腾", "npu"],

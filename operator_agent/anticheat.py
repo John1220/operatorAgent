@@ -73,9 +73,9 @@ def _strip_non_kernel_regions(code: str) -> str:
 
 def _hardware_allows_torch_compute(hardware: str) -> bool:
     """
-    对于「昆仑芯 P800 / 昇腾 NPU / 其他非 NVIDIA 自研加速卡」+ python DSL 组合：
-    此时根本无法写 Triton/CUDA kernel，唯一能激活 xblas/nncore 等自研 Tensor Core 的路径
-    就是调用 torch.matmul / torch.mm 等高层 API (由厂商的 torch_xmlir 等后端接管下放到 Tensor Core)。
+    对于「昇腾 NPU / 其他非 NVIDIA 自研加速卡」+ python DSL 组合：
+    此时根本无法写 Triton/CUDA kernel，唯一能激活厂商自研 Tensor Core 的路径
+    就是调用 torch.matmul / torch.mm 等高层 API (由厂商的 torch 后端接管下放)。
 
     在这种组合下如果还禁止 torch.* compute，等于强制写 6 层嵌套 Python 循环，
     不仅性能差 1000 倍、还根本不可能通过 benchmark。因此这里把这些硬件列入白名单：
@@ -85,7 +85,6 @@ def _hardware_allows_torch_compute(hardware: str) -> bool:
         return False
     hw = hardware.lower()
     return any(tok in hw for tok in (
-        "kunlunxin", "kunlun", "xpu", "p800",      # 昆仑芯
         "ascend", "npu", "昇腾", "huawei",          # 昇腾 / 华为
         "cambricon", "mlu",                         # 寒武纪
         "hygon", "dc", "海光",                      # 海光
@@ -111,7 +110,7 @@ def static_audit(code: str, dsl: str = "python", hardware: Optional[str] = None)
     """
     rules = _PYTHON_DSL_RULES if (dsl or "").lower() == "python" else _GPU_DSL_RULES
 
-    # ── 硬件白名单：昆仑芯/昇腾等自研加速卡 + 任何 DSL，放开 torch compute 限制 ──
+    # ── 硬件白名单：昇腾等自研加速卡 + 任何 DSL，放开 torch compute 限制 ──
     #   cuda_c DSL: C++ 源码中的 torch::matmul / at::matmul 等 (正则匹配 Python 的 torch.matmul,
     #   不匹配 C++ 的 ::, 天然不报); 且这些硬件的 Tensor Core 只能通过 torch API 激活
     if _hardware_allows_torch_compute(hardware):
@@ -177,14 +176,14 @@ def shield_torch(hardware: Optional[str] = None):
     退出时恢复原实现。torch 未安装时为 no-op。
 
     参数 (新增):
-        hardware: 目标硬件，用于对白名单自研加速卡 (昆仑芯/昇腾/寒武纪等) 关闭屏蔽。
-                  这些硬件只能通过 torch.matmul / torch.mm 等高层 API 激活其 xblas/nncore
+        hardware: 目标硬件，用于对白名单自研加速卡 (昇腾/寒武纪等) 关闭屏蔽。
+                  这些硬件只能通过 torch.matmul / torch.mm 等高层 API 激活其厂商
                   Tensor Core 实现，屏蔽了反而等于禁用了唯一的高性能路径。
 
     用法:
         with shield_torch(hardware=task.target.hardware):
             exec(kernel_code, ns)   # kernel 内 import torch
-            ns["kernel"](**inputs)  # 对 NVIDIA GPU: torch.matmul 抛错；昆仑芯: 正常放行
+            ns["kernel"](**inputs)  # 对 NVIDIA GPU: torch.matmul 抛错；白名单硬件: 正常放行
     """
     try:
         import torch

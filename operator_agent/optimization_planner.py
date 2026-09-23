@@ -5,11 +5,11 @@
 三层架构:
   Layer 0 — 优化原则 (硬件/DSL 无关): tiling, fusion, double-buffering 等概念
   Layer 1 — 硬件能力: 通过 HardwareCaps 判断硬件是否支持某特性
-  Layer 2 — DSL 代码模板: 同一原则在 Triton/CUDA-C/XPU 下的不同代码模式
+  Layer 2 — DSL 代码模板: 同一原则在 Triton/CUDA-C 等不同 DSL 下的代码模式
 
-适配新硬件 (如昆仑芯) 只需要:
+适配新硬件 (如昇腾) 只需要:
   1. 在 hardware_caps.py 添加硬件能力描述
-  2. (可选) 在 optimization_recipes.md 添加 xpu_template
+  2. (可选) 在 optimization_recipes.md 添加对应 DSL 的 *_template
   3. Planner 自动根据 caps + dsl 筛选和注入正确模板
 """
 
@@ -78,8 +78,6 @@ class OptimizationPlanner:
         "cuda_c": "cuda_c",
         "cuda": "cuda_c",
         "hip": "cuda_c",  # AMD HIP 语法基本兼容 CUDA
-        "xpu": "xpu",
-        "xpu_c": "xpu",
         "ascend_c": "generic",
         "bisheng": "generic",
     }
@@ -298,7 +296,7 @@ class OptimizationPlanner:
 
         Args:
             kernel_type: 算子类型
-            dsl: 目标 DSL (triton, cuda_c, xpu, etc.)
+            dsl: 目标 DSL (triton, cuda_c, etc.)
             roofline: Roofline 分析结果
             hardware: 硬件信息 dict (来自 backend.get_hardware_info())
             hw_caps: 硬件能力描述 (若提供则直接使用，否则从 hardware 推断)
@@ -497,7 +495,6 @@ class OptimizationPlan:
         dsl_label = {
             "triton": "Triton",
             "cuda_c": "CUDA-C",
-            "xpu": "昆仑芯 XPU",
             "generic": "通用伪代码",
         }.get(self.dsl, self.dsl)
 
@@ -529,9 +526,7 @@ class OptimizationPlan:
             if template:
                 # 根据 DSL 选择代码块语言标签
                 lang_tag = "python" if self.dsl == "triton" else (
-                    "cuda" if self.dsl == "cuda_c" else (
-                        "c" if self.dsl == "xpu" else ""
-                    )
+                    "cuda" if self.dsl == "cuda_c" else ""
                 )
                 lines.append("代码模板 (必须遵循此模式):")
                 lines.append(f"```{lang_tag}")

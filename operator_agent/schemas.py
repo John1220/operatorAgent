@@ -181,7 +181,6 @@ class TargetSpec:
     # 已知硬件 + 已知 DSL (允许 Router 的 _DSL_CAPABILITY 之外的值, 只做 warning)
     _KNOWN_HARDWARE = frozenset({
         "nvidia_gpu", "mock_gpu",
-        "kunlunxin_xpu", "kunlunxin", "xpu", "p800",
         "ascend", "npu",
         "amd_gpu", "rocm",
     })

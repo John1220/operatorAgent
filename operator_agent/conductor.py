@@ -43,7 +43,6 @@ class Router:
         "nvidia_gpu": {"triton", "cuda_c", "python"},
         "mock_gpu": {"python", "triton"},
         "ascend": {"python"},
-        "kunlunxin_xpu": {"python", "cuda_c"},   # 昆仑芯 P800: torch_xmlir 支持 python/cuda_c 兼容模式, 无 triton
     }
 
     def route(self, task: TaskSchema, kernel_db=None) -> RouteType:
@@ -54,14 +53,14 @@ class Router:
         if task.source.fused_ops or complexity == TaskComplexity.HIGH:
             return RouteType.AGENT_GENERATION
 
-        # ── 昆仑芯 / 昇腾等非 NVIDIA 新硬件：一律走 AGENT_GENERATION ──
+        # ── 昇腾等非 NVIDIA 新硬件：一律走 AGENT_GENERATION ──
         # 原因:
         #   - kernel_db 里目前没有适配这些硬件的 RAG 案例
-        #   - Compiler backend 会复用 nvidia 的优化配方 (R-MATMUL-*) 对昆仑芯无效
+        #   - Compiler backend 会复用 nvidia 的优化配方 (R-MATMUL-*) 对这些硬件无效
         #   - 必须让 Agent 从头到尾生成"纯 Python/torch.matmul 风格"的适配代码
         if task.target.hardware and any(
                 tok in task.target.hardware.lower()
-                for tok in ("kunlun", "kunlunxin", "xpu", "p800", "ascend", "npu")):
+                for tok in ("ascend", "npu")):
             return RouteType.AGENT_GENERATION
 
         # 目标硬件不支持该 DSL -> Agent 生成探路

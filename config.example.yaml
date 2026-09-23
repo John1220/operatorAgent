@@ -2,6 +2,13 @@
 # 使用方法:
 #   cp config.example.yaml config.yaml
 #   然后按实际情况修改 config.yaml (不要把真实 config.yaml 提交到 git)
+#
+# ⚠️ 当前代码库中没有任何模块读取 config.yaml (全仓无 `import yaml`)。
+#    改这个文件不会有任何效果。真正生效的配置面是三处:
+#      1. operator_agent/remote_executor.py  SSHExecutor.__init__ 的默认值
+#      2. test_nvidia_*.py / test_kunlunxin_matmul.py  build_llm() 与 ssh_config()
+#      3. 环境变量 REMOTE_SSH_HOST/PORT/USER/KEY、REMOTE_WORK_DIR、LLM_BASE_URL、LLM_API_KEY
+#    本文件保留为这些默认值的可读索引；修改环境时请三处同步，勿只改这里。
 
 # LLM 配置
 llm:
@@ -21,17 +28,35 @@ llm:
 # 远程执行配置
 remote:
   # 连接模式: ssh (推荐) / http / local / auto (自动检测)
-  mode: "auto"
-  # 远程工作目录 - uv 环境将在此目录下自动配置
-  work_dir: "/path/to/operator_agent_runner"
+  # 注意: auto 会依次探测 ssh → http → local, http 探测本机 8091 可能误连他人服务,
+  #       明确知道用 ssh 时请直接写 "ssh"
+  mode: "ssh"
+  # 远程工作目录 - uv 环境将在此目录下自动配置 (默认 ~/operator_agent)
+  # 支持 ~, 由远端 shell 展开; 建目录需要对该父目录有写权限
+  work_dir: "~/operator_agent"
   ssh:
-    host: "your-gpu-server.example.com"
-    port: 22
-    user: "your-ssh-user"
-    key_path: ""  # 从环境变量 REMOTE_SSH_KEY 读取，默认 ~/.ssh/id_rsa
-    runner_path: "/path/to/operator_agent_runner/run_kernel.py"
+    # 推荐做法: 在 ~/.ssh/config 里写一个 Host 块, 这里只填别名,
+    # 端口 / 用户名 / 密钥全部留 null 由该 Host 块解析。
+    # 这样仓库里不会出现任何真实连接信息, 换机器只改 ssh config。
+    #
+    #   Host my-gpu-box
+    #       HostName <ip>
+    #       Port <port>
+    #       User <user>
+    #       IdentityFile ~/.ssh/<key>
+    #       IdentitiesOnly yes
+    host: "my-gpu-box"
+    port: null        # 留 null 则不传 -p, 由 Host 块提供; 显式填值会覆盖
+    user: null        # 留 null 则不写 user@, 由 Host 块提供
+    key_path: null    # 留 null 则不传 -i, 由 Host 块提供
+    runner_path: "~/operator_agent/run_kernel.py"
   http:
-    url: "http://your-gpu-server.example.com:8091"
+    # 默认留空: 空串会让 check_connection 失败, auto 模式据此降级, 不会误连别人的服务
+    url: ""
+
+# 不想改 ssh config 时, 也可用环境变量覆盖 (优先级高于上面的默认值):
+#   REMOTE_SSH_HOST / REMOTE_SSH_PORT / REMOTE_SSH_USER / REMOTE_SSH_KEY
+#   REMOTE_WORK_DIR / REMOTE_RUNNER_PATH / REMOTE_HTTP_URL
 
 # Prompt 模板目录
 prompts_dir: "operator_agent/prompts"
@@ -39,7 +64,9 @@ prompts_dir: "operator_agent/prompts"
 # 优化配置
 optimization:
   max_rounds: 3
-  # 性能验收: 相对 NumPy 参考 baseline 的最低加速比
+  # 性能验收: 相对同机同卡 baseline 的最低加速比
+  # baseline 优先级见 verifier.py: fp16 matmul 用 pytorch_eager_fp16 > tf32 > eager,
+  # 其他算子用 pytorch_eager > torch_compile。禁止退回控制端计时。
   min_speedup: 1.0
   # legacy: 无参考实现算子的绝对 GFLOPS 回退目标
   target_gflops: 10.0

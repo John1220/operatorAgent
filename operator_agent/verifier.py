@@ -20,8 +20,24 @@ from .remote_executor import RemoteExecutor, RemoteExecutionResult
 
 # 常见 GPU 硬件理论峰值 (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
 # 格式: (FP32_TFLOPS, TF32_TFLOPS, FP16_TFLOPS, BF16_TFLOPS, memory_bandwidth_GBs)
-_HARDWARE_THEORETICAL_PEAK: dict[str, tuple[float, float, float, float, float]] = {
-    # compute_capability 前缀匹配
+# 匹配顺序: 先设备名 (更具体), 未命中再回退 compute_capability。
+# 不可反过来 —— cc 9.0 同时对应 H100/H200/H20, 三者算力带宽差异极大。
+_PEAK_BY_NAME: dict[str, tuple[float, float, float, float, float]] = {
+    "a100": (19.5,  156.0, 312.0, 312.0, 2039.0),
+    "h100": (67.0,  989.0, 1979.0, 989.0, 3350.0),
+    "h200": (67.0,  989.0, 1979.0, 989.0, 3350.0),
+    # H20: 2026-09-16 于 algorithm-h20 实测 (cuBLAS 8192³ / triad), 非 datasheet
+    # 算力砍到 138 TFLOPS 但带宽保留 3.68 TB/s → ridge ≈ 37.5 (H100 ≈ 295)
+    "h20":  (31.6,  71.6,  138.2, 138.3, 3680.0),
+    "v100": (15.7,  0.0,   125.0, 125.0, 900.0),
+    "3090": (16.3,  130.6, 326.0, 326.0, 936.0),
+    "4090": (82.6,  82.6,  330.0, 330.0, 1008.0),  # 4090 FP32=82.6 (no TF32 boost for Ada? actually Ada has TF32)
+    "a6000":(38.7,  310.0, 77.4,  77.4,  768.0),
+    "a5000":(27.8,  222.0, 55.5,  55.5,  768.0),
+    "t4":   (8.1,   65.0,  130.0, 130.0, 320.0),
+}
+
+_PEAK_BY_CC: dict[str, tuple[float, float, float, float, float]] = {
     "8.0":  (19.5,  156.0, 312.0, 312.0, 2039.0),  # A100 (80GB, HBM2e)
     "8.6":  (19.5,  156.0, 312.0, 312.0, 1555.0),  # A100 (40GB), A40
     "8.9":  (67.0,  989.0, 1979.0, 989.0, 3350.0),  # H100 (HBM3, FP8=1979)
@@ -30,16 +46,6 @@ _HARDWARE_THEORETICAL_PEAK: dict[str, tuple[float, float, float, float, float]] 
     "7.5":  (16.3,  130.6, 326.0, 326.0, 936.0),   # RTX 3090 / A40 (GA102, Ampere has TF32)
     "7.0":  (15.7,  0.0,   125.0, 125.0, 900.0),   # V100 (Volta, no TF32)
     "8.9-bw":(67.0, 989.0, 1979.0, 989.0, 1800.0),  # H100 (PCIe)
-    # 设备名关键字匹配 (fallback 当 compute_capability 不可用时)
-    "a100": (19.5,  156.0, 312.0, 312.0, 1555.0),
-    "h100": (67.0,  989.0, 1979.0, 989.0, 3350.0),
-    "h200": (67.0,  989.0, 1979.0, 989.0, 3350.0),
-    "v100": (15.7,  0.0,   125.0, 125.0, 900.0),
-    "3090": (16.3,  130.6, 326.0, 326.0, 936.0),
-    "4090": (82.6,  82.6,  330.0, 330.0, 1008.0),  # 4090 FP32=82.6 (no TF32 boost for Ada? actually Ada has TF32)
-    "a6000":(38.7,  310.0, 77.4,  77.4,  768.0),
-    "a5000":(27.8,  222.0, 55.5,  55.5,  768.0),
-    "t4":   (8.1,   65.0,  130.0, 130.0, 320.0),
 }
 
 
@@ -120,8 +126,8 @@ class Verifier:
         print("  [Verifier] L2: 功能验证...")
 
         # 反作弊静态审计: 执行前先检查是否存在原生算子回退调用
-        #   注意: 昆仑芯/昇腾等自研加速卡白名单放开 torch.matmul 等 (因为它们的 Tensor Core
-        #   只能通过 torch.matmul 下放 xblas 激活)
+        #   注意: 昇腾等自研加速卡白名单放开 torch.matmul 等 (因为它们的 Tensor Core
+        #   只能通过厂商的 torch 后端下放激活)
         violations = static_audit(kernel_code, task.target.dsl, hardware=task.target.hardware)
         if violations:
             print(f"  [Verifier] L2 FAILED: 反作弊静态审计未通过 ({len(violations)} 处违规)")
@@ -319,7 +325,8 @@ class Verifier:
                    "bound_type": bound, "primary_metric": "speedup_vs_baseline",
                    "backend": str(self.backend)}
         # 从 benchmark 结果传递额外字段 (mode, language, device 等)
-        for extra_key in ("mode", "language", "device", "runs", "max_time_ms"):
+        for extra_key in ("mode", "language", "device", "runs", "max_time_ms",
+                          "gpu_util_pct", "gpu_other_procs", "selected_gpu"):
             if extra_key in bench:
                 metrics[extra_key] = bench[extra_key]
 
@@ -396,6 +403,22 @@ class Verifier:
                 passed = speedup >= min_required
                 msg = (f"加速比 {speedup:.2f}x vs {display_name} "
                        f"(同机同卡 median, 要求 >= {min_required:.2f}x, {bound}-bound)")
+
+                # 共享机器上基准可信度的两个信号, 强度不同, 分开记录:
+                #   util_before > 5%  → 硬污染, 测量时确实在争用, 加速比不可比
+                #   other_procs > 0   → 仅提示卡被共享 (这台机器上恒为真), 不单独判污染
+                # 若把"有进程"也算污染, 每次运行都会被标记, 信号就失效了。
+                util = bench.get("gpu_util_pct")
+                others = bench.get("gpu_other_procs")
+                contaminated = util is not None and util > 5
+                metrics["benchmark_contaminated"] = contaminated
+                metrics["gpu_shared_with_others"] = bool(others)
+                if contaminated:
+                    metrics["contamination_reason"] = f"测量前 util={util}%"
+                    msg += f" ⚠️ 基准被污染({metrics['contamination_reason']}), 加速比不可比"
+                elif others:
+                    msg += f" (注: 卡与 {others} 个其他进程共享, 瞬时 util={util}%)"
+
                 print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
                 return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                           passed=passed, message=msg, metrics=metrics)
@@ -449,7 +472,7 @@ class Verifier:
     # ---- Roofline 分析 ----
 
     def _detect_theoretical_peak(self) -> dict:
-        """探测硬件理论峰值 (GFLOPS, 带宽)，优先从 compute_capability 匹配，回退设备名"""
+        """探测硬件理论峰值 (GFLOPS, 带宽)，优先按设备名匹配，回退 compute_capability"""
         if self._theoretical_peak is not None:
             return self._theoretical_peak
 
@@ -463,28 +486,25 @@ class Verifier:
         device = str(hw.get("device", "")).lower()
         name = str(hw.get("name", "")).lower()
 
-        # 优先按 compute_capability 精确匹配
-        if cc:
-            if cc in _HARDWARE_THEORETICAL_PEAK:
-                fp32, tf32, fp16, bf16, bw = _HARDWARE_THEORETICAL_PEAK[cc]
+        # 1. 设备名优先: cc 9.0 同时是 H100/H200/H20, 只有设备名能区分
+        #    键名长者先匹配, 避免 "h20" 抢在 "h200" 之前命中
+        vals = None
+        for key in sorted(_PEAK_BY_NAME, key=len, reverse=True):
+            if key in name or key in device:
+                vals = _PEAK_BY_NAME[key]
+                break
+
+        # 2. 设备名未命中时回退 compute_capability (精确 → 前缀)
+        if vals is None and cc:
+            if cc in _PEAK_BY_CC:
+                vals = _PEAK_BY_CC[cc]
             else:
-                # 前缀匹配: "8.0" 匹配 "8.0", "8.6" 匹配 "8.6"
-                matched = None
-                for key in sorted(_HARDWARE_THEORETICAL_PEAK.keys(), key=len, reverse=True):
-                    if cc.startswith(key) and key.replace(".", "").replace("-", "").isdigit():
-                        matched = key
+                for key in sorted(_PEAK_BY_CC, key=len, reverse=True):
+                    if cc.startswith(key):
+                        vals = _PEAK_BY_CC[key]
                         break
-                if matched:
-                    fp32, tf32, fp16, bf16, bw = _HARDWARE_THEORETICAL_PEAK[matched]
-                else:
-                    fp32, tf32, fp16, bf16, bw = (0, 0, 0, 0, 0)
-        else:
-            # 回退设备名关键字匹配
-            fp32, tf32, fp16, bf16, bw = (0, 0, 0, 0, 0)
-            for key, vals in _HARDWARE_THEORETICAL_PEAK.items():
-                if key in name or key in device:
-                    fp32, tf32, fp16, bf16, bw = vals
-                    break
+
+        fp32, tf32, fp16, bf16, bw = vals if vals else (0, 0, 0, 0, 0)
 
         self._theoretical_peak = {
             "fp32_tflops": fp32, "tf32_tflops": tf32,

@@ -3,9 +3,9 @@ LLM 客户端 - 统一的 LLM 调用封装
 支持 OpenAI 兼容 API (私有部署模型 / DeepSeek)
 支持主模型失败后自动降级到 fallback 模型
 通过环境变量配置:
-  LLM_BASE_URL  - API 地址 (默认 http://152.136.252.171:8092/v1)
+  LLM_BASE_URL  - API 地址 (必填, 仓库内不保存真实地址)
   LLM_API_KEY   - API Key (可选)
-  LLM_MODEL     - 模型名称 (默认 Qwen/Qwen3.5-9B)
+  LLM_MODEL     - 模型名称 (默认 Qwen3.8-27B)
   HY_API_KEY    - Fallback 模型 API Key (可选)
 
 === 成本监控 Harness (Usage Tracker) ===
@@ -182,11 +182,15 @@ class LLMClient:
         fallback_base_url: Optional[str] = None,
         fallback_api_key: Optional[str] = None,
     ):
-        self.base_url = (base_url or os.environ.get(
-            "LLM_BASE_URL", "http://152.136.252.171:8092/v1"
-        )).rstrip("/")
+        # 端点不写进仓库: 由 base_url 参数或 LLM_BASE_URL 环境变量提供
+        self.base_url = (base_url or os.environ.get("LLM_BASE_URL", "")).rstrip("/")
+        if not self.base_url:
+            raise ValueError(
+                "未配置 LLM 端点: 请传入 base_url 或设置环境变量 LLM_BASE_URL "
+                "(形如 http://host:port/v1)。仓库内不保存真实地址。"
+            )
         self.api_key = api_key or os.environ.get("LLM_API_KEY", "")
-        self.model = model or os.environ.get("LLM_MODEL", "Qwen/Qwen3.5-9B")
+        self.model = model or os.environ.get("LLM_MODEL", "Qwen3.8-27B")
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout

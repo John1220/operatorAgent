@@ -113,7 +113,7 @@ class EnvironmentChecker:
             print(report.dependency_manifest())
     """
 
-    def __init__(self, ssh_exec_fn, uv_path: str = "/home/zhanghan/.local/bin/uv",
+    def __init__(self, ssh_exec_fn, uv_path: str = "~/.local/bin/uv",
                  work_dir: str = "."):
         self._ssh = ssh_exec_fn          # callable: (cmd) -> stdout, raises on fail
         self._uv = uv_path

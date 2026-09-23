@@ -2,7 +2,7 @@
 硬件能力描述 — 跨平台 GPU 硬件特征的统一抽象层
 
 设计原则:
-  1. 不假设任何特定厂商 (NVIDIA/AMD/昆仑芯/昇腾/寒武纪)
+  1. 不假设任何特定厂商 (NVIDIA/AMD/昇腾/寒武纪)
   2. 所有字段都有合理默认值 (对应"最小能力"硬件)
   3. 从 backend.get_hardware_info() 自动推断，也可手动配置
   4. OptimizationPlanner 根据这些能力选择配方，而非硬编码硬件名
@@ -23,7 +23,7 @@ class HardwareCaps:
     """硬件能力描述符 — 所有字段均有保守默认值"""
 
     # ---- 厂商与标识 ----
-    vendor: str = "unknown"         # nvidia, amd, kunlunxin, ascend, cambricon, ...
+    vendor: str = "unknown"         # nvidia, amd, ascend, cambricon, ...
     device_name: str = "unknown"
     compute_capability: str = ""    # 如 "8.0" (NVIDIA), "gfx90a" (AMD)
 
@@ -69,7 +69,7 @@ class HardwareCaps:
 
     # ---- 编程模型/DSL 支持 ----
     supported_dsls: set = field(default_factory=lambda: {"cuda_c", "python"})
-    # triton, cuda_c, hip, xpu (昆仑芯), ascend-c, bisheng (寒武纪), opencl
+    # triton, cuda_c, hip, ascend-c, bisheng (寒武纪), opencl
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -127,6 +127,24 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
         has_double_buffering=True, has_warp_shuffle=True,
         supported_dsls={"triton", "cuda_c", "python"},
     ),
+    # NVIDIA H20 (Hopper 削减版) - 2026-09-16 于 algorithm-h20 实测 (cuBLAS 8192³ + triad)
+    # 与 H100 同为 cc 9.0, 但算力砍到 138 TFLOPS 而带宽保留 3.68 TB/s
+    # → ridge point ≈ 37.5 FLOP/B (H100 ≈ 295), 优化取向相反, 勿套用 H100 配方
+    "h20": HardwareCaps(
+        vendor="nvidia", device_name="H20",
+        compute_capability="9.0",
+        fp32_tflops=31.6, tf32_tflops=71.6, fp16_tflops=138.2, bf16_tflops=138.3,
+        has_tensor_core=True, tensor_core_version=4, tensor_core_m_k_n=(16, 16, 16),
+        vector_width_bytes=16, sub_group_size=32,
+        global_mem_bandwidth_gbs=3680.0, l2_cache_size_kb=61440,
+        shared_mem_per_sm_kb=228, shared_mem_bank_count=32,
+        registers_per_thread=255,
+        sm_count=78, max_threads_per_sm=2048,
+        has_l2_cache_hint=True, has_software_pipelining=True,
+        has_double_buffering=True, has_block_reduce=True,
+        has_warp_shuffle=True, has_atomic_fadd=True,
+        supported_dsls={"triton", "cuda_c", "python"},
+    ),
     # NVIDIA V100
     "v100": HardwareCaps(
         vendor="nvidia", device_name="V100",
@@ -162,32 +180,6 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
         sm_count=220,
         has_l2_cache_hint=True, has_software_pipelining=True,
         supported_dsls={"hip", "triton", "python"},
-    ),
-    # 昆仑芯 P800 (KL3 架构) - 实测数据
-    # FP16 Tensor Core ~252 TFLOPS, FP32 ~103 TFLOPS (实测 4096x4096)
-    # 96 GB HBM, 96 MiB L3, 8 XPU clusters, 400W TDP
-    # SDK: CUDA 11.7 compatible, torch 2.5.1+cu118 with torch_xmlir backend
-    "kunlunxin": HardwareCaps(
-        vendor="kunlunxin", device_name="P800 OAM",
-        compute_capability="kl3",
-        fp32_tflops=103.0, fp16_tflops=252.0, bf16_tflops=252.0,
-        tf32_tflops=0.0,  # P800 没有 TF32，FP32 直接 103 TFLOPS
-        has_tensor_core=True, tensor_core_version=1,
-        tensor_core_m_k_n=(16, 16, 16),
-        vector_width_bytes=16, sub_group_size=32,
-        global_mem_bandwidth_gbs=1600.0,  # 估算值，待实测
-        l2_cache_size_kb=98304,  # 96 MiB L3
-        shared_mem_per_sm_kb=64, shared_mem_bank_count=32,
-        registers_per_thread=255,
-        sm_count=8,  # XPU clusters (P800 有 8 个 cluster)
-        max_threads_per_sm=2048, max_blocks_per_sm=32,
-        has_l2_cache_hint=False,  # KL3 无显式 cache eviction hint
-        has_software_pipelining=True,
-        has_double_buffering=True,
-        has_block_reduce=True, has_warp_shuffle=True,
-        has_atomic_fadd=True,
-        supported_dsls={"cuda_c", "python", "xpu_c"},
-        # Triton 不原生支持昆仑芯，但可通过 CUDA 兼容层使用 CUDA-C 生成代码
     ),
     # 华为昇腾 910B (示例配置)
     "ascend910b": HardwareCaps(
@@ -227,9 +219,10 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
     cc = str(hw_info.get("compute_capability", "") or "")
     device = str(hw_info.get("device", "") or "")
 
-    # 尝试匹配已知硬件
-    for key, caps in _KNOWN_HARDWARE.items():
+    # 尝试匹配已知硬件 (键名长者优先, 避免 "h20" 抢在 "h200" 之前命中)
+    for key in sorted(_KNOWN_HARDWARE, key=len, reverse=True):
         if key in name or key in vendor or key in device:
+            caps = _KNOWN_HARDWARE[key]
             # 用 hw_info 中的动态数据覆盖预定义值
             caps.sm_count = hw_info.get("multiprocessor_count", caps.sm_count) or caps.sm_count
             return caps
@@ -252,15 +245,6 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
         caps.sub_group_size = 32
         caps.vector_width_bytes = 16
         caps.has_tensor_core = not cc.startswith("6.") and not cc.startswith("5.")
-    elif "xpu" in device or "kunlun" in vendor or "p800" in name:
-        caps.vendor = "kunlunxin"
-        caps.supported_dsls = {"cuda_c", "python"}
-        caps.has_l2_cache_hint = False
-        caps.has_software_pipelining = True
-        caps.has_warp_shuffle = True
-        caps.has_tensor_core = True
-        caps.sub_group_size = 32
-        caps.vector_width_bytes = 16
     elif "cpu" in device:
         caps.vendor = "cpu"
         caps.has_tensor_core = False
