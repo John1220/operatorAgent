@@ -10,6 +10,9 @@
 
   未被标记的用例代表当前已能拦下, 属纯回归保护。
 
+漏过的写法按 DSL 分成两组, 因为"该不该拦"本身取决于 DSL: python DSL 下 NumPy
+是实现介质, `A @ B` 是合法写法; GPU DSL 下它只能是 torch 回退。详见下方注释。
+
 纯本地测试, 不需要 GPU / LLM / 远端。
 """
 
@@ -30,9 +33,21 @@ CAUGHT = {
 # ─── 当前会漏过, 但应该被拦下 ───────────────────────────────
 # 这些都不是刻意构造的对抗样本: A @ B 与 A.matmul(B) 是 PyTorch 里写矩阵乘
 # 最自然的两种形态, LLM 在 Triton 路径遇挫后"退一步用 torch 兜底"时最可能写出。
+#
+# 但必须按 DSL 区分, 不能一刀切:
+#   - python DSL 下 NumPy 是实现介质 (anticheat.py 模块 docstring 明说), 而
+#     `A @ B` 对 numpy 数组是合法写法 —— tests/test_p0_3.py 的 PYTHON_MATMUL
+#     正是 `return A @ B`。所以歧义写法只在 GPU DSL 下算漏过。
+#   - 明确带 torch 语义的写法 (.matmul() 方法、from torch import、torch.nn
+#     模块实例化、getattr(torch,...)) 在两个 DSL 下都该拦。
 
-BYPASSED = {
+# 歧义写法: 仅 GPU DSL (triton/cuda_c) 下应被拦下
+BYPASSED_GPU_DSL_ONLY = {
     "@ 运算符 (__matmul__)": "def kernel(A,B):\n    return A @ B\n",
+}
+
+# 明确 torch 语义: 两个 DSL 下都应被拦下
+BYPASSED_BOTH_DSL = {
     "方法形式 .matmul()": "def kernel(A,B):\n    return A.matmul(B)\n",
     "from torch import matmul": (
         "def kernel(A,B):\n    from torch import matmul\n    return matmul(A,B)\n"
@@ -62,28 +77,74 @@ class TestStaticAuditCatches(unittest.TestCase):
                 self.assertTrue(static_audit(code, "python"),
                                 f"{name} 本该被拦下, 现在漏过了 (回归)")
 
+    def test_python_dsl_allows_numpy_at_operator(self):
+        """反向保护: python DSL 下 numpy 的 @ 是实现介质, 不得被误拦
 
-class TestStaticAuditBypasses(unittest.TestCase):
-    """已知漏过的写法: 修好后这些会转为 unexpected success 并报失败, 届时摘掉标记"""
-
-    def _assert_blocked(self, code, dsl):
-        self.assertTrue(static_audit(code, dsl), "static_audit 未拦下")
-
-    def test_bypass_triton(self):
-        for name, code in BYPASSED.items():
-            with self.subTest(case=name):
-                self._assert_blocked(code, "triton")
-
-    def test_bypass_python(self):
-        for name, code in BYPASSED.items():
-            with self.subTest(case=name):
-                self._assert_blocked(code, "python")
+        tests/test_p0_3.py 的 PYTHON_MATMUL 就是这一形态。若将来为拦 torch 的
+        `A @ B` 而把 @ 运算符一律禁掉, 这个用例会失败 —— 那是有意的。
+        """
+        code = "import numpy as np\n\ndef kernel(A,B):\n    return A @ B\n"
+        self.assertEqual(static_audit(code, "python"), [])
 
 
-# 逐个方法挂 expectedFailure, 使 subTest 里任一用例修好都能被察觉
-for _m in ("test_bypass_triton", "test_bypass_python"):
-    setattr(TestStaticAuditBypasses, _m,
-            unittest.expectedFailure(getattr(TestStaticAuditBypasses, _m)))
+class TestStaticAuditBypassesBothDSL(unittest.TestCase):
+    """明确 torch 语义的漏过写法: 两个 DSL 下都该拦, 修好后转为 unexpected success
+
+    粒度到「单个向量 × 单个 DSL」而不是把 dict 塞进一个 subTest 循环:
+    `@unittest.expectedFailure` 只在方法内**全部** subTest 通过时才翻成
+    unexpected success, 部分修复会被完全掩盖。而这里部分修复是大概率事件 ——
+    按 docs/research/03 的修复方案改用 AST 后, `.matmul()` / `from torch import`
+    / `torch.nn.X(...)` 都能直接抓到, 但 `getattr(torch,"mat"+"mul")` 还需要
+    常量折叠, 很可能落后一轮。
+    """
+
+    @unittest.expectedFailure
+    def test_triton_matmul_method(self):
+        self.assertTrue(static_audit(BYPASSED_BOTH_DSL["方法形式 .matmul()"], "triton"))
+
+    @unittest.expectedFailure
+    def test_python_matmul_method(self):
+        self.assertTrue(static_audit(BYPASSED_BOTH_DSL["方法形式 .matmul()"], "python"))
+
+    @unittest.expectedFailure
+    def test_triton_from_import(self):
+        self.assertTrue(static_audit(BYPASSED_BOTH_DSL["from torch import matmul"], "triton"))
+
+    @unittest.expectedFailure
+    def test_python_from_import(self):
+        self.assertTrue(static_audit(BYPASSED_BOTH_DSL["from torch import matmul"], "python"))
+
+    @unittest.expectedFailure
+    def test_triton_getattr_concat(self):
+        self.assertTrue(static_audit(BYPASSED_BOTH_DSL["getattr + 字符串拼接"], "triton"))
+
+    @unittest.expectedFailure
+    def test_python_getattr_concat(self):
+        self.assertTrue(static_audit(BYPASSED_BOTH_DSL["getattr + 字符串拼接"], "python"))
+
+    @unittest.expectedFailure
+    def test_triton_nn_module(self):
+        self.assertTrue(static_audit(BYPASSED_BOTH_DSL["torch.nn 模块实例化"], "triton"))
+
+    @unittest.expectedFailure
+    def test_python_nn_module(self):
+        self.assertTrue(static_audit(BYPASSED_BOTH_DSL["torch.nn 模块实例化"], "python"))
+
+
+class TestStaticAuditBypassesGpuDSL(unittest.TestCase):
+    """歧义写法 (`A @ B`) 的漏过: 只在 GPU DSL 下断言
+
+    python DSL 下它由 TestStaticAuditCatches.test_python_dsl_allows_numpy_at_operator
+    反向保护, 那边断言的恰好是「不得拦下」。
+    """
+
+    @unittest.expectedFailure
+    def test_triton_at_operator(self):
+        self.assertTrue(static_audit(BYPASSED_GPU_DSL_ONLY["@ 运算符 (__matmul__)"], "triton"))
+
+    @unittest.expectedFailure
+    def test_cuda_c_at_operator(self):
+        self.assertTrue(static_audit(BYPASSED_GPU_DSL_ONLY["@ 运算符 (__matmul__)"], "cuda_c"))
 
 
 class TestRuntimeShieldCoverage(unittest.TestCase):
