@@ -427,7 +427,17 @@ class Conductor:
             if l3_result and l3_result.passed is False:
                 current_gflops = l3_result.metrics.get("gflops", 0)
                 # 当 gflops 为 0 (指标计算不可用) 时，用速度比判断
-                if current_gflops > 0 and best_gflops > 0:
+                if current_gflops > 0 and best_gflops <= 0:
+                    # 首个有效观测只能用来建立基线: 没有"之前"可比, 因此既不算改善
+                    # 也不算停滞, 更不能据此禁用本轮配方 (首轮 plan 是在 roofline=None
+                    # 下按算子类型选的, 无从判断其好坏)。
+                    # 缺少这一支时 best_gflops 的初值 0.0 会让首轮掉进下面的"指标不
+                    # 完整"分支: 把可用的 gflops 报成缺失, 无条件禁用配方, 并在
+                    # max_stagnant_rounds=2 下把一次正在起效的优化提前终止。
+                    best_gflops = current_gflops
+                    print(f"\n[Conductor] 建立性能基线: {current_gflops:.2f} GFLOPS "
+                          f"(speedup={l3_result.metrics.get('speedup_vs_baseline', 0):.4f})")
+                elif current_gflops > 0 and best_gflops > 0:
                     if current_gflops > best_gflops:
                         best_gflops = current_gflops
                         rounds_without_improvement = 0
@@ -449,8 +459,9 @@ class Conductor:
                     # gflops 不可用: 用速度比或时间判断
                     speedup = l3_result.metrics.get("speedup_vs_baseline", 0)
                     kernel_ms = l3_result.metrics.get("candidate_median_time_ms", 0)
-                    if speedup > 0 and speedup < 1.0 and round_num >= 2:
-                        # 速度比持续 < 1.0 且无 gflops 参考，跳过禁用避免死锁
+                    # 首轮同样无基线可比, 不禁用配方 (与上面 gflops 分支同理)
+                    if round_num < 2 or (speedup > 0 and speedup < 1.0):
+                        # 无 gflops 参考时禁用配方等于拿噪声做永久决策，跳过避免死锁
                         pass
                     elif plan and plan.selected_recipes:
                         new_recipes = [r for r in plan.selected_recipes if r.id not in applied_recipes]
