@@ -12,13 +12,13 @@
 | [`01-launch开销与shape充分性实测.md`](01-launch开销与shape充分性实测.md) | H20 上 launch 地板 18.69µs；访存量扫描定出拐点；证明 layernorm 报告的 0.65x 实为净值差 6.8x；给出 shape 建议与有效性分档设计 | ✅ 2026-09-24 |
 | [`02-远端执行的信任边界实测.md`](02-远端执行的信任边界实测.md) | 实测确认 LLM 生成代码可读 `~/.ssh/<私钥>`；本地凭据不经 ssh 转发；env 洗白对主要风险无效，重排 P2-1/P2-2 处置顺序 | ✅ 2026-09-24 |
 | [`10-DeepSeekHarness与插件化agent运行时.md`](10-DeepSeekHarness与插件化agent运行时.md) | dsh 核实为 DeepSeek 官方 agent 运行时；「正交结果独立上报」等 4 条采纳、2 条改造后采纳；逐条标注是否经本人一手核对 | ✅ 2026-09-24 |
+| [`11-kernel生成系统全景.md`](11-kernel生成系统全景.md) | KernelBench/AlphaEvolve/Sakana/Kevin-32B/AKO/SOL-ExecBench 等对比与可信度分级；外部宣称加速比普遍虚高的校准；5 条我方落后处；L2 常驻导致分子分母不同基准的新发现 | ✅ 2026-09-25 |
 | [`13-跨运行记忆与技能库架构.md`](13-跨运行记忆与技能库架构.md) | 结论是「检索算法不是瓶颈，语料才是」；sqlite+FTS5 选型（实测排除 sqlite-vec）；三表 schema 与 admission gate；Sakana 与 AWM 两个反面案例 | ✅ 2026-09-25 |
 
 ## 待补
 
 | 编号 | 主题 | 对应缺口 |
 |---|---|---|
-| 11 | LLM 驱动 GPU kernel 生成系统全景（KernelBench / AlphaEvolve / Sakana AI CUDA Engineer / Kevin-32B 等） | 全部 |
 | 12 | 生成核的正确性验证与 reward hacking 防护 | 1、6 |
 | 14 | kernel 配置空间搜索策略与硬件感知目标函数 | 1、4 |
 | 20 | 吸纳决策汇总（逐项：采纳 / 改造后采纳 / 拒绝 + 理由） | — |
