@@ -108,6 +108,26 @@ def failure_pair(err) -> tuple[str, str]:
     return (lines[0] if lines else "无错误详情"), text
 
 
+def baseline_plan(kernel_type: str, precision: str) -> list:
+    """下发给远端的基线**有序偏好**。
+
+    为什么以名单而不是结论的形式下发: 选谁当基线是公平性策略 (fp16 候选就该比 cuBLAS
+    fp16, 否则是拿 fp16 比 fp32), 这个判断控制端做得; 但某个基线在这台机器上跑不跑得
+    起来 (`torch.compile` 失败、显存不够、非 CUDA 设备没有 TF32) 只有远端知道。所以
+    控制端只排序, 远端取第一个能跑的并回报 `baseline_selected`。
+
+    名单里出现远端没有的项是安全的 —— 远端按 `name in specs` 过滤。
+    """
+    k = (kernel_type or "").lower()
+    is_matmul = "matmul" in k or "gemm" in k
+    is_fp16 = (precision or "").lower() == "fp16"
+    if is_matmul and is_fp16:
+        return ["pytorch_eager_fp16", "pytorch_eager_tf32", "pytorch_eager", "torch_compile"]
+    if is_matmul:
+        return ["pytorch_eager_tf32", "pytorch_eager", "torch_compile"]
+    return ["pytorch_eager", "torch_compile"]
+
+
 class Verifier:
     """
     验证器 - 执行三级验证
@@ -402,6 +422,8 @@ class Verifier:
             remote_bench = self.backend.benchmark_with_baselines(
                 kernel_code, bench_inputs, task.source.kernel_type,
                 precision=task.constraints.precision.value,
+                baseline_priority=baseline_plan(task.source.kernel_type,
+                                                task.constraints.precision.value),
             )
         bench = self.backend.benchmark(kernel_code, bench_inputs, warmup=2, repeat=5) if remote_bench is None else remote_bench
 
@@ -486,27 +508,13 @@ class Verifier:
                   f"带宽利用率={roofline['bandwidth_utilization_pct']:.1f}%)")
 
         # 远程模式必须使用同机/同卡 baseline；禁止退回控制端计时。
-        # baseline 选择策略 (按优先级):
-        #   FP16 matmul: 1. pytorch_eager_fp16 (cuBLAS FP16) — 最公平
-        #               2. pytorch_eager_tf32 (cuBLAS + TF32)
-        #               3. pytorch_eager (cuBLAS FP32)
-        #   其他:       1. pytorch_eager_tf32 / pytorch_eager
+        # 选哪个基线的策略在 baseline_plan() (随请求下发), 这里只认远端回报的
+        # `baseline_selected` —— 远端现在**只测那一个**, 本地再重排等于假设其余基线
+        # 也被测过, 而那正是 D3 要省的 GPU 时间。
         if remote_bench is not None:
             baselines = bench.get("baselines", {})
-            is_cuda_matmul = (bench.get("device", "").startswith("cuda") and
-                              "matmul" in task.source.kernel_type.lower())
-            is_fp16 = (task.constraints.precision == Precision.FP16)
-            if is_cuda_matmul and is_fp16:
-                baseline_priority = ["pytorch_eager_fp16", "pytorch_eager_tf32", "pytorch_eager", "torch_compile"]
-            elif is_cuda_matmul:
-                baseline_priority = ["pytorch_eager_tf32", "pytorch_eager", "torch_compile"]
-            else:
-                baseline_priority = ["pytorch_eager", "torch_compile"]
-            baseline_name = None
-            for name in baseline_priority:
-                if name in baselines and baselines[name]:
-                    baseline_name = name
-                    break
+            paired = bench.get("paired", {}) or {}
+            baseline_name = bench.get("baseline_selected")
             baseline = baselines.get(baseline_name) if baseline_name else None
             if baseline:
                 baseline_ms = baseline.get("median_time_ms", baseline.get("min_time_ms", 0))
@@ -526,12 +534,19 @@ class Verifier:
                 metrics.update({
                     "baseline_type": baseline_name,
                     "baseline_display": display_name,
-                    "baseline_time_ms": round(baseline_ms, 4),
+                    "baseline_time_ms": round(baseline_ms, 6),
                     "speedup_vs_baseline": round(speedup, 4),
                     "min_speedup_required": min_required,
                     "measurement_scope": "same_remote_device",
                     "candidate_median_time_ms": candidate_metrics.get("median_time_ms"),
                     "baseline_metrics": baselines,
+                    # 交错配对的信号: 逐样本比值的 median 与其散布。判定仍走上面那个
+                    # ratio-of-medians (不静默换口径), 这两个先作为旁证记录。
+                    "paired_speedup_median": paired.get("speedup_paired_median"),
+                    "paired_speedup_dispersion": paired.get("speedup_paired_iqr_over_median"),
+                    "paired_samples": paired.get("paired_runs"),
+                    "paired_block_samples": paired.get("paired_block_samples"),
+                    "baseline_attempts": bench.get("baseline_attempts") or [],
                 })
                 passed = speedup >= min_required
                 msg = (f"加速比 {speedup:.2f}x vs {display_name} "
@@ -553,8 +568,15 @@ class Verifier:
                 return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                           passed=passed, message=msg, metrics=metrics)
 
-            return VerificationResult(level=VerificationLevel.L3_PERFORMANCE, passed=False,
-                                      message="远程性能测试未返回可用 baseline")
+            head, full = failure_pair(bench.get("error", ""))
+            return VerificationResult(
+                level=VerificationLevel.L3_PERFORMANCE, passed=False,
+                message=("远程性能测试未返回可用 baseline: "
+                         f"{head or '远端没有报 error, 也没报 baseline_selected'}"),
+                error_log=(f"{full}\n远端按偏好顺序尝试过: {bench.get('baseline_attempts')}"
+                           "\n若远端确实跑了基线却没报 baseline_selected, 说明部署的 "
+                           "run_kernel.py 与 verifier 不同步 (deploy 该按 hash 覆盖)。"),
+            )
 
         # 非远程后端使用本机 reference 计时。
         baseline = self._measure_baseline(task, bench_inputs)

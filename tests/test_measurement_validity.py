@@ -18,6 +18,7 @@
 
 import contextlib
 import io
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -37,7 +38,7 @@ from operator_agent.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType,
 )
-from operator_agent.verifier import Verifier
+from operator_agent.verifier import Verifier, baseline_plan
 
 # H20 launch 开销 (空 Triton 核, CUDA event 计时, 不冲刷 L2):
 #   docs/research/01 实测 median=20.24 min=18.69 µs
@@ -212,11 +213,60 @@ class TestDocumentedVerdictsAreStableUnderFloorChoice(unittest.TestCase):
                     Validity.VALID)
 
 
+# ─── 一.5、基线偏好名单 (D3: 策略在控制端, 可用性在远端) ─────
+
+class TestBaselinePlan(unittest.TestCase):
+    """`baseline_plan` 是**唯一**的基线公平性策略, 三档都不能飘。
+
+    飘了会怎样: 远端拿到一个它不认识的名单就退回自己的默认顺序, 于是「fp16 候选比
+    cuBLAS fp32」这种不公平的比较会在没人报错的情况下回来。
+    """
+
+    def test_fp16_matmul_prefers_cublas_fp16(self):
+        plan = baseline_plan("matmul", "fp16")
+        self.assertEqual("pytorch_eager_fp16", plan[0])
+        self.assertEqual("torch_compile", plan[-1])
+
+    def test_fp32_matmul_prefers_tf32(self):
+        plan = baseline_plan("matmul", "fp32")
+        self.assertEqual("pytorch_eager_tf32", plan[0])
+        self.assertNotIn("pytorch_eager_fp16", plan,
+                         "fp32 任务里出现 fp16 基线 = 拿候选的精度不当挡箭牌")
+
+    def test_gemm_counts_as_matmul(self):
+        self.assertEqual(baseline_plan("matmul", "fp32"), baseline_plan("gemm", "fp32"))
+
+    def test_non_matmul_has_two_ranks(self):
+        self.assertEqual(["pytorch_eager", "torch_compile"],
+                         baseline_plan("layernorm", "fp16"))
+
+    def test_every_name_exists_in_the_runner_spec_table(self):
+        """跨文件守卫: 名单里的名字必须是远端 `_baseline_specs` 真会建出来的。
+
+        名字对不上时远端会静默跳过, 策略退化成「按 specs 的书写顺序」—— 典型的
+        「 producer 与 consumer 词汇漂移」, 光看单文件测不出来。
+        """
+        src = (Path(__file__).resolve().parents[1] / "remote_scripts"
+               / "run_kernel.py").read_text(encoding="utf-8")
+        specs = set(re.findall(r'specs\["([a-z0-9_]+)"\]', src))
+        self.assertTrue(specs, f"没从 runner 里认出任何基线名: {specs}")
+        for kernel_type, prec in (("matmul", "fp16"), ("matmul", "fp32"),
+                                  ("layernorm", "fp16"), ("softmax", "bf16")):
+            plan = baseline_plan(kernel_type, prec)
+            unknown = [n for n in plan if n not in specs]
+            self.assertEqual([], unknown,
+                             f"{kernel_type}/{prec} 的名单里有远端建不出的基线: {unknown}")
+
+
 # ─── 二、Verifier 把三态写进 metrics ─────────────────────────
 
 def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO,
                      dispersion=None, p25=None, p75=None, max_over_median=None):
-    """搭一个远程形状的 L3: benchmark_with_baselines 返回同机同卡的候选与各基线"""
+    """搭一个远程形状的 L3: benchmark_with_baselines 返回同机同卡的候选 + 一个基线
+
+    D3 之后远端只测**一个**基线并回报 `baseline_selected`, 所以这里的 payload 也只带
+    一份基线 —— 写两份会让测试继续默认「全都测过」这个已经被换掉的假设。
+    """
     backend = RemoteExecutor(mode="local")
     candidate = {"min_time_ms": candidate_ms, "median_time_ms": candidate_ms,
                  "avg_time_ms": candidate_ms, "max_time_ms": candidate_ms, "runs": 30}
@@ -235,6 +285,11 @@ def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO,
         "baselines": {
             "pytorch_eager": {"median_time_ms": baseline_ms, "min_time_ms": baseline_ms},
         },
+        # 远端现在只测一个基线并回报选了哪个 (D3); verifier 不再本地重排
+        "baseline_selected": "pytorch_eager",
+        "paired": {"speedup_paired_median": baseline_ms / candidate_ms,
+                   "speedup_paired_iqr_over_median": 0.02,
+                   "paired_runs": 30, "paired_block_samples": 10},
     }
     if util is not None:
         bench["gpu_util_pct"] = util
@@ -626,18 +681,109 @@ class TestRunnerReportsDispersion(unittest.TestCase):
         self.assertIsNone(degenerate["dispersion_max_over_median"])
         self.assertEqual(1, self.rk._sample_stats([2.5])["runs"])
 
+    def test_selection_stops_at_the_first_usable_baseline(self):
+        """远端按名单试到第一个能跑的就必须停 (省 GPU 时间那一半)
+
+        守卫的是控制流而不是字面量: 找那个遍历偏好名单的 for, 要求它在选中后 break。
+        没有 break 就等于回到「2~3 个基线全测一遍, 只用一个」。
+        """
+        import ast
+        src = (Path(__file__).resolve().parents[1] / "remote_scripts"
+               / "run_kernel.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                   and n.name == "run_benchmark_with_baselines"), None)
+        self.assertIsNotNone(fn, "找不到 run_benchmark_with_baselines")
+        loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)
+                 and any(isinstance(x, ast.Assign)
+                         and any(getattr(y, "id", "") == "chosen"
+                                 for y in x.targets)
+                         for x in ast.walk(n))
+                 and any(isinstance(x, ast.Break) for x in ast.walk(n))]
+        self.assertEqual(1, len(loops),
+                         "偏好名单的遍历里没有「选中即 break」—— 基线又被全测一遍了")
+
+    def test_paired_function_actually_alternates_both_arms(self):
+        """交错函数里必须**两臂都出现** _timed_runs, 否则「交错」只是名字
+
+        退化成「候选测完再测基线」在文本上完全可以保持函数名与返回结构不变, 只有
+        结构断言抓得住 —— 这正是 D3 唯一真金白银的那一半。
+        """
+        import ast
+        src = (Path(__file__).resolve().parents[1] / "remote_scripts"
+               / "run_kernel.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_bench_pair_interleaved"), None)
+        self.assertIsNotNone(fn, "交错配对函数不见了")
+        arms = set()
+        for c in ast.walk(fn):
+            if (isinstance(c, ast.Call)
+                    and getattr(c.func, "id", None) == "_timed_runs" and c.args):
+                name = getattr(c.args[0], "id", "")
+                if name.endswith("_fn"):
+                    arms.add(name)
+        self.assertEqual({"cand_fn", "base_fn"}, arms,
+                         f"交错里只计时的臂: {arms} —— 另一臂没在同一个函数里被采样")
+        # 且必须是**同一个循环体**内交替, 而不是两个先后出现的 for
+        loops = [n for n in ast.walk(fn) if isinstance(n, (ast.For, ast.While))]
+        both = [n for n in loops
+                if {"cand_fn", "base_fn"} <= {getattr(c.args[0], "id", "")
+                                              for c in ast.walk(n)
+                                              if isinstance(c, ast.Call)
+                                              and getattr(c.func, "id", None) == "_timed_runs"}]
+        self.assertTrue(both, "两臂的计时不在同一个循环里 —— 那不是交错")
+        # 定义了不等于在用: L3 入口必须真的调它。变异 N8 实测过这个洞 —— 退回旧的
+        # 「候选测完再测基线」时, 配对函数的定义、形参、返回结构都可以原样留着。
+        caller = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                       and n.name == "run_benchmark_with_baselines"), None)
+        self.assertIsNotNone(caller, "L3 计时入口 run_benchmark_with_baselines 不见了")
+        called = {getattr(c.func, "id", "") for c in ast.walk(caller) if isinstance(c, ast.Call)}
+        self.assertIn("_bench_pair_interleaved", called,
+                      "L3 入口没有调用交错配对函数 —— D3 被回退了")
+
+    def test_microsecond_median_is_not_quantized(self):
+        """3 µs 量级的中位数不许被 round() 压成 0.1 µs 格点
+
+        后果不是「数字不好看」: 五个重复各自量化到同一个值, iqr 就成了 0,
+        离散度门在这样的 shape 上彻底失明。
+        """
+        # 真实相对散布 ~0.08%, 全部落在 4 位小数的同一个格点 (0.0031) 里
+        close = [0.0031234, 0.0031238, 0.0031245, 0.0031251, 0.0031259]
+        shifted = [x * 1.0005 for x in close]          # 只挪 0.05%
+        a = self.rk._sample_stats(close)
+        b = self.rk._sample_stats(shifted)
+        self.assertNotEqual(a["median_time_ms"], b["median_time_ms"],
+                            "相差 0.05% 的两组样本被 round 成了同一个中位数")
+        self.assertGreater(a["dispersion_iqr_over_median"], 0.0,
+                           "四分位距被量化压成 0 —— 离散度门在这种 shape 上会失明")
+        self.assertGreater(a["max_time_ms"], a["min_time_ms"],
+                           "max/min 撞进同一个格点, 抢占信号也就没了")
+
     def test_all_three_benchmark_paths_report_the_same_keys(self):
         """三条路径 (含基线 / triton 单测 / torch-numpy 单测) 必须口径一致。
 
         只有 _bench_callable 报分位数的话, 走另两条路径时离散度门会静默失效 ——
         与「算了没人读」是同一类缺陷。
         """
-        import re
+        import ast
         src = (Path(__file__).resolve().parents[1] / "remote_scripts"
                / "run_kernel.py").read_text(encoding="utf-8")
-        call_sites = re.findall(r"(?<!def )_sample_stats\(", src)
-        self.assertEqual(3, len(call_sites),
-                         "三条 benchmark 路径应当都走 _sample_stats")
+        tree = ast.parse(src)
+        # 数「调用点个数」是脆的 (交错路径天然要调两次), 要数的是**路径**:
+        # 每个 _bench* 计时助手都必须把样本交给 _sample_stats 汇总。
+        helpers = {n.name for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name.startswith("_bench")}
+        callers = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                   and any(isinstance(c, ast.Call)
+                           and getattr(c.func, "id", None) == "_sample_stats"
+                           for c in ast.walk(n))}
+        self.assertTrue(helpers, "没认出任何 _bench* 计时助手, 这条断言形同虚设")
+        self.assertEqual(helpers, helpers & callers,
+                         f"这些计时路径没走 _sample_stats: {sorted(helpers - callers)}")
+        self.assertIn("_bench_pair_interleaved", helpers,
+                      "交错配对路径不见了 —— D3 被回退了?")
         # 旧的逐字段拼装不允许残留 (它会漏掉分位数)
         self.assertNotIn('"min_time_ms": round(min(times)', src)
         # gflops / bandwidth 必须一律由 median 推出, 不许有路径用 avg
@@ -714,7 +860,8 @@ class TestVerifierPropagatesDispersion(unittest.TestCase):
                  "memory_bandwidth_gbs": 500.0,
                  "candidate": dict(stats, runs_requested=30),
                  "baselines": {"pytorch_eager": {"median_time_ms": 1.0,
-                                                 "min_time_ms": 1.0}}}
+                                                 "min_time_ms": 1.0}},
+                 "baseline_selected": "pytorch_eager"}
         backend.benchmark_with_baselines = lambda *a, **kw: bench
         backend.get_hardware_info = lambda: dict(H20_HW_INFO)
         buf = io.StringIO()

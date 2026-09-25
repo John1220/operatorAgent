@@ -655,8 +655,13 @@ class SSHExecutor:
 
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,
-                                 repeat: int = 30, precision: str = "") -> dict:
-        """Measure candidate/eager/torch.compile on the same remote device."""
+                                 repeat: int = 30, precision: str = "",
+                                 baseline_priority=None) -> dict:
+        """Time candidate vs one interleaved baseline on the same remote device.
+
+        `baseline_priority` 是控制端的有序偏好, 远端只测第一个能跑的基线 —— 谁公平
+        是个策略问题 (fp16 候选该比 cuBLAS fp16), 但「能不能跑」只有远端知道。
+        """
         try:
             if not self._deployed:
                 self.deploy()
@@ -664,6 +669,7 @@ class SSHExecutor:
                 "action": "benchmark_with_baselines", "code": kernel_code,
                 "inputs": self._serialize_inputs(inputs), "kernel_type": kernel_type,
                 "warmup": warmup, "repeat": repeat, "precision": precision,
+                "baseline_priority": list(baseline_priority or []),
             })
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -1013,11 +1019,14 @@ class RemoteExecutor:
 
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,
-                                 repeat: int = 30, precision: str = "") -> Optional[dict]:
+                                 repeat: int = 30, precision: str = "",
+                                 baseline_priority=None) -> Optional[dict]:
         """Same-device benchmark protocol; legacy backends return None."""
         with _get_exec_lock(self._lock_key()):
             fn = getattr(self.backend, "benchmark_with_baselines", None)
-            return fn(kernel_code, inputs, kernel_type, warmup, repeat, precision=precision) if fn else None
+            return (fn(kernel_code, inputs, kernel_type, warmup, repeat,
+                       precision=precision, baseline_priority=baseline_priority)
+                    if fn else None)
 
     def __repr__(self) -> str:
         return self.name

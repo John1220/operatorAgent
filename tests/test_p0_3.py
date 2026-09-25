@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from operator_agent.agents import SearchAgent
-from operator_agent.verifier import Verifier
+from operator_agent.verifier import Verifier, baseline_plan
 from operator_agent.mock_gpu import MockGPU
 from operator_agent.remote_executor import RemoteExecutor
 from operator_agent.schemas import (
@@ -173,10 +173,12 @@ class TestSameDeviceRemoteBenchmark(unittest.TestCase):
             "memory_bandwidth_gbs": 500.0,
             "candidate": {"min_time_ms": 1.0, "median_time_ms": 2.0,
                           "avg_time_ms": 2.1, "max_time_ms": 2.3, "runs": 30},
+            # D3 之后远端只测一个基线并回报选了哪个; 这里模拟「远端按偏好
+            # 试到 torch_compile 才成功」的情形 (eager 也测过但不参与判定)
             "baselines": {
-                "pytorch_eager": {"median_time_ms": 3.0, "min_time_ms": 2.8},
                 "torch_compile": {"median_time_ms": 2.5, "min_time_ms": 2.4},
             },
+            "baseline_selected": "torch_compile",
         }
         verifier = Verifier(backend)
         verifier._measure_baseline = lambda *_: self.fail("控制端 baseline 不得参与远程评测")
@@ -185,6 +187,47 @@ class TestSameDeviceRemoteBenchmark(unittest.TestCase):
         self.assertEqual(r.metrics["baseline_type"], "torch_compile")
         self.assertEqual(r.metrics["measurement_scope"], "same_remote_device")
         self.assertEqual(r.metrics["speedup_vs_baseline"], 1.25)
+
+    def test_control_side_trusts_the_remote_selection(self):
+        """远端说选了谁就是谁 —— 控制端不许按偏好名单重排
+
+        重排等于假设「所有基线都被测过」, 而 D3 之后远端只测一个。这个 payload 故意
+        同时带上 tf32 与 eager 两份耗时、且 selected 指向名单里**靠后**的那个: 一旦有人
+        把重排逻辑加回来, 这里会立刻选到 tf32 并给出 4.5x 的假加速比。
+        """
+        backend = RemoteExecutor(mode="local")
+        seen = {}
+
+        def _bench(*a, **kw):
+            seen.update(kw)
+            return {
+            "success": True, "device": "cuda:0", "gflops": 1000.0,
+            "memory_bandwidth_gbs": 500.0,
+            "candidate": {"median_time_ms": 2.0, "min_time_ms": 1.9},
+            # tf32 在名单里排在 eager **前面**, 且耗时被故意写成 9.0 —— 一旦有人把
+            # 本地重排加回来, 就会选中它并给出 4.5x 的假加速比
+            "baselines": {
+                "pytorch_eager_tf32": {"median_time_ms": 9.0, "min_time_ms": 9.0},
+                "pytorch_eager": {"median_time_ms": 3.0, "min_time_ms": 2.8},
+            },
+            "baseline_selected": "pytorch_eager",
+            "paired": {"speedup_paired_median": 1.47, "speedup_paired_iqr_over_median": 0.03,
+                       "paired_runs": 240, "paired_block_samples": 8},
+            }
+        backend.benchmark_with_baselines = _bench
+        v = Verifier(backend)
+        r = _l3(v, PYTHON_MATMUL, _matmul_inputs(),
+                _make_task(kernel="matmul", min_speedup=1.2))
+        self.assertTrue(r.passed, r.message)
+        self.assertEqual("pytorch_eager", r.metrics["baseline_type"])
+        self.assertEqual(1.5, r.metrics["speedup_vs_baseline"])
+        # 交错配对的旁证必须能被下游看到, 否则「测了但没人读」又回来一次
+        self.assertEqual(1.47, r.metrics["paired_speedup_median"])
+        self.assertEqual(0.03, r.metrics["paired_speedup_dispersion"])
+        self.assertEqual(240, r.metrics["paired_samples"])
+        self.assertEqual(8, r.metrics["paired_block_samples"])
+        # 策略必须真的被**下发**: 只在控制端排好但不发过去, 远端就退回自己的书写顺序
+        self.assertEqual(baseline_plan("matmul", "fp32"), seen["baseline_priority"])
 
 
 # ─── legacy 回退 ─────────────────────────────────────────────

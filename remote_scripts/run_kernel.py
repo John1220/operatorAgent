@@ -759,13 +759,16 @@ def _sample_stats(times) -> dict:
     median = _percentile(s, 50)
     p25 = _percentile(s, 25)
     p75 = _percentile(s, 75)
+    # ⚠️ 时间一律 round(..., 6) 而不是 4: 4 位小数 = 0.1 µs 的格点, 而 launch 主导的
+    # 小核中位数就在 3 µs 量级 —— 0.1/3.1 = 3.2% 的量化步长会让「5 次重复一模一样」
+    # 这种假象通过离散度门 (D3 真机对照时就是这样: 旧 runner 安静机器上 iqr 恰好 0.0000)。
     return {
-        "min_time_ms": round(s[0], 4),
-        "median_time_ms": round(median, 4),
-        "avg_time_ms": round(sum(s) / len(s), 4),
-        "max_time_ms": round(s[-1], 4),
-        "p25_time_ms": round(p25, 4),
-        "p75_time_ms": round(p75, 4),
+        "min_time_ms": round(s[0], 6),
+        "median_time_ms": round(median, 6),
+        "avg_time_ms": round(sum(s) / len(s), 6),
+        "max_time_ms": round(s[-1], 6),
+        "p25_time_ms": round(p25, 6),
+        "p75_time_ms": round(p75, 6),
         # 相对四分位距: 样本主体的散布。median 为 0 时不猜 (ZeroDivisionError 之源)。
         "dispersion_iqr_over_median": round((p75 - p25) / median, 4) if median > 0 else None,
         # 最慢样本 / 中位样本: 对离群点敏感, 与上面那个互补, 不可互相替代。
@@ -792,14 +795,140 @@ def _bench_callable(fn, warmup: int, repeat: int, device_is_cuda: bool) -> dict:
     return stats
 
 
+def _baseline_specs(reference, cand_inputs: dict, is_cuda: bool,
+                    is_matmul: bool, is_fp16: bool) -> dict:
+    """基线**构造器**表: 名字 -> () -> (可调用, 善后函数或 None)。
+
+    构造器只做「建张量 / 包 lambda / torch.compile / 打开 allow_tf32」, 不计时。
+    `torch.compile` 的编译因此天然落在计时区之外 (与旧写法一致); TF32 的善后函数
+    必须在**整个配对窗口结束后**才调用 —— 交错采样里两臂共用一段时间, 中途改标志位
+    等于让其中一臂换了配置跑。
+    """
+    import torch
+    # 四个基线一律用 specs["名字"] = 构造器 的形式登记: 控制端的偏好名单
+    # (verifier.baseline_plan) 与 test_measurement_validity 的跨文件守卫都按这个形状
+    # 认出可用的名字。写成 dict 字面量会让守卫看不见其中一个, 名单飘了也无人报警。
+    specs = {}
+    specs["pytorch_eager"] = lambda: (reference, None)
+
+    # FP16 任务要拿 cuBLAS FP16 当基线, 否则是拿 fp16 候选比 fp32 参考
+    if is_cuda and is_matmul and is_fp16:
+        def build_fp16():
+            a = cand_inputs["A"].to(torch.float16)
+            b = cand_inputs["B"].to(torch.float16)
+            return (lambda: a @ b), None
+        specs["pytorch_eager_fp16"] = build_fp16
+
+    # Triton tl.dot() 在 Ampere+ 默认走 TF32, cuBLAS fp32 默认不走 —— 不开这档
+    # 就是拿 fp32-cuBLAS 的慢去充当候选的应得成绩。fp16 任务下这档无意义, 不建。
+    if is_cuda and is_matmul and hasattr(torch.backends.cuda, "matmul") and not is_fp16:
+        def build_tf32():
+            original = torch.backends.cuda.matmul.allow_tf32
+            torch.backends.cuda.matmul.allow_tf32 = True
+            def restore():
+                torch.backends.cuda.matmul.allow_tf32 = original
+            return reference, restore
+        specs["pytorch_eager_tf32"] = build_tf32
+
+    if hasattr(torch, "compile"):
+        def build_compile():
+            return torch.compile(reference), None
+        specs["torch_compile"] = build_compile
+    return specs
+
+
+def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
+                            device_is_cuda: bool) -> tuple:
+    """候选与基线**按块交错**计时, 返回 (候选 stats, 基线 stats, paired stats)。
+
+    为什么必须交错 (真机实测, docs/research/36 第三节):
+      原来的写法是「候选跑完全部样本, 再跑基线」。共享机器上邻居的插队只会落进其中
+      一个臂, 于是加速比带一个**方向固定**的偏置, 且不随样本数收敛。反向测量实测
+      layernorm 16384×6144: A→B 给 1.4351, B→A 给 1.3276 —— 同样两个核, 顺序不同
+      差 7.7%; 1024×768 这种 launch 主导的小核更狠: 119.57 vs 0.0112 (差 10⁴ 倍)。
+      安静机器上三种日程一致到小数点后三位 —— 交错治的是邻居, 不是仪器误差。
+
+    为什么是**按块**而不是逐样本:
+      候选臂必须在 anticheat 的 shield_torch 里跑 (torch 原生算子被换成抛错桩),
+      基线臂本身就是 torch 原生算子 —— 同一个窗口里两臂不可能共用一个 shield。
+      逐样本包裹 shield 正是本文件 `_bench_triton` 里那段注释早已否决过的做法;
+      按块切换则是每块一次 setattr 群, 且全部发生在 event 窗口之外, 不进测量值。
+      块长上限 10 也是真机定的: 块太大时整块会被邻居的一个大 matmul 吞掉, 反而造出
+      新的离群 (1024×768 上 k=50 出现过 median 1.006 / max 91.4), k≤10 时中位数稳定。
+
+    shield 只包候选一侧的**全部**调用 (首跑 / 估时 / warmup / 计时), 与旧的
+    `_bench_callable` 语义一致 —— 不让任何一次候选执行躲开反作弊屏蔽。
+
+    与 test_anticheat_bypass 那套 AST 结构断言有两处约定, 动之前先看它:
+      1. 这里**必须**直接写 `with shield_torch()`, 不能把 shield 当参数注进来 ——
+         守卫按 `shield_torch` 这个字面名识别屏蔽区间, 换成注入的 callable 之后这条
+         (唯一的) L3 路径会从断言视野里整个消失 (真实发生过, 见该测试文件开头注释);
+      2. 两个臂按**形参位置**分类 (第 0 个候选、第 1 个基线), 所以形参顺序不能换,
+         名字可以改。
+    """
+    import torch
+
+    # 各跑一次吃掉 JIT / 首次派发, 否则估时会严重偏大 (与 _bench_callable 同一处理)
+    with shield_torch():
+        cand_fn()
+    base_fn()
+    if device_is_cuda:
+        torch.cuda.synchronize()
+
+    # 两臂用同一个样本数: 配对要求第 i 个样本互相对齐, 不能各按各的时间预算取数
+    with shield_torch():
+        n_cand = _resolve_counts(cand_fn, warmup, repeat, device_is_cuda)[1]
+    n_base = _resolve_counts(base_fn, warmup, repeat, device_is_cuda)[1]
+    n = int(min(MAX_REPEATS, max(n_cand, n_base)))
+    block = max(1, min(10, n // 20))   # 至少切成 20 块, 每块不超过 10 个样本
+
+    n_warm = max(warmup, 3)
+    with shield_torch():
+        for _ in range(n_warm):
+            cand_fn()
+    for _ in range(n_warm):
+        base_fn()
+    if device_is_cuda:
+        torch.cuda.synchronize()
+
+    cand_times, base_times = [], []
+    i = 0
+    while i < n:
+        k = min(block, n - i)
+        # 一块 = 一次 shield 进出, 且 shield 包的是**整块**而不是每一次调用
+        # (与本文件 541-543 的原则一致); 事件窗口在 _timed_runs 内部逐样本开闭,
+        # 所以 setattr 群不进测量值。
+        with shield_torch():
+            cand_times.extend(_timed_runs(cand_fn, k, device_is_cuda))
+        base_times.extend(_timed_runs(base_fn, k, device_is_cuda))
+        i += k
+
+    cand_stats = _sample_stats(cand_times)
+    base_stats = _sample_stats(base_times)
+    ratios = [b / c for c, b in zip(cand_times, base_times) if c > 0]
+    paired = {"paired_runs": len(ratios), "paired_block_samples": block}
+    if ratios:
+        rs = sorted(ratios)
+        med = _percentile(rs, 50)
+        p25, p75 = _percentile(rs, 25), _percentile(rs, 75)
+        # median-of-ratios: 逐轮配对后的比值中位数, 与 ratio-of-medians 互补
+        paired["speedup_paired_median"] = round(med, 4)
+        paired["speedup_paired_iqr_over_median"] = (
+            round((p75 - p25) / med, 4) if med > 0 else None)
+    cand_stats["runs_requested"] = repeat
+    base_stats["runs_requested"] = repeat
+    return cand_stats, base_stats, paired
+
+
 def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                                  warmup: int = 10, repeat: int = 30,
-                                 precision: str = "") -> dict:
-    """Benchmark candidate/eager/compile together on the remote execution device.
+                                 precision: str = "",
+                                 baseline_priority=None) -> dict:
+    """Time the candidate against exactly one baseline, interleaved, on device.
 
-    For CUDA + matmul, also measures cuBLAS with TF32 enabled for a fair
-    comparison against Triton (tl.dot uses TF32 by default on Ampere+).
-    When precision is "fp16", also measures cuBLAS FP16 baseline.
+    `baseline_priority` is the control side's ordered preference; the first
+    baseline that actually runs is the only one measured. Ordering matters:
+    it encodes which comparison is fair (fp16 candidate vs cuBLAS fp16, etc).
     """
     try:
         import torch
@@ -824,67 +953,56 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
             }
         candidate = lambda: module.kernel(**candidate_inputs)
         is_cuda = device.type == "cuda"
-        # 只屏蔽候选这一条: 下面四个 baseline (eager / fp16 / tf32 / compile)
-        # 本身就是 torch 原生算子, 套进去会全部抛 CheatDetectedError。
-        with shield_torch():
-            candidate_stats = _bench_callable(candidate, warmup, repeat, is_cuda)
-        eager_stats = _bench_callable(reference, warmup, repeat, is_cuda)
-        baselines = {"pytorch_eager": eager_stats}
-
-        # ---- FP16 baseline (for FP16 precision tasks) ----
-        # When the task requires FP16, measure cuBLAS with FP16 inputs for fair comparison.
         is_matmul = ("matmul" in (kernel_type or "").lower() or
-                      "gemm" in (kernel_type or "").lower())
+                     "gemm" in (kernel_type or "").lower())
         is_fp16 = (precision or "").lower() == "fp16"
-        if is_cuda and is_matmul and is_fp16:
-            try:
-                # Convert inputs to FP16 for cuBLAS FP16 benchmark
-                a_fp16 = candidate_inputs["A"].to(torch.float16)
-                b_fp16 = candidate_inputs["B"].to(torch.float16)
-                fp16_reference = lambda: a_fp16 @ b_fp16
-                # warmup with FP16
-                fp16_reference()
-                if is_cuda:
-                    torch.cuda.synchronize()
-                eager_fp16_stats = _bench_callable(fp16_reference, warmup, repeat, is_cuda)
-                baselines["pytorch_eager_fp16"] = eager_fp16_stats
-            except Exception as e:
-                baselines["pytorch_eager_fp16_error"] = str(e)[:300]
 
-        # ---- TF32 baseline (fair comparison for Triton kernels on Ampere+) ----
-        # Triton tl.dot() uses TF32 by default on Ampere; cuBLAS FP32 does not.
-        # Skip TF32 baseline for FP16 tasks (FP16 baseline is more relevant).
-        if is_cuda and is_matmul and hasattr(torch.backends.cuda, "matmul") and not is_fp16:
+        # 基线不再「全都测一遍再让控制端挑」, 而是按控制端给的偏好顺序, **第一个能跑的
+        # 就定下来** (D3, docs/research/20 第三节)。旧写法对 layernorm 要测 eager +
+        # torch_compile 两份、对 fp16 matmul 要测三份, 而 verifier 永远只用其中一份 ——
+        # 白烧 2~3 倍 L3 的 GPU 时间, 而且测得越久, 撞上邻居插队的窗口越长。
+        specs = _baseline_specs(reference, candidate_inputs, is_cuda, is_matmul, is_fp16)
+        order = [n for n in (baseline_priority or []) if n in specs]
+        order += [n for n in specs if n not in order]
+        chosen, attempts = None, []
+        for name in order:
+            fn, cleanup = None, None
             try:
-                original_tf32 = torch.backends.cuda.matmul.allow_tf32
-                torch.backends.cuda.matmul.allow_tf32 = True
-                # warmup with TF32
-                reference()
+                fn, cleanup = specs[name]()
+                fn()                      # 一次实跑探可用性 (编译 / 显存 / 数值)
                 if is_cuda:
                     torch.cuda.synchronize()
-                eager_tf32_stats = _bench_callable(reference, warmup, repeat, is_cuda)
-                baselines["pytorch_eager_tf32"] = eager_tf32_stats
-                torch.backends.cuda.matmul.allow_tf32 = original_tf32
+                chosen = (name, fn, cleanup)
+                break
             except Exception as e:
-                baselines["pytorch_eager_tf32_error"] = str(e)[:300]
-                try:
-                    torch.backends.cuda.matmul.allow_tf32 = original_tf32
-                except Exception:
-                    pass
+                attempts.append(f"{name}: {type(e).__name__}: {str(e)[:160]}")
+                if cleanup is not None:
+                    try:
+                        cleanup()
+                    except Exception:
+                        pass
+        if chosen is None:
+            return {"success": False,
+                    "error": f"No usable remote baseline for {kernel_type}; "
+                             f"attempts={attempts}"}
+        base_name, base_fn, base_cleanup = chosen
 
-        if hasattr(torch, "compile"):
-            try:
-                compiled = torch.compile(reference)
-                compiled()  # compilation is deliberately outside the timed region
-                if is_cuda:
-                    torch.cuda.synchronize()
-                baselines["torch_compile"] = _bench_callable(compiled, warmup, repeat, is_cuda)
-            except Exception as e:
-                baselines["torch_compile_error"] = str(e)[:300]
+        # 两臂按块交错计时。候选臂全程在 shield_torch 内 (每一次执行都是), 基线臂不在
+        # —— 基线本身就是 torch 原生算子, 套进 shield 会立刻抛 CheatDetectedError。
+        try:
+            candidate_stats, base_stats, paired = _bench_pair_interleaved(
+                candidate, base_fn, warmup, repeat, is_cuda)
+        finally:
+            if base_cleanup is not None:
+                base_cleanup()
         elapsed = candidate_stats["median_time_ms"] / 1000
         gflops, bandwidth = _compute_metrics(real_inputs, elapsed)
         return {"success": True, "device": str(device), "candidate": candidate_stats,
-                "baselines": baselines, "reference_type": reference_type,
+                "baselines": {base_name: base_stats},
+                "baseline_selected": base_name,
+                "baseline_attempts": attempts,
+                "paired": paired,
+                "reference_type": reference_type,
                 "gflops": round(gflops, 4), "memory_bandwidth_gbs": round(bandwidth, 4)}
     except Exception as e:
         return {"success": False, "error": f"Remote benchmark error: {type(e).__name__}: {e}"}
@@ -1178,6 +1296,7 @@ if __name__ == "__main__":
                 code, inputs, payload.get("kernel_type", ""),
                 payload.get("warmup", 10), payload.get("repeat", 30),
                 precision=payload.get("precision", ""),
+                baseline_priority=payload.get("baseline_priority") or None,
             )
         if isinstance(result, dict):
             result["gpu_util_pct"] = util_before

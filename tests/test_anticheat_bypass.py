@@ -211,10 +211,33 @@ class TestSyntaxErrorFailClosed(unittest.TestCase):
 # `call = lambda: kernel_func(**inputs)` + `_timed_runs(call, ...)` 之后, 结构断言
 # 会静默少覆盖两个函数。这个漏洞是真实发生过的 (见 test_shield_sites_are_non_trivial)。
 
-_CANDIDATE_CALLEES = frozenset({"kernel", "kernel_func", "candidate"})
-_REFERENCE_CALLEES = frozenset({"reference", "fp16_reference", "compiled"})
+# 按块交错 (D3) 是唯一允许「循环体内进 shield」的地方; 块长上限 10 与 runner 里的
+# `min(10, n // 20)` 是同一个约定 (块长的真机依据见 docs/research/36)。
+_BLOCK_SHIELD_FUNCTION = "_bench_pair_interleaved"
+_MAX_BLOCK_CAP = 10
+# 配对函数的两个臂按**位置**定性后的规范标签
+_CAND_LABEL, _BASE_LABEL = "cand_fn", "base_fn"
+_CANDIDATE_CALLEES = frozenset({"kernel", "kernel_func", "candidate", _CAND_LABEL})
+_REFERENCE_CALLEES = frozenset({"reference", "fp16_reference", "compiled", _BASE_LABEL})
 # 首参是「待跑的可调用对象」的那些调度函数
 _BENCH_DISPATCHERS = frozenset({"_bench_callable", "_timed_runs", "_resolve_counts"})
+
+
+def _arm_labels(tree) -> dict:
+    """配对函数的形参名 → 规范标签: 第 0 个是候选臂, 第 1 个是基线臂。
+
+    必须按位置而不是按名字分类: 这两个臂所在的函数是唯一产出 L3 数字的路径,
+    「候选有没有被屏蔽」只在它内部被真正回答。硬编码 `cand_fn` 的话, 一次改名
+    (变异 N7 实测) 就让整段代码从断言里静默消失 —— 与本文件开头那段「只认名字的
+    话, 重构成 lambda 会静默少覆盖两个函数」记的是同一个漏法。
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == _BLOCK_SHIELD_FUNCTION:
+            args = node.args.args
+            if len(args) < 2:
+                return {}
+            return {args[0].arg: _CAND_LABEL, args[1].arg: _BASE_LABEL}
+    return {}
 
 
 def _has_shield_item(with_node) -> bool:
@@ -224,6 +247,22 @@ def _has_shield_item(with_node) -> bool:
         and item.context_expr.func.id == "shield_torch"
         for item in with_node.items
     )
+
+
+def _parent_map(tree) -> dict:
+    return {id(child): node
+            for node in ast.walk(tree)
+            for child in ast.iter_child_nodes(node)}
+
+
+def _enclosing_function(node, parents):
+    cur = node
+    while True:
+        cur = parents.get(id(cur))
+        if isinstance(cur, ast.FunctionDef):
+            return cur.name
+        if cur is None:
+            return None
 
 
 def _shield_regions(tree) -> list:
@@ -306,17 +345,16 @@ def _execution_lineno(node, parents):
 
 def _kernel_call_sites(tree) -> list:
     """返回 [(被调用者标签, 行号, 是否被 shield 覆盖), ...]"""
-    parents = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[id(child)] = node
+    parents = _parent_map(tree)
     bindings = _lambda_bindings(tree)
+    arms = _arm_labels(tree)
     regions = _shield_regions(tree)
     sites = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         label = _callee_label(node, bindings)
+        label = arms.get(label, label)
         if label not in _CANDIDATE_CALLEES and label not in _REFERENCE_CALLEES:
             continue
         line = _execution_lineno(node, parents)
@@ -372,21 +410,74 @@ class TestRuntimeShieldCoverage(unittest.TestCase):
                          f"参考/基线被 shield 包住, 它们调用 torch 原生算子是合法的: {inside}")
 
     def test_shield_never_inside_a_loop(self):
+        """屏蔽不得逐样本包裹 —— 循环体内的 shield 只有一处合法例外
+
+        这条规则保护的是真开销: shield_torch 进出各要 setattr 二十多个属性, 在
+        launch 底噪上是 2~3 倍 (原文见 run_kernel.py 里 `_bench_triton` 上方那段
+        注释)。D3 的两臂交错天然需要一个轮流跑块的循环, 所以规则收紧到它真正想说
+        的东西: **shield 进出次数不得随样本数线性增长**。可机械检查的形式见
+        `test_block_interleaving_bounds_shield_entries`。
+        """
+        parents = _parent_map(self.tree)
         offenders = []
         for node in ast.walk(self.tree):
             if not isinstance(node, (ast.For, ast.While)):
                 continue
             for sub in ast.walk(node):
                 if isinstance(sub, ast.With) and _has_shield_item(sub):
-                    offenders.append(sub.lineno)
+                    if _enclosing_function(sub, parents) != _BLOCK_SHIELD_FUNCTION:
+                        offenders.append(sub.lineno)
         self.assertEqual([], offenders,
-                         f"shield_torch 出现在循环体内 (第 {offenders} 行), 会变成逐次屏蔽")
+                         f"shield_torch 出现在 {_BLOCK_SHIELD_FUNCTION} 之外的循环体内 "
+                         f"(第 {offenders} 行), 会变成逐次屏蔽")
+
+    def test_block_interleaving_bounds_shield_entries(self):
+        """按块交错的例外成立, 当且仅当块长有字面常量上限且一块只进一次 shield
+
+        进出次数 = 样本数 / 块长。所以「块长有上限」是这条例外的全部前提: 把
+        `min(10, ...)` 拆掉或改大, shield 就退回逐样本包裹; 把 shield 挪到块内的
+        每一次 `_timed_runs(fn, 1, ...)` 上, 同样毁掉 L3 计时。两种写法都要红。
+        """
+        fn = None
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.FunctionDef) and node.name == _BLOCK_SHIELD_FUNCTION:
+                fn = node
+        self.assertIsNotNone(fn, f"runner 里找不到 {_BLOCK_SHIELD_FUNCTION}")
+
+        caps = [arg.value
+                for node in ast.walk(fn) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == "min"
+                for arg in node.args
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, int)]
+        self.assertTrue(caps and min(caps) <= _MAX_BLOCK_CAP,
+                        f"{_BLOCK_SHIELD_FUNCTION} 的块长没有 ≤{_MAX_BLOCK_CAP} 的字面常量"
+                        f"上限 (找到的常量: {caps}), shield 进出会随样本数线性增长")
+
+        per_sample = []
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.With) and _has_shield_item(node)):
+                continue
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                        and sub.func.id == "_timed_runs" and len(sub.args) > 1
+                        and isinstance(sub.args[1], ast.Constant)):
+                    per_sample.append(sub.lineno)
+        self.assertEqual([], per_sample,
+                         f"第 {per_sample} 行在 shield 里逐样本跑 (_timed_runs 的 repeat "
+                         f"是字面量), 一块一次变成了每样本一次")
 
     def test_shield_sites_are_non_trivial(self):
         """兜底: 真出现新的候选执行路径时, 上面几条断言不该因为集合为空而空转"""
         sites = _kernel_call_sites(self.tree)
         self.assertGreaterEqual(len([s for s in sites if s[0] in _CANDIDATE_CALLEES]), 8)
         self.assertGreaterEqual(len([s for s in sites if s[0] in _REFERENCE_CALLEES]), 4)
+        # 配对函数本身必须在这套断言的视野里: 它是唯一产出 L3 数字的路径,
+        # 上面两个总数门槛可以被 L1/L2 路径单独满足, 所以还得单独点它的名。
+        self.assertTrue(_arm_labels(self.tree),
+                        f"{_BLOCK_SHIELD_FUNCTION} 不存在或形参不足两个")
+        labels = {s[0] for s in sites}
+        self.assertIn(_CAND_LABEL, labels, "候选臂没进分类表, shield 覆盖断言对它空转")
+        self.assertIn(_BASE_LABEL, labels, "基线臂没进分类表, 「基线不得被屏蔽」对它空转")
 
 
 class TestShieldIsActuallyDeployed(unittest.TestCase):
