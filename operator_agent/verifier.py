@@ -641,11 +641,25 @@ class Verifier:
                     "paired_speedup_dispersion": paired.get("speedup_paired_iqr_over_median"),
                     "paired_samples": paired.get("paired_runs"),
                     "paired_block_samples": paired.get("paired_block_samples"),
+                    # 峰值显存: 与加速比**并列**的第二项观测, 不参与判定 (本机还没有
+                    # 「我们的核会增加多少」的分布, 先攒数 —— 与 D2 的 SM 时钟同一处置)。
+                    # 外部依据: KernelBench-Verified 报最好模型 28% 的核增加峰值显存。
+                    "candidate_peak_memory_bytes": paired.get("candidate_peak_bytes_extra"),
+                    "baseline_peak_memory_bytes": paired.get("baseline_peak_bytes_extra"),
+                    "peak_memory_ratio": paired.get("peak_memory_ratio"),
                     "baseline_attempts": bench.get("baseline_attempts") or [],
                 })
                 passed = speedup >= min_required
                 msg = (f"加速比 {speedup:.2f}x vs {display_name} "
                        f"(同机同卡 median, 要求 >= {min_required:.2f}x, {bound}-bound)")
+                _cp = metrics["candidate_peak_memory_bytes"]
+                _bp = metrics["baseline_peak_memory_bytes"]
+                if isinstance(_cp, int) and isinstance(_bp, int):
+                    # 报绝对值而不是只报倍数: 小 shape 上「×4」可能只是 0.2→0.8 MiB,
+                    # 而大 shape 上 ×1.2 才是真吃掉几个 GB。
+                    msg += (f"; 每次调用额外峰值显存 候选 {_cp / 1048576:.1f} MiB / "
+                            f"基线 {_bp / 1048576:.1f} MiB "
+                            f"(×{metrics['peak_memory_ratio']})")
 
                 # 共享机器上基准可信度的两个信号, 强度不同, 分开记录:
                 #   util_before > 5%  → 硬污染, 测量时确实在争用, 加速比不可比
