@@ -22,6 +22,9 @@ from operator_agent.remote_executor import RemoteExecutor
 from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
 from operator_agent.verifier import Verifier
+from operator_agent.measurement import (
+    DISPERSION_DEGRADED, DISPERSION_UNINFORMATIVE, INTRUDER_MAX_OVER_MEDIAN,
+)
 
 TRITON_LN = '''
 import torch, triton, triton.language as tl
@@ -127,7 +130,7 @@ for label, code, kernel_type, inputs, traffic_mb, roof_us in CASES:
     m = r.metrics
     print(f"\n{label}")
     print(f"  访存 {traffic_mb} MB, roofline 下界 {roof_us} µs")
-    print(f"  候选 median = {m.get('candidate_median_time_ms')} ms   "
+    print(f"  候选 median = {m.get('median_time_ms')} ms   "
           f"基线 = {m.get('baseline_time_ms')} ms ({m.get('baseline_display')})")
     print(f"  launch_dominance = {m.get('launch_dominance')}  "
           f"(地板 {m.get('launch_floor_us')} µs)")
@@ -140,3 +143,20 @@ for label, code, kernel_type, inputs, traffic_mb, roof_us in CASES:
           f"runs={m.get('runs')}(请求 {m.get('runs_requested')})  "
           f"contaminated={m.get('benchmark_contaminated')} "
           f"(util={m.get('gpu_util_pct')}%, 其他进程={m.get('gpu_other_procs')})")
+
+    # ---- 离散度门是否真的通了 ----
+    # 缺口 1 原来的失效方式不是「没算」而是「算了没人读」。新加的 p25/p75/两个
+    # dispersion 字段走的正是同一条 bench["candidate"] → metrics 的搬运路径, 所以
+    # 必须在真机上确认它们**到了**, 否则整个门是空转的。
+    disp_iqr = m.get("dispersion_iqr_over_median")
+    disp_max = m.get("dispersion_max_over_median")
+    print(f"  样本分布: p25={m.get('p25_time_ms')} p75={m.get('p75_time_ms')} "
+          f"min={m.get('min_time_ms')} max={m.get('max_time_ms')} ms")
+    print(f"  iqr/median = {disp_iqr}   max/median = {disp_max}   "
+          f"(判据阈值 {DISPERSION_DEGRADED} / {DISPERSION_UNINFORMATIVE}; "
+          f"抢占阈值 {INTRUDER_MAX_OVER_MEDIAN} 仅诊断, 不改档位)")
+    if disp_iqr is None or disp_max is None:
+        print("  ❌ runner 没把分位数搬进 metrics —— 离散度门在此路径上空转")
+    if m.get("measurement_intruder_suspected") and \
+            m.get("measurement_validity") == "valid":
+        print("  ✓ 抢占观察已上报但未改变档位 (符合当前设计)")

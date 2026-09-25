@@ -7,9 +7,10 @@ L3 的数字有三种「不可信」, 而它们都不该被当成「性能不达
    而 launch 地板 18.69 µs → 地板占比 95.6%。那一轮报出的「0.65x」「带宽利用率
    5.4%」「memory-bound 需优化」全部是在描述 launch 开销。决定性旁证是
    torch_compile 反而比 eager 慢 2.5× —— 编译开销在这个尺寸根本摊不平。
-2. **基准被污染** —— 测量窗口内 GPU 上有别的进程在跑, 加速比不可比。两条互补的
-   证据: 测量**前**的 util 快照 (硬污染), 以及最慢样本/中位样本 (窗口**中途**插
-   进来的抢占 —— util 快照看不见它, 而 iqr/median 对单个离群样本也完全不敏感)。
+2. **基准被污染** —— 测量窗口内 GPU 上有别的进程在跑, 加速比不可比。证据是测量
+   **前**的 util 快照 (且须排掉自己上一轮的残留, 见 docs/research/33)。最慢样本/
+   中位样本本来是想补的第二条证据 (窗口**中途**的抢占, util 快照看不见), 但实测
+   它被样本数系统性抬高, 目前只作诊断。
 3. **样本自身在抖** —— 30 个样本的 iqr/median 大到超过被测差异的量级, median
    看着权威其实是噪声。这条以前完全没检查: runner 跑了 n 个样本, 只报 min/median/
    avg/max, 从不看它们散不散 (docs/research/17 第二节第 1 条)。
@@ -68,20 +69,18 @@ DISPERSION_UNINFORMATIVE = 0.30
 # 插进来的邻居进程它同样看不见 —— 于是「测量期间发生过抢占」这件事以前没有任何
 # 证据通道。max/median 是唯一的廉价旁证。
 #
-# ⚠️ 比值**强烈依赖核的绝对时长**。真机标定 (benchmarks/calibrate_dispersion_thresholds.py,
-# H20, 30 轮 × 30 样本 × 4 个核, 2026-09-25):
+# ⚠️ 比值同时依赖核的绝对时长和样本数, 因此目前只作诊断、不改 validity 档位。
+# 真机数据 (H20, 2026-09-26, docs/research/33):
 #
-#     核                        median      max/median 的 p50 / max
-#     空核                       4.5 µs        3.84 / 18.26
-#     layernorm 1024×768         8.4 µs        4.31 /  8.00
-#     layernorm 16384×6144       256 µs        1.04 /  1.38
-#     matmul 4096³ fp16         1030 µs        1.00 /  1.04
+#     核                    median   实际样本数 runs   max/median
+#     layernorm 1024×768    7.2 µs        750         19.17
+#     layernorm 16384×6144  164 µs        239          1.86   ← util=0%, 无邻居插队
+#     matmul 4096³ fp16     980 µs         48          1.12
 #
-# 一次固定量级的宿主抖动 (~30 µs) 对 4.5 µs 的空核是 18 倍, 对 1 ms 的 matmul 只有
-# 1.04 倍 —— 单一绝对阈值必然两头不讨好。解法不是继续调阈值, 而是**只在比值有意义的
-# 区间用它**: 短核本来就被 launch 地板支配判成 UNINFORMATIVE, 那时 max/median 大是
-# 常态、没有额外信息量; 只在 launch_dominance <= LAUNCH_DOMINANCE_VALID (核足够长)
-# 时启用。该区间内实测最坏值 1.38, 取 2.0 留约 45% 余量。
+# 原先 benchmarks/calibrate_dispersion_thresholds.py 标定时刻意固定 30 样本/轮,
+# 所以只看见第 1 层偏差 (绝对时长), 没看见第 2 层 (顺序统计量随 n 抬升) —— 那是
+# 标定脚本自身的方法缺陷。阈值保留在此, 供 reasons 里那句观察引用; 要重新赋予判据
+# 地位, 须先换成对 n 稳健的统计量。
 INTRUDER_MAX_OVER_MEDIAN = 2.0
 
 
@@ -109,6 +108,7 @@ class MeasurementAssessment:
     contaminated: bool = False
     dispersion: Optional[float] = None           # iqr/median, None = 样本不足或未上报
     max_over_median: Optional[float] = None      # 窗口内抢占的旁证, 与 dispersion 互补
+    intruder_suspected: bool = False             # 仅诊断; 为何不作判据见 assess() 内说明
 
     @property
     def can_gate(self) -> bool:
@@ -142,6 +142,7 @@ class MeasurementAssessment:
             out["dispersion_iqr_over_median"] = self.dispersion
         if self.max_over_median is not None:
             out["dispersion_max_over_median"] = self.max_over_median
+        out["measurement_intruder_suspected"] = self.intruder_suspected
         return out
 
 
@@ -176,17 +177,21 @@ def assess(median_time_ms: Optional[float] = None,
            gpu_util_pct: Optional[float] = None,
            dispersion: Optional[float] = None,
            max_over_median: Optional[float] = None) -> MeasurementAssessment:
-    """综合四个信号给出有效性判定, 取更差的一档
+    """综合判定测量有效性: 三个信号取更差的一档, 第四个只作观察
+
+    参与判定的三个: launch 地板支配 (`median_time_ms` vs `launch_floor_us`)、
+    测量前 util 污染 (`gpu_util_pct`)、样本主体离散度 (`dispersion` = iqr/median)。
 
     污染判为 DEGRADED 而不是 UNINFORMATIVE: `benchmark_with_baselines` 是同机同卡
     依次测候选与各基线的, 两者落在同一个污染窗口里, 比值仍保留部分意义; 但绝对
     gflops 与比值都被扰动过, 不足以支撑「这个配方没用」这种结论。
 
-    离散度同理: 30 个样本的 iqr/median 超过 0.10 说明这台机器此刻在抖, median
-    本身仍是无偏的, 但它的精度撑不住「加速比 1.02x」这种量级的结论。
+    离散度同理: iqr/median 超过 0.10 说明这台机器此刻在抖, median 本身仍是无偏的,
+    但它的精度撑不住「加速比 1.02x」这种量级的结论。
 
-    max_over_median 也判 DEGRADED 而不是更差: median 对少量离群样本是稳的, 所以
-    这个信号说明的是「窗口内有抢占」, 而不是「median 不可信」。
+    max_over_median **不改变档位**, 只写进 reasons 并置 `intruder_suspected` —— 它被
+    顺序统计量效应污染, 实测干净测量就已打到 1.86。详见 INTRUDER_MAX_OVER_MEDIAN
+    注释与 docs/research/33。
     """
     reasons: List[str] = []
     validity = Validity.VALID
@@ -227,18 +232,29 @@ def assess(median_time_ms: Optional[float] = None,
                 f"(> {DISPERSION_DEGRADED:.2f}): median 仍无偏, 但精度撑不住小差异, "
                 f"不得据此禁用配方或累计停滞")
 
-    # 只在「核足够长、launch 地板不支配」的区间里用比值判抢占。短核的 max/median
-    # 天然就是几倍到十几倍 (真机实测空核 p50=3.84), 而那个区间已被上面的地板门
-    # 判成 UNINFORMATIVE, 再加一条只会把常态误报成污染。阈值来源见常量注释。
-    intruder_regime_ok = dom is not None and dom <= LAUNCH_DOMINANCE_VALID
-    intruder = (intruder_regime_ok and max_over_median is not None
+    # max_over_median **只作观察, 不改变 validity 档位**。
+    #
+    # 真机验证 (docs/research/33) 推翻了把它当判据的设计。两层偏差同向叠加:
+    #   1. 绝对时长 —— 一次 ~30 µs 的宿主抖动对 4.5 µs 的核是 18 倍, 对 1 ms 的核
+    #      只有 1.04 倍;
+    #   2. 顺序统计量 —— runner 按毫秒预算自动加采样 (实测 runs = 750/239/48),
+    #      样本越多 max 越靠尾部。而能通过「核足够长」这个前提的核必然净时间
+    #      >= 9x 地板 ~= 182 µs, 那个长度正好换来 ~274 个样本 —— 用得上这条判据的
+    #      区间, 恰好是 max 被抬得最高的区间。
+    # 实测 layernorm 16384x6144 在 util=0%、完全没有邻居插队时就已报出 1.86,
+    # 逼近阈值 2.0。拿它当判据会系统性地把干净测量判成污染, 即把闭环静默关掉 ——
+    # 那正是缺口 1 最初的病。
+    #
+    # 仍写进 reasons: 缺口 1 的教训是「算了没人读」, reasons 会进 Fixer /
+    # SearchAgent 的 prompt。但措辞必须自我声明不影响判定, 否则下游会当判据读。
+    # 想救回这条判据得换成对 n 稳健的形式 (如「> 2xmedian 的样本占比」)。
+    intruder = (max_over_median is not None
                 and max_over_median > INTRUDER_MAX_OVER_MEDIAN)
     if intruder:
         reasons.append(
-            f"最慢样本是中位样本的 {max_over_median:.1f} 倍 "
-            f"(> {INTRUDER_MAX_OVER_MEDIAN:.0f}): 测量窗口内有进程抢占, "
-            f"而测量前的 util 快照看不见它; median 仍可用, 但不足以支撑小差异结论")
-        validity = _worse(validity, Validity.DEGRADED)
+            f"最慢样本是中位样本的 {max_over_median:.1f} 倍 (阈值 "
+            f"{INTRUDER_MAX_OVER_MEDIAN:.0f}, 实测样本数越多该值天然越高): "
+            f"窗口内可能有抢占, 也可能只是长尾; **仅诊断, 不影响本轮判定**")
 
     return MeasurementAssessment(
         validity=validity,
@@ -248,4 +264,5 @@ def assess(median_time_ms: Optional[float] = None,
         contaminated=contaminated,
         dispersion=dispersion,
         max_over_median=max_over_median,
+        intruder_suspected=intruder,
     )

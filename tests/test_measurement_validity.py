@@ -507,66 +507,66 @@ class TestDispersionGate(unittest.TestCase):
 
 
 class TestWindowIntruderSignal(unittest.TestCase):
-    """第四个信号: 测量窗口**中途**插进来的抢占
+    """max/median 是**诊断信号, 不改变判定** —— 这个性质必须钉住。
 
-    与 `gpu_util_pct` 的区别是时间: util 只在测量前采一次快照, 快照干净不代表
-    窗口内一直干净。与 `dispersion` 的区别是敏感度: iqr 对单个离群点完全不敏感。
-    这台机器恒有 7 个其他进程, 两个盲区都会真实命中。
+    它本来是被设计成判据的, 真机验证把它推翻了 (docs/research/33): runner 按毫秒
+    预算自动加采样, 而 max 是顺序统计量, 样本越多越靠尾部。两者同向 —— 能通过
+    「核足够长」这个前提的区间恰好是样本数最大的区间。实测 layernorm 16384×6144 在
+    util=0%、完全没有邻居插队的情况下就报出 max/median = 1.86, 逼近阈值 2.0。
+    拿它当判据会系统性地把干净测量判成污染, 也就是把闭环静默关掉 —— 正是缺口 1
+    最初那个病。
+
+    所以这里断言的不是「它能拦住什么」, 而是「它拦不住什么」。将来若换成对 n 稳健
+    的统计量 (如「> 2×median 的样本占比」) 并重新赋予判据地位, 这些用例要一起改。
     """
 
-    def test_clean_window_stays_valid(self):
+    def test_never_changes_validity_even_at_absurd_ratios(self):
+        for ratio in (2.1, 19.17, 500.0):
+            a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                       dispersion=0.001, max_over_median=ratio)
+            self.assertIs(a.validity, Validity.VALID,
+                          f"max/median={ratio} 不该改变档位 (原因项: {a.reasons})")
+            self.assertTrue(a.can_disable_recipe,
+                            f"max/median={ratio} 不该拿走禁用配方的权限")
+            self.assertTrue(a.can_count_stagnation)
+
+    def test_still_recorded_as_an_observation(self):
+        """不改变判定 ≠ 不吭声。reasons 会进 Fixer / SearchAgent 的 prompt。"""
         a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
-                   dispersion=0.01, max_over_median=1.4)
-        self.assertIs(a.validity, Validity.VALID)
+                   dispersion=0.001, max_over_median=19.17)
+        self.assertTrue(a.intruder_suspected)
+        self.assertTrue(a.as_metrics()["measurement_intruder_suspected"])
+        self.assertEqual(19.17, a.as_metrics()["dispersion_max_over_median"])
+        self.assertTrue(any("仅诊断" in r for r in a.reasons),
+                        f"观察项必须自我声明不影响判定: {a.reasons}")
+
+    def test_below_threshold_is_silent(self):
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                   dispersion=0.001, max_over_median=1.86)
+        self.assertFalse(a.intruder_suspected)
         self.assertEqual([], a.reasons)
 
-    def test_intruder_degrades_but_does_not_invalidate(self):
-        """median 对少量离群点是稳的, 所以只降到 DEGRADED, 不到 UNINFORMATIVE。"""
-        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
-                   dispersion=0.0, max_over_median=50.0)
-        self.assertIs(a.validity, Validity.DEGRADED)
-        self.assertTrue(a.can_gate)
-        self.assertFalse(a.can_disable_recipe)
-        self.assertTrue(any("抢占" in r for r in a.reasons), a.reasons)
-        self.assertEqual(50.0, a.as_metrics()["dispersion_max_over_median"])
-
-    def test_intruder_invisible_to_util_snapshot_is_still_caught(self):
-        """util 快照干净 (0%) + iqr 干净 (0.0), 只有 max/median 能看出来。"""
-        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
-                   gpu_util_pct=0.0, dispersion=0.0, max_over_median=12.0)
-        self.assertFalse(a.contaminated, "util 快照确实干净, 不该报硬污染")
-        self.assertIs(a.validity, Validity.DEGRADED)
-
-    def test_absent_signal_does_not_change_the_verdict(self):
+    def test_absent_signal_is_silent(self):
         a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US)
+        self.assertFalse(a.intruder_suspected)
         self.assertIsNone(a.max_over_median)
-        self.assertNotIn("dispersion_max_over_median", a.as_metrics())
+        self.assertIn("measurement_intruder_suspected", a.as_metrics())
 
-    def test_threshold_is_calibrated_on_real_hardware(self):
-        """2.0 不是猜的, 是 benchmarks/calibrate_dispersion_thresholds.py 标出来的。
+    def test_real_machine_clean_measurement_stays_valid(self):
+        """回归锚点: 真机那一行「干净但比值高」的数据, 判出来必须是 VALID。
 
-        钉在这里: 改这个数必须同时给出新的真机分布, 不能凭手感调。
+        layernorm 16384×6144, 实测 median 0.1636 ms / 239 样本 / util=0% /
+        max_over_median 1.86 / iqr_over_median 0.0105 / dominance 0.11。
         """
-        self.assertEqual(2.0, INTRUDER_MAX_OVER_MEDIAN)
-
-    def test_gate_is_disabled_in_the_launch_dominated_regime(self):
-        """短核的 max/median 天然就是几倍, 那条区间已由地板门判 UNINFORMATIVE。
-
-        真机实测 (H20, 30 轮 × 30 样本): 空核 (median 4.5 µs) 的 max/median
-        p50=3.84 / max=18.26, layernorm 1024×768 (8.4 µs) 是 4.31 / 8.00, 而
-        长核 (matmul 4096³, 1.03 ms) 只有 1.00 / 1.04。同一把绝对阈值套两种
-        区间必然两头不讨好 —— 所以只在长核区间启用。
-        """
-        a = assess(median_time_ms=NET_MS_LAYERNORM_SMALL, launch_floor_us=H20_FLOOR_US,
-                   max_over_median=15.0)
-        self.assertIs(a.validity, Validity.UNINFORMATIVE, "地板门已经判死了, 不该再叠一条")
-        self.assertFalse(any("抢占" in r for r in a.reasons),
-                         f"launch 支配区间不该报抢占: {a.reasons}")
-
-    def test_gate_is_disabled_when_floor_is_unknown(self):
-        """地板未知 → 无从判断处在哪个区间, 不猜。"""
-        a = assess(median_time_ms=1.0, launch_floor_us=None, max_over_median=50.0)
+        a = assess(median_time_ms=0.1636, launch_floor_us=H20_FLOOR_US,
+                   gpu_util_pct=0.0, dispersion=0.0105, max_over_median=1.86)
+        self.assertIs(a.validity, Validity.DEGRADED,
+                      "DEGRADED 只应来自 dominance=0.11 越过 0.10, 与抢占无关")
+        self.assertEqual(1, len([r for r in a.reasons if "地板" in r]), a.reasons)
         self.assertFalse(any("抢占" in r for r in a.reasons), a.reasons)
+
+    def test_threshold_constant_is_two(self):
+        self.assertEqual(2.0, INTRUDER_MAX_OVER_MEDIAN)
 
 
 class TestRunnerReportsDispersion(unittest.TestCase):
@@ -677,14 +677,62 @@ class TestVerifierPropagatesDispersion(unittest.TestCase):
         """util 快照干净、iqr 干净, 只有 max/median 报警 —— 仍要写进 message。
 
         message 是 Fixer / SearchAgent 的 prompt 素材, 是唯一保证被下游看到的通道
-        (缺口 1 原来的失效方式就是「算了没人读」)。
+        (缺口 1 原来的失效方式就是「算了没人读」)。但注意它**不改变档位**: 这个
+        统计量被顺序统计量效应污染, 详见 TestWindowIntruderSignal。
         """
         r = self._l3(candidate_ms=1.040, baseline_ms=1.10, util=0,
                      dispersion=0.0, max_over_median=18.0)
         self.assertEqual(18.0, r.metrics["dispersion_max_over_median"])
-        self.assertEqual(Validity.DEGRADED.value, r.metrics["measurement_validity"])
+        self.assertTrue(r.metrics["measurement_intruder_suspected"])
+        self.assertEqual(Validity.VALID.value, r.metrics["measurement_validity"])
+        self.assertTrue(r.metrics["measurement_can_disable_recipe"])
         self.assertIn("抢占", r.message)
-        self.assertFalse(r.metrics["measurement_can_disable_recipe"])
+        self.assertIn("仅诊断", r.message)
+
+
+    def test_every_sample_stat_survives_the_remote_path(self):
+        """runner 的 _sample_stats 吐出来的每个键, 都必须能在 L3 metrics 里找到。
+
+        真机跑出来的第一个版本这里是 `runs=None / max_time_ms=None` —— runner 特意
+        报出实际采样轮数 (快核会被自动加采样) 就是为了让下游知道这个数字有多少样本
+        撑着, 结果 verifier 的搬运循环只在 bench 顶层查, 而远程路径上这些字段在
+        bench["candidate"] 里。缺口 1 的失效方式「算了没人读」换了个形态重演了一次。
+
+        这个用例直接拿 _sample_stats 的真实返回值当输入, 所以以后它加字段、verifier
+        忘了搬, 就会在这里变红。
+        """
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "remote_scripts" / "run_kernel.py"
+        spec = importlib.util.spec_from_file_location("_rk_for_stats", path)
+        rk = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rk)
+        stats = rk._sample_stats([1.0, 1.05, 1.1, 1.2, 50.0])
+
+        # metrics 键名应与统计量键名一致
+        backend = RemoteExecutor(mode="local")
+        bench = {"success": True, "device": "cuda:0", "gflops": 1000.0,
+                 "memory_bandwidth_gbs": 500.0,
+                 "candidate": dict(stats, runs_requested=30),
+                 "baselines": {"pytorch_eager": {"median_time_ms": 1.0,
+                                                 "min_time_ms": 1.0}}}
+        backend.benchmark_with_baselines = lambda *a, **kw: bench
+        backend.get_hardware_info = lambda: dict(H20_HW_INFO)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            r = Verifier(backend)._verify_performance(
+                PYTHON_MATMUL, _matmul_inputs(), 0.0, _task())
+
+        missing = [k for k in stats if k not in r.metrics]
+        self.assertEqual([], missing,
+                         f"runner 报了但没搬进 metrics 的字段: {missing}")
+        self.assertEqual(stats["runs"], r.metrics["runs"],
+                         "runs 必须是实际轮数, 不是请求轮数")
+        self.assertEqual(30, r.metrics["runs_requested"])
+        # metrics["min_time_ms"] 从建立起装的就是 median, 是历史包袱, 不许被真 min
+        # 覆盖; 要拿真正的 median 请读 median_time_ms。
+        self.assertEqual(stats["median_time_ms"], r.metrics["min_time_ms"])
+        self.assertEqual(stats["median_time_ms"], r.metrics["median_time_ms"])
+        self.assertNotEqual(stats["min_time_ms"], r.metrics["min_time_ms"])
 
 
 if __name__ == "__main__":

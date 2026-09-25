@@ -378,20 +378,30 @@ class Verifier:
                    "memory_bandwidth_gbs": round(bandwidth, 4),
                    "bound_type": bound, "primary_metric": "speedup_vs_baseline",
                    "backend": str(self.backend)}
-        # 从 benchmark 结果传递额外字段 (mode, language, device 等)
-        for extra_key in ("mode", "language", "device", "runs", "max_time_ms",
+        # 从 benchmark 结果传递额外字段。
+        #
+        # ⚠️ 必须 bench 优先、candidate 兜底, 两个都要查。远程路径上这两层的分工不同:
+        # `mode/device/gpu_util_pct/selected_gpu` 在 bench 顶层, 而
+        # `runs/max_time_ms/p25/p75/dispersion_*` 在 bench["candidate"] 里。原先只有
+        # 一个循环、只查 bench, 于是真机跑出来是 `runs=None` —— runner 特意报出实际
+        # 采样轮数 (快核会被自动加采样) 就是为了让下游知道这个数字有多少样本撑着,
+        # 结果搬运环节把它丢了。这正是缺口 1 那一类「算了没人读」的失效方式,
+        # 由 docs/research/33 的真机验证抓出来。
+        for extra_key in ("mode", "language", "device", "runs", "runs_requested",
+                          "max_time_ms",
+                          "p25_time_ms", "p75_time_ms",
+                          "dispersion_iqr_over_median", "dispersion_max_over_median",
                           "gpu_util_pct", "gpu_other_procs", "selected_gpu"):
             if extra_key in bench:
                 metrics[extra_key] = bench[extra_key]
-        # 候选自己的样本分布。这三个字段来自 runner 的 _sample_stats: 它本来就跑了
-        # n 个样本, 多报两个分位数不花额外 GPU 时间, 而下游因此能区分「核真的慢」
-        # 和「这台机器此刻在抖」(docs/research/17 第二节第 1 条)。
-        # 注意取 candidate_metrics 而不是 bench: 远程路径上 bench 顶层只有
-        # device/success, 统计量都在 bench["candidate"] 里。
-        for extra_key in ("p25_time_ms", "p75_time_ms", "dispersion_iqr_over_median",
-                          "dispersion_max_over_median"):
-            if extra_key in candidate_metrics:
+            elif extra_key in candidate_metrics:
                 metrics[extra_key] = candidate_metrics[extra_key]
+        # ⚠️ 故意**不**搬 min_time_ms: metrics["min_time_ms"] 从建表那一刻起装的就是
+        # kernel_min_ms (= median 优先), 搬进来会把真最小值盖掉, 让这个数字的含义在
+        # 远程/非远程两条路径上分叉。这里补一个名字说清楚的 median 键, 让「加速比
+        # 建立在哪个统计量上」无歧义 —— 改 metrics["min_time_ms"] 的含义会波及
+        # kernel_db 里的历史快照与既有下游。
+        metrics["median_time_ms"] = kernel_min_ms
 
         # ---- 注入 Roofline 指标, 供 SearchAgent 做结构化优化决策 ----
         metrics.update({
