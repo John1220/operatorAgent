@@ -120,6 +120,11 @@ print(f"  name={peak['name']!r} cc={peak['compute_capability']!r} "
       f"launch_floor_us={peak['launch_floor_us']}")
 if peak["launch_floor_us"] is None:
     print("  ⚠️ 地板为 None: hardware_caps 未命中这台设备, 地板支配检查会被跳过")
+# 缺口 3: roofline 分母是哪一行、凭什么。未核口径的行会关掉「已到 roofline」出口
+# (measurement.roofline_converged), 所以下面每个 case 的 converged 都要连着这行读。
+print(f"  分母行 [{peak['peak_table_key']}] fp16={peak['fp16_tflops']} TFLOPS / "
+      f"bw={peak['memory_bandwidth_gbs']} GB/s — {peak['peak_source']} "
+      f"(trusted={peak['peak_trusted']})")
 
 CASES = [
     ("layernorm 1024×768 (docs/research/01 判定为无意义的那一档)",

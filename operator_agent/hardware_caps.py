@@ -142,11 +142,15 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
         supported_dsls={"triton", "cuda_c", "python"},
     ),
     # NVIDIA H100
+    # ⚠️ 全部为 **dense** 规格。原先这行抄的是 NVIDIA 规格页的大字号数字, 那几个是
+    # 2:4 sparse 的 (fp16 1979 / tf32 989 / int8 3958), 页脚小字才写 "With sparsity"。
+    # dense = 其一半。这是 docs/research/00 缺口 3 里同一个错误在第二处的副本 ——
+    # 它会让 fp16 核的 roofline 达成率被砍半, 「已到上界」的出口在这类卡上永不打开。
     "h100": HardwareCaps(
         vendor="nvidia", device_name="H100",
         compute_capability="9.0",
-        fp32_tflops=67.0, tf32_tflops=989.0, fp16_tflops=1979.0, bf16_tflops=989.0,
-        int8_tops=3958.0,
+        fp32_tflops=67.0, tf32_tflops=494.7, fp16_tflops=989.4, bf16_tflops=989.4,
+        int8_tops=1979.0,
         has_tensor_core=True, tensor_core_version=4, tensor_core_m_k_n=(16, 16, 16),
         vector_width_bytes=16, sub_group_size=32,
         global_mem_bandwidth_gbs=3350.0, l2_cache_size_kb=51200,
@@ -159,16 +163,24 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
         has_fp8_tensor_core=True,
         supported_dsls={"triton", "cuda_c", "python"},
     ),
-    # NVIDIA H20 (Hopper 削减版) - 2026-09-16 于 algorithm-h20 实测 (cuBLAS 8192³ + triad)
-    # 与 H100 同为 cc 9.0, 但算力砍到 138 TFLOPS 而带宽保留 3.68 TB/s
-    # → ridge point ≈ 37.5 FLOP/B (H100 ≈ 295), 优化取向相反, 勿套用 H100 配方
+    # NVIDIA H20 (Hopper 削减版) - dense 规格, 与 verifier._PEAK_BY_NAME["h20"] 同一口径
+    # 与 H100 同为 cc 9.0, 但算力砍到 fp16 148 TFLOPS 而带宽保留 4.0 TB/s
+    # → ridge point ≈ 37.0 FLOP/B (H100 ≈ 295), 优化取向相反, 勿套用 H100 配方
+    #
+    # 这一行以前填的是 2026-09-16 在 algorithm-h20 上 cuBLAS 8192³ + triad **实测**的
+    # (31.6, 71.6, 138.2, 138.3, 3680)。测得没错, **用途错了**: 一次库实现的读数是
+    # 「已达成的成绩」, 而 HardwareCaps 的字段名读起来像规格 —— 下游一旦拿它做分母就会
+    # 出现「达成率 >100%」(真机 4096³ 跑到 140.0 TFLOPS)。实测阶梯 (fp16 跨 shape
+    # 116.3~140.3、D2D 带宽随 footprint 1196~3357 GB/s) 见 benchmarks/
+    # calibrate_achievable_peak.py 与 docs/research/42, 那是「这台卡达得到什么」,
+    # 不是「这台卡的上界在哪里」。
     "h20": HardwareCaps(
         vendor="nvidia", device_name="H20",
         compute_capability="9.0",
-        fp32_tflops=31.6, tf32_tflops=71.6, fp16_tflops=138.2, bf16_tflops=138.3,
+        fp32_tflops=39.5, tf32_tflops=74.0, fp16_tflops=148.0, bf16_tflops=148.0,
         has_tensor_core=True, tensor_core_version=4, tensor_core_m_k_n=(16, 16, 16),
         vector_width_bytes=16, sub_group_size=32,
-        global_mem_bandwidth_gbs=3680.0, l2_cache_size_kb=61440,
+        global_mem_bandwidth_gbs=4000.0, l2_cache_size_kb=61440,
         # 2026-09-24 标定 (空 Triton 核, CUDA event, 25 预热 + 200 取中位):
         # median=20.24 min=18.69。2026-09-25 复测 median=20.03 min=18.30, 差 ~1%。
         # ⚠️ 同一个空核在 L2 冲刷口径下只有 4.64 µs —— 见字段注释与 docs/research/32。

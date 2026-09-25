@@ -542,8 +542,16 @@ class Conductor:
             # (同一文件里刚为 `can_disable_recipe` 删掉过一个)。
             if l3_result is not None and roofline_converged(l3_result.metrics or {}):
                 _att = binding_attainment(l3_result.metrics or {})
+                _rl = (l3_result.metrics or {}).get("roofline_analysis") or {}
                 print(f"\n[Conductor] 绑定轴已达 roofline {_att:.1f}% "
                       f"(>= {ROOFLINE_CONVERGED_PCT:.0f}%), 判定已收敛, 停止后续优化轮")
+                # 这条 break 是整个循环里最贵的一次判定 (它决定不再花轮次), 所以把它
+                # 依赖的分母连同出处一起落进日志: 以后复查时不需要回头猜 90% 是相对
+                # 哪个数算出来的、那个数凭什么。
+                print(f"[Conductor]   分母: [{_rl.get('peak_table_key', '?')}] "
+                      f"peak={_rl.get('hw_peak_gflops', 0) / 1000:.1f} TFLOPS / "
+                      f"bw={_rl.get('hw_peak_bandwidth_gbs', 0):.0f} GB/s "
+                      f"({_rl.get('compute_used', '?')}) — {_rl.get('peak_source', '出处未知')}")
                 snapshot_target_dir = _snap()
                 break
 

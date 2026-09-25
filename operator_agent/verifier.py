@@ -32,18 +32,33 @@ _REMOTE_L2_METRIC_KEYS = (
 )
 
 
-# 常见 GPU 硬件理论峰值 (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
+# 常见 GPU 硬件 **dense 规格峰值** (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
 # 格式: (FP32_TFLOPS, TF32_TFLOPS, FP16_TFLOPS, BF16_TFLOPS, memory_bandwidth_GBs)
 # 匹配顺序: 先设备名 (更具体), 未命中再回退 compute_capability。
 # 不可反过来 —— cc 9.0 同时对应 H100/H200/H20, 三者算力带宽差异极大。
+#
+# ⚠️ **这一张表回答的是「离理论上限还有多远」, 所以只能放 dense 规格, 不能放实测值。**
+# 原先 h20 那行写的是 138.2/138.3/71.6/31.6/3680, 注释老实标着「实测 (cuBLAS 8192³)」——
+# 出处没错, **用途错了**: 一次库实现的读数是「已达成的成绩」, 拿它当上界就会出现
+# 「达成率 101.5%」(真机 4096³ 跑到 140.0 TFLOPS), 而 D4 的收敛出口正是拿达成率判停的。
+# 实测值仍然有用, 但它不进这张表、也不进 roofline 分母 —— 理由见 _PEAK_BY_CC 之前那段。
+# 每一行的口径记在 _PEAK_SOURCE 里, 并随 Roofline 日志一起打出来 —— 未经核实的行
+# 会带着「口径不明」出现在每一轮验证的输出里, 而不是安静地假装是权威。
 _PEAK_BY_NAME: dict[str, tuple[float, float, float, float, float]] = {
+    # NVIDIA 官方规格页 (dense; 大字号那几个是 2:4 sparse, 差整 2 倍) + 与
+    # flash-attention benchmarks/benchmark_attn.py 的 BF16 dense 表交叉核对
     "a100": (19.5,  156.0, 312.0, 312.0, 2039.0),
-    "h100": (67.0,  989.0, 1979.0, 989.0, 3350.0),
-    "h200": (67.0,  989.0, 1979.0, 989.0, 3350.0),
-    # H20: 2026-09-16 于 algorithm-h20 实测 (cuBLAS 8192³ / triad), 非 datasheet
-    # 算力砍到 138 TFLOPS 但带宽保留 3.68 TB/s → ridge ≈ 37.5 (H100 ≈ 295)
-    "h20":  (31.6,  71.6,  138.2, 138.3, 3680.0),
+    "h100": (67.0,  494.7, 989.4, 989.4, 3350.0),
+    "h200": (67.0,  494.7, 989.4, 989.4, 4800.0),
+    # H20 没有公开的 NVIDIA 规格页 (两个官方 URL 均 404)。fp16/bf16/带宽取
+    # flash-attention 硬编码的 dense 表 (148e12 / 4.0e12), 它自称来自官方规格并用
+    # SM×tensor_core_clock×ops_per_cycle 交叉核对过; tf32 = bf16/2 是 Hopper 惯例
+    # (H100 989.4 vs 494.7 就是这个比例); fp32 由 78 SM × 128 FMA × 2 × 1.98 GHz 推得。
+    # 第三方规格页给 fp32 写 44 TFLOPS, 与上面的算术不自洽 (要 2.2 GHz), 故不用。
+    "h20":  (39.5,  74.0,  148.0, 148.0, 4000.0),
     "v100": (15.7,  0.0,   125.0, 125.0, 900.0),
+    # ⚠️ 以下四行**未核实口径** (很可能混了 2:4 sparse / FP16-with-FP32-accumulate)。
+    # 保留数值不臆改, 但 _PEAK_SOURCE 会标「未核」并打进日志, 别拿它们的达成率做判停决定。
     "3090": (16.3,  130.6, 326.0, 326.0, 936.0),
     "4090": (82.6,  82.6,  330.0, 330.0, 1008.0),  # 4090 FP32=82.6 (no TF32 boost for Ada? actually Ada has TF32)
     "a6000":(38.7,  310.0, 77.4,  77.4,  768.0),
@@ -51,26 +66,62 @@ _PEAK_BY_NAME: dict[str, tuple[float, float, float, float, float]] = {
     "t4":   (8.1,   65.0,  130.0, 130.0, 320.0),
 }
 
+# 逐行可信度**不另立一张表**, 而是由下面的出处字符串自己承担: 以 ⚠️ 开头的行视为
+# 「口径未核」, `measurement.roofline_converged` 据此拒绝开「已到 roofline」这个出口。
+# 为什么默认关: 不对称在于分母偏大只是让出口不开 (白烧几轮, 还有停滞出口兜底),
+# 分母偏小会把还能优化的核**提前**判成到顶。所以新加行时不写出处 = 不配拿来判停,
+# 这个默认值就是要逼着写。
+#
+# 每行的出处。日志里跟着 peak 一起打印, 让「这个数字凭什么」在使用点就可见。
+_PEAK_SOURCE: dict[str, str] = {
+    "a100": "NVIDIA 规格 (dense)",
+    "h100": "NVIDIA 规格 (dense; 原行用了 sparse 的 1979)",
+    "h200": "NVIDIA 规格 (dense), 带宽 4.8 TB/s",
+    "h20": "flash-attention dense 表 148/4.0 + 算术推导; 无公开官方页",
+    "v100": "NVIDIA 规格 (dense)",
+    "3090": "⚠️口径未核 (疑含 2:4 sparse)",
+    "4090": "⚠️口径未核 (疑含 2:4 sparse)",
+    "a6000": "⚠️口径未核",
+    "a5000": "⚠️口径未核",
+    "t4": "⚠️口径未核",
+}
+_PEAK_SOURCE_DEFAULT = "⚠️出处未记录"
+
+# 「这台机器实际达得到什么」不进这张表, 也不立第二张表。
+# 因为它不是一个标量: 2026-09-26 用 benchmarks/calibrate_achievable_peak.py 在 H20 GPU2
+# 上量到的阶梯是 fp16 从 2048² 的 116.3 TFLOPS 爬到 6144² 的 140.3 (跨 20.7%), D2D 带宽
+# 从 8 MB 的 1196 GB/s 爬到 4 GB 的 3357 GB/s (跨 2.8 倍)。按 shape 桶查它需要知道当前
+# 张量落在哪个桶 —— 那件事的正确归宿是持久化的每-shape 记录 (缺口 2), 而不是又一堆
+# 硬编码常量。数据本身留在 benchmarks/ 与 docs/research/42, 不在这里留没人读的副本。
 _PEAK_BY_CC: dict[str, tuple[float, float, float, float, float]] = {
-    # ⚠️ 这张回退表里有两处**结构性**问题, 这里只删掉可证明永不再匹配的键, 数值本身
-    # 待外部调研给出可追溯的出处后再改 (docs/research/00 缺口 3 有全部证据):
-    #   1. fp16 那一列在 h100/h200/8.9/9.0 上写着 1979.0 —— 那是 **FP8** 的数值
-    #      (被删掉的那行注释自己写着 "FP8=1979")。这条表里其余每一行都满足
-    #      fp16 == bf16 (a100 312/312、v100 125/125、3090 326/326、h20 138.2/138.3),
-    #      只有 Hopper 这两行差 2.0 倍 —— 不需要外部资料就能看出列错位。
-    #      后果是有后果的: fp16 核的达成率被这个分母砍半, D4 的收敛出口在这类卡上永不打开。
-    #   2. 键 "8.9" 标着 H100, 但 `hardware_caps` 自己写着 h100 的 cc 是 9.0 —— 8.9 是
-    #      Ada。所以一张名字没命中 `_PEAK_BY_NAME` 的 Ada 卡 (如 L40S) 会拿到 H100 的
-    #      算力与 HBM3 带宽, 于是「离上界还有多远」整个失真。这条**没删**, 因为我们没有
-    #      Ada 机器可验, 删掉会让 roofline 分类直接失效 (0 峰值), 那是更大的行为改动。
-    # 已删的两个键 "9.0a" / "8.9-bw" 是死键: 匹配只用 `cc in 表` 与 `cc.startswith(键)`,
-    # 而 cc 的真实取值是 "8.9"/"9.0"/"10.0" 这类, 永远不会以 "…a" 或 "8.9-bw" 开头。
+    # 回退表: 只有设备名没命中 _PEAK_BY_NAME 时才会用到。
+    # 原先 "8.9"/"9.0" 两行都填着 H100 的数字, 而 fp16 那一列用的是 **2:4 sparse** 的
+    # 1979 (被删掉的那行注释自己写着 "FP8=1979") —— 表里其余每行都满足 fp16 == bf16,
+    # 只有它们差 2.0 倍, 列错位不需要外部资料也能看出来。后果是有后果的: fp16 核的
+    # 达成率被这个分母砍半, D4 的收敛出口在这类卡上永不打开。
+    # 两个死键 "9.0a"/"8.9-bw" 已删 (匹配只用 `cc in 表` 与 `cc.startswith(键)`, 而 cc
+    # 来自 f"{major}.{minor}", 永远不会以 "…a" 结尾)。
+    #
+    # ⚠️ 分母偏大 vs 偏小的不对称: 偏大只是让判停出口不开 (白烧轮次), 偏小会**提前停**
+    # (把还能优化的核判成已到顶)。所以拿不准时一律取较大的那个口径。
     "8.0":  (19.5,  156.0, 312.0, 312.0, 2039.0),  # A100 (80GB, HBM2e)
     "8.6":  (19.5,  156.0, 312.0, 312.0, 1555.0),  # A100 (40GB), A40
-    "8.9":  (67.0,  989.0, 1979.0, 989.0, 3350.0),  # 标着 H100, 但 8.9 是 Ada —— 见上
-    "9.0":  (67.0,  989.0, 1979.0, 989.0, 3350.0),  # H200 (est.)
-    "7.5":  (16.3,  130.6, 326.0, 326.0, 936.0),   # RTX 3090 / A40 (GA102, Ampere has TF32)
+    # 8.9 是 Ada 而不是 H100 (hardware_caps 自己写着 h100 的 cc 是 9.0)。按 L40S 填:
+    # 362 是 **FP16 累加** 的 dense 率; 用 FP32 累加时上限其实是 181。取 362 是因为
+    # 上面那条不对称 —— 偏大只是不出口, 偏小会提前停。
+    "8.9":  (91.3,  181.0, 362.0, 362.0, 864.0),
+    "9.0":  (67.0,  494.7, 989.4, 989.4, 3350.0),  # H100 SXM dense (cc 9.0 也含 H20/H200)
+    "7.5":  (16.3,  130.6, 326.0, 326.0, 936.0),   # RTX 3090 / A40 (⚠️口径未核)
     "7.0":  (15.7,  0.0,   125.0, 125.0, 900.0),   # V100 (Volta, no TF32)
+}
+
+_PEAK_CC_SOURCE: dict[str, str] = {
+    "8.0": "A100 80GB NVIDIA 规格 (dense)",
+    "8.6": "A100 40GB NVIDIA 规格 (dense); 同 cc 的 A40 会偏高 (真机 149/696), 只会让出口不开",
+    "8.9": "Ada/L40S dense (362 是 FP16 累加口径; 同 cc 的 4090/A10 会更偏高)",
+    "9.0": "H100 SXM dense; 只有设备名能把它和 H20/H200 分开",
+    "7.0": "V100 NVIDIA 规格 (Volta 无 TF32)",
+    "7.5": "⚠️口径未核",
 }
 
 
@@ -542,9 +593,12 @@ class Verifier:
 
         if roofline["hw_peak_gflops"] > 0 and roofline["hw_peak_bandwidth_gbs"] > 0:
             compute_label = roofline.get("compute_used", "fp32_cuda_core")
+            # 分母的出处必须出现在分母被读到的那一行: 判停出口 (ROOFLINE_CONVERGED_PCT)
+            # 直接拿达成率当证据, 而「这个 peak 凭什么」以前只在源码注释里, 日志里看不到。
             print(f"  [Verifier] Roofline: {roofline['roofline_bound']} "
                   f"(AI={roofline['arithmetic_intensity']:.2f} FLOP/Byte, "
-                  f"peak={roofline['hw_peak_gflops']/1000:.1f} TFLOPS ({compute_label}), "
+                  f"peak={roofline['hw_peak_gflops']/1000:.1f} TFLOPS ({compute_label}|"
+                  f"分母[{roofline['peak_table_key']}] {roofline['peak_source']}), "
                   f"GFLOPS利用率={roofline['gflops_utilization_pct']:.1f}%, "
                   f"带宽利用率={roofline['bandwidth_utilization_pct']:.1f}%)")
 
@@ -712,22 +766,40 @@ class Verifier:
         # 1. 设备名优先: cc 9.0 同时是 H100/H200/H20, 只有设备名能区分
         #    键名长者先匹配, 避免 "h20" 抢在 "h200" 之前命中
         vals = None
+        matched_key = None
+        matched_from = ""
         for key in sorted(_PEAK_BY_NAME, key=len, reverse=True):
             if key in name or key in device:
                 vals = _PEAK_BY_NAME[key]
+                matched_key, matched_from = key, "name"
                 break
 
         # 2. 设备名未命中时回退 compute_capability (精确 → 前缀)
         if vals is None and cc:
             if cc in _PEAK_BY_CC:
                 vals = _PEAK_BY_CC[cc]
+                matched_key, matched_from = cc, "cc"
             else:
                 for key in sorted(_PEAK_BY_CC, key=len, reverse=True):
                     if cc.startswith(key):
                         vals = _PEAK_BY_CC[key]
+                        matched_key, matched_from = key, "cc-prefix"
                         break
 
         fp32, tf32, fp16, bf16, bw = vals if vals else (0, 0, 0, 0, 0)
+        # 出处跟着数字走: 日志里每一行 peak 都要能回答「这个分母凭什么」。
+        # 未核口径的行会带着 ⚠️ 出现在每次验证输出里 —— 缺口 3 的病根不是数值错,
+        # 而是数值在使用点看不出它有多可信。
+        if matched_key is None:
+            peak_source = "未命中任何表 (peak=0, 达成率不可用)"
+        elif matched_from == "name":
+            peak_source = _PEAK_SOURCE.get(matched_key, _PEAK_SOURCE_DEFAULT)
+        else:
+            peak_source = ("回退按 cc 匹配: "
+                           + _PEAK_CC_SOURCE.get(matched_key, _PEAK_SOURCE_DEFAULT))
+        # 出处字符串本身就是可信度的载体 (见 _PEAK_SOURCE 上方的说明): 以 ⚠️ 开头、
+        # 或者根本没命中表的行, 都**不配**用来开「已到 roofline」这个判停出口。
+        peak_trusted = matched_key is not None and not peak_source.startswith("⚠️")
 
         # launch 地板走 hardware_caps 而不是上面这两张表: 它是实测值而非 datasheet
         # 推算值, 且按缺口 3 的方向, 硬件知识应该收敛到 HardwareCaps 一处。
@@ -743,6 +815,9 @@ class Verifier:
             "fp32_tflops": fp32, "tf32_tflops": tf32,
             "fp16_tflops": fp16, "bf16_tflops": bf16,
             "memory_bandwidth_gbs": bw,
+            "peak_source": peak_source,
+            "peak_trusted": peak_trusted,
+            "peak_table_key": matched_key or "",
             "launch_floor_us": launch_floor_us,
             "compute_capability": cc, "device": device, "name": name,
         }
@@ -876,6 +951,11 @@ class Verifier:
             "bandwidth_utilization_pct": round(bw_util, 1),
             "hw_name": peak.get("name", "unknown"),
             "hw_compute_capability": peak.get("compute_capability", "unknown"),
+            # 分母的出处跟着分母走。缺口 3 的病根不是某个数字错, 而是**用这个数字的人
+            # 看不出它有多可信**: 138.2 和 1979 在日志里长得一模一样。
+            "peak_source": peak.get("peak_source", ""),
+            "peak_trusted": peak.get("peak_trusted", False),
+            "peak_table_key": peak.get("peak_table_key", ""),
         }
 
     def _build_reference_fn(self, task: TaskSchema, inputs: dict):

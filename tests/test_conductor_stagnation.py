@@ -255,11 +255,17 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
 
     # 峰值故意设得很小, 让脚本注入的 gflops / 带宽能落在利用率尺度的两端:
     # fp32 峰值 20 GFLOPS, 带宽峰值 1000 GB/s。
+    # ⚠️ 这个 fixture 必须跟着真 producer (`Verifier._detect_theoretical_peak`) 的返回
+    # 形状走: 它现在多带了 peak_source/peak_trusted/peak_table_key。少了 `peak_trusted`
+    # 时「分母口径未核 → 不开出口」这道门会默认关掉, 于是本类的用例全都不停 —— 看着像
+    # 「机制生效」, 实际是 fixture 落后了一格。
     PEAK = {"fp32_tflops": 0.02, "tf32_tflops": 0.0,
             "fp16_tflops": 0.0, "bf16_tflops": 0.0,
             "memory_bandwidth_gbs": 1000.0,
             "launch_floor_us": None, "compute_capability": "",
-            "device": "mock_gpu", "name": "MockGPU"}
+            "device": "mock_gpu", "name": "MockGPU",
+            "peak_table_key": "mock", "peak_source": "mock (口径已核)",
+            "peak_trusted": True}
 
     def test_compute_axis_converged_stops_early(self):
         """50% → 95% GFLOPS 利用率: 第 2 轮已达上界, 不该再跑第 3、4 轮"""
@@ -267,7 +273,26 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
         self.assertIn("判定已收敛", out)
         self.assertEqual(self._rounds_run(out, 4), 2)
         self.assertIn("95.0%", out, "报出来的利用率要能对上注入值/峰值")
+        self.assertIn("[Conductor]   分母:", out,
+                      "判停那一行要把它依赖的分母出处一起打出来")
+        self.assertIn("口径已核", out)
         self.assertNotIn("提前终止", out, "停因是收敛而不是停滞 —— 两者是不同的判据")
+
+    def test_unverified_peak_denominator_does_not_open_the_exit(self):
+        """分母口径未核 (peak_trusted=False) 时, 利用率再高也不能宣布「已到上界」
+
+        理由是不对称的代价: 出口不开只是多烧几轮 (停滞出口会兜底), 而分母偏小 (这张
+        表里 5 个 ⚠️ 行的口径就没核过, 混过 2:4 sparse 就是 2 倍) 会把还能优化的核
+        提前判成到顶。所以「这个数字凭什么」不能只写在源码注释里。
+        """
+        peak = dict(self.PEAK, peak_trusted=False,
+                    peak_source="⚠️口径未核 (疑含 2:4 sparse)")
+        _, out, _ = self._run([10.0, 19.0, 40.0, 80.0], max_rounds=4, peak=peak)
+        self.assertNotIn("判定已收敛", out)
+        self.assertEqual(self._rounds_run(out, 4), 4)
+        self.assertNotIn("[Conductor]   分母", out,
+                         "没判停就不该打印「判停所依赖的分母」那一行 "
+                         "(Verifier 每轮的 Roofline 行里也带分母, 别拿它当判停证据)")
 
     def test_memory_axis_converged_stops_early(self):
         """matmul 的名字是 compute-bound, 但先贴上界的是带宽轴 —— 仍该停"""

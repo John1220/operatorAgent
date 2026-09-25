@@ -73,8 +73,23 @@ NOISE_BAND = {
 
 # 绑定轴上达到 roofline 上界的这个比例, 就认为「再优化也不会有 measurable 收益」。
 # 缺口 4 的正解在这里: 判据该看**离上界还有多远**, 而不是继续拿一个标量比大小。
-# 0.90 是经验值 (真机上 matmul 4096³ fp16 的 Triton 核实测 101% GFLOPS 利用率,
-# 峰值表本身有 ±5% 的余量), 改动需回归验证。
+# 0.90 这个数以前写的理由是「真机上 matmul 4096³ fp16 实测 101% GFLOPS 利用率,
+# 峰值表本身有 ±5% 余量」—— 那条**已经不成立了** (2026-09-26 核实): 101% 不是余量,
+# 是分母用错了对象 (拿 cuBLAS 8192³ 的一次读数当上界)。分母换成 dense 规格 148 TFLOPS
+# 后同一个核真机复测 **94.7%**, 于是 90 的含义从「比库实现的成绩还差一点」变成
+# 「离规格上限还差 10%」。
+#
+# ⚠️ 两条轴的可达性因此**不对称**, 别把它当一个通用常数读 (2026-09-26 真机):
+#   - compute 轴: 本机实测最好的 fp16 核 140.2 TFLOPS = 规格的 94.7%, 出口打得开,
+#     但只剩 4.7% 余量 (对着旧的 138.2 分母是「随便就打满」)。
+#   - memory 轴: 本机 D2D 拷贝实测最好 3357 GB/s = 4000 规格的 **84%** (带宽阶梯见
+#     docs/research/42), 低于 90 —— 这条轴上出口**永不打开**, memory-bound 核会把
+#     轮次跑满 (由停滞出口兜底)。改之前分母是 3680, 同一个读数 91.2% 是能出口的。
+#   这是这次吸纳**故意付出的代价**: 分母偏小 (旧 138.2 更偏小) 会把还能优化的核**提前**
+#   判成到顶, 而多烧几轮是可恢复的。正解是按 shape 查这台卡的可达上界 (缺口 2 的持久化
+#   记录), 而不是把阈值调回 84% 去迁就一个更好的分母。
+# ⚠️ 参照 KernelBench-Hard 的一句话: 人写的 Hopper 核常见只到峰值的 60~85% —— 按
+# 这个量级, 90 是一个**偏乐观**的出口, 打不开它才是常态 (docs/research/42)。
 ROOFLINE_CONVERGED_PCT = 90.0
 
 
@@ -99,6 +114,11 @@ def roofline_converged(metrics: dict) -> bool:
     if (metrics.get("measurement_can_gate") is False
             or metrics.get("benchmark_contaminated")):
         return False          # 不可信的测量不能说「已经到顶」
+    # 分母自己不可信时同样不能说「到顶」: 峰值表里没核过口径的行可能偏小 2 倍
+    # (sparse/dense 混过), 那会把还能优化的核提前判成已到上限。用 `is False` 而不是
+    # `not ...`: 老记录里没这个键时保持原有行为 (默认开), 新链路一律带 True/False。
+    if (metrics.get("roofline_analysis") or {}).get("peak_trusted") is False:
+        return False
     a = binding_attainment(metrics)
     return a is not None and a >= ROOFLINE_CONVERGED_PCT
 
