@@ -134,7 +134,8 @@ class CoderPipeline:
     def _sample_one(self, plan_str: str, sketch: UnifiedSketch,
                     task: TaskSchema, ref_code: str, temperature: float) -> str:
         """单次采样 (Code 阶段: 仅输出纯代码)"""
-        optimization_hints = "\n".join(f"- {h}" for h in sketch.optimization_hints) if sketch.optimization_hints else "无"
+        hot = sketch.hot_hints()
+        optimization_hints = "\n".join(f"- {h}" for h in hot) if hot else "无"
 
         prompt = self.pm.render(
             "coder_from_plan",

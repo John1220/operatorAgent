@@ -16,6 +16,27 @@ from .fixer import FixerAgent
 from .triton_opt_rules import TritonOptimizationRules
 
 
+def _clean(hints) -> list:
+    """只留字符串: new_hints 来自 LLM 的 JSON, 一个 dict 混进来就会以 Python repr
+    的形式印进 prompt"""
+    return [h for h in (hints or []) if isinstance(h, str) and h.strip()]
+
+
+def _hint_log(sketch: UnifiedSketch, new_hints: list) -> list:
+    """冷层累计日志: 去重、保序、不随轮数重复
+
+    规则回退路径每轮生成**同文案**的 hint, 原先是 `旧 + 新` 直接拼, 于是 6 轮后
+    26 条里绝大部分是同一句 (实测每条在 Coder prompt 里出现 20 次)。去重只作用在
+    冷层; 热层 (hints_this_version) 永远是本轮原样。
+    """
+    seen, out = set(), []
+    for h in _clean(sketch.optimization_hints) + _clean(new_hints):
+        if h not in seen:
+            seen.add(h)
+            out.append(h)
+    return out
+
+
 class DesignerAgent:
     """
     Designer Agent
@@ -206,7 +227,8 @@ class CoderAgent:
             # 非 triton DSL: 不注入 triton_skill (tl.* / @triton.jit 暗示会严重干扰非 NVIDIA 硬件的代码生成)
             effective_skill = None
 
-        optimization_hints = "\n".join(f"- {h}" for h in sketch.optimization_hints) if sketch.optimization_hints else "无"
+        hot = sketch.hot_hints()
+        optimization_hints = "\n".join(f"- {h}" for h in hot) if hot else "无"
         if optimization_recipes:
             optimization_hints = f"[Planner选中的优化配方]\n{optimization_recipes}\n\n[Designer优化建议]\n{optimization_hints}"
 
@@ -218,7 +240,7 @@ class CoderAgent:
             hardware=task.target.hardware,
             dsl=sketch.target_dsl,
             precision=task.constraints.precision.value,
-            sketch=json.dumps(sketch.to_dict(), ensure_ascii=False, indent=2),
+            sketch=json.dumps(sketch.to_prompt_dict(), ensure_ascii=False, indent=2),
             ref_code=ref_code or "无",
             optimization_hints=optimization_hints,
             block_m=sketch.tiling.block_m,
@@ -580,7 +602,8 @@ class SearchAgent:
             algorithm=sketch.algorithm, version=sketch.version + 1,
             tiling=tiling, memory_plan=sketch.memory_plan, pipeline=sketch.pipeline,
             target_dsl=sketch.target_dsl,
-            optimization_hints=sketch.optimization_hints + new_hints,
+            optimization_hints=_hint_log(sketch, new_hints),
+            hints_this_version=list(new_hints),
         )
         return new_sketch, suggestion
 
@@ -610,6 +633,7 @@ class SearchAgent:
             algorithm=sketch.algorithm, version=sketch.version + 1,
             tiling=new_tiling, memory_plan=sketch.memory_plan,
             pipeline=sketch.pipeline, target_dsl=sketch.target_dsl,
-            optimization_hints=sketch.optimization_hints + hints,
+            optimization_hints=_hint_log(sketch, hints),
+            hints_this_version=list(hints),
         )
         return new_sketch, f"规则优化: tile {old_bm}x{old_bn}x{old_bk}→{new_bm}x{new_bn}x{new_bk} ({reason})"

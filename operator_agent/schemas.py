@@ -355,6 +355,28 @@ class UnifiedSketch:
     pipeline: list = field(default_factory=list)
     target_dsl: str = "python"
     optimization_hints: list = field(default_factory=list)
+    # C2 热/冷两层 (docs/research/20 第三节)。`optimization_hints` 是**累计日志**
+    # (冷层, 只进快照与 SearchAgent); `hints_this_version` 是本轮 SearchAgent 新提的
+    # 那条 (热层, 唯一进 Coder prompt 的)。
+    # 这里刻意不做摘要/压缩器: 一手证据是递归摘要会毁掉事实与操作性约束, 而我方
+    # 的历史负担是「逐轮堆积」—— 不注入就行, 不需要压。
+    hints_this_version: list = field(default_factory=list)
+
+    def hot_hints(self) -> list:
+        """给 Coder 看的那一份: 本轮新 hint; 第一轮还没有「本轮」, 退回全量日志"""
+        return self.hints_this_version or self.optimization_hints
+
+    def to_prompt_dict(self) -> dict:
+        """渲染进 prompt 的 sketch 结构: **不带任何 hint**
+
+        hint 在 prompt 里只留一个通道 —— 模板的 {{optimization_hints}} 块 (渲染的是
+        hot_hints())。此前 sketch JSON 与该块是同一份内容的两个注入点, 实测每条
+        hint 在 Coder prompt 里出现两次。
+        """
+        d = self.to_dict()
+        d.pop("optimization_hints", None)
+        d.pop("hints_this_version", None)
+        return d
 
     def to_dict(self) -> dict:
         return {
@@ -376,6 +398,7 @@ class UnifiedSketch:
             ],
             "target_dsl": self.target_dsl,
             "optimization_hints": self.optimization_hints,
+            "hints_this_version": self.hints_this_version,
         }
 
     @classmethod
@@ -409,6 +432,7 @@ class UnifiedSketch:
             ],
             target_dsl=d.get("target_dsl", "python"),
             optimization_hints=list(d.get("optimization_hints") or []),
+            hints_this_version=list(d.get("hints_this_version") or []),
         )
 
     _KNOWN_ALGORITHMS = frozenset({
