@@ -97,6 +97,7 @@ def capture_execution(
     if not log_dir and env_dir:
         log_dir = env_dir
     if log_dir and log_dir.lower() in ("off", "none", "0", "false"):
+        # 不建目录、不开文件: 只透传输出 (sys.stdout 原样不动即是透传)。
         yield None
         return
     if log_dir:
