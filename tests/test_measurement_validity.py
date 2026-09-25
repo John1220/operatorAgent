@@ -263,7 +263,7 @@ class TestBaselinePlan(unittest.TestCase):
 
 def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO,
                      dispersion=None, p25=None, p75=None, max_over_median=None,
-                     cand_peak=None, base_peak=None):
+                     cand_peak=None, base_peak=None, block_medians=None):
     """搭一个远程形状的 L3: benchmark_with_baselines 返回同机同卡的候选 + 一个基线
 
     D3 之后远端只测**一个**基线并回报 `baseline_selected`, 所以这里的 payload 也只带
@@ -301,6 +301,8 @@ def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO,
         bench["paired"]["baseline_peak_bytes_extra"] = base_peak
     if cand_peak is not None and base_peak:
         bench["paired"]["peak_memory_ratio"] = round(cand_peak / base_peak, 3)
+    if block_medians is not None:
+        bench["paired"]["block_ratio_medians"] = block_medians
     if util is not None:
         bench["gpu_util_pct"] = util
         bench["gpu_other_procs"] = 7
@@ -405,6 +407,37 @@ class TestPeakMemoryObservation(unittest.TestCase):
         self.assertIsNone(r.metrics["candidate_peak_memory_bytes"])
         self.assertIsNone(r.metrics["peak_memory_ratio"])
         self.assertNotIn("峰值显存", r.message)
+
+
+class TestBlockSeries(unittest.TestCase):
+    """逐块比值序列 (D5 的唯一可判输入, docs/research/46)
+
+    真机已经量过: 一段 1.5 ms 的 host 侧抢占打在 20% 的块上, 那一块的比值掉到 0.0054
+    (=候选看起来慢 186 倍), 而**同一次 run 的全局 median 一分没动**, iqr/median 只从
+    0.0309 走到 0.0388。所以聚合口径对成段污染是聋的, 块序列不聋 —— 前提是这个数
+    真的被搬进 metrics 并且留在那儿能被复盘。
+    """
+
+    def _l3(self, v):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            r = v._verify_performance(PYTHON_MATMUL, _matmul_inputs(), 0.0, _task())
+        return r, buf.getvalue()
+
+    def test_block_series_reaches_metrics(self):
+        series = [1.001, 0.998, 0.005, 1.002]
+        r, _ = self._l3(_remote_verifier(candidate_ms=NET_MS_MATMUL_4096, baseline_ms=1.10,
+                                         block_medians=series))
+        self.assertEqual(series, r.metrics["block_ratio_medians"],
+                         "块序列没搬进 metrics —— D5 的可判输入到不了下游")
+
+    def test_absent_series_is_none_not_empty(self):
+        """旧 runner 不报这个键时必须是 None: 空列表会被将来的停止规则读成「零块 = 无证据」
+        而不是「没有证据」"""
+        r, _ = self._l3(_remote_verifier(candidate_ms=NET_MS_MATMUL_4096, baseline_ms=1.10))
+        self.assertIsNone(r.metrics["block_ratio_medians"])
 
 
 # ─── 三、Conductor 真的按三态改变行为 ─────────────────────────

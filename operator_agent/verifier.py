@@ -641,6 +641,9 @@ class Verifier:
                     "paired_speedup_dispersion": paired.get("speedup_paired_iqr_over_median"),
                     "paired_samples": paired.get("paired_runs"),
                     "paired_block_samples": paired.get("paired_block_samples"),
+                    # 逐块比值序列: D5「什么时候可以停」唯一读得动的粒度。本轮只搬运不判定
+                    # (false-stop 率还没量出来, 见 docs/research/46)。
+                    "block_ratio_medians": paired.get("block_ratio_medians"),
                     # 峰值显存: 与加速比**并列**的第二项观测, 不参与判定 (本机还没有
                     # 「我们的核会增加多少」的分布, 先攒数 —— 与 D2 的 SM 时钟同一处置)。
                     # 外部依据: KernelBench-Verified 报最好模型 28% 的核增加峰值显存。

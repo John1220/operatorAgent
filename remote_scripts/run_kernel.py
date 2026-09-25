@@ -1006,9 +1006,11 @@ def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
         torch.cuda.synchronize()
 
     cand_times, base_times = [], []
+    block_sizes = []
     i = 0
     while i < n:
         k = min(block, n - i)
+        block_sizes.append(k)
         # 一块 = 一次 shield 进出, 且 shield 包的是**整块**而不是每一次调用
         # (与本文件 541-543 的原则一致); 事件窗口在 _timed_runs 内部逐样本开闭,
         # 所以 setattr 群不进测量值。
@@ -1029,6 +1031,22 @@ def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
         paired["speedup_paired_median"] = round(med, 4)
         paired["speedup_paired_iqr_over_median"] = (
             round((p75 - p25) / med, 4) if med > 0 else None)
+
+    # ---- 逐块比值 median (先观测, 不判定) ----
+    # 为什么粒度是「块」而不是样本: 这台机器上的干扰是**邻居插队**, 一次插队污染的是
+    # 一整块连续时间, 不是某个孤立样本。iqr/median 对单点离群完全不敏感 (doc 33 第四节
+    # 已经栽过一次), 而把 30 个样本摊成一个数同样看不见「前 20 块干净、后 3 块被抢」。
+    # 块序列才是「什么时候可以停」的唯一可判输入 —— 但那条规则要先把 false-stop 率量出来
+    # (docs/research/46), 所以这里只把它带回来, 不参与任何判决。
+    block_ratios, pos = [], 0
+    for k in block_sizes:
+        seg = [b / c for c, b in zip(cand_times[pos:pos + k], base_times[pos:pos + k])
+               if c > 0]
+        pos += k
+        if seg:
+            block_ratios.append(round(_percentile(sorted(seg), 50), 5))
+    paired["block_ratio_medians"] = block_ratios
+
     # ---- 峰值显存: 与速度并列的第二项观测 (口径与理由见 _additional_peak_bytes) ----
     # 候选臂照旧包在 shield 里 —— 本文件的约定是「候选的每一次执行都在屏蔽区内」,
     # 多出来这一次也不例外; 少包一次就是给反作弊开一个洞。
