@@ -4,7 +4,8 @@
 - DependencyAnalyzer: import 提取 (ast/正则回退)、模块→pip 名映射、内置排除
 - EnvironmentChecker: 链路自检 (ssh/uv/python/torch/triton/cuda/gpu)、缺失项报告
 - EnvironmentReport: summary、dependency_manifest 输出
-- SSHExecutor.deploy: hash 同步 (远程旧版→更新、远程新版→跳过)
+- SSHExecutor.deploy: 按清单逐文件 hash 同步、依赖先于 runner 推送
+- RemoteExecutor 门面: 必须暴露 conductor duck-type 探测的方法 (ensure_environment/deploy)
 - Conductor: 环境自检未通过时提前返回 (不进入生成流程)
 
 运行: python3 tests/test_environment.py  或  python3 -m unittest tests.test_environment -v
@@ -20,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from operator_agent.environment import (
     DependencyAnalyzer, EnvironmentChecker, EnvironmentReport, CheckItem,
 )
+from operator_agent.remote_executor import RemoteExecutor
 from operator_agent.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision, VerificationLevel,
@@ -290,6 +292,56 @@ class TestConductorEnvCheck(unittest.TestCase):
         mock_designer.assert_not_called()
         self.assertFalse(artifact.all_passed)
         self.assertIn("环境自检", artifact.verification_results[0].message)
+
+
+class TestFacadeInterfaceParity(unittest.TestCase):
+    """RemoteExecutor 门面必须暴露调用方 duck-type 探测的方法
+
+    缺陷实例 (2026-09-25 于 H20 验证 L2 数值门时撞见): conductor.py:233 的守卫是
+    `if hasattr(self.backend, "ensure_environment")`, 而三个 driver 传进 Conductor
+    的都是 RemoteExecutor 门面。门面没有这个方法 → 守卫恒为 False → 「任务开始前
+    的环境自检」在真机路径上从来没跑过。不报错, 只是不执行, 所以一直没被发现,
+    而 docs/问题识别与技术方案.md 的 P1-3 把它记为 ✅ 已实施。
+
+    这是缺口 5 (后端 isinstance 分派) 的具体后果: 门面与实现接口不一致, 而
+    duck-typing 守卫在缺失时静默跳过。
+    """
+
+    def test_facade_exposes_ensure_environment(self):
+        self.assertTrue(hasattr(RemoteExecutor(mode="local"), "ensure_environment"),
+                        "门面缺这个方法会让 conductor.py:233 的 hasattr 守卫恒为 False")
+
+    def test_facade_exposes_deploy(self):
+        self.assertTrue(hasattr(RemoteExecutor(mode="local"), "deploy"))
+
+    def test_backend_without_env_provisioning_reports_ready(self):
+        """LocalExecutor / HTTPExecutor 没有要 provision 的远端环境
+
+        返回 (True, "") 而不是伪造一份清单: manifest 只在 all_passed 为 False 时
+        被 conductor 消费。
+        """
+        passed, manifest = RemoteExecutor(mode="local").ensure_environment()
+        self.assertTrue(passed)
+        self.assertEqual(manifest, "")
+
+    def test_facade_delegates_rather_than_stubbing(self):
+        """委托必须真的落到底层实现, 不能在门面上就地返回 True"""
+        ex = RemoteExecutor(mode="ssh")
+        fake = MagicMock()
+        fake.ensure_environment.return_value = (False, "需配置: torch (uv add torch)")
+        ex._backend = fake
+
+        self.assertEqual(ex.ensure_environment(required_pips=["torch"]),
+                         (False, "需配置: torch (uv add torch)"))
+        fake.ensure_environment.assert_called_once_with(required_pips=["torch"])
+
+    def test_facade_deploy_delegates(self):
+        ex = RemoteExecutor(mode="ssh")
+        fake = MagicMock()
+        fake.deploy.return_value = True
+        ex._backend = fake
+        self.assertTrue(ex.deploy())
+        fake.deploy.assert_called_once_with()
 
 
 if __name__ == "__main__":

@@ -956,6 +956,29 @@ class RemoteExecutor:
     def get_hardware_info(self) -> dict:
         return self.backend.get_hardware_info()
 
+    def ensure_environment(self, required_pips: Optional[list] = None) -> tuple:
+        """前置环境自检 + 自动配置, 委托给底层后端
+
+        门面必须显式暴露本方法: conductor.py 的守卫是
+        `if hasattr(self.backend, "ensure_environment")`, 而 driver 传进 Conductor
+        的是 RemoteExecutor 门面。门面没有这个方法时守卫恒为 False, 于是「任务开始
+        前的环境自检」在真机路径上被静默跳过 —— 不报错, 只是不执行。
+
+        Returns:
+            (all_passed, manifest_text)。底层后端无需配置环境时 (LocalExecutor /
+            HTTPExecutor) 返回 (True, ""): 没有要 provision 的东西, 这就是「就绪」
+            的诚实答案; manifest 只在 all_passed 为 False 时被消费。
+        """
+        fn = getattr(self.backend, "ensure_environment", None)
+        if fn is None:
+            return True, ""
+        return fn(required_pips=required_pips)
+
+    def deploy(self) -> bool:
+        """把 runner 及其同级依赖同步到远端; 底层后端无需部署时视为已成功"""
+        fn = getattr(self.backend, "deploy", None)
+        return fn() if fn is not None else True
+
     def compile(self, kernel_code: str) -> bool:
         return self.backend.compile(kernel_code)
 
