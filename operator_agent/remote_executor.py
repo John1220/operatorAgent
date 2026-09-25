@@ -26,6 +26,7 @@
 
 import os
 import json
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -33,7 +34,7 @@ import hashlib
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from .environment import EnvironmentChecker, DependencyAnalyzer, EnvironmentReport, CheckItem
@@ -346,48 +347,94 @@ class SSHExecutor:
         print(f"  [SSHExecutor] uv 环境配置完成: {self.work_dir}")
         return True
 
+    def _remote_files(self) -> list:
+        """需要部署到远端的 (本地路径, 远端路径) 列表, 按推送顺序排列
+
+        runner 的同级依赖必须排在 runner 前面: 这样一次部署即使中途失败, 也只会
+        出现「新依赖 + 旧 runner」(能跑), 不会出现「新 runner + 缺依赖」(直接
+        ImportError)。
+        """
+        repo_root = Path(__file__).parent.parent
+        remote_dir = str(PurePosixPath(self.remote_runner_path).parent)
+        return [
+            # L2 数值门的容差表与判定式, runner 以同级模块 import
+            (repo_root / "operator_agent" / "tolerance.py",
+             f"{remote_dir}/tolerance.py"),
+            (repo_root / "remote_scripts" / self._runner_script,
+             self.remote_runner_path),
+        ]
+
+    def _remote_hashes(self, paths: list) -> dict:
+        """一次 SSH 往返取回多个远端文件的 sha256 前 12 位; 不存在的记为空串"""
+        py = self._python_cmd if self._python_cmd else "python3"
+        script = (
+            "import hashlib, os\n"
+            f"for p in {paths!r}:\n"
+            # 远端路径默认是 ~/operator_agent/... 形式。shell 与 scp 会展开 ~,
+            # 但 python 的 open() 不会 —— 少了这一行 hash 查询会恒定失败, 于是
+            # 每个任务都白推一次脚本 (改动前的实现就是这个状态)。
+            "    q = os.path.expanduser(p)\n"
+            "    try:\n"
+            "        with open(q, 'rb') as f:\n"
+            "            print(p, hashlib.sha256(f.read()).hexdigest()[:12])\n"
+            "    except OSError:\n"
+            "        print(p, '')\n"
+        )
+        try:
+            out = self._ssh_exec(f"{py} -c {shlex.quote(script)}")
+        except RuntimeError:
+            return {p: "" for p in paths}
+        hashes = {}
+        for line in out.splitlines():
+            parts = line.rsplit(" ", 1)
+            if len(parts) == 2:
+                hashes[parts[0]] = parts[1]
+        return hashes
+
+    def _scp(self, local: Path, remote_path: str) -> None:
+        scp_cmd = ["scp", "-o", "StrictHostKeyChecking=no"]
+        if self.port:
+            scp_cmd.extend(["-P", str(self.port)])
+        if self.key_path:
+            scp_cmd.extend(["-i", os.path.expanduser(self.key_path)])
+        scp_cmd.extend([str(local), f"{self._ssh_target()}:{remote_path}"])
+        subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60, check=True)
+
     def deploy(self) -> bool:
-        """部署 runner 脚本到远程服务器（如果已存在则跳过）"""
+        """部署 runner 及其同级依赖到远程服务器 (逐文件按内容 hash 判断是否需要更新)"""
         if not self._setup_uv_env():
             print(f"  [SSHExecutor] 环境配置失败，跳过部署")
             return False
 
-        local_runner = Path(__file__).parent.parent / "remote_scripts" / self._runner_script
-        if not local_runner.exists():
-            print(f"  [SSHExecutor] 本地脚本不存在: {local_runner}")
+        files = self._remote_files()
+        missing = [str(local) for local, _ in files if not local.exists()]
+        if missing:
+            print(f"  [SSHExecutor] 本地脚本不存在: {', '.join(missing)}")
             return False
 
-        # 用内容 hash 判断是否需要更新 (替代"存在即跳过", 保证远程脚本始终最新)
-        local_content = local_runner.read_bytes()
-        local_hash = hashlib.sha256(local_content).hexdigest()[:12]
-        try:
-            py = self._python_cmd if self._python_cmd else "python3"
-            remote_hash = self._ssh_exec(
-                f"{py} -c \"import hashlib,sys; "
-                f"print(hashlib.sha256(open('{self.remote_runner_path}','rb').read()).hexdigest()[:12])\""
-            ).strip()
-        except RuntimeError:
-            remote_hash = ""   # 远程文件不存在
+        local_hashes = {
+            remote: hashlib.sha256(local.read_bytes()).hexdigest()[:12]
+            for local, remote in files
+        }
+        remote_hashes = self._remote_hashes([remote for _, remote in files])
 
-        if remote_hash == local_hash:
+        stale = [remote for remote in local_hashes
+                 if remote_hashes.get(remote, "") != local_hashes[remote]]
+        if not stale:
             self._deployed = True
-            print(f"  [SSHExecutor] 远程脚本已是最新 (hash={local_hash}): {self.remote_runner_path}")
+            print(f"  [SSHExecutor] 远程脚本已是最新 "
+                  f"(hash={local_hashes[self.remote_runner_path]}): {self.remote_runner_path}")
             return True
 
         try:
-            scp_cmd = ["scp", "-o", "StrictHostKeyChecking=no"]
-            if self.port:
-                scp_cmd.extend(["-P", str(self.port)])
-            if self.key_path:
-                scp_cmd.extend(["-i", os.path.expanduser(self.key_path)])
-            scp_cmd.extend([
-                str(local_runner),
-                f"{self._ssh_target()}:{self.remote_runner_path}"
-            ])
-            subprocess.run(scp_cmd, capture_output=True, text=True, timeout=60, check=True)
+            # 按 _remote_files() 的顺序推: 依赖先于 runner
+            for local, remote in files:
+                if remote in stale:
+                    action = "更新" if remote_hashes.get(remote) else "部署"
+                    self._scp(local, remote)
+                    print(f"  [SSHExecutor] 脚本已{action}到 {self.host}:{remote} "
+                          f"(hash={local_hashes[remote]})")
             self._deployed = True
-            action = "更新" if remote_hash else "部署"
-            print(f"  [SSHExecutor] 脚本已{action}到 {self.host}:{self.remote_runner_path} (hash={local_hash})")
             return True
         except Exception as e:
             print(f"  [SSHExecutor] 部署失败: {e}")

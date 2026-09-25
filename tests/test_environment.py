@@ -200,20 +200,24 @@ class TestDeployHashSync(unittest.TestCase):
     def test_remote_uptodate_skips_scp(self, mock_subproc):
         from operator_agent.remote_executor import SSHExecutor
         import hashlib
-        from pathlib import Path
-
-        local_runner = Path(__file__).resolve().parents[1] / "operator_agent" / ".." / "remote_scripts" / "run_kernel.py"
-        if not local_runner.exists():
-            self.skipTest("run_kernel.py 不存在")
-        local_hash = hashlib.sha256(local_runner.read_bytes()).hexdigest()[:12]
 
         ex = SSHExecutor(host="h", user="u")
         ex._uv_path = "uv"
         ex._uv_setup = True
 
+        files = ex._remote_files()
+        if not all(local.exists() for local, _ in files):
+            self.skipTest("待部署文件缺失")
+        # 远端 hash 查询现在是一次往返返回多行 "<路径> <hash>", 按 _remote_files()
+        # 派生而不是写死 run_kernel.py —— 将来往清单里加文件时本用例不必再改。
+        listing = "\n".join(
+            f"{remote} {hashlib.sha256(local.read_bytes()).hexdigest()[:12]}"
+            for local, remote in files
+        )
+
         def ssh_exec(cmd, stdin_data=None):
             if "hashlib" in cmd:
-                return local_hash   # 远程 hash 匹配
+                return listing   # 全部匹配
             return "ok"
         ex._ssh_exec = ssh_exec
 
@@ -221,6 +225,28 @@ class TestDeployHashSync(unittest.TestCase):
         self.assertTrue(result)
         # hash 匹配, scp 不应被调用
         mock_subproc.run.assert_not_called()
+
+    @patch("operator_agent.remote_executor.subprocess")
+    def test_dependencies_pushed_before_runner(self, mock_subproc):
+        """runner 的同级依赖必须先于 runner 推送
+
+        部署中途失败时, 这个顺序决定结果是「新依赖 + 旧 runner」(能跑) 还是
+        「新 runner + 缺依赖」(import 就炸)。远端 hash 查询失败/文件缺失都会
+        触发全量推送, 所以这里让远端报空。
+        """
+        from operator_agent.remote_executor import SSHExecutor
+
+        ex = SSHExecutor(host="h", user="u")
+        ex._uv_path = "uv"
+        ex._uv_setup = True
+        ex._ssh_exec = lambda cmd, stdin_data=None: "" if "hashlib" in cmd else "ok"
+
+        self.assertTrue(ex.deploy())
+
+        pushed = [c.args[0][-1].split(":")[-1] for c in mock_subproc.run.call_args_list]
+        self.assertEqual(pushed, [remote for _, remote in ex._remote_files()])
+        self.assertIn("tolerance.py", pushed[0],
+                      "L2 数值门的容差表必须先于 runner 到位, 否则新 runner 一 import 就炸")
 
 
 # ─── Conductor 环境前置自检 ─────────────────────────────────

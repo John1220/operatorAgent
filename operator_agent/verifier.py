@@ -14,8 +14,19 @@ from .schemas import (
     VerificationResult, VerificationLevel, TaskSchema, Precision,
 )
 from .anticheat import static_audit
+from . import tolerance
 from .mock_gpu import MockGPU
 from .remote_executor import RemoteExecutor, RemoteExecutionResult
+
+
+# 远端 L2 返回的指标里需要透传到控制端的键。matched_ratio / bad_elements / atol /
+# rtol 是数值门改成「绝对+相对」之后新增的: 只留 max_error 的话, 控制端分不清
+# 「差一点点」和「整体缩放了 3%」, 而后者正是 docs/research/12 要拦的那类。
+_REMOTE_L2_METRIC_KEYS = (
+    "max_error", "max_rel_error", "matched_ratio", "bad_elements",
+    "atol", "rtol", "required_matched_ratio",
+    "compared_elements", "coverage", "reference_type", "device",
+)
 
 
 # 常见 GPU 硬件理论峰值 (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
@@ -140,8 +151,12 @@ class Verifier:
         # 支持单组输入 (dict) 或多组输入套件 (list[dict])
         input_sets = test_inputs if isinstance(test_inputs, list) else [test_inputs]
         max_error_overall = 0.0
+        max_rel_error_overall = 0.0
         total_compared = 0
+        total_bad = 0
+        min_matched_ratio = 1.0
         min_coverage = 1.0
+        gate_params = {}
         has_reference = False
         reference_types = set()
         execution_devices = set()
@@ -158,22 +173,34 @@ class Verifier:
             if "max_error" in m:
                 has_reference = True
                 max_error_overall = max(max_error_overall, m["max_error"])
+                max_rel_error_overall = max(max_rel_error_overall, m.get("max_rel_error", 0.0))
                 total_compared += m.get("compared_elements", 0)
+                total_bad += m.get("bad_elements", 0)
+                # 多组输入取最差的一组: 任一组掉到 rho 以下就不该算通过
+                min_matched_ratio = min(min_matched_ratio, m.get("matched_ratio", 1.0))
                 min_coverage = min(min_coverage, m.get("coverage", 1.0))
+                if not gate_params:
+                    gate_params = {k: m[k] for k in
+                                   ("atol", "rtol", "required_matched_ratio") if k in m}
                 if m.get("reference_type"):
                     reference_types.add(m["reference_type"])
                 if m.get("device"):
                     execution_devices.add(m["device"])
 
         if has_reference:
-            msg = f"功能验证通过 ({len(input_sets)} 组输入), 最大误差={max_error_overall:.2e}"
+            msg = (f"功能验证通过 ({len(input_sets)} 组输入), 最大误差={max_error_overall:.2e}, "
+                   f"matched_ratio={min_matched_ratio:.6f}")
             if min_coverage < 1.0:
                 msg += f", 覆盖率={min_coverage * 100:.1f}%"
             metrics = {
                 "max_error": max_error_overall,
+                "max_rel_error": max_rel_error_overall,
+                "matched_ratio": min_matched_ratio,
+                "bad_elements": total_bad,
                 "num_input_sets": len(input_sets),
                 "compared_elements": total_compared,
                 "coverage": min_coverage,
+                **gate_params,
             }
             if reference_types:
                 metrics["reference_type"] = ",".join(sorted(reference_types))
@@ -207,9 +234,8 @@ class Verifier:
                             level=VerificationLevel.L2_FUNCTION, passed=False,
                             message=f"远程功能验证失败: 误差 {remote_verify['max_error']:.2e}",
                             error_log=remote_verify.get("error", ""),
-                            metrics={k: remote_verify[k] for k in (
-                                "max_error", "max_rel_error", "compared_elements", "coverage",
-                                "reference_type", "device") if k in remote_verify},
+                            metrics={k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
+                                     if k in remote_verify},
                         )
                     if remote_verify.get("output_shape") and remote_verify.get("expected_shape"):
                         return VerificationResult(
@@ -225,9 +251,8 @@ class Verifier:
                     level=VerificationLevel.L2_FUNCTION, passed=True,
                     message=(f"远程全量比对通过 ({remote_verify.get('compared_elements', 0)} 元素), "
                              f"最大误差={remote_verify.get('max_error', 0):.2e}"),
-                    metrics={k: remote_verify[k] for k in (
-                        "max_error", "max_rel_error", "compared_elements", "coverage",
-                        "reference_type", "device") if k in remote_verify},
+                    metrics={k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
+                             if k in remote_verify},
                 )
 
             # 旧执行器兼容路径。新 SSHExecutor 不会进入这里。
@@ -271,12 +296,39 @@ class Verifier:
         if actual.shape != expected.shape:
             return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"输出形状不匹配: {actual.shape} vs {expected.shape}")
 
+        # 数值门禁与真机路径 (remote_scripts/run_kernel.py) 共用 tolerance.py 里的
+        # 同一张容差表和同一条判定式: 绝对 + 相对 的 AND 形式, 见该模块 docstring。
+        atol, rtol, rho = tolerance.effective_atol(
+            task.constraints.precision.value, max_allowed)
+        actual_f = np.asarray(actual, dtype=np.float32)
+        abs_error = np.abs(actual_f - expected)
+        rel_error = abs_error / (np.abs(expected) + tolerance.EPS)
+        bad = (abs_error > atol) & (rel_error > rtol)
+        has_nonfinite = bool((~np.isfinite(actual_f)).any())
+        passed, matched_ratio = tolerance.evaluate(
+            int(bad.sum()), int(abs_error.size), has_nonfinite, rho)
+
         size = int(expected.size)
-        max_error = float(np.max(np.abs(actual - expected)))
-        metrics = {"max_error": max_error, "compared_elements": size, "coverage": 1.0}
-        if max_error <= max_allowed:
-            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True, message=f"全量比对通过 ({size} 元素), 最大误差={max_error:.2e}", metrics=metrics)
-        return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"功能验证失败: 误差 {max_error:.2e}", metrics=metrics)
+        metrics = {
+            "max_error": float(abs_error.max()) if size else 0.0,
+            "max_rel_error": float(rel_error.max()) if size else 0.0,
+            "matched_ratio": matched_ratio,
+            "bad_elements": int(bad.sum()),
+            "atol": atol, "rtol": rtol, "required_matched_ratio": rho,
+            "compared_elements": size, "coverage": 1.0,
+        }
+        if passed:
+            return VerificationResult(
+                level=VerificationLevel.L2_FUNCTION, passed=True,
+                message=(f"全量比对通过 ({size} 元素), 最大误差={metrics['max_error']:.2e}, "
+                         f"matched_ratio={matched_ratio:.6f}"),
+                metrics=metrics)
+        reason = ("输出含 NaN/Inf" if has_nonfinite else
+                  f"{metrics['bad_elements']}/{size} 个元素同时超 atol={atol:.1e} 与 rtol={rtol:.1e}")
+        return VerificationResult(
+            level=VerificationLevel.L2_FUNCTION, passed=False,
+            message=f"功能验证失败: {reason}, 最大误差={metrics['max_error']:.2e}",
+            metrics=metrics)
 
     def _verify_performance(self, kernel_code: str, test_inputs, target_gflops: float, task: TaskSchema) -> VerificationResult:
         min_required = task.constraints.min_speedup

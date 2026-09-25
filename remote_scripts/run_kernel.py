@@ -9,6 +9,11 @@ Actions:
 
 环境变量:
   OPERATOR_AGENT_GPU - 固定使用的 GPU 卡号; 未设置时按 (低利用率, 高显存余量) 自动选
+
+同级依赖:
+  tolerance.py - L2 数值门的容差表与判定式 (单一事实来源, 见该模块 docstring)。
+                 由 SSHExecutor.deploy() 与本文件一起推送; 在仓库内直接跑本文件时
+                 回退到 operator_agent/ 下找。
 """
 
 import sys
@@ -16,6 +21,15 @@ import json
 import time
 import os
 import numpy as np
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+try:
+    import tolerance
+except ImportError:          # 仓库内直接运行: 模块还在 operator_agent/ 下
+    sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "operator_agent"))
+    import tolerance
 
 
 # ─── GPU 自动选择 ─────────────────────────────────────────────
@@ -414,19 +428,55 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
                     "output_shape": list(actual.shape), "expected_shape": list(expected.shape)}
         actual_f = actual.detach().to(torch.float32)
         expected_f = expected.detach().to(torch.float32)
+
+        # ---- 数值门禁: 绝对 + 相对 (AND 形式) ----
+        # 判据与容差表的定义在 operator_agent/tolerance.py, 由 deploy() 连同本文件
+        # 一起推送到同目录。这里只做 torch 侧的元素级运算, 归约成标量后交给
+        # tolerance.evaluate() —— 判定规则因此只有一份, 又不必把整个输出张量搬回
+        # 主机 (attention 类算子的输出可以是 GB 量级)。
+        #
+        # 原实现是 `max_abs_error <= max_error`, 纯绝对容差: 实测在 4096³ fp16 上
+        # 允许把结果整体缩小 14.93% 仍判通过 (docs/research/12 第一节)。
+        atol, rtol, rho = tolerance.effective_atol(precision, max_error)
         abs_error = (actual_f - expected_f).abs()
-        max_abs_error = float(abs_error.max().item()) if abs_error.numel() else 0.0
-        denom = expected_f.abs().clamp_min(1e-12)
-        max_rel_error = float((abs_error / denom).max().item()) if abs_error.numel() else 0.0
+        total = int(abs_error.numel())
+        if total:
+            # EPS=1e-8 而不是原先的 clamp_min(1e-12): 后者会让近零参考点上的
+            # rel_err 再放大 4 个数量级。
+            rel_error = abs_error / (expected_f.abs() + tolerance.EPS)
+            # AND: 只有同时超绝对阈值和相对阈值才算坏点。这是不误杀合法 fp16
+            # 累加核的关键 —— 那种核在近零参考处的 rel_err 可达 2.1e4。
+            bad = (abs_error > atol) & (rel_error > rtol)
+            n_bad = int(bad.sum().item())
+            max_abs_error = float(abs_error.max().item())
+            max_rel_error = float(rel_error.max().item())
+            has_nonfinite = bool((~torch.isfinite(actual_f)).any().item())
+        else:
+            n_bad, max_abs_error, max_rel_error, has_nonfinite = 0, 0.0, 0.0, False
+
+        passed, matched_ratio = tolerance.evaluate(n_bad, total, has_nonfinite, rho)
+        if has_nonfinite:
+            reason = "输出含 NaN/Inf"
+        elif not passed:
+            reason = (f"matched_ratio {matched_ratio:.6f} < {rho} "
+                      f"({n_bad}/{total} 个元素同时超 atol={atol:.1e} 与 rtol={rtol:.1e}; "
+                      f"max_abs={max_abs_error:.2e}, max_rel={max_rel_error:.2e})")
+        else:
+            reason = ""
         return {
-            "success": max_abs_error <= max_error,
+            "success": passed,
             "reference_type": reference_type,
             "output_shape": list(actual.shape),
-            "compared_elements": int(actual.numel()),
+            "compared_elements": total,
             "coverage": 1.0,
             "max_error": max_abs_error,
             "max_rel_error": max_rel_error,
-            "error": "" if max_abs_error <= max_error else f"max abs error {max_abs_error:.2e}",
+            "matched_ratio": matched_ratio,
+            "atol": atol,
+            "rtol": rtol,
+            "required_matched_ratio": rho,
+            "bad_elements": n_bad,
+            "error": reason,
             "device": str(device),
         }
     except Exception as e:
