@@ -17,7 +17,8 @@
 | [`12-正确性验证与reward-hacking防护.md`](12-正确性验证与reward-hacking防护.md) | 实测 L2 门是纯绝对容差，一个整体缩小 14.93% 的核判为通过；证明「直接加 `max_rel` 门禁」会误杀正确核（合法 fp16 累加核 max_rel=2.1e4）；一手核对 FlashInfer AND 形式与 KernelBench 容差表并三门禁对照；更正调研输入——候选先跑我们已满足 | ✅ 2026-09-25 |
 | [`13-跨运行记忆与技能库架构.md`](13-跨运行记忆与技能库架构.md) | 结论是「检索算法不是瓶颈，语料才是」；sqlite+FTS5 选型（实测排除 sqlite-vec）；三表 schema 与 admission gate；Sakana 与 AWM 两个反面案例 | ✅ 2026-09-25 |
 | [`14-搜索策略与硬件感知目标函数.md`](14-搜索策略与硬件感知目标函数.md) | 核实出一个比缺口 4 更紧急的记账 bug（首轮必然误判停滞并禁用配方）；用 roofline `max()` 统一 bound 感知而非分支选指标；测量卫生对策清单 | ✅ 2026-09-25 |
-| [`30-L2数值门真机验证.md`](30-L2数值门真机验证.md) | H20 实测：正确的 Triton fp16 核对 cuBLAS 参考误差为 **0.0**（容差表余量约 4 个数量级），0.97 缩放核从 PASS 变 FAIL；核实 `allow_fp16_reduced_precision_reduction=True` 与 TF32 不对称；证明 MockGPU 不能用来标定 fp16 容差；新发现门面缺 `ensure_environment` 导致 P1-3 环境自检在真机路径从未执行 | ✅ 2026-09-25 |
+| [`30-L2数值门真机验证.md`](30-L2数值门真机验证.md) | H20 实测：正确的 Triton fp16 核对 cuBLAS 参考误差为 **0.0**（容差表余量约 4 个数量级），0.97 缩放核从 PASS 变 FAIL；核实 `allow_fp16_reduced_precision_reduction=True` 与 TF32 不对称；证明 MockGPU 不能用来标定 fp16 容差；新发现门面缺 `ensure_environment` 导致 P1-3 环境自检在真机路径从未执行；第六节记录同一核在 L2 按 fp32 判精度、L3 按 TF32 给算力的不一致 | ✅ 2026-09-25 |
+| [`31-测量有效性三态真机验证.md`](31-测量有效性三态真机验证.md) | **缺口 1 落地**：H20 上三档全部复现（layernorm 1024×768 dominance 0.62 → `uninformative`；16384×6144 → 0.111 `degraded`；matmul 4096³ → 0.020 `valid`）；指出 doc 01 自己推荐的 shape 与其阈值互相矛盾；发现扣地板加速比在基线被地板吞掉时产出低于物理下界的噪声，改为拒报 | ✅ 2026-09-25 |
 
 ## 待补
 

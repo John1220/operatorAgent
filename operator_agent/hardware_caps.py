@@ -50,6 +50,15 @@ class HardwareCaps:
     shared_mem_bank_count: int = 32 # bank 数量 (NVIDIA=32, AMD=64)
     registers_per_thread: int = 255 # 每线程寄存器数
 
+    # ---- 测量口径 ----
+    # 空核的端到端 launch 开销, 用于判断 L3 数字是否被 launch 支配 (缺口 1)。
+    # 量的是 agent 基准实际要付的完整代价 —— Python 侧 grid 计算 + Triton JIT
+    # 派发 + 参数编组 + driver launch, 而不是 driver 层那 3~5 µs; L3 基准走的
+    # 就是这条路。取 median 而非 min, 与候选侧用 median 计时保持同口径。
+    # None = 该设备未实测。measurement.assess() 拿到 None 会跳过这项检查并在
+    # metrics 里写明「未做检查」, 不会默认放行 —— 缺证据不等于有效。
+    launch_floor_us: Optional[float] = None
+
     # ---- 执行模型 ----
     sm_count: int = 0               # SM/CU/计算单元数量
     max_threads_per_sm: int = 2048  # 每 SM 最大线程数
@@ -137,6 +146,9 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
         has_tensor_core=True, tensor_core_version=4, tensor_core_m_k_n=(16, 16, 16),
         vector_width_bytes=16, sub_group_size=32,
         global_mem_bandwidth_gbs=3680.0, l2_cache_size_kb=61440,
+        # 2026-09-24 实测 (空 Triton 核, CUDA event 计时, 25 预热 + 200 取中位):
+        # median=20.24 min=18.69。见 docs/research/01 第一节。
+        launch_floor_us=20.24,
         shared_mem_per_sm_kb=228, shared_mem_bank_count=32,
         registers_per_thread=255,
         sm_count=78, max_threads_per_sm=2048,

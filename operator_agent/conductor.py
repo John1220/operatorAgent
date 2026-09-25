@@ -324,6 +324,10 @@ class Conductor:
         # 为了避免目录名和 ArtifactStore.save 出的 timestamp_id 错开, 我们用 store.save 的目录作为权威写入源,
         # 在每次 store.save 之前写 snapshot 到同一个 artifact_dir (通过 store.save 返回的路径更新).
 
+        # 本次运行内累计的「测量无效」轮数。不进快照: 它描述的是本次会话的测量
+        # 环境, 续跑时机器负载早变了, 恢复旧值没有意义。
+        invalid_measurement_rounds = 0
+
         for round_num in range(start_round, self.max_optimize_rounds + 1):
             print(f"\n{'─'*40}")
             print(f"轮次 {round_num}/{self.max_optimize_rounds}")
@@ -423,8 +427,19 @@ class Conductor:
                 )
                 break
 
+            # 缺口 1: 「数字不好看」不等于「性能未改善」—— 测量本身可能不可信。
+            # 污染与 launch 地板支配压低的是数字, 不是核的质量; 拿它禁用配方会
+            # **永久**拉黑实际有效的配方, 拿它累计停滞会在 max_stagnant_rounds=2 下
+            # 把一次正在起效的优化提前终止。L3 通过时同样要看: 那一路会把本轮配方
+            # 记进 applied_recipes, 依据不可信的测量给配方记功是同一个错误的镜像。
+            measurement_ok = True
+            if l3_result is not None:
+                measurement_ok = self._measurement_drives_loop(l3_result, round_num)
+                if not measurement_ok:
+                    invalid_measurement_rounds += 1
+
             # L3 性能改善追踪: 连续无改善时提前终止，避免浪费 LLM token
-            if l3_result and l3_result.passed is False:
+            if l3_result and l3_result.passed is False and measurement_ok:
                 current_gflops = l3_result.metrics.get("gflops", 0)
                 # 当 gflops 为 0 (指标计算不可用) 时，用速度比判断
                 if current_gflops > 0 and best_gflops <= 0:
@@ -738,6 +753,10 @@ class Conductor:
             self._save_to_db(artifact, task)
             print(f"[Conductor] 算子已存入知识库 (RAG)")
 
+        if invalid_measurement_rounds:
+            print(f"\n[Conductor] ⚠️ 本次 {invalid_measurement_rounds} 轮的 L3 测量被判为不可信 "
+                  f"(污染 / launch 地板支配), 这些轮次未参与配方禁用与停滞计数")
+
         self._print_summary(artifact, task, saved_dir)
 
         # 执行结束后打印实际使用的 LLM 模型 (可能已降级)
@@ -745,6 +764,32 @@ class Conductor:
             print(f"\n[Conductor] ⚠️ 本次执行已降级: 主模型 [{self.llm.model}] 失败, "
                   f"实际使用 [{self.llm._active_model}] @ {self.llm._active_base_url}")
         return artifact
+
+    @staticmethod
+    def _measurement_drives_loop(l3_result: VerificationResult, round_num: int) -> bool:
+        """本轮 L3 数字能否驱动闭环决策 (配方禁用 / 停滞计数 / 记功)
+
+        缺口 1 的原失效方式不是「没算出来」而是「算出来了没人读」: Verifier 早就把
+        `benchmark_contaminated` 写进了 metrics, 但 conductor / fixer / agents 三个
+        文件里 grep 零命中, `passed` 照旧。于是污染压低 gflops → 判「未改善」→
+        `disabled_recipes.add()`, 而 disabled_recipes 在后续轮次不会恢复。
+
+        metrics 里没有有效性键时返回 True: 旧的 execution_snapshot 与不带 L3 的
+        路径都不产这几个键, 对它们沿用改动前的行为, 不做追溯性重判。
+        """
+        m = l3_result.metrics or {}
+        if m.get("measurement_can_count_stagnation", True):
+            return True
+        print(f"\n[Conductor] 第 {round_num} 轮测量有效性="
+              f"{m.get('measurement_validity', 'unknown')}, "
+              f"不禁用配方 / 不计入停滞轮次")
+        for reason in m.get("measurement_validity_reasons") or []:
+            print(f"  [Conductor]   - {reason}")
+        net = m.get("speedup_net_of_floor")
+        if net is not None:
+            print(f"  [Conductor]   扣除 launch 地板后的加速比 = {net:.4f} "
+                  f"(仅供参考, 不作为判据)")
+        return False
 
     # ─── 可复现性 Harness: 快照读写辅助 ────────────────────────────────────────────
 
