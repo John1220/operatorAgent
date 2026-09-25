@@ -1,0 +1,149 @@
+"""核函数接口契约的静态检查 (架构缺口 6)
+
+调用方与生成核之间有一条从未写下来的约定: 远端固定以
+
+    module.kernel(**inputs)
+
+**全关键字**方式调用 (`remote_scripts/run_kernel.py:_execute_triton`)。生成代码只要少
+一个参数、多一个参数、或把参数声明成 positional-only，运行时就是一句
+`TypeError: kernel() got an unexpected keyword argument 'causal'` —— 而这句话要等到
+一次完整的 SSH 往返 + 远程 import + Triton JIT 之后才会出现，于是一个纯静态可见的
+错误要花掉一整轮 Fixer (真实历史: attention 任务连烧 3 轮, 见 docs/research/00 缺口 6)。
+
+为什么用 AST 而不是 `inspect.signature`
+---------------------------------------
+两条都是实测/一手事实:
+1. **不能在控制端 import 生成代码**。`@triton.jit` 要求代码真的落在文件里
+   (triton 3.8.0 在 `python -c` 下直接 `ValueError: @jit functions should be defined
+   in a Python file`)，而控制端也没有 torch。项目本来就把「引用实现只在远端构建」写成
+   了规则 (`verifier._reference_torch` 的 docstring)。
+2. **`inspect.signature` 对 Triton 的 JITFunction 拿不到真签名**。真机实测 (triton
+   3.8.0) 它返回 `(*args: 'P.args', **kwargs: 'P.kwargs')` —— 于是「有 **kwargs 就放行」
+   的规则会**永远放行**，一条看起来正确、实际永不触发的死守卫。真参数表在 `.fn` 与
+   `.params` 上。AST 路线没有这个问题: 装饰器不影响 `def` 的参数列表。
+
+保守原则
+--------
+只在「运行时必然 TypeError」时判失败；任何看不准的形状 (`kernel = something`、条件定义、
+函数内定义) 一律放行，让 L2 去撞。误放行的代价是一轮 L2，误拦截的代价是把一份能跑的核
+打回去重画 —— 后者更糟。
+"""
+from __future__ import annotations
+
+import ast
+from typing import Optional
+
+
+def _find_kernel_def(tree: ast.Module) -> Optional[ast.FunctionDef]:
+    """只在模块顶层找 `def kernel(...)`; 看不准就返回 None (交调用方放行)"""
+    found = None
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "kernel":
+            found = node                      # 顶层重复定义时后一个生效, 与 Python 一致
+        if isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == "kernel":
+                    return None               # `kernel = ...` 别名: 静态看不出来
+        if isinstance(node, (ast.If, ast.Try)):
+            # 条件/异常分支里的定义意味着"可能没有", 也可能有别的形态 —— 不猜
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.FunctionDef) and sub.name == "kernel":
+                    return None
+    return found
+
+
+def _arg_names(a: ast.arguments) -> dict:
+    """{'posonly': [...], 'poskw': [...], 'kwonly': [...], 'vararg': bool,
+        'kwarg': bool, 'no_default': set(名字)}"""
+    kw = a.kwonlyargs
+    pos_only = list(a.posonlyargs)
+    regular = list(a.args)
+    # defaults 只覆盖"尾部"参数: posonly+regular 合并后的最后 len(defaults) 个
+    positional = pos_only + regular
+    # defaults 覆盖的是**尾部** len(defaults) 个参数, 所以必填的是前 n_no_default 个。
+    # 写成 positional[n_no_default:] 会把「必填」算成空集 —— 两个用例就是这么抓出它的。
+    n_no_default = len(positional) - len(a.defaults)
+    # ⚠️ 这里必须取 .arg 名字: 直接放 ast.arg 对象的话, 后面 `名字 in no_default` 恒为
+    # False, 于是「必填参数没传」「positional-only 挡道」两条判断一起变成永不触发。
+    no_default = {x.arg for x in positional[:max(0, n_no_default)]}
+    for arg, d in zip(kw, a.kw_defaults):
+        if d is None:
+            no_default.add(arg.arg)
+    return {
+        "posonly": [x.arg for x in pos_only],
+        "poskw": [x.arg for x in regular],
+        "kwonly": [x.arg for x in kw],
+        "vararg": a.vararg is not None,
+        "kwarg": a.kwarg is not None,
+        "no_default": no_default,
+    }
+
+
+def input_key_sets(test_inputs) -> list:
+    """把调用方可能传的输入形态摊成「若干组关键字名」
+
+    `Verifier.verify(test_inputs)` 同时接受单个 dict 与**多组输入套件** (list[dict],
+    见 L2 的 num_input_sets)。契约要对每一组单独成立 —— 某一组多带一个键, 那一组就会
+    在运行时抛 TypeError, 所以不能只看第一组, 也不能取并集后只判一次。
+    形态不认识就返回空列表 (= 不检查), 与整模块的保守原则一致。
+    """
+    if isinstance(test_inputs, dict):
+        return [list(test_inputs.keys())]
+    if isinstance(test_inputs, (list, tuple)) and test_inputs:
+        sets = [list(x.keys()) for x in test_inputs if isinstance(x, dict)]
+        return sets
+    return []
+
+
+def check_kernel_interface(source: str, input_keys) -> Optional[str]:
+    """签名对不上就返回一句处方式说明, 对得上或看不准返回 None
+
+    input_keys: 调用方这次会作为关键字传进去的名字 (即 L2 用的那份输入的键)。
+    """
+    keys = {str(k) for k in (input_keys or ())}
+    if not keys:
+        return None                       # 没有输入信息 = 没有可判的对象
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None                       # 语法错由 L1 的预检负责, 这里不抢话
+    fn = _find_kernel_def(tree)
+    if fn is None:
+        return None
+    a = _arg_names(fn.args)
+    named = set(a["posonly"]) | set(a["poskw"]) | set(a["kwonly"])
+
+    problems = []
+    if a["kwarg"]:
+        return None                       # **kwargs: 传什么都接得住
+    # positional-only 的参数**无法**用关键字传 → 必填的那些必然撞上
+    blocked = [n for n in a["posonly"] if n in a["no_default"]]
+    if blocked:
+        problems.append(
+            f"positional-only 参数无法用关键字传入: {', '.join(sorted(blocked))}")
+    # 只有**必填**参数 (无默认值) 缺了才会抛 TypeError; 调用方不传一个有默认值的参数
+    # 是完全合法的, 把它算进问题就等于把能跑的核打回去重画。
+    required_missing = sorted(n for n in (set(a["poskw"]) | set(a["kwonly"]))
+                              if n in a["no_default"] and n not in keys)
+    extra = sorted(keys - named)
+    if required_missing:
+        problems.append(f"kernel() 必填但调用方不会传的参数: {', '.join(required_missing)}")
+    if extra:
+        problems.append(f"调用方会传、但 kernel() 没收的参数: {', '.join(extra)}")
+    if not problems:
+        return None
+
+    declared = ", ".join(a["posonly"] + a["poskw"] + a["kwonly"]) or "(无参数)"
+    return (
+        "根因: 调用方固定以 `kernel(**输入)` 的**全关键字**方式调用核函数, 而这份代码的 "
+        "kernel() 签名与之对不上 —— 真跑起来必然抛 "
+        "`TypeError: kernel() got an unexpected keyword argument ...`。\n"
+        f"  本次会传入的输入名: {', '.join(sorted(keys))}\n"
+        f"  kernel() 声明的参数: ({declared})\n"
+        + "".join(f"  不匹配: {p}\n" for p in problems)
+        + "改法: 让 `def kernel(...)` 的参数名**逐一等于**上面「会传入的输入名」; "
+          "多余的那个若确实用不到, 也照样写进签名并在函数体里忽略 "
+          "(或整体写成 `def kernel(*args, **kwargs)` 再自己取)。"
+          "注意不要改输入名 —— 那是任务侧给的。\n"
+          f"位置: 第 {fn.lineno} 行的 `def kernel`。"
+    )

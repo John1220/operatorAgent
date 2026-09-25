@@ -14,6 +14,7 @@ from .schemas import (
     VerificationResult, VerificationLevel, TaskSchema, Precision,
 )
 from .anticheat import static_audit
+from .interface_contract import check_kernel_interface, input_key_sets
 from . import tolerance
 from . import measurement
 from .hardware_caps import detect_hardware_caps
@@ -168,7 +169,8 @@ class Verifier:
         """执行完整三级验证"""
         results = []
 
-        l1 = self._verify_compile(kernel_code, task.target.dsl)
+        l1 = self._verify_compile(kernel_code, task.target.dsl,
+                                  input_key_sets(test_inputs))
         results.append(l1)
         if not l1.passed:
             return results
@@ -182,7 +184,8 @@ class Verifier:
         results.append(l3)
         return results
 
-    def _verify_compile(self, kernel_code: str, dsl: str = "python") -> VerificationResult:
+    def _verify_compile(self, kernel_code: str, dsl: str = "python",
+                        input_key_sets=None) -> VerificationResult:
         print("  [Verifier] L1: 编译验证...")
         # 本地语法预检: 截断/缩进/未终结字面量等 SyntaxError 直接判失败,
         # 避免把明知无效的代码发去远程编译 (省 SSH 往返, 错误更清晰)
@@ -203,6 +206,26 @@ class Verifier:
                     # 行长什么样, 只能猜。这里把 e.text/e.offset 连同上下文一起带上。
                     error_log=syntax_error_report(kernel_code, e),
                 )
+        # 接口契约静态检查 (缺口 6): 远端固定以 `kernel(**输入)` 全关键字方式调用, 签名
+        # 对不上就是必然的 TypeError —— 但那要等一次 SSH 往返 + 远程 import + Triton JIT
+        # 之后才现形, 于是一个纯静态可见的错误要花掉一整轮 Fixer (真实历史: attention
+        # 连烧 3 轮在 `kernel() got an unexpected keyword argument 'causal'`)。
+        # 放在缓存之前: 这是本地 AST 遍历, 微秒级, 而缓存键只看代码哈希 —— 同一份代码
+        # 配不同的输入集, 契约结论可以不同, 不能让缓存把它吞掉。
+        mismatch = None
+        for keys in (input_key_sets or []):
+            mismatch = check_kernel_interface(kernel_code, keys)
+            if mismatch:
+                break
+        if mismatch:
+            print("  [Verifier] L1 FAILED: 核函数接口与调用契约不符 (未动 GPU)")
+            return VerificationResult(
+                level=VerificationLevel.L1_COMPILE, passed=False,
+                message="编译失败: " + mismatch.split("\n")[0],
+                error_log=mismatch,
+                metrics={"compile_status": "interface_mismatch",
+                         "backend": str(self.backend)},
+            )
         import hashlib
         cache_key = hashlib.sha256(kernel_code.encode("utf-8")).hexdigest()
         if cache_key in self._compile_cache:
