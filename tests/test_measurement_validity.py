@@ -28,8 +28,7 @@ import numpy as np
 from operator_agent import Conductor, KernelDatabase, MockGPU
 from operator_agent.measurement import (
     CONTAMINATION_UTIL_PCT, LAUNCH_DOMINANCE_UNINFORMATIVE, LAUNCH_DOMINANCE_VALID,
-    MeasurementAssessment, Validity, assess, launch_dominance, net_of_floor,
-    net_of_floor_speedup,
+    MeasurementAssessment, Validity, assess, launch_dominance,
 )
 from operator_agent.remote_executor import RemoteExecutor
 from operator_agent.schemas import (
@@ -38,10 +37,23 @@ from operator_agent.schemas import (
 )
 from operator_agent.verifier import Verifier
 
-# H20 实测地板 (docs/research/01 第一节): median=20.24 min=18.69 µs
+# H20 launch 开销 (空 Triton 核, CUDA event 计时, 不冲刷 L2):
+#   docs/research/01 实测 median=20.24 min=18.69 µs
+#   benchmarks/calibrate_l2_flush_effect.py 复测 median=20.03 min=18.30 µs
+# 两次相差 ~1%, 取先标定的 20.24。
+#
+# ⚠️ 这个数的含义被复测修正过: 同一个空核在**冲刷 L2 后**只测得 4.64 µs, 所以
+# 20.24 µs 不是恒定的执行开销, 而是「空闲 GPU 上 CUDA event 窗口吃进的 launch
+# 延迟」。runner 现在按 Triton do_bench 口径冲刷 L2, 报的是净执行时间, 因此
+# launch_dominance 的分母必须是 floor+net 而不是 net。详见 docs/research/32。
 H20_FLOOR_US = 20.24
 H20_FLOOR_MIN_US = 18.69
 H20_HW_INFO = {"name": "NVIDIA H20", "device": "cuda", "compute_capability": "9.0"}
+
+# 冲刷 L2 后的真机净执行时间 (benchmarks/calibrate_l2_flush_effect.py, H20)
+NET_MS_LAYERNORM_SMALL = 0.00739      # 1024×768, 不冲刷时是 0.02192
+NET_MS_LAYERNORM_LARGE = 0.1637       # 16384×6144
+NET_MS_MATMUL_4096 = 0.97992          # 4096³ fp16, 不冲刷时是 0.99304
 
 PYTHON_MATMUL = "import numpy as np\n\ndef kernel(A, B):\n    return A @ B\n"
 
@@ -51,12 +63,24 @@ PYTHON_MATMUL = "import numpy as np\n\ndef kernel(A, B):\n    return A @ B\n"
 class TestLaunchDominance(unittest.TestCase):
 
     def test_layernorm_measured_case(self):
-        """docs/research/01 的 layernorm 1024×768: 候选 median 0.0316 ms"""
-        self.assertAlmostEqual(launch_dominance(H20_FLOOR_US, 0.0316), 0.6405, places=4)
+        """真机净时间 7.39 µs → launch 占端到端的 73.3%"""
+        self.assertAlmostEqual(
+            launch_dominance(H20_FLOOR_US, NET_MS_LAYERNORM_SMALL), 0.7325, places=4)
 
     def test_matmul_measured_case(self):
-        """docs/research/01 的 matmul 4096³: 候选 median 1.040 ms → 地板占比 1.9%"""
-        self.assertAlmostEqual(launch_dominance(H20_FLOOR_US, 1.040), 0.0195, places=4)
+        """真机净时间 979.9 µs → launch 只占 2.0%"""
+        self.assertAlmostEqual(
+            launch_dominance(H20_FLOOR_US, NET_MS_MATMUL_4096), 0.0202, places=4)
+
+    def test_never_exceeds_one(self):
+        """floor/(floor+net) 恒 < 1 —— 这正是修正前 floor/net 做不到的
+
+        修正前拿「不冲刷口径的地板」除「冲刷口径的净时间」, layernorm 1024×768
+        实测算出 2.81。一个 >1 的"占比"是口径混用的信号。
+        """
+        for net in (1e-9, 1e-6, 0.001, 1.0, 1000.0):
+            with self.subTest(net=net):
+                self.assertLess(launch_dominance(H20_FLOOR_US, net), 1.0)
 
     def test_none_when_floor_unknown(self):
         self.assertIsNone(launch_dominance(None, 1.0))
@@ -71,8 +95,9 @@ class TestAssessTiers(unittest.TestCase):
     """阈值边界。0.10 / 0.30 是 docs/research/01 的经验分界, 不是推导值"""
 
     def _dom_for(self, dominance):
-        """反解出能产生指定 dominance 的 median 时间 (ms)"""
-        return (H20_FLOOR_US / 1000.0) / dominance
+        """反解出能产生指定 dominance 的净时间 (ms): d = f/(f+net) → net = f(1-d)/d"""
+        f = H20_FLOOR_US / 1000.0
+        return f * (1.0 - dominance) / dominance
 
     def _assess_dom(self, dominance, **kw):
         return assess(median_time_ms=self._dom_for(dominance),
@@ -135,40 +160,26 @@ class TestUnknownFloorIsNotSilentlyValid(unittest.TestCase):
         self.assertTrue(m["measurement_validity_reasons"])
 
 
-class TestNetOfFloor(unittest.TestCase):
+class TestNoNetOfFloorMetric(unittest.TestCase):
+    """「扣除地板后的净值/净加速比」这个指标已被删除, 别再把它加回来
 
-    def test_subtracts_floor(self):
-        # dominance = 20.24/1000 / 0.0316 = 0.6405 → net = 0.0316 * 0.3595
-        self.assertAlmostEqual(net_of_floor(H20_FLOOR_US, 0.0316), 0.011361, places=5)
+    它建立在「runner 报的 median 含 launch 开销」这个前提上。真机标定
+    (benchmarks/calibrate_l2_flush_effect.py) 推翻了前提: runner 现在按 Triton
+    do_bench 口径每次计时前冲刷 256 MB L2, 冲刷把 GPU 填满, launch 延迟被藏在
+    事件窗口之外, 所以报出来的**已经是净执行时间**。再减一次地板是重复扣除。
 
-    def test_clamped_at_zero(self):
-        self.assertEqual(net_of_floor(H20_FLOOR_US, 0.001), 0.0)
+    而且它在地板支配区会产出低于物理下界的噪声: layernorm 1024×768 的 Eager
+    基线不冲刷时 median=19.62 µs 而地板 20.24 µs, 扣完是负的。
+    """
 
-    def test_none_when_floor_unknown(self):
-        self.assertIsNone(net_of_floor(None, 1.0))
+    def test_module_exposes_no_net_of_floor(self):
+        import operator_agent.measurement as mod
+        self.assertFalse([n for n in dir(mod) if "net_of_floor" in n],
+                         "net_of_floor* 已删除: 冲刷后的 median 本身就是净值")
 
-    def test_net_speedup_is_higher_than_measured_when_candidate_is_faster(self):
-        """扣掉一个共同的加性开销后, 快的一侧优势被放大 → 净值比高于实测比
-
-        这正是 launch 地板把加速比压向 1.0 的机制 (docs/research/01)。
-        两侧都必须明显大于地板, 否则见下条。
-        """
-        candidate_ms, baseline_ms = 0.100, 0.150
-        measured = baseline_ms / candidate_ms
-        net = net_of_floor_speedup(H20_FLOOR_US, candidate_ms, baseline_ms)
-        self.assertAlmostEqual(measured, 1.5, places=4)
-        self.assertAlmostEqual(net, 1.627, places=3)
-        self.assertGreater(net, measured)
-
-    def test_net_speedup_refused_when_either_side_is_floor_dominated(self):
-        """layernorm 那一档: 基线 20.6 µs vs 地板 20.24 µs, 净剩 0.36 µs, 低于该
-        shape 0.86 µs 的 roofline 下界 —— 差值全是噪声, 相除出来的数字没有意义。
-        """
-        self.assertIsNone(net_of_floor_speedup(H20_FLOOR_US, 0.0316, 0.0206))
-        self.assertIsNone(net_of_floor_speedup(H20_FLOOR_US, 1.000, 0.0206))
-
-    def test_net_speedup_none_when_candidate_swallowed_by_floor(self):
-        self.assertIsNone(net_of_floor_speedup(H20_FLOOR_US, 0.001, 0.030))
+    def test_metrics_carry_no_net_of_floor_keys(self):
+        m = assess(median_time_ms=0.1, launch_floor_us=H20_FLOOR_US).as_metrics()
+        self.assertFalse([k for k in m if "net_of_floor" in k], m)
 
 
 class TestDocumentedVerdictsAreStableUnderFloorChoice(unittest.TestCase):
@@ -177,14 +188,26 @@ class TestDocumentedVerdictsAreStableUnderFloorChoice(unittest.TestCase):
     def test_layernorm_uninformative_either_way(self):
         for floor in (H20_FLOOR_US, H20_FLOOR_MIN_US):
             with self.subTest(floor=floor):
-                self.assertIs(assess(median_time_ms=0.0316, launch_floor_us=floor).validity,
-                              Validity.UNINFORMATIVE)
+                self.assertIs(
+                    assess(median_time_ms=NET_MS_LAYERNORM_SMALL,
+                           launch_floor_us=floor).validity,
+                    Validity.UNINFORMATIVE)
+
+    def test_large_layernorm_degraded_either_way(self):
+        for floor in (H20_FLOOR_US, H20_FLOOR_MIN_US):
+            with self.subTest(floor=floor):
+                self.assertIs(
+                    assess(median_time_ms=NET_MS_LAYERNORM_LARGE,
+                           launch_floor_us=floor).validity,
+                    Validity.DEGRADED)
 
     def test_matmul_valid_either_way(self):
         for floor in (H20_FLOOR_US, H20_FLOOR_MIN_US):
             with self.subTest(floor=floor):
-                self.assertIs(assess(median_time_ms=1.040, launch_floor_us=floor).validity,
-                              Validity.VALID)
+                self.assertIs(
+                    assess(median_time_ms=NET_MS_MATMUL_4096,
+                           launch_floor_us=floor).validity,
+                    Validity.VALID)
 
 
 # ─── 二、Verifier 把三态写进 metrics ─────────────────────────
@@ -234,26 +257,28 @@ class TestVerifierEmitsValidity(unittest.TestCase):
         return r, buf.getvalue()
 
     def test_h20_floor_is_picked_up_from_hardware_caps(self):
-        r, _ = self._l3(_remote_verifier(candidate_ms=1.040, baseline_ms=1.10))
+        r, _ = self._l3(_remote_verifier(candidate_ms=NET_MS_MATMUL_4096, baseline_ms=1.10))
         self.assertEqual(r.metrics["launch_floor_us"], H20_FLOOR_US)
 
     def test_big_shape_is_valid(self):
-        r, _ = self._l3(_remote_verifier(candidate_ms=1.040, baseline_ms=1.10))
+        r, _ = self._l3(_remote_verifier(candidate_ms=NET_MS_MATMUL_4096, baseline_ms=1.10))
         self.assertEqual(r.metrics["measurement_validity"], Validity.VALID.value)
         self.assertTrue(r.metrics["measurement_can_disable_recipe"])
 
     def test_tiny_shape_is_uninformative_and_says_so_in_message(self):
-        """layernorm 1024×768 那一档: 数字描述的是驱动派发, 不是核质量"""
-        r, out = self._l3(_remote_verifier(candidate_ms=0.0316, baseline_ms=0.0206))
+        """layernorm 1024×768 那一档: 净时间 7.39 µs, launch 占端到端 73%"""
+        r, out = self._l3(_remote_verifier(candidate_ms=NET_MS_LAYERNORM_SMALL,
+                                           baseline_ms=0.00995))
         self.assertEqual(r.metrics["measurement_validity"], Validity.UNINFORMATIVE.value)
         self.assertFalse(r.metrics["measurement_can_gate"])
         # message 是 Fixer / SearchAgent 的 prompt 素材, 是唯一保证被下游看到的通道
         self.assertIn("测量有效性=uninformative", r.message)
-        self.assertIn("launch 地板", r.message)
+        self.assertIn("launch", r.message)
 
     def test_contamination_marks_degraded(self):
         """docs/research/00 记录的实测: matmul 那轮测量前 util=14%"""
-        r, _ = self._l3(_remote_verifier(candidate_ms=1.040, baseline_ms=1.10, util=14))
+        r, _ = self._l3(_remote_verifier(candidate_ms=NET_MS_MATMUL_4096,
+                                         baseline_ms=1.10, util=14))
         self.assertTrue(r.metrics["benchmark_contaminated"])
         self.assertEqual(r.metrics["measurement_validity"], Validity.DEGRADED.value)
         self.assertFalse(r.metrics["measurement_can_disable_recipe"])
@@ -267,18 +292,6 @@ class TestVerifierEmitsValidity(unittest.TestCase):
         self.assertIsNone(r.metrics.get("launch_floor_us"))
         self.assertTrue(any("未做地板支配检查" in x
                             for x in r.metrics["measurement_validity_reasons"]))
-
-    def test_net_of_floor_speedup_reported_when_both_sides_clear_the_floor(self):
-        r, _ = self._l3(_remote_verifier(candidate_ms=0.100, baseline_ms=0.150))
-        self.assertIn("speedup_net_of_floor", r.metrics)
-        self.assertGreater(r.metrics["speedup_net_of_floor"],
-                           r.metrics["speedup_vs_baseline"])
-
-    def test_net_of_floor_speedup_omitted_when_floor_dominated(self):
-        """layernorm 那一档不报第二指标: 净值由噪声相除得来, 报出来比不报更糟"""
-        r, _ = self._l3(_remote_verifier(candidate_ms=0.0316, baseline_ms=0.0206))
-        self.assertNotIn("speedup_net_of_floor", r.metrics)
-
 
 # ─── 三、Conductor 真的按三态改变行为 ─────────────────────────
 
@@ -317,7 +330,7 @@ class LaunchDominatedGPU(MockGPU):
       常量: 两个用例之间唯一的变量就只剩测量有效性。
     """
 
-    def __init__(self, candidate_ms=0.0316, gflops=16.0):
+    def __init__(self, candidate_ms=NET_MS_LAYERNORM_SMALL, gflops=16.0):
         super().__init__()
         self.name = "NVIDIA H20"
         self._candidate_ms = candidate_ms
@@ -366,28 +379,28 @@ class TestConductorIgnoresUninformativeMeasurement(unittest.TestCase):
         return buf.getvalue()
 
     def test_uninformative_rounds_run_full_budget(self):
-        out = self._run(0.0316, max_rounds=3)
+        out = self._run(NET_MS_LAYERNORM_SMALL, max_rounds=3)
         self.assertEqual(sum(1 for r in (1, 2, 3) if f"轮次 {r}/3" in out), 3)
         self.assertNotIn("提前终止", out)
 
     def test_uninformative_rounds_do_not_disable_recipes(self):
         """断言后果而不是日志: 配方被禁用的可观测后果是后续轮次 Planner 无方可选"""
-        out = self._run(0.0316, max_rounds=3)
+        out = self._run(NET_MS_LAYERNORM_SMALL, max_rounds=3)
         self.assertNotIn("性能未改善，禁用配方", out)
         self.assertNotIn("本轮无新增优化配方", out)
 
     def test_uninformative_rounds_are_announced(self):
-        out = self._run(0.0316, max_rounds=3)
+        out = self._run(NET_MS_LAYERNORM_SMALL, max_rounds=3)
         self.assertIn("测量有效性=uninformative", out)
         self.assertIn("3 轮的 L3 测量被判为不可信", out)
 
     def test_valid_measurement_still_terminates_on_real_stagnation(self):
         """反向保护: 不得把改造做成「干脆不做停滞判定」
 
-        候选计时 1.040 ms (matmul 4096³ 那一档) → launch_dominance 1.9% → VALID,
+        候选净时间 979.9 µs (matmul 4096³ 那一档) → launch_dominance 2.0% → VALID,
         于是停滞判定照常生效, max_stagnant_rounds=2 下第 3 轮不再执行。
         """
-        out = self._run(1.040, max_rounds=3)
+        out = self._run(NET_MS_MATMUL_4096, max_rounds=3)
         self.assertNotIn("测量有效性=", out)
         self.assertIn("提前终止", out)
 

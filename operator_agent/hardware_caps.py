@@ -51,10 +51,17 @@ class HardwareCaps:
     registers_per_thread: int = 255 # 每线程寄存器数
 
     # ---- 测量口径 ----
-    # 空核的端到端 launch 开销, 用于判断 L3 数字是否被 launch 支配 (缺口 1)。
-    # 量的是 agent 基准实际要付的完整代价 —— Python 侧 grid 计算 + Triton JIT
-    # 派发 + 参数编组 + driver launch, 而不是 driver 层那 3~5 µs; L3 基准走的
-    # 就是这条路。取 median 而非 min, 与候选侧用 median 计时保持同口径。
+    # **空闲 GPU 上 CUDA event 窗口吃进的 launch 延迟**, 用于判断 L3 数字是否被
+    # launch 支配 (缺口 1)。空 Triton 核, 25 预热 + 200 次取 median。
+    #
+    # ⚠️ 这不是「launch 的固有开销」, 两者差 4 倍: 真机标定发现同一个空核在
+    # GPU 被填满时 (Triton do_bench 式的 256MB L2 冲刷排在 start.record() 之前)
+    # 只测得 4.64 µs, 而 GPU 空闲时测得 20.03 µs —— 差的那 15 µs 是 GPU 空等
+    # 命令到达的时间, 被事件窗口计了进去。见 docs/research/32 第二节。
+    #
+    # runner 现在按冲刷口径报**净执行时间**, 所以 measurement.launch_dominance
+    # 的分母必须是 floor+net 而不是 net, 否则会算出 >1 的「占比」。
+    #
     # None = 该设备未实测。measurement.assess() 拿到 None 会跳过这项检查并在
     # metrics 里写明「未做检查」, 不会默认放行 —— 缺证据不等于有效。
     launch_floor_us: Optional[float] = None
@@ -146,8 +153,9 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
         has_tensor_core=True, tensor_core_version=4, tensor_core_m_k_n=(16, 16, 16),
         vector_width_bytes=16, sub_group_size=32,
         global_mem_bandwidth_gbs=3680.0, l2_cache_size_kb=61440,
-        # 2026-09-24 实测 (空 Triton 核, CUDA event 计时, 25 预热 + 200 取中位):
-        # median=20.24 min=18.69。见 docs/research/01 第一节。
+        # 2026-09-24 标定 (空 Triton 核, CUDA event, 25 预热 + 200 取中位):
+        # median=20.24 min=18.69。2026-09-25 复测 median=20.03 min=18.30, 差 ~1%。
+        # ⚠️ 同一个空核在 L2 冲刷口径下只有 4.64 µs —— 见字段注释与 docs/research/32。
         launch_floor_us=20.24,
         shared_mem_per_sm_kb=228, shared_mem_bank_count=32,
         registers_per_thread=255,

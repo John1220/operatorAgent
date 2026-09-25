@@ -137,6 +137,6 @@ for label, code, kernel_type, inputs, traffic_mb, roof_us in CASES:
     for reason in m.get("measurement_validity_reasons") or []:
         print(f"    - {reason}")
     print(f"  speedup={m.get('speedup_vs_baseline')}  "
-          f"speedup_net_of_floor={m.get('speedup_net_of_floor')}  "
+          f"runs={m.get('runs')}(请求 {m.get('runs_requested')})  "
           f"contaminated={m.get('benchmark_contaminated')} "
           f"(util={m.get('gpu_util_pct')}%, 其他进程={m.get('gpu_other_procs')})")

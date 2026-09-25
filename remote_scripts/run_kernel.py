@@ -616,16 +616,30 @@ def run_benchmark(code: str, inputs: dict, warmup: int = 3, repeat: int = 10) ->
     return _benchmark_torch_numpy(code, real_inputs, warmup, repeat, lang)
 
 
-def _timed_runs(fn, repeat: int, device_is_cuda: bool) -> list[float]:
+def _timed_runs(fn, repeat: int, device_is_cuda: bool, flush_l2: bool = True) -> list[float]:
     """重复执行 fn 并返回每轮耗时 (毫秒)。
 
     GPU 上使用 CUDA event 计时, 避免 CPU 端 time.perf_counter 引入的
     launch 调度与同步噪声, 提升 L3 性能验证精度 (对 autotune 选优更可靠)。
+
+    每次计时前冲刷 L2, 做法直接取自 Triton 官方 `do_bench`
+    (`triton/python/triton/testing.py:299,329` + `third_party/nvidia/backend/
+    driver.py:398-408`): 一个 256 MB 的 buffer, 每轮 `zero_()` 一遍, 且冲刷在
+    event 窗口**之外** (同流有序, 所以 start.record() 一定在冲刷完成之后)。
+
+    为什么必须跟: H20 的 L2 是 60 MiB。layernorm 1024×768 读写共 3.15 MB, 第一轮
+    之后就整份常驻 L2, 此后每次"测量"量的都是 L2 命中而不是 HBM; 而 verifier 拿
+    这个时间去和 3.68 TB/s 的 **HBM** 峰值比, 算出的带宽利用率因此系统性偏高。
+    matmul 4096³ 的 100 MB 流量超出 L2 只有部分命中 —— 偏差方向相同但幅度不同,
+    也就是说候选与基线被偏袒的程度不一样, 连加速比本身都是脏的。
     """
     import torch
     times = []
+    flush_buf = _l2_flush_buffer() if (device_is_cuda and flush_l2) else None
     for _ in range(repeat):
         if device_is_cuda:
+            if flush_buf is not None:
+                flush_buf.zero_()
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
@@ -640,17 +654,71 @@ def _timed_runs(fn, repeat: int, device_is_cuda: bool) -> list[float]:
     return times
 
 
+_L2_FLUSH_BYTES = 256 * 1024 * 1024   # 与 Triton do_bench 一致
+_l2_flush_cache = None
+
+
+def _l2_flush_buffer():
+    """惰性分配 256 MB 冲刷缓冲; 非 CUDA 环境下调用方不会走到这里"""
+    global _l2_flush_cache
+    if _l2_flush_cache is None:
+        import torch
+        _l2_flush_cache = torch.empty(_L2_FLUSH_BYTES // 4, dtype=torch.int, device="cuda")
+    return _l2_flush_cache
+
+
+# 时间预算 (毫秒) 而不是固定次数决定重复轮数, 同样取自 Triton do_bench
+# (`testing.py:273-275,313-314`: warmup=25 / rep=100 的单位是**毫秒**,
+# n_repeat = max(1, int(rep / estimate_ms)))。
+# 固定 repeat 对一个 20 µs 的核只有 0.2 ms 的总测量窗口, 统计上毫无意义, 而 L3
+# 的加速比要拿去做配方禁用这种**永久**决策。取 25/50 而不是官方的 25/100:
+# 一次 L3 要测候选 + 四条基线共五组, 且这台机器是共享的、每次评测都在 LLM 循环
+# 的关键路径上。
+WARMUP_MS_BUDGET = 25
+REPEAT_MS_BUDGET = 50
+MAX_REPEATS = 5000        # 上限兜底: 极快的核不至于把一次 L3 拖到几十秒
+
+
+def _resolve_counts(fn, warmup: int, repeat: int, device_is_cuda: bool) -> tuple:
+    """按时间预算把 (warmup, repeat) 两个「次数」折算成实际轮数
+
+    估时只跑一次 (5 轮取均值, 不计入结果), 两个预算共用它 —— do_bench 也是先估
+    一次再同时算 n_warmup 与 n_repeat (`testing.py:310-314`)。估时不冲 L2, 因为
+    它只用来定轮数, 不进结果。
+
+    结果不低于调用方给的次数, 所以慢核行为完全不变, 只有快核会被自动加采样。
+    估时失败时退回原值: 预算是增强, 不该成为新的失败点。
+    """
+    if not device_is_cuda:
+        return warmup, repeat
+    try:
+        est = sum(_timed_runs(fn, 5, True, flush_l2=False)) / 5
+    except Exception:
+        return warmup, repeat
+    if est <= 0:
+        return warmup, repeat
+    n_warmup = int(min(max(warmup, WARMUP_MS_BUDGET / est), MAX_REPEATS))
+    n_repeat = int(min(max(repeat, REPEAT_MS_BUDGET / est), MAX_REPEATS))
+    return n_warmup, n_repeat
+
+
 def _bench_callable(fn, warmup: int, repeat: int, device_is_cuda: bool) -> dict:
     import torch
-    for _ in range(warmup):
+    fn()                       # 先跑一次吃掉 JIT/首次派发, 否则估时会严重偏大
+    if device_is_cuda:
+        torch.cuda.synchronize()
+    n_warmup, n_repeat = _resolve_counts(fn, warmup, repeat, device_is_cuda)
+    for _ in range(n_warmup):
         fn()
     if device_is_cuda:
         torch.cuda.synchronize()
-    times = _timed_runs(fn, repeat, device_is_cuda)
+    times = _timed_runs(fn, n_repeat, device_is_cuda)
     times.sort()
     return {"min_time_ms": round(times[0], 4), "median_time_ms": round(times[len(times)//2], 4),
             "avg_time_ms": round(sum(times) / len(times), 4), "max_time_ms": round(times[-1], 4),
-            "runs": repeat}
+            # 报实际跑的轮数, 不是调用方请求的: 快核会被自动加采样, 下游要知道
+            # 这个数字有多少样本撑着 (verifier 会把它摊进 L3 metrics)
+            "runs": len(times), "runs_requested": repeat}
 
 
 def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
@@ -777,12 +845,14 @@ def _benchmark_triton(code: str, real_inputs: dict, warmup: int, repeat: int) ->
 
         # 屏蔽包住 warmup + 整个 _timed_runs, 不逐次包裹 (开销理由同 _execute_triton)
         with shield_torch():
-            for _ in range(warmup):
-                _ = kernel_func(**torch_inputs)
+            call = lambda: kernel_func(**torch_inputs)
+            n_warmup, n_repeat = _resolve_counts(call, warmup, repeat, True)
+            for _ in range(n_warmup):
+                _ = call()
             torch.cuda.synchronize()
 
             # CUDA event 计时, 提升精度 (毫秒 -> 秒)
-            times = [t / 1000 for t in _timed_runs(lambda: kernel_func(**torch_inputs), repeat, True)]
+            times = [t / 1000 for t in _timed_runs(call, n_repeat, True)]
 
         avg_time = sum(times) / len(times)
         gflops, bandwidth = _compute_metrics(real_inputs, avg_time)
@@ -815,22 +885,25 @@ def _benchmark_torch_numpy(code: str, real_inputs: dict, warmup: int, repeat: in
             kernel_func = ns["kernel"]
 
             with shield_torch():
-                for _ in range(warmup):
-                    _ = kernel_func(**torch_inputs)
-                if torch.cuda.is_available():
+                call = lambda: kernel_func(**torch_inputs)
+                is_cuda = torch.cuda.is_available()
+                n_warmup, n_repeat = _resolve_counts(call, warmup, repeat, is_cuda)
+                for _ in range(n_warmup):
+                    _ = call()
+                if is_cuda:
                     torch.cuda.synchronize()
 
                 # CUDA event 计时 (毫秒 -> 秒), CPU 回退到 perf_counter
-                is_cuda = torch.cuda.is_available()
-                times = [t / 1000 for t in _timed_runs(lambda: kernel_func(**torch_inputs), repeat, is_cuda)]
+                times = [t / 1000 for t in _timed_runs(call, n_repeat, is_cuda)]
         else:
             ns = {"__name__": "__kernel__"}
             exec(code, ns)
             kernel_func = ns["kernel"]
             with shield_torch():
+                call = lambda: kernel_func(**real_inputs)
                 for _ in range(warmup):
-                    kernel_func(**real_inputs)
-                times = [t / 1000 for t in _timed_runs(lambda: kernel_func(**real_inputs), repeat, False)]
+                    call()
+                times = [t / 1000 for t in _timed_runs(call, repeat, False)]
 
         avg_time = sum(times) / len(times)
         gflops, bandwidth = _compute_metrics(real_inputs, avg_time)

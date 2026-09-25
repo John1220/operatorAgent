@@ -785,10 +785,6 @@ class Conductor:
               f"不禁用配方 / 不计入停滞轮次")
         for reason in m.get("measurement_validity_reasons") or []:
             print(f"  [Conductor]   - {reason}")
-        net = m.get("speedup_net_of_floor")
-        if net is not None:
-            print(f"  [Conductor]   扣除 launch 地板后的加速比 = {net:.4f} "
-                  f"(仅供参考, 不作为判据)")
         return False
 
     # ─── 可复现性 Harness: 快照读写辅助 ────────────────────────────────────────────

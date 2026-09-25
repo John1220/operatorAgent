@@ -58,7 +58,6 @@ class MeasurementAssessment:
     reasons: List[str] = field(default_factory=list)
     launch_dominance: Optional[float] = None     # None = 地板未知, 无从判定
     launch_floor_us: Optional[float] = None
-    net_of_floor_time_ms: Optional[float] = None  # 扣除地板后的净时间
     contaminated: bool = False
 
     @property
@@ -89,53 +88,33 @@ class MeasurementAssessment:
             out["launch_dominance"] = round(self.launch_dominance, 4)
         if self.launch_floor_us is not None:
             out["launch_floor_us"] = self.launch_floor_us
-        if self.net_of_floor_time_ms is not None:
-            out["net_of_floor_time_ms"] = round(self.net_of_floor_time_ms, 5)
         return out
 
 
-def launch_dominance(launch_floor_us: Optional[float], median_time_ms: Optional[float]) -> Optional[float]:
-    """地板占候选 median 时间的比例; 任一侧缺失或非正则返回 None (无从判定)"""
+def launch_dominance(launch_floor_us: Optional[float], net_time_ms: Optional[float]) -> Optional[float]:
+    """端到端时间里 launch 开销占的比例; 任一侧缺失或非正则返回 None (无从判定)
+
+    runner 报的是**冲刷 L2 后**的净执行时间 (Triton `do_bench` 口径), 事件窗口里
+    已经不含 GPU 空等 launch 命令的那一段。而用户真正付出的端到端时间是
+    「launch 开销 + 净执行」, 所以占比是 `floor / (floor + net)`。
+
+    不能用 `floor / net`: 真机标定 (benchmarks/calibrate_l2_flush_effect.py, H20,
+    torch 2.14.0+cu130 / triton 3.8.0) 显示同一个空 Triton 核
+
+        不冲刷 median = 20.03 µs      冲刷 median = 4.64 µs
+
+    也就是说「20.24 µs 的 launch 地板」量的其实是**空闲 GPU 上事件窗口吃进的
+    launch 延迟**, 不是一个恒定的执行开销 —— 用 do_bench 的 256 MB 冲刷把 GPU
+    填满后, 同一个空核只剩 4.64 µs。冲刷前后是两个口径, 拿旧口径的地板去除新
+    口径的净时间会算出 >1 的值 (实测 layernorm 1024×768 得到 2.81), 那正是口径
+    混用的信号。
+    """
     if not launch_floor_us or launch_floor_us <= 0:
         return None
-    if not median_time_ms or median_time_ms <= 0:
+    if not net_time_ms or net_time_ms <= 0:
         return None
-    return (launch_floor_us / 1000.0) / median_time_ms
-
-
-def net_of_floor(launch_floor_us: Optional[float], median_time_ms: Optional[float]) -> Optional[float]:
-    """扣除 launch 地板后的净时间 (ms), 下限截到 0
-
-    前提是「候选与基线的 launch 开销相同」。对 Triton vs cuBLAS 这个假设并不严格
-    成立 (两者的派发路径不同, 真实差值未测, 见 docs/research/01 第六节未决问题 2),
-    所以净值只作为第二指标呈现, 不替代实测值。
-    """
-    dom = launch_dominance(launch_floor_us, median_time_ms)
-    if dom is None:
-        return None
-    return max(0.0, median_time_ms * (1.0 - dom))
-
-
-def net_of_floor_speedup(launch_floor_us: Optional[float],
-                         candidate_ms: Optional[float],
-                         baseline_ms: Optional[float]) -> Optional[float]:
-    """扣除地板后的加速比 (第二指标)。前提同 net_of_floor。
-
-    任一侧本身就被地板支配时返回 None。从一个几乎全是 launch 开销的时间里减掉
-    地板, 剩下的是噪声而不是计算时间: 实测 layernorm 1024×768 的 PyTorch Eager
-    基线 median=20.6 µs 而地板 20.24 µs, 净剩 0.36 µs —— 低于该 shape 0.86 µs
-    的 roofline 下界, 物理上不可能, 说明差值全是噪声。报一个由噪声相除得来的
-    数字比不报更糟。
-    """
-    for ms in (candidate_ms, baseline_ms):
-        dom = launch_dominance(launch_floor_us, ms)
-        if dom is None or dom > LAUNCH_DOMINANCE_UNINFORMATIVE:
-            return None
-    c = net_of_floor(launch_floor_us, candidate_ms)
-    b = net_of_floor(launch_floor_us, baseline_ms)
-    if not c or not b:
-        return None
-    return b / c
+    floor_ms = launch_floor_us / 1000.0
+    return floor_ms / (floor_ms + net_time_ms)
 
 
 def assess(median_time_ms: Optional[float] = None,
@@ -178,6 +157,5 @@ def assess(median_time_ms: Optional[float] = None,
         reasons=reasons,
         launch_dominance=dom,
         launch_floor_us=launch_floor_us,
-        net_of_floor_time_ms=net_of_floor(launch_floor_us, median_time_ms),
         contaminated=contaminated,
     )

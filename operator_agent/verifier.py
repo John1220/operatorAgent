@@ -466,7 +466,7 @@ class Verifier:
                 others = bench.get("gpu_other_procs")
                 metrics["gpu_shared_with_others"] = bool(others)
                 msg = self._assess_measurement(metrics, msg, kernel_min_ms,
-                                               baseline_ms=baseline_ms, gpu_util_pct=util)
+                                               gpu_util_pct=util)
                 if not metrics.get("benchmark_contaminated") and others:
                     msg += f" (注: 卡与 {others} 个其他进程共享, 瞬时 util={util}%)"
 
@@ -490,8 +490,7 @@ class Verifier:
             passed = speedup >= min_required
             msg = (f"加速比 {speedup:.2f}x vs {baseline['baseline_type']} "
                    f"(要求 >= {min_required:.2f}x, {bound}-bound)")
-            msg = self._assess_measurement(metrics, msg, kernel_min_ms,
-                                           baseline_ms=baseline["baseline_time_ms"])
+            msg = self._assess_measurement(metrics, msg, kernel_min_ms)
             print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
             return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                       passed=passed, message=msg, metrics=metrics)
@@ -508,7 +507,7 @@ class Verifier:
                                   passed=passed, message=msg, metrics=metrics)
 
     def _assess_measurement(self, metrics: dict, msg: str, candidate_ms,
-                            baseline_ms=None, gpu_util_pct=None) -> str:
+                            gpu_util_pct=None) -> str:
         """写入测量有效性三态判定, 返回追加了原因说明的 msg
 
         缺口 1 的失效方式不是「没算」而是「算了没人读」: `benchmark_contaminated`
@@ -528,12 +527,6 @@ class Verifier:
         metrics["benchmark_contaminated"] = assessment.contaminated
         if assessment.contaminated:
             metrics["contamination_reason"] = f"测量前 util={gpu_util_pct}%"
-        net = measurement.net_of_floor_speedup(
-            assessment.launch_floor_us, candidate_ms, baseline_ms)
-        if net is not None:
-            # 第二指标, 不替代实测加速比: 前提是候选与基线 launch 开销相同, 对
-            # Triton vs cuBLAS 并不严格成立 (docs/research/01 第六节未决问题 2)。
-            metrics["speedup_net_of_floor"] = round(net, 4)
         if assessment.reasons:
             msg += (f"  ⚠️ 测量有效性={assessment.validity.value}: "
                     + "; ".join(assessment.reasons))
