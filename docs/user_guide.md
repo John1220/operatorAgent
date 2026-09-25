@@ -136,8 +136,8 @@ from operator_agent import (
 
 # 1. 初始化 LLM 客户端
 llm = LLMClient(
-    base_url="https://tokenhub.tencentmaas.com/v1",
-    model="hy3",
+    base_url="https://your-llm-endpoint.example.com/v1",
+    model="your-model-name",
     api_key="your-api-key",
     temperature=0.3,
     max_tokens=4096,
@@ -166,7 +166,9 @@ task = TaskSchema(
 )
 
 # 3. 初始化后端（远程 SSH 或本地 MockGPU）
-backend = RemoteExecutor(mode="ssh", host="152.136.252.171", port=22, user="zhanghan")
+# host 传 ~/.ssh/config 里的 Host 别名即可; port/user/key_path 不传,
+# 由该 Host 块的 Port / User / IdentityFile 解析, 仓库与文档中不出现真实值
+backend = RemoteExecutor(mode="ssh", host="my-gpu-box")
 # 或使用 MockGPU: backend = MockGPU(name="MockA100", compute_units=108)
 
 # 4. 生成测试输入
@@ -252,7 +254,7 @@ print(artifact.code)
 ```yaml
 # LLM 配置
 llm:
-  base_url: "http://152.136.252.171:8092/v1"    # LLM API 地址
+  base_url: "https://your-llm-endpoint.example.com/v1"  # LLM API 地址
   model: "Qwen/Qwen3.5-9B"                        # 模型名称
   temperature: 0.3                                # 温度参数（0-1，越低越确定性）
   max_tokens: 4096                                # 最大生成 token 数
@@ -262,15 +264,15 @@ llm:
 # 远程执行配置
 remote:
   mode: "auto"                                    # 连接模式: ssh/http/local/auto
-  work_dir: "/data/zhanghan/operator_agent_runner" # 远程工作目录
+  work_dir: "~/operator_agent"                    # 远程工作目录
   ssh:
-    host: "152.136.252.171"                       # SSH 主机
-    port: 22                                      # SSH 端口
-    user: "root"                                  # SSH 用户名
-    key_path: ""                                  # 私钥路径（从 REMOTE_SSH_KEY 读取）
-    runner_path: "/data/zhanghan/operator_agent_runner/run_kernel.py"
+    host: "my-gpu-box"                            # SSH 主机或 ~/.ssh/config 别名
+    port: null                                    # 留空则由 ssh config 的 Port 解析
+    user: null                                    # 留空则由 ssh config 的 User 解析
+    key_path: null                                # 留空则由 IdentityFile 解析
+    runner_path: "~/operator_agent/run_kernel.py"
   http:
-    url: "http://152.136.252.171:8091"            # HTTP 接口地址
+    url: ""                                       # HTTP 接口地址（不用 http 模式则留空）
 
 # Prompt 模板目录
 prompts_dir: "operator_agent/prompts"
@@ -301,11 +303,12 @@ hardware_presets:
 | 环境变量 | 说明 | 默认值 |
 |---------|------|-------|
 | `LLM_API_KEY` | LLM API 密钥 | - |
-| `REMOTE_SSH_HOST` | SSH 主机 | 152.136.252.171 |
-| `REMOTE_SSH_PORT` | SSH 端口 | 22 |
-| `REMOTE_SSH_USER` | SSH 用户名 | zhanghan |
-| `REMOTE_SSH_KEY` | SSH 私钥路径 | ~/.ssh/id_rsa |
-| `REMOTE_RUNNER_PATH` | 远程脚本路径 | ~/operator_agent_runner/run_kernel.py |
+| `REMOTE_SSH_HOST` | SSH 主机或 ssh config 别名 | algorithm-h20 |
+| `REMOTE_SSH_PORT` | SSH 端口 | 不设，由 ssh config 解析 |
+| `REMOTE_SSH_USER` | SSH 用户名 | 不设，由 ssh config 解析 |
+| `REMOTE_SSH_KEY` | SSH 私钥路径 | 不设，由 IdentityFile 解析 |
+| `REMOTE_WORK_DIR` | 远程工作目录 | ~/operator_agent |
+| `REMOTE_RUNNER_PATH` | 远程脚本路径 | {work_dir}/run_kernel.py |
 | `REMOTE_HTTP_URL` | HTTP 接口地址 | - |
 
 ### 4.3 Conductor 参数
@@ -364,8 +367,8 @@ def cleanup_old_logs(log_dir=None, keep_count=10):
 from operator_agent import LLMClient
 
 llm = LLMClient(
-    base_url="https://tokenhub.tencentmaas.com/v1",
-    model="hy3",
+    base_url="https://your-llm-endpoint.example.com/v1",
+    model="your-model-name",
     api_key="your-api-key",
 )
 try:
@@ -383,17 +386,17 @@ except Exception as e:
 
 1. **检查 SSH 连接**：
    ```bash
-   ssh zhanghan@152.136.252.171 -p 22
+   ssh my-gpu-box          # 别名由 ~/.ssh/config 提供 host/port/user/key
    ```
 
 2. **检查远程 uv 环境**：
    ```bash
-   ssh zhanghan@152.136.252.171 "cd /data/zhanghan/operator_agent_runner && uv run python -c \"import triton; print('Triton OK')\""
+   ssh my-gpu-box "cd ~/operator_agent && uv run python -c \"import triton; print('Triton OK')\""
    ```
 
 3. **检查远程脚本是否存在**：
    ```bash
-   ssh zhanghan@152.136.252.171 "ls /data/zhanghan/operator_agent_runner/run_kernel.py"
+   ssh my-gpu-box "ls ~/operator_agent/run_kernel.py"
    ```
 
 ### 5.3 编译验证失败（L1 FAIL）

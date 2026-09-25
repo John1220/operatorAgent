@@ -19,7 +19,9 @@
 
 环境变量 (platform="kunlunxin", 服务器已下线, 保留作为接入其他 GPU 平台的范例):
   REMOTE_SSH_HOST_KL / REMOTE_SSH_PORT_KL / REMOTE_SSH_USER_KL / REMOTE_SSH_KEY_KL
-  REMOTE_WORK_DIR_KL / REMOTE_RUNNER_PATH_KL
+  REMOTE_WORK_DIR_KL / REMOTE_RUNNER_PATH_KL / REMOTE_PYTHON_KL
+  脱敏约定与 nvidia 分支一致: host 默认只是 ssh 别名 kunlunxin-p800,
+  port / user / key 默认不设, 交由 ~/.ssh/config 的 Host 块解析。
 """
 
 import os
@@ -88,19 +90,24 @@ class SSHExecutor:
         if platform == "kunlunxin":
             # 昆仑芯 P800 (服务器已下线)。分支保留作为"非 NVIDIA 平台"的接入范例:
             # 不走 uv, 用厂商预装 conda python + 专用 runner, 且需要额外的 LD_LIBRARY_PATH
-            self.host = host or os.environ.get("REMOTE_SSH_HOST_KL", "43.180.254.145")
-            self.port = port or int(os.environ.get("REMOTE_SSH_PORT_KL", "22"))
-            self.user = user or os.environ.get("REMOTE_SSH_USER_KL", "zhanghan")
-            self.key_path = key_path or os.environ.get(
-                "REMOTE_SSH_KEY_KL", os.path.expanduser("~/.ssh/yita_zhanghan.pem")
-            )
+            #
+            # 连接信息与下面 nvidia 分支同一套脱敏约定: host 只给 ~/.ssh/config 里的
+            # 别名, port / user / key_path 默认 None 交由该 Host 块解析, 仓库中因此
+            # 不出现真实 IP、端口、用户名或密钥路径。
+            self.host = host or os.environ.get("REMOTE_SSH_HOST_KL", "kunlunxin-p800")
+            _env_port_kl = os.environ.get("REMOTE_SSH_PORT_KL", "")
+            self.port = port or (int(_env_port_kl) if _env_port_kl else None)
+            self.user = user or os.environ.get("REMOTE_SSH_USER_KL") or None
+            self.key_path = key_path or os.environ.get("REMOTE_SSH_KEY_KL") or None
             self.work_dir = work_dir or os.environ.get(
-                "REMOTE_WORK_DIR_KL", "/home/zhanghan/operator_agent_runner"
+                "REMOTE_WORK_DIR_KL", "~/operator_agent_runner"
             )
             self.remote_runner_path = remote_runner_path or os.environ.get(
                 "REMOTE_RUNNER_PATH_KL", f"{self.work_dir}/run_kernel_xpu.py"
             )
-            self._python_cmd = "/data1/miniconda3/envs/vllm_xpu/bin/python"
+            self._python_cmd = os.environ.get(
+                "REMOTE_PYTHON_KL", "/data1/miniconda3/envs/vllm_xpu/bin/python"
+            )
             self._runner_script = "run_kernel_xpu.py"
         else:
             # 默认走 ~/.ssh/config 里的 Host 别名: 端口 / 用户名 / 密钥由该 Host 块提供,

@@ -15,7 +15,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from benchmarks._remote_bench import run_remote_benchmark, print_benchmark_table
+from benchmarks._remote_bench import (run_remote_benchmark, print_benchmark_table,
+                                     resolve_ssh_config, ssh_label)
 
 
 # ─── Official Triton LayerNorm Forward Kernel ────────────────────────────
@@ -124,11 +125,9 @@ def main():
     print("=" * 70)
 
     # Connect to remote GPU
-    ssh_host = os.environ.get("REMOTE_SSH_HOST", "152.136.252.171")
-    ssh_user = os.environ.get("REMOTE_SSH_USER", "zhanghan")
-    ssh_port = int(os.environ.get("REMOTE_SSH_PORT", "22"))
+    ssh_host, ssh_user, ssh_port, _, _ = resolve_ssh_config()
 
-    print(f"\n  Remote GPU: {ssh_host}:{ssh_port}")
+    print(f"\n  Remote GPU: {ssh_label(ssh_host, ssh_port)}")
     print(f"  Test shapes: {len(TEST_SHAPES)} configurations")
     print(f"  Precision: FP16 (forward pass only)")
     print()

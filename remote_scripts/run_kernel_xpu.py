@@ -54,7 +54,7 @@ os.makedirs(os.environ["TORCH_EXTENSIONS_DIR"], exist_ok=True)
 # 将 XBLAS JIT 缓存重定向到用户可写目录，避免 /tmp 权限问题
 _user_cache = os.path.expanduser("~/.xpu_jit_cache")
 os.makedirs(_user_cache, exist_ok=True)
-# 用 sudo chmod 修复 /tmp 下 xblas 相关目录权限 (zhanghan 有免密 sudo)
+# 用 sudo -n (免密 sudo, 无则静默失败) 修复 /tmp 下 xblas 相关目录权限
 for tmp_path in ["/tmp/kXPU3", "/tmp/xpujitc-temp", "/tmp/.xblas_cache"]:
     try:
         if os.path.exists(tmp_path):

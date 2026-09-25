@@ -5,8 +5,8 @@ A100 自动调优 Triton Matmul 验证脚本
 (tile 大小 / warp 数 / 流水线阶段数) 组合，并与 cuBLAS (torch.matmul, FP16)
 基线对比性能和精度。
 
-运行方式 (在远程 A100 上):
-    cd /data/zhanghan/operator_agent_runner && uv run python triton_autotune_matmul.py
+运行方式 (在远程 GPU 机器上, 工作目录由 REMOTE_WORK_DIR 或 ssh 别名约定给出):
+    cd ~/operator_agent && uv run python triton_autotune_matmul.py
 """
 
 import triton
