@@ -1068,8 +1068,11 @@ def _mm_persistent(a_ptr, b_ptr, c_ptr, M, N, K,
 
 - **triton_template**:
 ```python
+# ⚠️ 设备函数**不要叫 `kernel`**: 调用方固定 `kernel(**输入)` 全关键字调用, 所以
+# `kernel` 必须是收张量的 wrapper。本例以前写成 `def kernel(x_ptr, y_ptr, n, BLOCK)`,
+# 照着抄就会被 L1 的接口契约检查直接判掉 (也都会在 L2 抛 TypeError) —— 见 docs/research/41。
 @triton.jit(launch_pdl=True)                       # ← 装饰器上要写
-def kernel(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
+def _pdl_copy(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     tl.extra.cuda.gdc_wait()                       # ← 读上游数据之前
@@ -1077,8 +1080,13 @@ def kernel(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
     tl.store(y_ptr + offs, x * 2, mask=offs < n)
     tl.extra.cuda.gdc_launch_dependents()          # ← 写完之后再放行后继
 
-# 启动点同样要写, 只写一处不生效:
-kernel[grid](x, y, n, BLOCK=1024, launch_pdl=True)
+def kernel(X):                                     # ← wrapper: 参数名 == 输入名
+    Y = torch.empty_like(X)
+    n = X.numel()
+    grid = (triton.cdiv(n, 1024),)
+    # 启动点同样要写, 只写一处不生效:
+    _pdl_copy[grid](X, Y, n, BLOCK=1024, launch_pdl=True)
+    return Y
 ```
 
 ---
