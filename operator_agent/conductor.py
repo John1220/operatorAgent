@@ -773,7 +773,11 @@ class Conductor:
 
         if artifact.all_passed:
             self._save_to_db(artifact, task)
-            print(f"[Conductor] 算子已存入知识库 (RAG)")
+        # 每次运行都在日志里报一句语料现状。这条的存在理由是缺口 2 的失效方式本身:
+        # 「RAG 命中 N 个相似案例」以前只说明语料里有 N 条, 不说明它们是不是真的
+        # 从上一次运行继承下来的 (答案曾经是「不是」)。
+        print(f"[KernelDB] {self.kernel_db.summary()} "
+              f"本次取用 {self.kernel_db.retrievals_this_run} 次命中")
 
         if invalid_measurement_rounds:
             print(f"\n[Conductor] ⚠️ 本次 {invalid_measurement_rounds} 轮的 L3 测量被判为不可信 "
@@ -982,7 +986,18 @@ class Conductor:
         )
 
     def _save_to_db(self, artifact: KernelArtifact, task: TaskSchema):
+        """把这次的核写进跨运行经验库 (缺口 2)。门不过就只进内存, 不落盘。
+
+        刻意放在 `artifact.all_passed` 那一支里、但**再**过一道 `persist_decision`:
+        all_passed 只说明「三级验证都点了通过」, 而缺口 1 的真机数据证明那个通过可以是
+        被 launch 地板或邻居抢占造出来的 (doc 31/32/33)。持久化会把一次假信号变成
+        下一次检索的样本, 所以这里比 Voyager 的 `if success` 多两条。
+        """
         from .kernel_db import KernelRecord
+        from .measurement import persist_decision
+
+        metrics = artifact.benchmark_data or {}
+        keep, reason = persist_decision(metrics)
         record = KernelRecord(
             kernel_id=artifact.kernel_id,
             algorithm=task.source.kernel_type,
@@ -990,11 +1005,19 @@ class Conductor:
             dsl=task.target.dsl,
             code=artifact.code,
             sketch=artifact.sketch.to_dict() if artifact.sketch else None,
-            performance=artifact.benchmark_data.get("gflops", 0),
+            performance=metrics.get("gflops", 0),
             tags=[task.source.kernel_type, "verified", f"v{artifact.sketch.version if artifact.sketch else 1}"],
             compile_info=artifact.compile_info,
+            score=float(metrics.get("speedup_vs_baseline") or 0.0),
+            measurement_validity=str(metrics.get("measurement_validity") or ""),
         )
-        self.kernel_db.add(record)
+        if not keep:
+            print(f"[KernelDB] 未入库 (只留在本次进程): {reason}")
+            self.kernel_db.add(record)
+            return False
+        self.kernel_db.promote(record)
+        print(f"[KernelDB] 已入库并落盘: {reason}")
+        return True
 
     def _record_failure(self, task: TaskSchema, failed_results: list[VerificationResult],
                         fix_note: str, fixed: bool):

@@ -1,11 +1,18 @@
 """
 Kernel Database & RAG 检索
-Simple in-memory database with embedding-like retrieval for kernel examples.
-Supports Python and Triton DSL seed data.
+结构化键检索的历史案例库 (原注释自称 "embedding-like" 是误导: 这里从来没有 embedding,
+`search()` 走的是硬过滤 + 词元重叠评分 —— 与外部调研的结论一致, 见 docs/research/43)。
+
+持久化: 一条 JSONL 事件日志, 启动时重放 (缺口 2 之前是「零文件 I/O」, 语料永远是
+_init_seed_data() 里那 6 条字面量)。
 """
 
+import json
+import os
 import re
-from dataclasses import dataclass, field
+import time
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Optional
 from .schemas import UnifiedSketch
 
@@ -13,6 +20,23 @@ from .schemas import UnifiedSketch
 def _tokenize(text: str) -> set:
     """将文本切分为小写词元集合 (用于相关性评分)"""
     return set(re.findall(r"[a-z0-9_]+", (text or "").lower()))
+
+
+def _perf_weight(record: "KernelRecord") -> float:
+    """历史高性能案例的排序加分 (沿用旧口径的量级: 最多加 1.0)
+
+    有可信加速比 (score) 时用 score, 没有时才回退 gflops。回退不是偷懒: 6 条手写 seed
+    本来就没有同机基线可测, 而**旧排序只看 gflops 正是缺口 4 记过的那件事** —— 对
+    memory-bound 算子, gflops 高的核可能恰恰是错的示范。score 上限截在 3.0×,
+    因为加速比再高也不该盖过相关性本身。
+    """
+    if record.score > 0:
+        return min(record.score, 3.0) / 3.0
+    return min(record.performance, 100.0) / 100.0
+
+
+# `OPERATOR_AGENT_KERNEL_DB=off` 与另外两条 env 一样用于「跑测试不得改动仓库状态」
+_DISABLED = ("off", "none", "0", "false")
 
 
 @dataclass
@@ -27,6 +51,30 @@ class KernelRecord:
     performance: float = 0.0  # GFLOPS
     tags: list = field(default_factory=list)
     compile_info: dict = field(default_factory=dict)  # 编译元信息
+    # ---- 下面几条服务于「这条经验值不值得被再次取用」(docs/research/43 第四节) ----
+    # score: 可信的同机加速比。**不是** gflops —— 缺口 4 之前判据固定看 gflops,
+    # 对 memory-bound 算子整个失真 (doc 00 缺口 4 的原始证据)。它的读者是 search():
+    # 历史高性能案例的排序权重。
+    score: float = 0.0
+    # 入库那一刻的测量有效性档位。没这个字段就没法区分「核真的快」和
+    # 「数字描述的是 launch 开销」(缺口 1), 而持久化会把后者一起固化成经验。
+    # 读者: 门 (measurement.persist_decision) 与 summary() 里的分档计数。
+    measurement_validity: str = ""
+    retrieved_count: int = 0
+    created_at: float = 0.0
+    # ⚠️ 刻意**没有** `is_buggy` 与 `shape_key`：前者在这条路径上没有写者 (只入库
+    # all_passed 的核)，后者的读者 (按 shape 聚合可达上界, 见 doc 42 第六节) 还不存在。
+    # 空字段就是下一份「算了没人读」。
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "KernelRecord":
+        # 忽略未知键: 老日志里没新字段, 新日志多出的字段也不该让旧版本读不了。
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
 
 
 # ─── Triton 种子代码 ──────────────────────────────────────────
@@ -167,14 +215,125 @@ def kernel(X: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, eps: float
 
 class KernelDatabase:
     """
-    算子数据库 - 存储 & 检索历史成功案例
-    模拟 RAG (Retrieval-Augmented Generation) 检索能力
-    支持 Python 和 Triton DSL 的混合检索
+    算子数据库 - 存储 & 检索历史成功案例 (结构化键, 无 embedding)
+
+    持久化是一行一条 JSON 的**追加式事件日志** (`kernel` / `retrieved`), 启动时重放。
+    为什么是这个形态而不是向量库 / SQLite: 见 docs/research/43 第二、四节 ——
+    检索键是结构化的 (`algorithm`/`hardware`/`dsl` + 词元评分), 语料量级是几百条,
+    而三个用 embedding 的外部系统都依赖外部 embedding 服务, 与本项目的依赖约束冲突。
     """
 
-    def __init__(self):
+    def __init__(self, jsonl_path: Optional[str] = None, persist_retrievals: bool = True):
         self._records: dict[str, KernelRecord] = {}
+        self._jsonl = self._resolve_jsonl(jsonl_path)
+        self._persist_retrievals = persist_retrievals
         self._init_seed_data()
+        self.loaded_from_disk = 0
+        self.disk_skipped_lines = 0
+        self.retrievals_this_run = 0
+        if self._jsonl is not None:
+            self.replay()
+
+    @staticmethod
+    def _resolve_jsonl(jsonl_path: Optional[str]) -> Optional[Path]:
+        """显式参数 > OPERATOR_AGENT_KERNEL_DB > <repo>/output/kernel_db.jsonl
+
+        `output/` 已在 .gitignore 里 —— 语料是**这台机器**测出来的东西, 不进仓库
+        (换一张卡, 里面的 score 就不成立了, 见 doc 42 的达成率口径)。
+        值为 off/none/0/false 时整个关闭 (单元测试用它来保持仓库无副作用)。
+        """
+        p = jsonl_path or os.environ.get("OPERATOR_AGENT_KERNEL_DB", "").strip()
+        if not p:
+            p = str(Path(__file__).resolve().parent.parent / "output" / "kernel_db.jsonl")
+        if p.lower() in _DISABLED:
+            return None
+        return Path(p)
+
+    # ---- 事件日志 ----
+
+    def _append_event(self, event: dict) -> None:
+        if self._jsonl is None:
+            return
+        try:
+            self._jsonl.parent.mkdir(parents=True, exist_ok=True)
+            with self._jsonl.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except OSError:
+            # 写不进日志不该让一次真跑失败: 语料是副产品, 产物才是主品。
+            pass
+
+    def replay(self) -> int:
+        """重放事件日志, 返回从磁盘读回的记录数 (不含 seed)
+
+        坏行**跳过并计数**, 不整体放弃: 追加式日志被 Ctrl-C 截断最后一行是常态。
+        """
+        if self._jsonl is None or not self._jsonl.exists():
+            self.disk_skipped_lines = 0
+            return 0
+        loaded = 0
+        skipped = 0
+        with self._jsonl.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+                kind = ev.get("event")
+                if kind == "kernel":
+                    try:
+                        rec = KernelRecord.from_dict(ev["record"])
+                    except (KeyError, TypeError):
+                        skipped += 1
+                        continue
+                    self._records[rec.kernel_id] = rec
+                    loaded += 1
+                elif kind == "retrieved":
+                    for kid in ev.get("ids", []):
+                        r = self._records.get(kid)
+                        if r is not None:
+                            r.retrieved_count += 1
+        self.disk_skipped_lines = skipped
+        self.loaded_from_disk = loaded
+        return loaded
+
+    def summary(self) -> str:
+        """给人在每次运行的日志里读的一句 —— 没有这一句, 「载入了历史」就是看不见的"""
+        if self._jsonl is None:
+            return f"{len(self._records)} 条记录 (持久化关闭, 只有 seed)"
+        n_seed = sum(1 for k in self._records if k.startswith("seed_"))
+        mine = len(self._records) - n_seed
+        used = sum(1 for r in self._records.values() if r.retrieved_count)
+        # 分档计数是 `measurement_validity` 这个字段的读者: 语料里有多少是「当年测的时候
+        # 就不干净」的, 直接决定这批 score 能不能拿去做判断 (doc 43 第四节的入库门)。
+        tiers = {}
+        for r in self._records.values():
+            if r.kernel_id.startswith("seed_"):
+                continue
+            tiers[r.measurement_validity or "未标"] = tiers.get(r.measurement_validity or "未标", 0) + 1
+        tier_text = " ".join(f"{k}={v}" for k, v in sorted(tiers.items())) or "无"
+        return (f"{len(self._records)} 条记录 = seed {n_seed} + 历史 {mine} "
+                f"(从 {self._jsonl.name} 重放 {self.loaded_from_disk} 条"
+                f"{f', 跳过坏行 {self.disk_skipped_lines}' if self.disk_skipped_lines else ''}"
+                f"); 曾被检索 {used} 条; 历史部分测量档位 {tier_text}")
+
+    def note_retrievals(self, ids: list) -> None:
+        if not ids:
+            return
+        # 本次运行取用了多少条经验 —— 没有这个数, 「RAG 命中 N 个案例」就永远只是
+        # 「语料里有 N 条」的另一种说法 (缺口 2 的原始失效方式)。与 D2 同一条纪律:
+        # 先观测、看得见, 再谈用它定退役规则。
+        self.retrievals_this_run += len(ids)
+        if not self._persist_retrievals:
+            return
+        self._append_event({"event": "retrieved", "ids": list(ids), "at": time.time()})
+        for kid in ids:
+            r = self._records.get(kid)
+            if r is not None:
+                r.retrieved_count += 1
 
     def _init_seed_data(self):
         """预置种子数据，模拟历史成功案例"""
@@ -339,15 +498,35 @@ class KernelDatabase:
                 relevance += 2.0
             if (algorithm or tags) and relevance == 0:
                 continue
-            score += relevance + min(r.performance, 100.0) / 100.0
+            score += relevance + _perf_weight(r)
             scored.append((score, r))
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [r for _, r in scored[:limit]]
+        hits = [r for _, r in scored[:limit]]
+        # 检索计数是「这条经验有没有被用」的唯一证据链, 也是将来定退役规则的输入
+        # (docs/research/43 第四节: 本轮**不设**阈值, 只攒数)。
+        self.note_retrievals([r.kernel_id for r in hits])
+        return hits
 
     def add(self, record: KernelRecord):
-        """添加新记录"""
+        """添加新记录 (只进内存)"""
         self._records[record.kernel_id] = record
+
+    def promote(self, record: KernelRecord) -> bool:
+        """入库 + 落盘。同 id 已存在且新分数不高时**不覆盖**。
+
+        替换规则借自 ShinkaEvolve 的 crowding (`archive_selection_strategy="crowding"`:
+        更相似的存档成员被更优者替换, 见 docs/research/43 第二节)。这里的键更简单,
+        所以只保留「同一个核的更好测量才替换」这一种情况。
+        """
+        old = self._records.get(record.kernel_id)
+        if old is not None and record.score <= old.score:
+            return False
+        record.created_at = record.created_at or time.time()
+        self._records[record.kernel_id] = record
+        self._append_event({"event": "kernel", "record": record.to_dict(),
+                            "at": record.created_at})
+        return True
 
     def get(self, kernel_id: str) -> Optional[KernelRecord]:
         return self._records.get(kernel_id)

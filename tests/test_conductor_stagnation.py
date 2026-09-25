@@ -308,6 +308,8 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
         _, out, _ = self._run([10.0, 15.0, 16.0, 16.5], max_rounds=4, peak=self.PEAK)
         self.assertNotIn("判定已收敛", out)
         self.assertEqual(self._rounds_run(out, 4), 4)
+        # 每次运行都要报一句语料现状 (缺口 2: 「RAG 命中 N 条」以前不说明那 N 条从哪来)
+        self.assertIn("[KernelDB]", out)
 
     def test_no_l3_result_is_never_called_converged(self):
         """L2 挂掉的轮次压根没有 L3 结果: 既不能崩, 更不能宣布「已到上界」

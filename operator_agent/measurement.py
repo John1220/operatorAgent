@@ -109,6 +109,29 @@ def binding_attainment(metrics: dict) -> Optional[float]:
     return max(vals) if vals else None
 
 
+def persist_decision(metrics: dict) -> tuple:
+    """这次运行的核值不值得写进跨运行经验库 (缺口 2)。返回 (入库?, 理由)
+
+    写成判据而不是写在 conductor 里, 是为了让它有单测与变异守卫 —— 缺口 2 原先的
+    失效方式正是「快照一直在写, 但没人读」(docs/research/43 第三节)。
+
+    门比 Voyager 的 `if success` 严两条, 理由都来自本机实测:
+      - `measurement_can_gate` (缺口 1 的产物): 「通过」可以是被 launch 地板喂出来的
+        假信号 (doc 31/32: 同一个 layernorm 核换个计时口径, 加速比从 0.895x 翻到 1.346x)。
+        持久化会把这种假信号**固化成下一次检索的样本**, 比一次性误判更贵。
+      - score 用 speedup 而不是 gflops: 对 memory-bound 算子 gflops 整个失真 (缺口 4)。
+    """
+    if metrics.get("measurement_can_gate") is False:
+        return False, "测量不可信 (can_gate=False): 不能把假信号固化成语料"
+    if metrics.get("benchmark_contaminated"):
+        return False, "窗口被抢占污染 (util 超阈值)"
+    speedup = metrics.get("speedup_vs_baseline")
+    if not isinstance(speedup, (int, float)) or speedup <= 1.0:
+        return False, f"相对同机基线没有加速 (speedup={speedup})"
+    return True, (f"speedup={speedup:.3f}x, "
+                  f"validity={metrics.get('measurement_validity', '未知')}")
+
+
 def roofline_converged(metrics: dict) -> bool:
     """已经贴着 roofline 上界 —— 继续换配方只会白烧 GPU 与 LLM token"""
     if (metrics.get("measurement_can_gate") is False

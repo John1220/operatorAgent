@@ -181,6 +181,63 @@ class TestNoScratchFilesAtRepoRoot(unittest.TestCase):
                          f"也不该出现在公开仓里")
 
 
+class TestNoShadowedDefinitions(unittest.TestCase):
+    """同一个 class 体里定义两次的函数, 第一份是**看起来活着**的死代码
+
+    起因是本轮真实发生的一次: `KernelDatabase.promote()` 被两次编辑各插了一遍,
+    Python 不报错、测试全绿, 直到我拿它做变异 (删掉落盘那一行) 才发现**删除毫无影响**
+    —— 被删的是被遮蔽的那份。这类缺陷比普通的死代码更贵: 它会让「改了就等于生效」
+    这个假设失效。
+    """
+
+    SCAN_DIRS = ("operator_agent", "benchmarks", "remote_scripts")
+
+    def _duplicates(self):
+        import ast
+        out = []
+        for d in self.SCAN_DIRS:
+            for py in sorted((REPO_ROOT / d).rglob("*.py")):
+                try:
+                    tree = ast.parse(py.read_text(encoding="utf-8"))
+                except SyntaxError:
+                    continue        # 语法错由编译类测试负责, 这里不重复报
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.ClassDef):
+                        continue
+                    seen: dict = {}
+                    for st in node.body:
+                        if not isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            continue
+                        if st.name in seen:
+                            out.append(f"{py.relative_to(REPO_ROOT)}:"
+                                       f"{node.name}.{st.name} "
+                                       f"(第 {seen[st.name]} 行已定义过一次)")
+                        else:
+                            seen[st.name] = st.lineno
+        return out
+
+    def test_no_method_is_defined_twice_in_the_same_class(self):
+        dups = self._duplicates()
+        self.assertEqual([], dups, "同名方法在同一个类里定义两次 —— 前一份永远不会被执行")
+
+    def test_guard_is_not_a_no_op(self):
+        """自己也要防「守卫空转」: 造一个含重复定义的源码, 必须被 _duplicates 抓到"""
+        import ast
+        import tempfile
+        src = ("class A:\n"
+               "    def f(self):\n        return 1\n"
+               "    def f(self):\n        return 2\n")
+        tree = ast.parse(src)
+        cls = tree.body[0]
+        seen, dups = {}, []
+        for st in cls.body:
+            if st.name in seen:
+                dups.append(st.name)
+            else:
+                seen[st.name] = st.lineno
+        self.assertEqual(["f"], dups, "检测逻辑本身失效了")
+
+
 class TestResearchDocReferencesResolve(unittest.TestCase):
     """指向 docs/research/NN 的引用必须落到一个真实存在的文件。
 
@@ -221,6 +278,26 @@ class TestResearchDocReferencesResolve(unittest.TestCase):
 
     def _existing_names(self):
         return {f.name for f in (REPO_ROOT / "docs" / "research").glob("*.md")}
+
+    def test_readme_indexes_every_doc_exactly_once_in_order(self):
+        """README 的索引表必须与 docs/research/*.md 一一对应, 且编号递增
+
+        起因是本轮真实发生的一次手滑: 往 README 插 43 那一行时, 替换文本没把 42 行的
+        表头重新写回去, 于是 42 那一行被并进 43 的尾部 —— 内容还在, 「文档存在」这条
+        守卫照样绿, 但索引里已经没有 42 了。索引断掉比正文断掉更难被发现, 因为没人会
+        去 grep 一个「自己没读到过」的编号。
+        """
+        readme = (REPO_ROOT / "docs" / "research" / "README.md").read_text(encoding="utf-8")
+        rows = [int(m.group(1)) for m in
+                re.finditer(r"^\| \[`+(\d{2})-", readme, flags=re.M)]
+        on_disk = sorted(int(f.name[:2]) for f in (REPO_ROOT / "docs" / "research").glob("*.md")
+                         if f.name[:2].isdigit())
+        self.assertEqual(on_disk, sorted(rows),
+                         f"README 索引与磁盘上的文档不一致: 磁盘 {on_disk} vs 索引 {sorted(rows)}")
+        self.assertEqual(len(rows), len(set(rows)), "有编号在 README 里出现不止一次")
+        # 刻意**不**断言「行顺序 = 编号顺序」: README 现在就有两个表 (31~43 与补记的
+        # 34/35), 那是排版约定而不是正确性。上面那条「与磁盘一一对应」已经足够抓住
+        # 「某行被并进另一行」这种真实事故。
 
     def test_every_reference_points_at_an_existing_doc(self):
         ids = self._existing_ids()

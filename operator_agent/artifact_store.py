@@ -20,6 +20,13 @@ class ArtifactStore:
     """算子产物持久化存储"""
 
     def __init__(self, output_dir: Optional[str] = None):
+        # OPERATOR_AGENT_OUTPUT_DIR 覆盖默认落盘位置。为什么要能覆盖: 单元测试每次跑
+        # 都会往仓库的 output/ 里灌产物目录, 于是「历史语料」里绝大多数是测试现场 ——
+        # 2026-09-26 盘点: 5326 份 execution_snapshot 里 5316 份是 mock_gpu, 2872 份
+        # result.json 里 2822 份是 mock_gpu (docs/research/43 第三节)。真实语料因此
+        # 不可读。与 logs/ 那条 (e2b455e) 是同一个缺陷的另一面。
+        if not output_dir:
+            output_dir = os.environ.get("OPERATOR_AGENT_OUTPUT_DIR", "").strip() or None
         if output_dir:
             self.output_dir = Path(output_dir)
         else:
