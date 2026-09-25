@@ -87,6 +87,18 @@ def capture_execution(
         # 日志文件名: 20260802_153000_matmul_nvidia_gpu_ab12cd34.log
     """
     # 确定日志目录
+    # OPERATOR_AGENT_LOG_DIR 覆盖默认位置; 取 off/none/空 则完全不落文件 (只透传输出)。
+    # 这条是为「跑测试不得改动仓库状态」而加的: Conductor.run 无条件走这里, 于是每个
+    # 单元测试都会往 logs/ 写一个文件, 并且顺带触发下面的自动清理 —— 真实跑出来的
+    # 现场会被测试批次轮掉。受害对象是 docs/research/35 第九节的 C1 重测方案: 它挑的
+    # 素材就是「logs/ 里真实修 3 轮仍失败的 case」, 而那些文件已经没了 (2026-09-26 核实:
+    # 现存 11 个日志全部带 `LLM: <MagicMock ...>` 头)。
+    env_dir = os.environ.get("OPERATOR_AGENT_LOG_DIR", "").strip()
+    if not log_dir and env_dir:
+        log_dir = env_dir
+    if log_dir and log_dir.lower() in ("off", "none", "0", "false"):
+        yield None
+        return
     if log_dir:
         log_dir = Path(log_dir)
     else:
@@ -94,8 +106,13 @@ def capture_execution(
         log_dir = project_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # 自动清理旧日志，只保留最新10个
-    deleted = cleanup_old_logs(log_dir, keep_count=10)
+    # 自动清理旧日志。keep_count 可由 OPERATOR_AGENT_LOG_KEEP 放宽 —— 默认 10 是
+    # 「随手跑几次」的假设, 做长周期实验时它会把要复查的现场删掉。
+    try:
+        keep = int(os.environ.get("OPERATOR_AGENT_LOG_KEEP", "") or 10)
+    except ValueError:
+        keep = 10
+    deleted = cleanup_old_logs(log_dir, keep_count=keep)
     if deleted > 0:
         print(f"[Log] 自动清理 {deleted} 个旧日志文件")
 
