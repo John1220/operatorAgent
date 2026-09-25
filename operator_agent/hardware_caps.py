@@ -71,6 +71,20 @@ class HardwareCaps:
     max_threads_per_sm: int = 2048  # 每 SM 最大线程数
     max_blocks_per_sm: int = 32     # 每 SM 最大 block 数
     max_warps_per_sm: int = 64      # 每 SM 最大 warp 数
+    # 每 SM 的寄存器文件总量 (不是每线程上限, 那是 registers_per_thread)。
+    # persistent kernel 按占用率算 grid 大小时要用: occupancy =
+    # registers_per_sm // (n_regs * sub_group_size * num_warps)。
+    # NVIDIA Volta 以后一律 64K 个 32-bit 寄存器/SM (cudaDevAttrMaxRegistersPerMultiprocessor)。
+    registers_per_sm: int = 65536
+
+    # ---- Hopper+ 数据搬运与调度特性 ----
+    # 这三个字段是 R-MATMUL-13 / R-MATMUL-14 / R-UNIV-05 的 requires_caps 判据。
+    # 不设字段时 getattr(caps, "has_tma", False) 恒为 False, 配方永远选不出来 ——
+    # 与 R-MATMUL-07 曾经那个恒假的 registers_per_thread>=255 是同一类死条件。
+    has_tma: bool = False               # Tensor Memory Accelerator (cc >= 9.0)
+    has_warp_specialization: bool = False  # Hopper autoWS / Blackwell WS (cc >= 9.0)
+    has_pdl: bool = False               # Programmatic Dependent Launch (cc >= 9.0)
+    has_fp8_tensor_core: bool = False   # e4m3/e5m2 Tensor Core (cc >= 8.9)
 
     # ---- ISA / 编程模型特性 ----
     has_l2_cache_hint: bool = False      # 是否支持 L2 缓存提示 (eviction_policy)
@@ -141,6 +155,8 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
         sm_count=132, max_threads_per_sm=2048,
         has_l2_cache_hint=True, has_software_pipelining=True,
         has_double_buffering=True, has_warp_shuffle=True,
+        has_tma=True, has_warp_specialization=True, has_pdl=True,
+        has_fp8_tensor_core=True,
         supported_dsls={"triton", "cuda_c", "python"},
     ),
     # NVIDIA H20 (Hopper 削减版) - 2026-09-16 于 algorithm-h20 实测 (cuBLAS 8192³ + triad)
@@ -163,6 +179,10 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
         has_l2_cache_hint=True, has_software_pipelining=True,
         has_double_buffering=True, has_block_reduce=True,
         has_warp_shuffle=True, has_atomic_fadd=True,
+        # Hopper cc9.0: TMA / autoWS / PDL / FP8 全部具备。
+        # ⚠️ autoWS 有极窄的静默失效门槛, 见 R-MATMUL-14。
+        has_tma=True, has_warp_specialization=True, has_pdl=True,
+        has_fp8_tensor_core=True,
         supported_dsls={"triton", "cuda_c", "python"},
     ),
     # NVIDIA V100
@@ -226,6 +246,16 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
 }
 
 
+def _nvidia_cc_major(cc: str) -> int:
+    """把 compute_capability 字符串解析成主版本号, 解析不出来返回 0。
+
+    cc 在本模块里是字符串 ("9.0" / "gfx90a"), 直接拿去做数值比较会抛 TypeError,
+    所以任何按架构代次推断能力的地方都先过这个函数。
+    """
+    head = (cc or "").split(".")[0]
+    return int(head) if head.isdigit() else 0
+
+
 def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
     """
     从 backend.get_hardware_info() 返回的 dict 自动推断硬件能力。
@@ -259,12 +289,19 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
     if "cuda" in device or vendor == "nvidia":
         caps.vendor = "nvidia"
         caps.supported_dsls = {"triton", "cuda_c", "python"}
-        caps.has_l2_cache_hint = cc.startswith("8.") or cc.startswith("9.")
-        caps.has_software_pipelining = cc.startswith("8.") or cc.startswith("9.")
+        major = _nvidia_cc_major(cc)
+        caps.has_l2_cache_hint = major >= 8
+        caps.has_software_pipelining = major >= 8
         caps.has_warp_shuffle = True
         caps.sub_group_size = 32
         caps.vector_width_bytes = 16
-        caps.has_tensor_core = not cc.startswith("6.") and not cc.startswith("5.")
+        caps.has_tensor_core = major >= 7
+        # 推断路径一律取保守值: 误报 True 会把配方塞给不具备该能力的硬件 (核直接
+        # 编译/启动失败), 误报 False 只是少一次优化机会。所以 Hopper 特性按
+        # major >= 9 一刀切, Ada(8.9)/Blackwell(10.x) 的 FP8 要靠 _KNOWN_HARDWARE
+        # 显式建条目, 不在这里猜。
+        caps.has_tma = caps.has_warp_specialization = caps.has_pdl = major >= 9
+        caps.has_fp8_tensor_core = major >= 9
     elif "cpu" in device:
         caps.vendor = "cpu"
         caps.has_tensor_core = False

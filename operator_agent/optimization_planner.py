@@ -243,11 +243,10 @@ class OptimizationPlanner:
     def _check_caps_requirement(req: str, caps: HardwareCaps) -> bool:
         """检查单个硬件能力要求是否满足"""
         req = req.strip()
-        # 布尔要求: "has_tensor_core"
-        if req in ("has_tensor_core", "has_software_pipelining",
-                   "has_double_buffering", "has_l2_cache_hint",
-                   "has_block_reduce", "has_warp_shuffle",
-                   "has_atomic_fadd", "has_fast_math"):
+        # 布尔要求裸名: "has_tensor_core" 等同 "has_tensor_core=True"。
+        # 按前缀判定而不是枚举字段名 —— 枚举表漏一个新字段, 该配方就会走到函数
+        # 末尾的「无法解析则默认通过」, 于是被塞给不具备该能力的硬件。
+        if re.fullmatch(r"has_\w+", req):
             return bool(getattr(caps, req, False))
 
         # 布尔要求显式: "has_tensor_core=True"
@@ -263,7 +262,13 @@ class OptimizationPlanner:
             attr = num_match.group(1)
             op = num_match.group(2)
             val = int(num_match.group(3))
-            actual = getattr(caps, attr, 0) or 0
+            actual = getattr(caps, attr, 0)
+            # compute_capability 之类是字符串 ("9.0"), 直接 "9.0" >= 90 会抛
+            # TypeError 打断整轮 plan()。非数值一律判不满足, 由 _caps_failure_note
+            # 说明是配方写错而不是硬件不够。
+            if not isinstance(actual, (int, float)):
+                return False
+            actual = actual or 0
             if op == ">=":
                 return actual >= val
             elif op == "<=":
@@ -371,8 +376,20 @@ class OptimizationPlanner:
         """检查所有硬件能力要求，返回 (是否满足, 失败原因)"""
         for req in reqs:
             if not self._check_caps_requirement(req, caps):
-                return False, req
+                return False, req + self._caps_failure_note(req, caps)
         return True, ""
+
+    @staticmethod
+    def _caps_failure_note(req: str, caps: HardwareCaps) -> str:
+        """区分「硬件不够」和「配方条件写错」—— 后者不写进拒绝原因就没人会去修。"""
+        m = re.match(r"(\w+)\s*(?:>=|<=|>|<|==)\s*\d+", req.strip())
+        if m:
+            attr = m.group(1)
+            if not hasattr(caps, attr):
+                return f"  [HardwareCaps 无 {attr} 字段, 条件写错]"
+            if not isinstance(getattr(caps, attr), (int, float)):
+                return f"  [{attr}={getattr(caps, attr)!r} 非数值, 不能做数值比较]"
+        return ""
 
     @staticmethod
     def _matches_kernel_type(applies_to: list[str], kernel_type: str) -> bool:

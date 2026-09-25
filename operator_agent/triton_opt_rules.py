@@ -8,6 +8,27 @@ from typing import Dict, Tuple
 from operator_agent.schemas import TilingStrategy
 
 
+def normalize_bound_type(bound_type: str) -> str:
+    """把 bound_type 归一到 compute | memory | unknown | mixed。
+
+    仓库里这个字段有两套拼法在流通: Verifier._roofline_analysis 产出的是**裸词**
+    ("memory" / "compute"), 而本模块历史上按 "memory_bound" / "compute_bound" 比较。
+    两套拼法对不上时, 两个分支都进不去, 一路落到 else 的 "mixed" —— 也就是说
+    bound 感知从来没生效过: H20 上明明测出 memory-bound, 给出的建议却是
+    "均衡调整 tiling" 而不是 "增大 BLOCK_K"。
+
+    归一化放在消费端而不是改产出端: 产出端的字符串已经进了 metrics / 日志 /
+    kernel_db 快照, 改它会连带改动下游的既有断言。
+    """
+    b = (bound_type or "").strip().lower().replace("-", "_")
+    for suffix in ("_bound", "_bottleneck"):
+        if b.endswith(suffix):
+            b = b[: -len(suffix)]
+    if b in ("compute", "memory", "unknown", "mixed"):
+        return b
+    return "mixed" if b else "unknown"
+
+
 class TritonOptimizationRules:
     """Triton 算子性能优化规则引擎"""
 
@@ -51,7 +72,8 @@ class TritonOptimizationRules:
 
         Args:
             current_tiling: 当前 tiling
-            bound_type: compute_bound | memory_bound | mixed
+            bound_type: compute | memory | unknown | mixed (亦接受 *_bound 拼法,
+                见 normalize_bound_type)
             hw_name: 硬件名称
             hw_cc: compute capability
 
@@ -65,15 +87,16 @@ class TritonOptimizationRules:
         recommendations = cls.TILE_RECOMMENDATIONS[platform]
 
         # 根据 bound type 选择策略
-        if bound_type == "compute_bound":
+        bound = normalize_bound_type(bound_type)
+        if bound == "compute":
             new_tiling = cls._optimize_compute_bound(old_bm, old_bn, old_bk, recommendations["compute_bound"])
-            reason = f"compute-bound: 增大 BLOCK_M/BLOCK_N 提升 SM 占有率和计算密度"
-        elif bound_type == "memory_bound":
+            reason = "compute-bound: 增大 BLOCK_M/BLOCK_N 提升 SM 占有率和计算密度"
+        elif bound == "memory":
             new_tiling = cls._optimize_memory_bound(old_bm, old_bn, old_bk, recommendations["memory_bound"])
-            reason = f"memory-bound: 增大 BLOCK_K 提升数据复用率，优化内存合并"
+            reason = "memory-bound: 增大 BLOCK_K 提升数据复用率，优化内存合并"
         else:
             new_tiling = cls._optimize_mixed(old_bm, old_bn, old_bk)
-            reason = f"mixed-bound: 均衡调整 tiling"
+            reason = f"{bound}-bound: 均衡调整 tiling"
 
         return new_tiling, reason
 
@@ -181,18 +204,26 @@ class TritonOptimizationRules:
         """
         hints = []
         ratio = current_gflops / target_gflops if target_gflops > 0 else 0
+        bound = normalize_bound_type(bound_type)
 
-        if bound_type == "compute_bound":
+        if bound == "compute":
             hints.append("使用 tl.dot() 触发 Tensor Core")
             hints.append("增大 BLOCK_M/BLOCK_N 提升计算密度")
-            hints.append("使用 float16 累加器提升吞吐量")
+            # 输入可以 cast 到低精度走 tensor core, 但累加器必须留在 fp32
+            # (R-UNIV-03)。这里原先写的是「使用 float16 累加器提升吞吐量」——
+            # fp16 累加会丢失大 K 求和的高位, 是精度 bug 不是优化。
+            hints.append("输入 cast 到 fp16/bf16 触发 tensor core, 累加器保持 fp32")
             if ratio < 0.5:
                 hints.append("当前计算利用率低于 50%，考虑重新设计 tiling 策略")
 
-        elif bound_type == "memory_bound":
+        elif bound == "memory":
             hints.append("优化内存访问模式，确保 coalesced 访问")
             hints.append("增大 BLOCK_K 提升每次加载的数据复用率")
-            hints.append("使用 tl.cache 优化数据缓存")
+            # 原先写的是「使用 tl.cache 优化数据缓存」—— Triton 没有 tl.cache 这个
+            # 名字 (✅ triton/language/core.py 全文无 cache 相关导出), 照抄进核里
+            # 直接 NameError, 白烧一轮 Fixer。真实 API 是 load/store 的关键字参数。
+            hints.append('用 tl.load(..., eviction_policy="evict_first"/"evict_last") '
+                         '与 cache_modifier=".ca"/".cg" 控制缓存驻留')
             if ratio < 0.5:
                 hints.append("当前带宽利用率低于 50%，检查内存访问是否合并")
 
