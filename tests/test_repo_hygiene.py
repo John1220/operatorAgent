@@ -181,5 +181,67 @@ class TestNoScratchFilesAtRepoRoot(unittest.TestCase):
                          f"也不该出现在公开仓里")
 
 
+class TestResearchDocReferencesResolve(unittest.TestCase):
+    """指向 docs/research/NN 的引用必须落到一个真实存在的文件。
+
+    这不是假想病: 这一轮有 6 处已提交的注释写着 `docs/research/17 第二节第 1 条`,
+    而 17 从未存在过 —— 离散度门的调研决策被折进了 20 的第三节 (README 的「待补」
+    里写着)。代码注释指着不存在的章节, 就等于把「一手核实」的链条断在这里: 下一个人
+    无法复查阈值是从哪来的。
+
+    扫工作区而不是索引: 新文件在 `git add` 之前就该被拦住。
+    """
+
+    SKIP_DIRS = {".git", "__pycache__", "triton", "output", "logs", "debug",
+                 ".venv", "node_modules"}
+    # 三种写法: `docs/research/20` / `doc 33 第三节` / markdown 链接 `(15-xxx.md)`
+    REF_RE = re.compile(
+        r"(?:docs/research/|\bdocs?\s+)(\d{2})(?!(?:\d|[a-z]))"
+        r"|\((\d{2})-[^\s()]+\.md\)"
+    )
+
+    def _files(self):
+        for p in REPO_ROOT.rglob("*"):
+            if not p.is_file() or p.suffix not in (".py", ".md", ".yaml", ".yml"):
+                continue
+            rel = p.relative_to(REPO_ROOT)
+            # 本文件必须写明这些不存在的编号 (它讲的就是这个 bug), 与凭据扫描器排除
+            # 自己同一个理由; "被排除的只有扫描器自己"由
+            # test_only_the_scanner_itself_is_skipped 兜住
+            if set(rel.parts) & self.SKIP_DIRS or _excluded(str(rel)):
+                continue
+            yield p
+
+    def _existing_ids(self):
+        return {f.name[:2] for f in (REPO_ROOT / "docs" / "research").glob("*.md")
+                if f.name[:2].isdigit()}
+
+    def test_every_reference_points_at_an_existing_doc(self):
+        ids = self._existing_ids()
+        self.assertGreater(len(ids), 5, f"docs/research 里只认出 {ids}, 扫描前提不成立")
+        bad = []
+        n_refs = 0
+        for p in self._files():
+            body = p.read_text(encoding="utf-8", errors="ignore")
+            for m in self.REF_RE.finditer(body):
+                ref = m.group(1) or m.group(2)
+                n_refs += 1
+                if ref not in ids:
+                    line = body[:m.start()].count("\n") + 1
+                    bad.append(f"{p.relative_to(REPO_ROOT)}:{line} -> docs/research/{ref}")
+        self.assertGreaterEqual(n_refs, 15,
+                                f"只认出 {n_refs} 条引用, 这条守卫几乎没在做事")
+        self.assertEqual([], bad, "存在指向不存在文档的引用 (一手核实的链条断了)")
+
+    def test_guard_is_not_a_no_op(self):
+        """反向验证: 三种写法的不存在编号都要被抓到, 存在编号不该被算进来"""
+        probe = ("见 docs/research/99 与 doc 98 第二节; 链接写法则 `(97-xxx.md)`。"
+                 "正常的 doc 33 与 (33-离散度门真机验证.md) 是存在的。")
+        got = [m.group(1) or m.group(2) for m in self.REF_RE.finditer(probe)]
+        for missing in ("99", "98", "97"):
+            self.assertIn(missing, got)
+        self.assertNotIn("33", [g for g in got if g not in self._existing_ids()])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

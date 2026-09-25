@@ -1,6 +1,6 @@
 """在真机上标定离散度门的两个阈值
 
-背景: runner 现在会随每次计时上报两个统计量 (docs/research/17 第二节第 1 条):
+背景: runner 现在会随每次计时上报两个统计量 (阈值标定: docs/research/20 第四节):
 
     dispersion_iqr_over_median   (p75-p25)/median —— 样本**主体**的散布
     dispersion_max_over_median   max/median      —— 有没有离群样本

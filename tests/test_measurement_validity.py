@@ -437,7 +437,7 @@ class TestMeasurementDrivesLoopDirectly(unittest.TestCase):
 
 
 class TestDispersionGate(unittest.TestCase):
-    """第三个信号: 样本自身在抖 (docs/research/17 第二节第 1 条)
+    """第三个信号: 样本自身在抖 (docs/research/20 §3.1 D1)
 
     runner 本来就跑 n 个样本, 多报 p25/p75 **不花任何额外 GPU 时间**, 于是下游
     能区分「核真的慢」和「这台机器此刻在抖」。以前只报 min/median/avg/max,

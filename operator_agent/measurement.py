@@ -13,7 +13,7 @@ L3 的数字有三种「不可信」, 而它们都不该被当成「性能不达
    它被样本数系统性抬高, 目前只作诊断。
 3. **样本自身在抖** —— 30 个样本的 iqr/median 大到超过被测差异的量级, median
    看着权威其实是噪声。这条以前完全没检查: runner 跑了 n 个样本, 只报 min/median/
-   avg/max, 从不看它们散不散 (docs/research/17 第二节第 1 条)。
+   avg/max, 从不看它们散不散 (决策与出处: docs/research/20 §3.1 D1)。
 
 `VerificationResult.passed` 只有两态, 于是这三种情况都被记成失败, 再被 Conductor
 拿去禁用配方、累计停滞轮次。已记录的后果: matmul 那轮触发污染 (测量前 util=14%)
@@ -49,7 +49,7 @@ LAUNCH_DOMINANCE_UNINFORMATIVE = 0.30
 # 也算污染, 每次运行都会被标记, 信号就失效了。
 CONTAMINATION_UTIL_PCT = 5.0
 
-# 样本离散度 iqr/median 的门限 (docs/research/17 第二节第 1 条)。
+# 样本离散度 iqr/median 的门限 (阈值由真机标定得出: docs/research/20 第四节)。
 #
 # 0.10 取自 PyTorch `torch.utils.benchmark` 的 `_IQR_WARN_THRESHOLD` (✅ 一手核实
 # `torch/utils/benchmark/utils/common.py`), 它是「结果可以报到几位有效数字」的判据。

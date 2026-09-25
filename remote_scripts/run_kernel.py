@@ -111,7 +111,7 @@ def _sample_gpu_idle():
     100%, 所以只能在测量前采样。其他计算进程数比利用率更可靠地反映是否被共享,
     故一并返回 (排除本进程自己)。
 
-    ⚠️ **采两次取最小值**, 中间留 1.2 s。原因 (真机实测, docs/research/17 第三节):
+    ⚠️ **采两次取最小值**, 中间留 1.2 s。原因 (真机实测, docs/research/33 第三节):
     `nvidia-smi` 的 utilization.gpu 是过去约 1 秒窗口内的占比, 所以"测量前"采样
     只挡住了**本进程**的核, 挡不住**上一个 runner 进程**的尾巴 —— L1/L2/L3 是
     三次独立的 ssh 调用, 间隔常常不到 1 秒。实测在一台真空闲的卡上 (连续 100 次
@@ -744,7 +744,7 @@ def _percentile(sorted_times, q: float) -> float:
 def _sample_stats(times) -> dict:
     """把一批样本摊成统计量, 三条 benchmark 路径共用。
 
-    p25/p75 是给离散度门用的 (docs/research/17): runner 本来就跑了 n 个样本,
+    p25/p75 是给离散度门用的 (docs/research/20 第四节): runner 本来就跑了 n 个样本,
     多报两个分位数**不花任何额外 GPU 时间**, 而下游因此能区分「核真的慢」和
     「这台机器此刻在抖」。判据 iqr/median 与 PyTorch Timer 的
     `_IQR_WARN_THRESHOLD` 同源。
