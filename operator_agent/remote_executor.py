@@ -360,6 +360,9 @@ class SSHExecutor:
             # L2 数值门的容差表与判定式, runner 以同级模块 import
             (repo_root / "operator_agent" / "tolerance.py",
              f"{remote_dir}/tolerance.py"),
+            # 运行时反作弊屏蔽, 与控制端 static_audit 共用同一份禁用清单
+            (repo_root / "operator_agent" / "anticheat.py",
+             f"{remote_dir}/anticheat.py"),
             (repo_root / "remote_scripts" / self._runner_script,
              self.remote_runner_path),
         ]

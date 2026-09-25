@@ -12,8 +12,9 @@ Actions:
 
 同级依赖:
   tolerance.py - L2 数值门的容差表与判定式 (单一事实来源, 见该模块 docstring)。
-                 由 SSHExecutor.deploy() 与本文件一起推送; 在仓库内直接跑本文件时
-                 回退到 operator_agent/ 下找。
+  anticheat.py - 运行时屏蔽 shield_torch, 与控制端 static_audit 共用同一份禁用清单。
+  两者都由 SSHExecutor.deploy() 与本文件一起推送; 在仓库内直接跑本文件时回退到
+  operator_agent/ 下找。
 """
 
 import sys
@@ -27,9 +28,11 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 try:
     import tolerance
+    from anticheat import shield_torch
 except ImportError:          # 仓库内直接运行: 模块还在 operator_agent/ 下
     sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "operator_agent"))
     import tolerance
+    from anticheat import shield_torch
 
 
 # ─── GPU 自动选择 ─────────────────────────────────────────────
@@ -418,8 +421,13 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
                 k: (v.to(torch.float16) if isinstance(v, torch.Tensor) and v.is_floating_point() else v)
                 for k, v in candidate_inputs.items()
             }
-        with torch.no_grad():
+        # 运行时反作弊: 屏蔽只包住候选那一次调用。参考实现 (_reference_torch)
+        # 恰恰要合法地调用 torch.matmul / F.softmax, 把 with 套在外面会连它一起打死。
+        # 候选先跑、参考后跑这个顺序本身也是一道防护 (参考还没算出来, 候选无从
+        # 回收它的显存), 见 docs/research/12 第四节。
+        with shield_torch(), torch.no_grad():
             actual = module.kernel(**candidate_inputs)
+        with torch.no_grad():
             expected = reference()
         if not isinstance(actual, torch.Tensor):
             actual = torch.as_tensor(actual, device=device)
@@ -509,14 +517,18 @@ def _execute_triton(code: str, real_inputs: dict) -> dict:
 
             torch_inputs = {k: torch.from_numpy(v).to(device).contiguous() for k, v in real_inputs.items()}
 
-            for _ in range(3):
-                _ = kernel_func(**torch_inputs)
-            torch.cuda.synchronize()
+            # 屏蔽包住 warmup + 计时整段, 而不是包住每一次 kernel 调用:
+            # shield_torch 进出各要 setattr 二十多个属性, 在 18.69µs 的 launch
+            # 底噪上是 2~3 倍开销, 逐次包裹会把 L3 计时彻底毁掉。
+            with shield_torch():
+                for _ in range(3):
+                    _ = kernel_func(**torch_inputs)
+                torch.cuda.synchronize()
 
-            start = time.perf_counter()
-            output = kernel_func(**torch_inputs)
-            torch.cuda.synchronize()
-            elapsed = time.perf_counter() - start
+                start = time.perf_counter()
+                output = kernel_func(**torch_inputs)
+                torch.cuda.synchronize()
+                elapsed = time.perf_counter() - start
 
             if isinstance(output, torch.Tensor):
                 out_arr = output.cpu().numpy()
@@ -551,16 +563,17 @@ def _execute_torch_numpy(code: str, real_inputs: dict, lang: str) -> dict:
             exec(code, ns)
             kernel_func = ns["kernel"]
 
-            for _ in range(3):
-                _ = kernel_func(**torch_inputs)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            with shield_torch():
+                for _ in range(3):
+                    _ = kernel_func(**torch_inputs)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
 
-            start = time.perf_counter()
-            output = kernel_func(**torch_inputs)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
-            elapsed = time.perf_counter() - start
+                start = time.perf_counter()
+                output = kernel_func(**torch_inputs)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                elapsed = time.perf_counter() - start
 
             if isinstance(output, torch.Tensor):
                 out_arr = output.cpu().numpy()
@@ -570,9 +583,12 @@ def _execute_torch_numpy(code: str, real_inputs: dict, lang: str) -> dict:
             ns = {"__name__": "__kernel__"}
             exec(code, ns)
             kernel_func = ns["kernel"]
-            start = time.perf_counter()
-            output = kernel_func(**real_inputs)
-            elapsed = time.perf_counter() - start
+            # numpy DSL 同样要屏蔽: 「在 CPU 上用 torch 算出结果再返回」是这条路径
+            # 下最省事的作弊写法, 静态审计漏掉时必须由运行时兜住。
+            with shield_torch():
+                start = time.perf_counter()
+                output = kernel_func(**real_inputs)
+                elapsed = time.perf_counter() - start
             out_arr = np.asarray(output)
 
         gflops, bandwidth = _compute_metrics(real_inputs, elapsed)
@@ -669,7 +685,10 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
             }
         candidate = lambda: module.kernel(**candidate_inputs)
         is_cuda = device.type == "cuda"
-        candidate_stats = _bench_callable(candidate, warmup, repeat, is_cuda)
+        # 只屏蔽候选这一条: 下面四个 baseline (eager / fp16 / tf32 / compile)
+        # 本身就是 torch 原生算子, 套进去会全部抛 CheatDetectedError。
+        with shield_torch():
+            candidate_stats = _bench_callable(candidate, warmup, repeat, is_cuda)
         eager_stats = _bench_callable(reference, warmup, repeat, is_cuda)
         baselines = {"pytorch_eager": eager_stats}
 
@@ -756,12 +775,14 @@ def _benchmark_triton(code: str, real_inputs: dict, warmup: int, repeat: int) ->
         kernel_func = module.kernel
         torch_inputs = {k: torch.from_numpy(v).to(device).contiguous() for k, v in real_inputs.items()}
 
-        for _ in range(warmup):
-            _ = kernel_func(**torch_inputs)
-        torch.cuda.synchronize()
+        # 屏蔽包住 warmup + 整个 _timed_runs, 不逐次包裹 (开销理由同 _execute_triton)
+        with shield_torch():
+            for _ in range(warmup):
+                _ = kernel_func(**torch_inputs)
+            torch.cuda.synchronize()
 
-        # CUDA event 计时, 提升精度 (毫秒 -> 秒)
-        times = [t / 1000 for t in _timed_runs(lambda: kernel_func(**torch_inputs), repeat, True)]
+            # CUDA event 计时, 提升精度 (毫秒 -> 秒)
+            times = [t / 1000 for t in _timed_runs(lambda: kernel_func(**torch_inputs), repeat, True)]
 
         avg_time = sum(times) / len(times)
         gflops, bandwidth = _compute_metrics(real_inputs, avg_time)
@@ -793,21 +814,23 @@ def _benchmark_torch_numpy(code: str, real_inputs: dict, warmup: int, repeat: in
             exec(code, ns)
             kernel_func = ns["kernel"]
 
-            for _ in range(warmup):
-                _ = kernel_func(**torch_inputs)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            with shield_torch():
+                for _ in range(warmup):
+                    _ = kernel_func(**torch_inputs)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
 
-            # CUDA event 计时 (毫秒 -> 秒), CPU 回退到 perf_counter
-            is_cuda = torch.cuda.is_available()
-            times = [t / 1000 for t in _timed_runs(lambda: kernel_func(**torch_inputs), repeat, is_cuda)]
+                # CUDA event 计时 (毫秒 -> 秒), CPU 回退到 perf_counter
+                is_cuda = torch.cuda.is_available()
+                times = [t / 1000 for t in _timed_runs(lambda: kernel_func(**torch_inputs), repeat, is_cuda)]
         else:
             ns = {"__name__": "__kernel__"}
             exec(code, ns)
             kernel_func = ns["kernel"]
-            for _ in range(warmup):
-                kernel_func(**real_inputs)
-            times = [t / 1000 for t in _timed_runs(lambda: kernel_func(**real_inputs), repeat, False)]
+            with shield_torch():
+                for _ in range(warmup):
+                    kernel_func(**real_inputs)
+                times = [t / 1000 for t in _timed_runs(lambda: kernel_func(**real_inputs), repeat, False)]
 
         avg_time = sum(times) / len(times)
         gflops, bandwidth = _compute_metrics(real_inputs, avg_time)

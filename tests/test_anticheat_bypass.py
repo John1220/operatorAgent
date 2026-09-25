@@ -9,12 +9,14 @@
 循环会让部分修复被完全掩盖。static_audit 改用 AST 后 10 个标记全部翻成
 unexpected success，于是摘掉标记，本文件从「缺陷清单」转为「回归防线」。
 
-仍未修的一项是运行时屏蔽没进真机 runner (TestRuntimeShieldCoverage)，标记保留。
+最后一项 (运行时屏蔽没进真机 runner) 修好后, 本文件已无 expectedFailure。
 
 纯本地测试, 不需要 GPU / LLM / 远端。
 """
 
+import ast
 import unittest
+from pathlib import Path, PurePosixPath
 
 from operator_agent.anticheat import static_audit
 
@@ -189,25 +191,179 @@ class TestSyntaxErrorFailClosed(unittest.TestCase):
                         "AST 解析失败时必须退回正则, 不能直接返回空列表")
 
 
-class TestRuntimeShieldCoverage(unittest.TestCase):
-    """洞 1: 真机 runner 无运行时反作弊
+# ─── 真机 runner 的运行时屏蔽结构断言 ─────────────────────────
+#
+# runner 里的调用点分三类, 屏蔽只能覆盖第一类:
+#   候选 (candidate)  用户交上来的 kernel, 必须被 shield 包住
+#   参考 (reference)  _reference_torch 产出的 torch 原生实现, 绝不能被包住
+#   基线 (baseline)   eager / fp16 / tf32 / torch.compile, 同样绝不能被包住
+# 用「被调用者的名字」来分类, 因为 runner 里有两种形态: 直接调
+# `module.kernel(**inputs)` / `kernel_func(**inputs)`, 以及把 lambda 交给
+# `_bench_callable(fn, ...)` 去跑 —— 后者要靠首参名才能区分候选和基线。
 
-    这不是行为测试而是结构测试 —— 直接断言 remote_scripts/run_kernel.py 里
-    出现了 shield 引用。当前会失败, 修好 (把 shield_torch 移进 runner) 后转为
-    unexpected success。
+_CANDIDATE_CALLEES = frozenset({"kernel", "kernel_func", "candidate"})
+_REFERENCE_CALLEES = frozenset({"reference", "fp16_reference", "compiled"})
+
+
+def _has_shield_item(with_node) -> bool:
+    return any(
+        isinstance(item.context_expr, ast.Call)
+        and isinstance(item.context_expr.func, ast.Name)
+        and item.context_expr.func.id == "shield_torch"
+        for item in with_node.items
+    )
+
+
+def _shield_regions(tree) -> list:
+    """所有 `with shield_torch()` 覆盖的行区间 [(起, 止), ...]"""
+    regions = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With) and _has_shield_item(node):
+            end = max((n.lineno for n in ast.walk(node) if hasattr(n, "lineno")),
+                      default=node.lineno)
+            regions.append((node.lineno, end))
+    return regions
+
+
+def _callee_label(call: ast.Call):
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr                                  # module.kernel(...)
+    if isinstance(func, ast.Name):
+        if func.id == "_bench_callable" and call.args and isinstance(call.args[0], ast.Name):
+            return call.args[0].id                        # _bench_callable(candidate, ...)
+        return func.id                                    # reference() / compiled()
+    return None
+
+
+def _execution_lineno(node, parents):
+    """lambda 的定义处不是执行处 —— 把 lambda 体内的调用折算到它真正被跑的行。
+
+    - `candidate = lambda: module.kernel(...)`: lambda 绑到了名字上, 真正的执行点
+      是后面的 `_bench_callable(candidate, ...)`, 那一条已被单独分类; 这里返回
+      None 表示跳过, 否则会把它误判成「shield 外的候选调用」。
+    - `_timed_runs(lambda: kernel_func(...), ...)`: lambda 直接当实参就地执行,
+      折算成 `_timed_runs` 那一行。
+    """
+    cur = node
+    while True:
+        parent = parents.get(id(cur))
+        if parent is None:
+            return node.lineno
+        if isinstance(parent, ast.Lambda):
+            grand = parents.get(id(parent))
+            if isinstance(grand, ast.Call) and any(a is parent for a in grand.args):
+                return grand.lineno
+            return None
+        cur = parent
+
+
+def _kernel_call_sites(tree) -> list:
+    """返回 [(被调用者标签, 行号, 是否被 shield 覆盖), ...]"""
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    regions = _shield_regions(tree)
+    sites = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        label = _callee_label(node)
+        if label not in _CANDIDATE_CALLEES and label not in _REFERENCE_CALLEES:
+            continue
+        line = _execution_lineno(node, parents)
+        if line is None:
+            continue
+        sites.append((label, line, any(lo <= line <= hi for lo, hi in regions)))
+    return sites
+
+
+class TestRuntimeShieldCoverage(unittest.TestCase):
+    """洞 1 (docs/research/03): 真机 runner 曾经没有运行时反作弊
+
+    shield_torch 原先只在 LocalExecutor 与 MockGPU 生效, 而唯一产出真机 L2/L3
+    数字的是 remote_scripts/run_kernel.py 这条路径 —— 静态审计漏掉的写法在真机
+    上就畅通无阻。
+
+    这里是结构测试而不是行为测试: 真机路径没法在单测里跑。但只断言「源码里出现
+    shield_torch」太弱, 一个 import 就能让它变绿。所以按 AST 断言三件事:
+      1. 每个候选调用点都落在某个 `with shield_torch()` 区间内;
+      2. 每个参考/基线调用点都落在区间**外** —— 参考实现本来就要合法调用
+         torch.matmul, 套进去会把整个 L2/L3 打死;
+      3. shield 不得出现在 for 循环体内 —— 进出各二十多次 setattr, 在 18.69µs
+         的 launch 底噪上是 2~3 倍开销, 逐次包裹会毁掉 L3 计时。
     """
 
-    @unittest.expectedFailure
-    def test_runner_applies_shield(self):
-        from pathlib import Path
-        runner = Path(__file__).resolve().parent.parent / "remote_scripts" / "run_kernel.py"
-        src = runner.read_text(encoding="utf-8")
-        self.assertTrue(
-            "shield_torch" in src or "anticheat" in src,
-            "remote_scripts/run_kernel.py 未引用任何运行时反作弊; "
-            "shield_torch 目前只在 LocalExecutor 与 MockGPU 生效, "
-            "而唯一产出真机 L3 数字的是 runner 这条路径",
+    @classmethod
+    def setUpClass(cls):
+        cls.runner = Path(__file__).resolve().parent.parent / "remote_scripts" / "run_kernel.py"
+        cls.src = cls.runner.read_text(encoding="utf-8")
+        cls.tree = ast.parse(cls.src)
+
+    def test_shield_comes_from_anticheat_module(self):
+        """必须是同一份 shield_torch, 不能在 runner 里另抄一套禁用清单"""
+        imported = any(
+            isinstance(node, ast.ImportFrom) and node.module == "anticheat"
+            and any(a.name == "shield_torch" for a in node.names)
+            for node in ast.walk(self.tree)
         )
+        self.assertTrue(imported, "runner 未从 anticheat 导入 shield_torch")
+
+    def test_candidate_calls_are_shielded(self):
+        outside = [f"{label} @ 第 {line} 行"
+                   for label, line, covered in _kernel_call_sites(self.tree)
+                   if label in _CANDIDATE_CALLEES and not covered]
+        self.assertEqual([], outside,
+                         f"这些候选调用点不在任何 shield_torch 区间内: {outside}")
+
+    def test_reference_calls_are_not_shielded(self):
+        inside = [f"{label} @ 第 {line} 行"
+                  for label, line, covered in _kernel_call_sites(self.tree)
+                  if label in _REFERENCE_CALLEES and covered]
+        self.assertEqual([], inside,
+                         f"参考/基线被 shield 包住, 它们调用 torch 原生算子是合法的: {inside}")
+
+    def test_shield_never_inside_a_loop(self):
+        offenders = []
+        for node in ast.walk(self.tree):
+            if not isinstance(node, (ast.For, ast.While)):
+                continue
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.With) and _has_shield_item(sub):
+                    offenders.append(sub.lineno)
+        self.assertEqual([], offenders,
+                         f"shield_torch 出现在循环体内 (第 {offenders} 行), 会变成逐次屏蔽")
+
+    def test_shield_sites_are_non_trivial(self):
+        """兜底: 真出现新的候选执行路径时, 上面几条断言不该因为集合为空而空转"""
+        sites = _kernel_call_sites(self.tree)
+        self.assertGreaterEqual(len([s for s in sites if s[0] in _CANDIDATE_CALLEES]), 8)
+        self.assertGreaterEqual(len([s for s in sites if s[0] in _REFERENCE_CALLEES]), 4)
+
+
+class TestShieldIsActuallyDeployed(unittest.TestCase):
+    """runner 里 import anticheat 之后, 部署链必须把 anticheat.py 一起推上去
+
+    否则每次远端调用都 ImportError。_remote_files() 的顺序也有讲究: 依赖排在
+    runner 前面, 中途失败只会得到「新依赖 + 旧 runner」(能跑), 不会得到
+    「新 runner + 缺依赖」(直接崩)。
+    """
+
+    def test_anticheat_deployed_before_runner(self):
+        from operator_agent.remote_executor import SSHExecutor
+
+        ex = SSHExecutor(host="h", user="u")
+        names = [PurePosixPath(remote).name for _, remote in ex._remote_files()]
+        self.assertIn("anticheat.py", names)
+        self.assertLess(names.index("anticheat.py"), names.index("run_kernel.py"))
+
+    def test_deployed_anticheat_is_the_one_under_test(self):
+        """推上去的必须是 operator_agent/anticheat.py 本身, 不是副本"""
+        from operator_agent import anticheat
+
+        deployed = Path(__file__).resolve().parent.parent / "operator_agent" / "anticheat.py"
+        self.assertEqual(deployed.resolve(), Path(anticheat.__file__).resolve())
 
 
 if __name__ == "__main__":
