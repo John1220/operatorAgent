@@ -2,8 +2,9 @@
 
 钉住三件事:
 
-1. `measurement.assess()` 的分档数学与两个信号 (launch 地板支配 / 基准污染) 的组合
-   规则, 含「地板未知」时不得默认放行。
+1. `measurement.assess()` 的分档数学与四个信号 (launch 地板支配 / 测量前 util 污染 /
+   样本主体离散度 / 窗口内抢占) 的组合规则, 含「地板未知」与「分位数未上报」时
+   不得默认放行。
 2. `Verifier` 的三条 L3 返回路径都要把三态写进 metrics —— 缺口 1 原来的失效方式
    不是「没算」而是「算出来没人读」(`benchmark_contaminated` 早在 metrics 里,
    conductor/fixer/agents 三个文件 grep 零命中)。
@@ -27,7 +28,8 @@ import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
 from operator_agent.measurement import (
-    CONTAMINATION_UTIL_PCT, LAUNCH_DOMINANCE_UNINFORMATIVE, LAUNCH_DOMINANCE_VALID,
+    CONTAMINATION_UTIL_PCT, DISPERSION_DEGRADED, DISPERSION_UNINFORMATIVE,
+    INTRUDER_MAX_OVER_MEDIAN, LAUNCH_DOMINANCE_UNINFORMATIVE, LAUNCH_DOMINANCE_VALID,
     MeasurementAssessment, Validity, assess, launch_dominance,
 )
 from operator_agent.remote_executor import RemoteExecutor
@@ -212,14 +214,24 @@ class TestDocumentedVerdictsAreStableUnderFloorChoice(unittest.TestCase):
 
 # ─── 二、Verifier 把三态写进 metrics ─────────────────────────
 
-def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO):
+def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO,
+                     dispersion=None, p25=None, p75=None, max_over_median=None):
     """搭一个远程形状的 L3: benchmark_with_baselines 返回同机同卡的候选与各基线"""
     backend = RemoteExecutor(mode="local")
+    candidate = {"min_time_ms": candidate_ms, "median_time_ms": candidate_ms,
+                 "avg_time_ms": candidate_ms, "max_time_ms": candidate_ms, "runs": 30}
+    if dispersion is not None:
+        candidate["dispersion_iqr_over_median"] = dispersion
+    if max_over_median is not None:
+        candidate["dispersion_max_over_median"] = max_over_median
+    if p25 is not None:
+        candidate["p25_time_ms"] = p25
+    if p75 is not None:
+        candidate["p75_time_ms"] = p75
     bench = {
         "success": True, "device": "cuda:0", "gflops": 1000.0,
         "memory_bandwidth_gbs": 500.0,
-        "candidate": {"min_time_ms": candidate_ms, "median_time_ms": candidate_ms,
-                      "avg_time_ms": candidate_ms, "max_time_ms": candidate_ms, "runs": 30},
+        "candidate": candidate,
         "baselines": {
             "pytorch_eager": {"median_time_ms": baseline_ms, "min_time_ms": baseline_ms},
         },
@@ -422,6 +434,257 @@ class TestMeasurementDrivesLoopDirectly(unittest.TestCase):
         self.assertTrue(a.can_gate)
         self.assertFalse(a.can_disable_recipe)
         self.assertFalse(a.can_count_stagnation)
+
+
+class TestDispersionGate(unittest.TestCase):
+    """第三个信号: 样本自身在抖 (docs/research/17 第二节第 1 条)
+
+    runner 本来就跑 n 个样本, 多报 p25/p75 **不花任何额外 GPU 时间**, 于是下游
+    能区分「核真的慢」和「这台机器此刻在抖」。以前只报 min/median/avg/max,
+    从不看它们散不散 —— 30 个未收敛样本给出的 median 看起来权威, 实则是噪声,
+    而 Conductor 拿它去禁用配方、累计停滞轮次。
+    """
+
+    def test_tight_samples_stay_valid(self):
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                   dispersion=0.01)
+        self.assertIs(a.validity, Validity.VALID)
+        self.assertEqual(a.dispersion, 0.01)
+        self.assertEqual([], a.reasons)
+
+    def test_loose_samples_are_degraded_and_say_what_to_do(self):
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                   dispersion=0.15)
+        self.assertIs(a.validity, Validity.DEGRADED)
+        self.assertTrue(a.can_gate, "DEGRADED 仍可参与通过/不通过判定")
+        self.assertFalse(a.can_disable_recipe)
+        self.assertFalse(a.can_count_stagnation)
+        # reason 是 Fixer / SearchAgent 的 prompt 素材, 必须带处置动作
+        self.assertTrue(any("离散度" in r and ("禁用配方" in r or "停滞" in r)
+                            for r in a.reasons), a.reasons)
+
+    def test_very_loose_samples_are_uninformative(self):
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                   dispersion=0.45)
+        self.assertIs(a.validity, Validity.UNINFORMATIVE)
+        self.assertFalse(a.can_gate)
+        self.assertTrue(any("重测" in r for r in a.reasons), a.reasons)
+
+    def test_thresholds_match_the_documented_anchors(self):
+        """0.10 锚在 PyTorch _IQR_WARN_THRESHOLD; 0.30 无外部锚点, 是经验值。
+
+        把常量钉在这里, 改动时必须同时改文档, 不能悄悄漂。
+        """
+        self.assertEqual(0.10, DISPERSION_DEGRADED)
+        self.assertEqual(0.30, DISPERSION_UNINFORMATIVE)
+
+    def test_boundary_is_inclusive_at_zero_and_exclusive_at_threshold(self):
+        self.assertIs(assess(median_time_ms=1.0, launch_floor_us=H20_FLOOR_US,
+                             dispersion=0.0).validity, Validity.VALID)
+        self.assertIs(assess(median_time_ms=1.0, launch_floor_us=H20_FLOOR_US,
+                             dispersion=DISPERSION_DEGRADED).validity, Validity.VALID)
+
+    def test_absent_dispersion_does_not_change_the_verdict(self):
+        """旧 runner / MockGPU 不上报分位数: 不得因此把有效测量判成不可信。"""
+        with_d = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US)
+        self.assertIs(with_d.validity, Validity.VALID)
+        self.assertIsNone(with_d.dispersion)
+        self.assertNotIn("dispersion_iqr_over_median", with_d.as_metrics())
+
+    def test_worse_signal_wins_when_two_fire_at_once(self):
+        """离散度只到 DEGRADED, 但地板支配到 UNINFORMATIVE → 取更差的。"""
+        a = assess(median_time_ms=NET_MS_LAYERNORM_SMALL, launch_floor_us=H20_FLOOR_US,
+                   dispersion=0.15)
+        self.assertIs(a.validity, Validity.UNINFORMATIVE)
+        self.assertEqual(2, len([r for r in a.reasons if "离散度" in r or "launch" in r]))
+
+    def test_contamination_and_dispersion_both_recorded(self):
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                   gpu_util_pct=14.0, dispersion=0.15)
+        self.assertTrue(a.contaminated)
+        self.assertIs(a.validity, Validity.DEGRADED)
+        self.assertEqual(2, len(a.reasons))
+
+
+class TestWindowIntruderSignal(unittest.TestCase):
+    """第四个信号: 测量窗口**中途**插进来的抢占
+
+    与 `gpu_util_pct` 的区别是时间: util 只在测量前采一次快照, 快照干净不代表
+    窗口内一直干净。与 `dispersion` 的区别是敏感度: iqr 对单个离群点完全不敏感。
+    这台机器恒有 7 个其他进程, 两个盲区都会真实命中。
+    """
+
+    def test_clean_window_stays_valid(self):
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                   dispersion=0.01, max_over_median=1.4)
+        self.assertIs(a.validity, Validity.VALID)
+        self.assertEqual([], a.reasons)
+
+    def test_intruder_degrades_but_does_not_invalidate(self):
+        """median 对少量离群点是稳的, 所以只降到 DEGRADED, 不到 UNINFORMATIVE。"""
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                   dispersion=0.0, max_over_median=50.0)
+        self.assertIs(a.validity, Validity.DEGRADED)
+        self.assertTrue(a.can_gate)
+        self.assertFalse(a.can_disable_recipe)
+        self.assertTrue(any("抢占" in r for r in a.reasons), a.reasons)
+        self.assertEqual(50.0, a.as_metrics()["dispersion_max_over_median"])
+
+    def test_intruder_invisible_to_util_snapshot_is_still_caught(self):
+        """util 快照干净 (0%) + iqr 干净 (0.0), 只有 max/median 能看出来。"""
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                   gpu_util_pct=0.0, dispersion=0.0, max_over_median=12.0)
+        self.assertFalse(a.contaminated, "util 快照确实干净, 不该报硬污染")
+        self.assertIs(a.validity, Validity.DEGRADED)
+
+    def test_absent_signal_does_not_change_the_verdict(self):
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US)
+        self.assertIsNone(a.max_over_median)
+        self.assertNotIn("dispersion_max_over_median", a.as_metrics())
+
+    def test_threshold_is_calibrated_on_real_hardware(self):
+        """2.0 不是猜的, 是 benchmarks/calibrate_dispersion_thresholds.py 标出来的。
+
+        钉在这里: 改这个数必须同时给出新的真机分布, 不能凭手感调。
+        """
+        self.assertEqual(2.0, INTRUDER_MAX_OVER_MEDIAN)
+
+    def test_gate_is_disabled_in_the_launch_dominated_regime(self):
+        """短核的 max/median 天然就是几倍, 那条区间已由地板门判 UNINFORMATIVE。
+
+        真机实测 (H20, 30 轮 × 30 样本): 空核 (median 4.5 µs) 的 max/median
+        p50=3.84 / max=18.26, layernorm 1024×768 (8.4 µs) 是 4.31 / 8.00, 而
+        长核 (matmul 4096³, 1.03 ms) 只有 1.00 / 1.04。同一把绝对阈值套两种
+        区间必然两头不讨好 —— 所以只在长核区间启用。
+        """
+        a = assess(median_time_ms=NET_MS_LAYERNORM_SMALL, launch_floor_us=H20_FLOOR_US,
+                   max_over_median=15.0)
+        self.assertIs(a.validity, Validity.UNINFORMATIVE, "地板门已经判死了, 不该再叠一条")
+        self.assertFalse(any("抢占" in r for r in a.reasons),
+                         f"launch 支配区间不该报抢占: {a.reasons}")
+
+    def test_gate_is_disabled_when_floor_is_unknown(self):
+        """地板未知 → 无从判断处在哪个区间, 不猜。"""
+        a = assess(median_time_ms=1.0, launch_floor_us=None, max_over_median=50.0)
+        self.assertFalse(any("抢占" in r for r in a.reasons), a.reasons)
+
+
+class TestRunnerReportsDispersion(unittest.TestCase):
+    """runner 侧: _percentile 与 numpy 同口径, _sample_stats 三条路径共用。
+
+    直接 import remote_scripts/run_kernel.py —— 它只依赖 numpy, torch 是函数内
+    延迟导入, 所以本地无 GPU 也能测这两个纯函数。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = Path(__file__).resolve().parents[1] / "remote_scripts" / "run_kernel.py"
+        spec = importlib.util.spec_from_file_location("_rk_under_test", path)
+        cls.rk = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.rk)
+
+    def test_percentile_matches_numpy(self):
+        rng = np.random.default_rng(7)
+        for n in (1, 2, 5, 30, 31, 200):
+            samples = sorted(rng.lognormal(0.0, 0.3, n).tolist())
+            for q in (0, 25, 50, 75, 100):
+                self.assertAlmostEqual(
+                    float(np.percentile(samples, q)),
+                    self.rk._percentile(samples, q), places=9,
+                    msg=f"n={n} q={q} 与 numpy 口径不一致")
+
+    def test_iqr_is_blind_to_a_single_outlier_and_max_over_median_is_not(self):
+        """29 个稳定样本 + 1 个被抢占的样本。
+
+        这是本机的真实污染形态, 也是这次吸纳最重要的发现: **iqr/median 完全看不
+        见它** (p25=p75=1.0 → iqr=0), 因为分位数本来就对少量离群点稳健 —— 当决策
+        统计量是 median 时这是优点。但 gpu_util 只在测量前采一次快照, 窗口中途插
+        进来的抢占它同样看不见, 于是「测量期间发生过抢占」以前没有任何证据通道。
+        max/median 补的就是这个洞, 两个统计量互补, 不可互相替代。
+        """
+        samples = [1.0] * 29 + [50.0]
+        stats = self.rk._sample_stats(samples)
+        self.assertEqual(1.0, stats["median_time_ms"])
+        self.assertEqual(0.0, stats["dispersion_iqr_over_median"],
+                         "iqr 应当看不见单个离群点 —— 它若看见了说明口径变了")
+        self.assertEqual(50.0, stats["dispersion_max_over_median"])
+        self.assertEqual(30, stats["runs"])
+
+    def test_bulk_noise_moves_iqr_but_not_max_over_median_alone(self):
+        """反过来: 主体在抖时 iqr 必须报警, 不能只靠 max/median。"""
+        rng = np.random.default_rng(3)
+        samples = (1.0 + rng.normal(0.0, 0.25, 40)).tolist()
+        stats = self.rk._sample_stats(samples)
+        self.assertGreater(stats["dispersion_iqr_over_median"], 0.2)
+
+    def test_stats_survive_degenerate_input(self):
+        self.assertEqual(0.0, self.rk._sample_stats([0.0, 0.0, 0.0])["median_time_ms"])
+        # median 为 0 时不能抛 ZeroDivisionError
+        degenerate = self.rk._sample_stats([0.0, 0.0])
+        self.assertIsNone(degenerate["dispersion_iqr_over_median"])
+        self.assertIsNone(degenerate["dispersion_max_over_median"])
+        self.assertEqual(1, self.rk._sample_stats([2.5])["runs"])
+
+    def test_all_three_benchmark_paths_report_the_same_keys(self):
+        """三条路径 (含基线 / triton 单测 / torch-numpy 单测) 必须口径一致。
+
+        只有 _bench_callable 报分位数的话, 走另两条路径时离散度门会静默失效 ——
+        与「算了没人读」是同一类缺陷。
+        """
+        import re
+        src = (Path(__file__).resolve().parents[1] / "remote_scripts"
+               / "run_kernel.py").read_text(encoding="utf-8")
+        call_sites = re.findall(r"(?<!def )_sample_stats\(", src)
+        self.assertEqual(3, len(call_sites),
+                         "三条 benchmark 路径应当都走 _sample_stats")
+        # 旧的逐字段拼装不允许残留 (它会漏掉分位数)
+        self.assertNotIn('"min_time_ms": round(min(times)', src)
+        # gflops / bandwidth 必须一律由 median 推出, 不许有路径用 avg
+        self.assertNotIn("_compute_metrics(real_inputs, avg_time)", src)
+
+
+class TestVerifierPropagatesDispersion(unittest.TestCase):
+
+    def _l3(self, **kw):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            r = _remote_verifier(**kw)._verify_performance(
+                PYTHON_MATMUL, _matmul_inputs(), 0.0, _task())
+        return r
+
+    def test_dispersion_lands_in_metrics_and_message(self):
+        r = self._l3(candidate_ms=1.040, baseline_ms=1.10, dispersion=0.42,
+                     p25=0.9, p75=1.3)
+        self.assertEqual(0.42, r.metrics["dispersion_iqr_over_median"])
+        self.assertEqual(0.9, r.metrics["p25_time_ms"])
+        self.assertEqual(1.3, r.metrics["p75_time_ms"])
+        self.assertEqual(Validity.UNINFORMATIVE.value, r.metrics["measurement_validity"])
+        self.assertIn("离散度", r.message)
+        self.assertFalse(r.metrics["measurement_can_count_stagnation"])
+
+    def test_quiet_machine_stays_valid(self):
+        r = self._l3(candidate_ms=1.040, baseline_ms=1.10, dispersion=0.02)
+        self.assertEqual(Validity.VALID.value, r.metrics["measurement_validity"])
+        self.assertTrue(r.metrics["measurement_can_disable_recipe"])
+
+    def test_runner_without_dispersion_is_not_penalised(self):
+        r = self._l3(candidate_ms=1.040, baseline_ms=1.10)
+        self.assertEqual(Validity.VALID.value, r.metrics["measurement_validity"])
+        self.assertNotIn("dispersion_iqr_over_median", r.metrics)
+
+    def test_window_intruder_reaches_metrics_and_message(self):
+        """util 快照干净、iqr 干净, 只有 max/median 报警 —— 仍要写进 message。
+
+        message 是 Fixer / SearchAgent 的 prompt 素材, 是唯一保证被下游看到的通道
+        (缺口 1 原来的失效方式就是「算了没人读」)。
+        """
+        r = self._l3(candidate_ms=1.040, baseline_ms=1.10, util=0,
+                     dispersion=0.0, max_over_median=18.0)
+        self.assertEqual(18.0, r.metrics["dispersion_max_over_median"])
+        self.assertEqual(Validity.DEGRADED.value, r.metrics["measurement_validity"])
+        self.assertIn("抢占", r.message)
+        self.assertFalse(r.metrics["measurement_can_disable_recipe"])
 
 
 if __name__ == "__main__":

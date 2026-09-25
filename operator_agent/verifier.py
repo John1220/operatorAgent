@@ -383,6 +383,15 @@ class Verifier:
                           "gpu_util_pct", "gpu_other_procs", "selected_gpu"):
             if extra_key in bench:
                 metrics[extra_key] = bench[extra_key]
+        # 候选自己的样本分布。这三个字段来自 runner 的 _sample_stats: 它本来就跑了
+        # n 个样本, 多报两个分位数不花额外 GPU 时间, 而下游因此能区分「核真的慢」
+        # 和「这台机器此刻在抖」(docs/research/17 第二节第 1 条)。
+        # 注意取 candidate_metrics 而不是 bench: 远程路径上 bench 顶层只有
+        # device/success, 统计量都在 bench["candidate"] 里。
+        for extra_key in ("p25_time_ms", "p75_time_ms", "dispersion_iqr_over_median",
+                          "dispersion_max_over_median"):
+            if extra_key in candidate_metrics:
+                metrics[extra_key] = candidate_metrics[extra_key]
 
         # ---- 注入 Roofline 指标, 供 SearchAgent 做结构化优化决策 ----
         metrics.update({
@@ -522,6 +531,8 @@ class Verifier:
             median_time_ms=candidate_ms,
             launch_floor_us=self._detect_theoretical_peak().get("launch_floor_us"),
             gpu_util_pct=gpu_util_pct,
+            dispersion=metrics.get("dispersion_iqr_over_median"),
+            max_over_median=metrics.get("dispersion_max_over_median"),
         )
         metrics.update(assessment.as_metrics())
         metrics["benchmark_contaminated"] = assessment.contaminated

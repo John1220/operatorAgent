@@ -110,17 +110,38 @@ def _sample_gpu_idle():
     利用率统计的是"有 kernel 在跑的时间占比", 我们自己的 benchmark 会把它顶到
     100%, 所以只能在测量前采样。其他计算进程数比利用率更可靠地反映是否被共享,
     故一并返回 (排除本进程自己)。
+
+    ⚠️ **采两次取最小值**, 中间留 1.2 s。原因 (真机实测, docs/research/17 第三节):
+    `nvidia-smi` 的 utilization.gpu 是过去约 1 秒窗口内的占比, 所以"测量前"采样
+    只挡住了**本进程**的核, 挡不住**上一个 runner 进程**的尾巴 —— L1/L2/L3 是
+    三次独立的 ssh 调用, 间隔常常不到 1 秒。实测在一台真空闲的卡上 (连续 100 次
+    采样全是 0%), 紧挨着自己一轮 benchmark 之后去采, 读到的是 10-34%。
+    这个假阳性会直接判「基准被污染」→ 加速比不可比 → Conductor 不计停滞、
+    不禁用配方, 也就是让闭环静默失效。
+
+    取 min 而不是 max/mean: 自己的残留会在这 1.2 s 里排空, 邻居的持续负载不会,
+    所以两次里较小的那个才更接近"别人占了多少"。代价是每次 L3 多 1.2 s。
     """
     util, others = None, None
     try:
         import subprocess
-        r = subprocess.run(
-            ["nvidia-smi", f"--id={_SELECTED_GPU_ID}",
-             "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            util = int(r.stdout.strip().splitlines()[0])
+
+        def _read_util():
+            r = subprocess.run(
+                ["nvidia-smi", f"--id={_SELECTED_GPU_ID}",
+                 "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return int(r.stdout.strip().splitlines()[0])
+            return None
+
+        first = _read_util()
+        time.sleep(1.2)
+        second = _read_util()
+        readings = [u for u in (first, second) if u is not None]
+        util = min(readings) if readings else None
+
         r2 = subprocess.run(
             ["nvidia-smi", f"--id={_SELECTED_GPU_ID}",
              "--query-compute-apps=pid", "--format=csv,noheader"],
@@ -702,6 +723,57 @@ def _resolve_counts(fn, warmup: int, repeat: int, device_is_cuda: bool) -> tuple
     return n_warmup, n_repeat
 
 
+def _percentile(sorted_times, q: float) -> float:
+    """升序样本的 q 分位数 (q ∈ [0,100]), 线性插值, 与 numpy 默认口径一致。
+
+    不引 numpy 是为了让这个函数在 runner 的任何执行路径上都能用 —— runner 会被
+    scp 到远端单独跑, 依赖越少越好。
+    """
+    n = len(sorted_times)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return sorted_times[0]
+    pos = (n - 1) * q / 100.0
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return sorted_times[lo] * (1.0 - frac) + sorted_times[hi] * frac
+
+
+def _sample_stats(times) -> dict:
+    """把一批样本摊成统计量, 三条 benchmark 路径共用。
+
+    p25/p75 是给离散度门用的 (docs/research/17): runner 本来就跑了 n 个样本,
+    多报两个分位数**不花任何额外 GPU 时间**, 而下游因此能区分「核真的慢」和
+    「这台机器此刻在抖」。判据 iqr/median 与 PyTorch Timer 的
+    `_IQR_WARN_THRESHOLD` 同源。
+
+    ⚠️ iqr/median 对**单个离群样本完全不敏感** (29 个 1.0 + 1 个 50.0 → p25=p75=1.0
+    → iqr=0)。当决策统计量是 median 时这正是想要的性质 —— median 在 50% 样本被
+    污染前都不动。但它意味着 iqr 看不见「测量窗口中途有邻居进程插进来」, 而
+    gpu_util 只在测量**前**采一次快照, 同样看不见。所以额外报 max/median 作为
+    「窗口内发生过抢占」的廉价旁证。
+    """
+    s = sorted(times)
+    median = _percentile(s, 50)
+    p25 = _percentile(s, 25)
+    p75 = _percentile(s, 75)
+    return {
+        "min_time_ms": round(s[0], 4),
+        "median_time_ms": round(median, 4),
+        "avg_time_ms": round(sum(s) / len(s), 4),
+        "max_time_ms": round(s[-1], 4),
+        "p25_time_ms": round(p25, 4),
+        "p75_time_ms": round(p75, 4),
+        # 相对四分位距: 样本主体的散布。median 为 0 时不猜 (ZeroDivisionError 之源)。
+        "dispersion_iqr_over_median": round((p75 - p25) / median, 4) if median > 0 else None,
+        # 最慢样本 / 中位样本: 对离群点敏感, 与上面那个互补, 不可互相替代。
+        "dispersion_max_over_median": round(s[-1] / median, 4) if median > 0 else None,
+        "runs": len(s),
+    }
+
+
 def _bench_callable(fn, warmup: int, repeat: int, device_is_cuda: bool) -> dict:
     import torch
     fn()                       # 先跑一次吃掉 JIT/首次派发, 否则估时会严重偏大
@@ -713,12 +785,11 @@ def _bench_callable(fn, warmup: int, repeat: int, device_is_cuda: bool) -> dict:
     if device_is_cuda:
         torch.cuda.synchronize()
     times = _timed_runs(fn, n_repeat, device_is_cuda)
-    times.sort()
-    return {"min_time_ms": round(times[0], 4), "median_time_ms": round(times[len(times)//2], 4),
-            "avg_time_ms": round(sum(times) / len(times), 4), "max_time_ms": round(times[-1], 4),
-            # 报实际跑的轮数, 不是调用方请求的: 快核会被自动加采样, 下游要知道
-            # 这个数字有多少样本撑着 (verifier 会把它摊进 L3 metrics)
-            "runs": len(times), "runs_requested": repeat}
+    stats = _sample_stats(times)
+    # 报实际跑的轮数, 不是调用方请求的: 快核会被自动加采样, 下游要知道
+    # 这个数字有多少样本撑着 (verifier 会把它摊进 L3 metrics)
+    stats["runs_requested"] = repeat
+    return stats
 
 
 def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
@@ -854,18 +925,19 @@ def _benchmark_triton(code: str, real_inputs: dict, warmup: int, repeat: int) ->
             # CUDA event 计时, 提升精度 (毫秒 -> 秒)
             times = [t / 1000 for t in _timed_runs(call, n_repeat, True)]
 
-        avg_time = sum(times) / len(times)
-        gflops, bandwidth = _compute_metrics(real_inputs, avg_time)
+        stats = _sample_stats([t * 1000 for t in times])
+        # gflops / bandwidth 改用 median: 单个被邻居抢占的样本就能把 avg 拉高数倍
+        # (29×1.0ms + 1×50ms → avg 2.63ms, median 1.0ms), 而 median 在 50% 样本被
+        # 污染前都不动。含基线的那条路径 (run_benchmark_with_baselines) 一直用的是
+        # median, 这两条以前用 avg, 属于口径不一致。
+        gflops, bandwidth = _compute_metrics(real_inputs, stats["median_time_ms"] / 1000)
 
         return {
             "success": True,
             "language": "triton",
-            "avg_time_ms": round(avg_time * 1000, 4),
-            "min_time_ms": round(min(times) * 1000, 4),
-            "max_time_ms": round(max(times) * 1000, 4),
+            **stats,
             "gflops": round(gflops, 4),
             "memory_bandwidth_gbs": round(bandwidth, 4),
-            "runs": repeat,
             "device": str(device),
         }
     except Exception as e:
@@ -905,18 +977,19 @@ def _benchmark_torch_numpy(code: str, real_inputs: dict, warmup: int, repeat: in
                     call()
                 times = [t / 1000 for t in _timed_runs(call, repeat, False)]
 
-        avg_time = sum(times) / len(times)
-        gflops, bandwidth = _compute_metrics(real_inputs, avg_time)
+        stats = _sample_stats([t * 1000 for t in times])
+        # gflops / bandwidth 改用 median: 单个被邻居抢占的样本就能把 avg 拉高数倍
+        # (29×1.0ms + 1×50ms → avg 2.63ms, median 1.0ms), 而 median 在 50% 样本被
+        # 污染前都不动。含基线的那条路径 (run_benchmark_with_baselines) 一直用的是
+        # median, 这两条以前用 avg, 属于口径不一致。
+        gflops, bandwidth = _compute_metrics(real_inputs, stats["median_time_ms"] / 1000)
 
         return {
             "success": True,
             "language": lang,
-            "avg_time_ms": round(avg_time * 1000, 4),
-            "min_time_ms": round(min(times) * 1000, 4),
-            "max_time_ms": round(max(times) * 1000, 4),
+            **stats,
             "gflops": round(gflops, 4),
             "memory_bandwidth_gbs": round(bandwidth, 4),
-            "runs": repeat,
             "device": str(device) if lang == "torch" else "cpu",
         }
     except Exception as e:
