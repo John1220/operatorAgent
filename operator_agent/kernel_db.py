@@ -545,6 +545,72 @@ class KernelDatabase:
 
 # ─── 失败案例库 (负样本沉淀 + Reflexion 结构化教训) ──────────────────
 
+_ERROR_CLASS_RE = re.compile(r"\b([A-Z][A-Za-z0-9_]*(?:Error|Exception))\b")
+_FRAME_RE = re.compile(r'File "[^"]*", line \d+, in (\S+)')
+
+# 没有 `*Error` 词元时用的关键词表。只收**本仓库里能找到的字面量** (doc 45 第二节):
+# 臆造一个「常见错误关键词」清单正是本项目记过的那类死判据 —— 它永远不会命中。
+_FAILURE_CLASS_MARKERS = (
+    ("反作弊", "cheat_detected"),
+    ("最大误差", "numeric_tolerance"),
+    ("No usable remote baseline", "infra_no_baseline"),
+    ("Missing 'kernel' function", "no_kernel_entry"),
+)
+_INFRA_CLASSES = ("infra_no_baseline",)
+
+
+def failure_signature(level: str, error_text: str) -> str:
+    """把一次失败摊成「与这次任务无关」的粗粒度签名, 用于跨任务复发计数。
+
+    为什么不能用现成的 sha1(kernel_type|dsl|level|错误前 200 字符):
+    那个键**含 kernel_type**, 所以「同一类错误在三个不同算子上都出现过」这条信息被
+    它自己拆散了 —— 而跨任务复发恰恰是 C3 的判据 (单次失败只是模型局限, 复发才是
+    harness 缺陷)。它也含错误原文, 于是行号、机器路径、Triton 回显的源码里任何一个字节
+    的变化都会生成新签名, 分组碎成 1:1 (碎分组的后果不是「计数不准」, 而是门永远不开)。
+
+    本函数只保留三个成分: 验证层级 / 失败类名 / 最内层栈帧函数名。
+    **刻意不含**任务 id、kernel_type、行号与任何路径。
+    """
+    lv = (level or "?").strip() or "?"
+    text = error_text or ""
+    # 关键词先于异常名: 远端把「每个基线试了一遍」的错误列表一起塞进 error_log
+    # (`torch_compile: AttributeError: ...`), 于是错误**原文**里几乎总能匹配到一个
+    # 异常类名 —— 那个名字属于基础设施的某一次尝试, 不是这次失败的诊断。我们自己写的
+    # 那句固定文案才是。代价: 生成的源码若在注释里回显这些关键词, 会被归到对应桶里
+    # (错分但不危险: 可复用性还要过 is_promotable_failure)。
+    cls = next((name for marker, name in _FAILURE_CLASS_MARKERS if marker in text), None)
+    if cls is None:
+        # 取**最后**一个异常名: Python traceback 把根因排在末尾, 远程那句
+        # `Compile error: CompilationError: ... NameError: name 'tl' is not defined`
+        # 里, CompilationError 只是 Triton 的包装, NameError 才是这次真正没写 import 的原因。
+        names = _ERROR_CLASS_RE.findall(text)
+        cls = names[-1] if names else "unknown"
+    frames = _FRAME_RE.findall(text)
+    # 最内层帧 = 真正抛出的那个函数 (traceback 是自上而下排的)
+    frame = frames[-1] if frames else "-"
+    return f"{lv}|{cls}|{frame}"
+
+
+def is_promotable_failure(record: "FailureRecord") -> bool:
+    """这条失败有没有资格被当成**跨运行**的教训复用。
+
+    排除两类, 都不是成本考虑:
+    ① **数值容差类** (L2 + 「最大误差」)。吸纳 AdaExplore 的 `filter_max_difference`
+       (✅ 读过它的 `agent_entry.py:156` 调用点): 它把带 max_difference 的日志整条丢掉。
+       我们的理由更硬 —— 从「误差 3.1e-3 > 门限 2e-3」里提炼出的教训, 唯一自然的落点是
+       「这类误差可以接受」, 而那正是本项目的数值门存在的意义所在。让语料去教模型放宽
+       检查, 是在给 reward hacking 建库。
+    ② **基础设施类** (远端没有可用基线)。这不是核的错, 记进教训库会变成「上次这个算子
+       失败过」的假先验。
+    """
+    lv = record.level or ""
+    text = record.error_summary or ""
+    if "L2" in lv and ("最大误差" in text or "max_error" in text):
+        return False
+    sig = record.signature or failure_signature(lv, text)
+    return sig.split("|")[1] not in _INFRA_CLASSES
+
+
 @dataclass
 class FailureRecord:
     """失败案例记录: 验证失败 -> 修复 -> 教训 (Reflexion 结构化经验)
@@ -552,6 +618,10 @@ class FailureRecord:
     原字段 (kernel_type/hardware/dsl/level/error_summary/fix_summary/fixed) 保留向后兼容;
     新增的 lessons/error_keywords/applicable_hardware/root_cause 是 Reflexion 自我反思
     产出的结构化条目, 用于 FixerAgent 在 prompt 中直接注入 "同类型错误如何修复"。
+
+    `signature` / `task_id` 是「跨任务复发」这条判据的载体 (doc 45)。它们必须**同时**存在:
+    signature 把不同任务的同类失败归到一个桶, task_id 让那个桶能按**任务**而不是按记录数
+    计数 —— 同一任务里连烧三轮修复不算「复发」, 那是同一次失败被重复观测到。
     """
     failure_id: str
     kernel_type: str
@@ -567,11 +637,24 @@ class FailureRecord:
     lessons: list = field(default_factory=list)  # list[str]: 每条是独立可复用的教训
     error_keywords: list = field(default_factory=list)  # 用于相似度检索的关键词
     applicable_hardware: list = field(default_factory=list)  # 适用硬件 (空=全部适用)
+    # --- 复发签名 (doc 45) ---
+    signature: str = ""                 # 与任务/算子类型无关的粗粒度签名
+    task_id: str = ""                   # 归属任务; 复发按 distinct task_id 计数
 
     def __post_init__(self):
         if not self.created_at:
             import time
             self.created_at = time.time()
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "FailureRecord":
+        # 与 KernelRecord 同一条纪律: 未知的键忽略而不是报错 —— 老文件读得动, 新字段
+        # 缺省为空。
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in d.items() if k in known})
 
 
 class FailureDatabase:
@@ -582,13 +665,151 @@ class FailureDatabase:
     支持两种检索:
       - search_by_context(kernel_type, dsl, hardware)  — 基础上下文检索 (原行为)
       - search_by_error(error_text, kernel_type, dsl)   — 基于 error_summary 词元相似度 (Reflexion 新增)
+
+    持久化与 KernelDatabase 同形态 (追加式 JSONL + 启动重放)。但**读侧多一道门**:
+    从文件重放回来的记录, 只有当它的签名在语料里跨 ≥`recurrence_gate` 个**任务**出现过
+    时才允许注入 prompt (C3 的判据, 见 doc 45)。本次进程内新写的记录不受门约束 ——
+    那等于把 Fixer 现在就能看到的自身经验关掉, 是回归而不是收紧。
     """
 
-    def __init__(self):
+    def __init__(self, jsonl_path: Optional[str] = None,
+                 recurrence_gate: Optional[int] = None):
         self._records: dict[str, FailureRecord] = {}
+        self._jsonl = self._resolve_jsonl(jsonl_path)
+        self._gate = self._resolve_gate(recurrence_gate)
+        self.loaded_from_disk = 0
+        self.disk_skipped_lines = 0
+        # 只有从磁盘重放回来的记录受复发门约束; 用 id 集合而不是记录上的布尔字段,
+        # 是为了不给磁盘格式加一个「运行期状态」字段 (那玩意儿重放后必然与实际不符)。
+        self._replayed: set[str] = set()
+        self._rec_cache: Optional[dict] = None
+        # 两个「挡了多少」的集合而不是计数器: 一次运行里 Fixer 会检索好几轮, 同一条被挡
+        # 两次不该报成两条。
+        self.suppressed_by_gate: set[str] = set()
+        self.suppressed_by_kind: set[str] = set()
+        if self._jsonl is not None:
+            self.replay()
+
+    @staticmethod
+    def _resolve_jsonl(jsonl_path: Optional[str]) -> Optional[Path]:
+        """显式参数 > OPERATOR_AGENT_FAILURE_DB > <repo>/output/failure_db.jsonl
+
+        与 kernel_db 分开两个文件: 正样本要过测量门才入库、负样本每条都记, 两者的
+        写入节奏和清理策略都不一样, 混在一个文件里重放时要靠 event 类型分支, 不如分开。
+        """
+        p = jsonl_path or os.environ.get("OPERATOR_AGENT_FAILURE_DB", "").strip()
+        if not p:
+            p = str(Path(__file__).resolve().parent.parent / "output" / "failure_db.jsonl")
+        if str(p).lower() in _DISABLED:
+            return None
+        return Path(p)
+
+    @staticmethod
+    def _resolve_gate(recurrence_gate: Optional[int]) -> int:
+        """跨任务复发门槛, 默认 3。
+
+        3 来自 AdaExplore: `--knowledge_1_threshold` 出厂默认 3, 且论文 §3.3 写的是
+        「只保留频率超过阈值 O 的规则, 实践中取 3」(✅ 两处都读过原文与配置文件)。
+        ⚠️ 它是**一篇论文调出来的常数**, 没有任何消融实验说明 3 比 2 或 5 好; 本项目
+        也没有样本去验。所以它可被 env 覆盖, 设为 0/1 等于关掉这道门。
+        """
+        raw = recurrence_gate if recurrence_gate is not None else \
+            os.environ.get("OPERATOR_AGENT_FAILURE_GATE", "").strip()
+        if raw == "" or raw is None:
+            return 3
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return 3
+
+    def _append_event(self, event: dict) -> None:
+        if self._jsonl is None:
+            return
+        try:
+            self._jsonl.parent.mkdir(parents=True, exist_ok=True)
+            with self._jsonl.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        except OSError:
+            # 与 KernelDatabase 同一条: 写不进语料不该让一次真跑失败。
+            pass
+
+    def replay(self) -> int:
+        """重放事件日志, 返回从磁盘读回的记录数"""
+        if self._jsonl is None or not self._jsonl.exists():
+            self.disk_skipped_lines = 0
+            return 0
+        skipped = 0
+        with self._jsonl.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+                if ev.get("event") != "failure":
+                    continue
+                try:
+                    rec = FailureRecord.from_dict(ev["record"])
+                except (KeyError, TypeError):
+                    skipped += 1
+                    continue
+                self._records[rec.failure_id] = rec
+                self._replayed.add(rec.failure_id)
+        self.disk_skipped_lines = skipped
+        # 数的是**条数**而不是行数: 同一 id 的后写覆盖先写, 说「重放回 5 条」而库里只有
+        # 3 条会让人开始怀疑计数。
+        self.loaded_from_disk = len(self._replayed)
+        self._rec_cache = None
+        return self.loaded_from_disk
+
+    def recurrence(self) -> dict:
+        """签名 -> 出现过它的**不同任务数** (不是记录数)。
+
+        按任务计数是这条判据的全部要点: 同一个任务里连烧三轮修复 = 同一次失败被观测三次,
+        把它算成「复发三次」会把「这个模型在这个算子上反复修不好」误读成「harness 有缺陷」。
+        """
+        if self._rec_cache is None:
+            seen: dict = {}
+            for r in self._records.values():
+                if not r.signature:
+                    continue
+                seen.setdefault(r.signature, set()).add(r.task_id or r.failure_id)
+            self._rec_cache = {k: len(v) for k, v in seen.items()}
+        return self._rec_cache
+
+    def usable(self, record: FailureRecord) -> bool:
+        """这条记录现在允许被注入 prompt 吗 (只挡磁盘重放回来的)"""
+        if record.failure_id not in self._replayed:
+            return True
+        if not is_promotable_failure(record):
+            self.suppressed_by_kind.add(record.failure_id)
+            return False
+        if self._gate > 1 and self.recurrence().get(record.signature, 0) < self._gate:
+            self.suppressed_by_gate.add(record.failure_id)
+            return False
+        return True
+
+    def summary(self) -> str:
+        """给人在每次运行结尾读的一句 —— 与 KernelDB 同理: 门如果看不见, 就等于没生效"""
+        if self._jsonl is None:
+            return f"{len(self._records)} 条失败记录 (持久化关闭, 只有本次进程)"
+        rec = self.recurrence()
+        above = sum(1 for n in rec.values() if n >= self._gate)
+        mine = len(self._records) - len(self._replayed & set(self._records))
+        return (f"{len(self._records)} 条 = 本次 {mine} + 重放 {self.loaded_from_disk} "
+                f"(从 {self._jsonl.name}{f', 跳过坏行 {self.disk_skipped_lines}' if self.disk_skipped_lines else ''}); "
+                f"{len(rec)} 个签名, 其中跨任务复发 ≥{self._gate} 的 {above} 个")
 
     def add(self, record: FailureRecord):
+        # 总是追加, 不在写侧去重 —— 与 KernelDatabase.promote 同一个约定: 追加式日志里
+        # 「后写覆盖先写」由重放来完成 (`self._records[id] = rec`), 于是同一件事的
+        # fixed=False → fixed=True 演进能落盘, 而写侧去重会把这一次更新永远丢掉。
         self._records[record.failure_id] = record
+        self._rec_cache = None
+        self._append_event({"event": "failure", "record": record.to_dict()})
 
     def search(self, kernel_type: str = "", dsl: str = "", limit: int = 3) -> list[FailureRecord]:
         """老接口等价于 search_by_context(kernel_type=kernel_type, dsl=dsl)"""
@@ -616,7 +837,10 @@ class FailureDatabase:
                                     any(hw_tok in h.lower() for h in r.applicable_hardware))
             return (not r.fixed, not hw_match, -r.created_at)
         matches.sort(key=_sort_key)
-        return matches[:limit]
+        # 复发门在 limit 之前生效: 挡掉的记录不该占用那 2 个 prompt 名额, 否则
+        # 「语料里有很多没复发的旧失败」会把真正够格的教训挤出 prompt。
+        # search_by_error 走的是同一个入口, 不再单独判一次。
+        return [r for r in matches if self.usable(r)][:limit]
 
     def search_by_error(self, error_text: str, kernel_type: str = "",
                         dsl: str = "", limit: int = 3) -> list[FailureRecord]:

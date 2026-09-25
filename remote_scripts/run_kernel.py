@@ -352,9 +352,16 @@ def run_compile(code: str) -> dict:
         finally:
             os.unlink(temp_path)
     except ImportError as e:
-        return {"success": False, "error": f"Import error ({lang}): {e}"}
+        return {"success": False,
+                "error": f"Import error ({lang}): {type(e).__name__}: {e}"}
     except Exception as e:
-        return {"success": False, "error": f"Compile error: {e}"}
+        # 异常类名必须带上。本文件其余每一条错误路径都是 `f"{type(e).__name__}: {e}"`,
+        # 只有这两处原本写的是 `f"Compile error: {e}"` —— 于是 L1 失败的 error_log 里
+        # **一个类名都没有**, 而 L1 恰恰是 Fixer 最需要「这是 SyntaxError 还是
+        # AttributeError」的那一段。(真机量出来的: 三条失败全落进 unknown 桶,
+        # 见 docs/research/45 第五节)
+        return {"success": False,
+                "error": f"Compile error: {type(e).__name__}: {e}"}
 
 
 def _deserialize_inputs(inputs: dict) -> dict:

@@ -22,7 +22,7 @@ from .schemas import (
 from .agents import DesignerAgent, CoderAgent, SearchAgent
 from .fixer import FixerAgent
 from .verifier import Verifier
-from .kernel_db import KernelDatabase, FailureDatabase, FailureRecord
+from .kernel_db import KernelDatabase, FailureDatabase, FailureRecord, failure_signature
 from .mock_gpu import MockGPU
 from .remote_executor import RemoteExecutor
 from .llm_client import LLMClient
@@ -778,6 +778,11 @@ class Conductor:
         # 从上一次运行继承下来的 (答案曾经是「不是」)。
         print(f"[KernelDB] {self.kernel_db.summary()} "
               f"本次取用 {self.kernel_db.retrievals_this_run} 次命中")
+        # 负样本侧同样每轮报一句。这条的读者是**复发门到底挡了多少**: 语料在长、门在不在
+        # 起作用, 不看这一句就只能靠读代码相信它存在 (doc 45 第二节的失效方式)。
+        print(f"[FailureDB] {self.failure_db.summary()} "
+              f"本次被复发门挡住 {len(self.failure_db.suppressed_by_gate)} 条"
+              f"·被类别门挡住 {len(self.failure_db.suppressed_by_kind)} 条")
 
         if invalid_measurement_rounds:
             print(f"\n[Conductor] ⚠️ 本次 {invalid_measurement_rounds} 轮的 L3 测量被判为不可信 "
@@ -1022,13 +1027,21 @@ class Conductor:
     def _record_failure(self, task: TaskSchema, failed_results: list[VerificationResult],
                         fix_note: str, fixed: bool):
         """将验证失败/修复记录写入失败案例库 (负样本)"""
-        levels = "+".join(r.level.value for r in failed_results)
+        # 层级必须**排序去重**后再拼: 原先的 "+".join(r.level.value for r in ...) 跟着
+        # failed_results 的顺序走, 同一份失败可以写成 "L1+L2" 也可以写成 "L2+L1",
+        # 于是签名碎成两个桶 —— 而复发门要数的就是同一个桶里的任务数 (fixer 那边
+        # 一直是 sorted 的, 两边不一致)。
+        levels = "+".join(sorted({r.level.value for r in failed_results}))
         error_summary = " | ".join(
             FixerAgent._truncate_error(r.error_log or r.message, 300)
             for r in failed_results
         )
+        signature = failure_signature(levels, error_summary)
         self.failure_db.add(FailureRecord(
-            failure_id=f"{task.task_id}_{len(self.failure_db)}",
+            # id 由内容决定, 不再用 `task_id_{库里现有条数}`: 后者是**插入顺序**的函数,
+            # 一旦语料跨运行重放, 同一个任务的同一类失败每次都会拿到新 id, 于是
+            # 「这算是老问题还是新问题」在库里根本没有答案。
+            failure_id=f"cx-{task.task_id}:{signature}",
             kernel_type=task.source.kernel_type,
             hardware=task.target.hardware,
             dsl=task.target.dsl,
@@ -1036,8 +1049,10 @@ class Conductor:
             error_summary=error_summary,
             fix_summary=fix_note,
             fixed=fixed,
+            signature=signature,
+            task_id=task.task_id,
         ))
-        print(f"[Conductor] 失败案例已入库 (fixed={fixed}, level={levels})")
+        print(f"[Conductor] 失败案例已入库 (fixed={fixed}, level={levels}, 签名={signature})")
 
     def _print_summary(self, artifact: KernelArtifact, task: TaskSchema, saved_dir=None):
         print(f"\n{'='*60}")

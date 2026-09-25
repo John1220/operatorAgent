@@ -16,7 +16,7 @@ import textwrap
 from typing import Optional
 from .schemas import TaskSchema, VerificationResult
 from .prompt_manager import PromptManager
-from .kernel_db import FailureRecord  # 用于回写 Reflexion 教训
+from .kernel_db import FailureRecord, failure_signature  # 用于回写 Reflexion 教训
 
 
 # ── 处方式错误反馈 (docs/research/20 C1) ─────────────────────────
@@ -247,11 +247,12 @@ class FixerAgent:
             print(f"  [Fixer] Reflexion LLM 调用失败, 跳过沉淀: {e}")
             return None
 
-        # 构造 FailureRecord (固定 failure_id, 避免重复写入)
-        import uuid, hashlib, time
-        sig = hashlib.sha1(
-            f"{task.source.kernel_type}|{task.target.dsl}|{levels}|{error_details[:200]}".encode()
-        ).hexdigest()[:12]
+        # 构造 FailureRecord。原先这里写的是「固定 failure_id, 避免重复写入」, 却在 id
+        # 末尾拼了 `uuid4().hex[:4]` —— 每次反思都生成一个新 id, 同一份教训因此可以无限
+        # 重复入库, 那句注释描述的正是代码没有做的事。现在 id 完全由内容决定
+        # (任务 + 签名), 同一任务同一类失败重放/重写都是覆盖同一条。
+        import time
+        signature = failure_signature(levels, error_details)
 
         lessons = result.get("lessons") or []
         if isinstance(lessons, str):
@@ -269,7 +270,7 @@ class FixerAgent:
         hw = [str(x).strip() for x in hw if str(x).strip()]
 
         return FailureRecord(
-            failure_id=f"fix-{sig}-{uuid.uuid4().hex[:4]}",
+            failure_id=f"rx-{task.task_id}:{signature}",
             kernel_type=task.source.kernel_type,
             hardware=task.target.hardware,
             dsl=task.target.dsl,
@@ -282,6 +283,8 @@ class FixerAgent:
             lessons=lessons[:10],
             error_keywords=kw[:15],
             applicable_hardware=hw[:10],
+            signature=signature,
+            task_id=task.task_id,
         )
 
     @staticmethod
@@ -393,8 +396,9 @@ class FixerAgent:
         """将失败结果格式化为注入 prompt 的错误描述 (日志已截断)
 
         `prescriptive=False` 给 Reflexion 用: 那一步只是回看这次失败, 把处方混进去会
-        让沉淀的教训变成抄我们的模板; 而且 `failure_id` 的哈希取的是本函数输出的前
-        200 字符, 开头换成固定的归因段会让不同的错误撞进同一个签名。
+        让沉淀的教训变成抄我们的模板; 而且这段文本直接喂给 `failure_signature()`,
+        固定归因前言会让不同错误的签名互相靠拢 —— 签名要分的是「哪一类失败」,
+        不是「我们的 prompt 长什么样」。
         """
         if not failed_results:
             return _ATTRIBUTION if prescriptive else "无详细错误信息"

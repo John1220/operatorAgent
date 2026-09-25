@@ -16,7 +16,8 @@
    (docs/research/43 第三节)。
 
 对策: 测试期内把目录指到 tmp (`OPERATOR_AGENT_LOG_DIR` / `OPERATOR_AGENT_OUTPUT_DIR`),
-或干脆关掉 (`OPERATOR_AGENT_KERNEL_DB=off`)。真实运行不受影响 —— 不设变量时行为与从前一致。
+或干脆关掉 (`OPERATOR_AGENT_KERNEL_DB` / `OPERATOR_AGENT_FAILURE_DB` = off)。
+真实运行不受影响 —— 不设变量时行为与从前一致。
 """
 import os
 import tempfile
@@ -37,6 +38,9 @@ def pytest_configure(config):
     # 经验库是「跨运行的记忆」: 单元测试既不该共享它, 也不该往仓库写 JSONL。
     # 真要测持久化的用例自己传 jsonl_path=<tmp>。
     os.environ.setdefault("OPERATOR_AGENT_KERNEL_DB", "off")
+    # 负样本库同一条纪律 (doc 45)。它比正样本库更危险: 每条失败都写, 不做入库门,
+    # 一次测试批次就能把语料灌满 mock 的假失败。
+    os.environ.setdefault("OPERATOR_AGENT_FAILURE_DB", "off")
 
 
 @pytest.fixture(scope="session", autouse=True)
