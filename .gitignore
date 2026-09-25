@@ -34,6 +34,9 @@ triton/
 config.yaml
 # 请使用 config.example.yaml 作为模板, 拷贝为 config.yaml 后填入真实值
 
-# ─── 临时调试脚本 (以下划线开头, 便于开发期随手写小脚本) ───
-_debug*.py
-_*.py
+# ─── 临时调试脚本 (仓库根目录下划线开头, 便于开发期随手写小脚本) ───
+# 必须用 / 锚定根目录: 裸 `_*.py` 会连 `__init__.py` 一起吞掉 (它同样以 _ 开头),
+# 后果是 operator_agent/ 与 benchmarks/ 在 fresh clone 里退化成 namespace package,
+# `from operator_agent import Conductor` 直接 ImportError; 同一规则还会吞掉
+# benchmarks/_remote_bench.py, 而三个已跟踪的 benchmarks/test_*.py 都 import 它。
+/_*.py
