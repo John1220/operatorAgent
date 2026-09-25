@@ -28,6 +28,8 @@ from .remote_executor import RemoteExecutor
 from .llm_client import LLMClient
 from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
+from .measurement import (ROOFLINE_CONVERGED_PCT, Validity, Verdict,
+                          binding_attainment, roofline_converged, verdict)
 from .agent_logger import capture_execution
 from .optimization_planner import OptimizationPlanner
 
@@ -92,6 +94,18 @@ class Router:
             )
             return RouteType.COMPILER_BACKEND if hits else RouteType.AGENT_GENERATION
         return RouteType.COMPILER_BACKEND
+
+
+def _validity_of(metrics: dict) -> Validity:
+    """把 verifier 写进 metrics 的档位字符串还原成枚举
+
+    缺键时按 VALID 处理: 那是「没有测量有效性信息」的老路径 (MockGPU / legacy),
+    不该因为缺键就把一次可用测量判成不可信。
+    """
+    try:
+        return Validity(metrics["measurement_validity"])
+    except (KeyError, ValueError):
+        return Validity.VALID
 
 
 class Conductor:
@@ -403,14 +417,19 @@ class Conductor:
                 "recipes_applied": list(applied_recipes),
             })
 
-            if all_passed:
-                # 标记本轮配方为成功应用
-                if plan and plan.selected_recipes:
-                    for r in plan.selected_recipes:
-                        applied_recipes.add(r.id)
-                print(f"\n[Conductor] 所有验证通过!")
-                # ── 可复现性 Harness: 通过前写快照, 方便后续 resume 时直接复用最终轮 ──
-                snapshot_target_dir = self._flush_snapshot(
+            def _snap() -> str:
+                """把当前循环状态写进 execution_snapshot.json
+
+                循环内的落盘点都走这里 (通过 / 停滞 / 已到 roofline / L1L2 耗尽轮次 /
+                走到轮次末尾)。少数例外是参数不同的那几处 —— 例如 Fixer 抛异常时
+                `pending_fix` 要写成 None, 它们仍直接调 `_flush_snapshot`。
+
+                ⚠️ 变异测试的一个空跑: 终止出口处这次落盘写在 break 之前、save 之前,
+                而 `execute()` 末尾一定会再补写一次进权威的 `saved_dir`。所以删掉出口
+                那次不会有任何断言变红 —— 它只在「进程在 save 之前就没」时才有读者。
+                保留是为了与其余出口动作一致。
+                """
+                return self._flush_snapshot(
                     task=task,
                     artifact_dir=snapshot_target_dir,
                     round_done=round_num,
@@ -425,6 +444,15 @@ class Conductor:
                     disabled_recipes=disabled_recipes,
                     all_verification_results=all_verification_results,
                 )
+
+            if all_passed:
+                # 标记本轮配方为成功应用
+                if plan and plan.selected_recipes:
+                    for r in plan.selected_recipes:
+                        applied_recipes.add(r.id)
+                print(f"\n[Conductor] 所有验证通过!")
+                # ── 可复现性 Harness: 通过前写快照, 方便后续 resume 时直接复用最终轮 ──
+                snapshot_target_dir = _snap()
                 break
 
             # 缺口 1: 「数字不好看」不等于「性能未改善」—— 测量本身可能不可信。
@@ -453,27 +481,40 @@ class Conductor:
                     print(f"\n[Conductor] 建立性能基线: {current_gflops:.2f} GFLOPS "
                           f"(speedup={l3_result.metrics.get('speedup_vs_baseline', 0):.4f})")
                 elif current_gflops > 0 and best_gflops > 0:
-                    if current_gflops > best_gflops:
+                    # D4 四态判决。原来这里是无带宽的 `current > best`: 于是「完全
+                    # 打平」和「差 0.0001%」都会去禁用配方 —— 而禁用是**永久**决策,
+                    # 需要的证据比「这次没测出更好」强。现在只有 SLOW 才禁用。
+                    v, why = verdict(current_gflops, best_gflops,
+                                     _validity_of(l3_result.metrics or {}))
+                    if v is Verdict.FAST:
                         best_gflops = current_gflops
                         rounds_without_improvement = 0
                         if plan and plan.selected_recipes:
                             for r in plan.selected_recipes:
                                 applied_recipes.add(r.id)
+                        print(f"\n[Conductor] 性能改善 ({current_gflops:.2f} GFLOPS, {why})")
                     else:
-                        rounds_without_improvement += 1
-                        if plan and plan.selected_recipes:
-                            new_recipes = [r for r in plan.selected_recipes if r.id not in applied_recipes]
+                        if v is Verdict.SLOW:
+                            # 只有 SLOW 才禁用配方 —— SAME 与 AMBIGUOUS 都是「没有证据」,
+                            # 而禁用是永久决策。进到这里时 measurement_ok 已经成立
+                            # (它要求 can_count_stagnation, 也就是 VALID), 所以不必再
+                            # 检查 can_disable_recipe: 那会是永不生效的条件。
+                            new_recipes = [r for r in plan.selected_recipes
+                                           if r.id not in applied_recipes] if plan else []
                             for r in new_recipes:
                                 disabled_recipes.add(r.id)
                             if new_recipes:
                                 disabled_names = ", ".join(r.id for r in new_recipes)
-                                print(f"  [Planner] 性能未改善，禁用配方: {disabled_names}")
-                        print(f"\n[Conductor] 性能未改善 ({current_gflops:.2f} <= {best_gflops:.2f} GFLOPS, "
-                              f"连续 {rounds_without_improvement}/{max_stagnant_rounds} 轮)")
+                                print(f"  [Planner] 性能退步，禁用配方: {disabled_names}")
+                            print(f"\n[Conductor] 性能退步 ({current_gflops:.2f} < {best_gflops:.2f} "
+                                  f"GFLOPS, {why}), 连续 {rounds_without_improvement + 1}/{max_stagnant_rounds} 轮")
+                        else:
+                            print(f"\n[Conductor] 性能未改善 ({current_gflops:.2f} vs {best_gflops:.2f} "
+                                  f"GFLOPS, {why}), 连续 {rounds_without_improvement + 1}/{max_stagnant_rounds} 轮")
+                        rounds_without_improvement += 1
                 else:
                     # gflops 不可用: 用速度比或时间判断
                     speedup = l3_result.metrics.get("speedup_vs_baseline", 0)
-                    kernel_ms = l3_result.metrics.get("candidate_median_time_ms", 0)
                     # 首轮同样无基线可比, 不禁用配方 (与上面 gflops 分支同理)
                     if round_num < 2 or (speedup > 0 and speedup < 1.0):
                         # 无 gflops 参考时禁用配方等于拿噪声做永久决策，跳过避免死锁
@@ -487,28 +528,29 @@ class Conductor:
                           f"连续 {rounds_without_improvement}/{max_stagnant_rounds} 轮")
                 if rounds_without_improvement >= max_stagnant_rounds:
                     print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善，提前终止优化")
-                    snapshot_target_dir = self._flush_snapshot(
-                        task=task,
-                        artifact_dir=snapshot_target_dir,
-                        round_done=round_num,
-                        current_sketch=current_sketch,
-                        current_code=current_code,
-                        pending_fix=pending_fix,
-                        iteration_history=artifact.iteration_history,
-                        best_gflops=best_gflops,
-                        rounds_without_improvement=rounds_without_improvement,
-                        optimization_history=optimization_history,
-                        applied_recipes=applied_recipes,
-                        disabled_recipes=disabled_recipes,
-                        all_verification_results=all_verification_results,
-                    )
+                    snapshot_target_dir = _snap()
                     break
+
+            # 缺口 4 的正解: 改善判据该看「离 roofline 上界还有多远」, 而不是继续拿
+            # 一个标量比大小。绑定轴已经贴着上界的核, 换任何配方都不可能有可测收益 ——
+            # 再跑一轮只是白烧 GPU 与 LLM token。
+            #
+            # 只判「本轮有没有 L3 结果」: 再往前 `all_passed` 已经 break, 而
+            # `Verifier.verify()` 在 L1/L2 失败时直接 return (verifier.py:158-175),
+            # 所以拿得到 L3 就意味着 L1/L2 过了、且 L3 没过。在这里再写
+            # `not l3_result.passed` 或 `not l1_l2_failed` 都是永不生效的条件
+            # (同一文件里刚为 `can_disable_recipe` 删掉过一个)。
+            if l3_result is not None and roofline_converged(l3_result.metrics or {}):
+                _att = binding_attainment(l3_result.metrics or {})
+                print(f"\n[Conductor] 绑定轴已达 roofline {_att:.1f}% "
+                      f"(>= {ROOFLINE_CONVERGED_PCT:.0f}%), 判定已收敛, 停止后续优化轮")
+                snapshot_target_dir = _snap()
+                break
 
             l1_l2_failed = any(
                 not r.passed and r.level in (VerificationLevel.L1_COMPILE, VerificationLevel.L2_FUNCTION)
                 for r in verify_results
             )
-
             if l1_l2_failed:
                 # L1(编译)/L2(功能) 失败: 携带错误信息进入 Fixer 修复闭环
                 if round_num < self.max_optimize_rounds:
@@ -580,21 +622,7 @@ class Conductor:
                     )
                     continue
                 print(f"\n[Conductor] L1/L2 验证失败且已达最大轮次，停止迭代")
-                snapshot_target_dir = self._flush_snapshot(
-                    task=task,
-                    artifact_dir=snapshot_target_dir,
-                    round_done=round_num,
-                    current_sketch=current_sketch,
-                    current_code=current_code,
-                    pending_fix=pending_fix,
-                    iteration_history=artifact.iteration_history,
-                    best_gflops=best_gflops,
-                    rounds_without_improvement=rounds_without_improvement,
-                    optimization_history=optimization_history,
-                    applied_recipes=applied_recipes,
-                    disabled_recipes=disabled_recipes,
-                    all_verification_results=all_verification_results,
-                )
+                snapshot_target_dir = _snap()
                 break
 
             if l3_result and not l3_result.passed and round_num < self.max_optimize_rounds:
@@ -654,21 +682,7 @@ class Conductor:
                 })
 
             # ── 可复现性 Harness: 循环走到末尾 (没走 break/continue) 时统一 flush 一次快照 ──
-            snapshot_target_dir = self._flush_snapshot(
-                task=task,
-                artifact_dir=snapshot_target_dir,
-                round_done=round_num,
-                current_sketch=current_sketch,
-                current_code=current_code,
-                pending_fix=pending_fix,
-                iteration_history=artifact.iteration_history,
-                best_gflops=best_gflops,
-                rounds_without_improvement=rounds_without_improvement,
-                optimization_history=optimization_history,
-                applied_recipes=applied_recipes,
-                disabled_recipes=disabled_recipes,
-                all_verification_results=all_verification_results,
-            )
+            snapshot_target_dir = _snap()
             if not (l3_result and not l3_result.passed and round_num < self.max_optimize_rounds):
                 print(f"\n[Conductor] 已达最大优化轮次，停止迭代")
 

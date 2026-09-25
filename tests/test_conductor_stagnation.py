@@ -14,6 +14,10 @@
 gflops 用脚本化后端注入 (MockGPU.benchmark 是真计时, 逐轮改善无法稳定复现);
 kernel 代码保持真执行, L3 因 min_speedup=5.0 每轮都 FAILED, 确保进入停滞分支。
 
+D4 之后这里还覆盖四态判决的后果 (`TestRealStagnationStillTerminates`) 与 roofline
+收敛出口 (`TestRooflineConvergedTerminatesSearch`) —— 后者是变异测试逼出来的:
+判据本身有单测, 但「循环里到底有没有读它」没有任何断言, 把出口整个删掉照样全绿。
+
 运行: python3 -m unittest tests.test_conductor_stagnation -v
 """
 
@@ -42,6 +46,12 @@ def kernel(A, B):
     return C
 """
 
+WRONG_MATMUL = """import numpy as np
+
+def kernel(A, B):
+    return (A @ B) * 3
+"""
+
 SKETCH = {
     "algorithm": "matmul",
     "tiling": {"block_m": 64, "block_n": 64, "block_k": 32},
@@ -50,32 +60,40 @@ SKETCH = {
 
 
 class ScriptedLLM:
+    def __init__(self, code=SLOW_MATMUL):
+        self._code = code
+
     def chat(self, messages, **kw):
-        return SLOW_MATMUL
+        return self._code
 
     def chat_json(self, messages, **kw):
         return dict(SKETCH)
 
 
 class ScriptedGflopsGPU(MockGPU):
-    """按轮次注入 gflops, 其余行为 (compile/run/计时) 全部沿用 MockGPU
+    """按轮次注入 gflops (可选再注入带宽), 其余行为 (compile/run/计时) 全部沿用 MockGPU
 
     注入点是 `execute()` 而不是 `benchmark()`: 非远程后端下 Verifier 的 L3 从
-    `backend.execute(...).gflops` 取值 (verifier.py:307), `benchmark()` 返回的
-    gflops 只用于远程分支。
+    `backend.execute(...).gflops` 与 `.memory_bandwidth_gbs` 取值 (verifier.py:444-446),
+    `benchmark()` 返回的 gflops 只用于远程分支。
     每轮的调用序是 L2 execute → L3 benchmark → L3 execute, 所以用 benchmark
     的调用次数当轮次指针: 只有 L3 那次 execute 会读到本轮的脚本值 (L2 不消费
     gflops, 读到上一轮的无妨)。
     """
 
-    def __init__(self, gflops_seq):
+    def __init__(self, gflops_seq, bandwidth_seq=None, dispersion=None):
         super().__init__()
         self._seq = list(gflops_seq)
+        self._bw_seq = None if bandwidth_seq is None else list(bandwidth_seq)
+        self._dispersion = dispersion
         self._round = 0
         self.observed = []
 
     def benchmark(self, kernel_code, inputs, warmup=3, repeat=10):
         result = super().benchmark(kernel_code, inputs, warmup, repeat)
+        if self._dispersion is not None:
+            # MockGPU 不报离散度, 而 Verifier 会把它搬进 metrics 并据此定档
+            result["dispersion_iqr_over_median"] = self._dispersion
         self._round = len(self.observed)
         self.observed.append(self._gflops_for_round())
         return result
@@ -83,19 +101,24 @@ class ScriptedGflopsGPU(MockGPU):
     def execute(self, kernel_code, inputs):
         result = super().execute(kernel_code, inputs)
         result.gflops = self._gflops_for_round()
+        if self._bw_seq is not None:
+            result.memory_bandwidth_gbs = self._seq_at(self._bw_seq)
         return result
 
     def _gflops_for_round(self):
-        idx = min(self._round, len(self._seq) - 1)
-        return self._seq[idx]
+        return self._seq_at(self._seq)
+
+    def _seq_at(self, seq):
+        return seq[min(self._round, len(seq) - 1)]
 
 
 class StagnationCase(unittest.TestCase):
 
     maxDiff = 600   # Conductor 的 stdout 很长, 失败时不要刷屏
 
-    def _run(self, gflops_seq, max_rounds):
-        backend = ScriptedGflopsGPU(gflops_seq)
+    def _run(self, gflops_seq, max_rounds, bandwidth_seq=None, peak=None,
+             dispersion=None, code=None):
+        backend = ScriptedGflopsGPU(gflops_seq, bandwidth_seq, dispersion)
         task = TaskSchema(
             task_type=TaskType.OPERATOR_GENERATION,
             source=SourceSpec(framework="pytorch", kernel_type="matmul",
@@ -111,10 +134,16 @@ class StagnationCase(unittest.TestCase):
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            artifact = Conductor(backend=backend, kernel_db=KernelDatabase(),
-                                 llm=ScriptedLLM(),
-                                 max_optimize_rounds=max_rounds,
-                                 ).execute(task, inputs, target_gflops=0.0)
+            conductor = Conductor(backend=backend, kernel_db=KernelDatabase(),
+                                  llm=ScriptedLLM(SLOW_MATMUL if code is None else code),
+                                  max_optimize_rounds=max_rounds)
+            if peak is not None:
+                # `_theoretical_peak` 是 Verifier 的延迟探测缓存 (verifier.py:147),
+                # 预置它等于对外声明「这台设备的理论峰值是 X」, 不必碰探测逻辑。
+                # MockGPU 探测不到峰值 (hw_peak_gflops=0 → 利用率恒为 0), 所以
+                # roofline 相关的用例只能从这里注入。
+                conductor.verifier._theoretical_peak = dict(peak)
+            artifact = conductor.execute(task, inputs, target_gflops=0.0)
         return artifact, buf.getvalue(), backend
 
     def _rounds_run(self, out, max_rounds):
@@ -171,10 +200,33 @@ class TestRealStagnationStillTerminates(StagnationCase):
         self.assertEqual(self._rounds_run(out, 4), 3,
                          "max_stagnant_rounds=2: 基线轮 + 2 轮无改善后应停")
 
-    def test_flat_gflops_disables_recipes_after_baseline(self):
+    def test_flat_gflops_does_not_disable_recipes(self):
+        """打平不再是「禁用配方」的证据 (D4 四态判决)
+
+        原来这里断言的是 tie → 禁用: 判据是一个无带宽的 `current > best`, 于是
+        「完全没变」与「真的更慢」被压成同一件事, 而禁用是**永久**决策。四态之后
+        平局落 SAME —— 累计停滞 (上面那条用例仍在守), 但不拉黑配方。
+        """
         _, out, _ = self._run([10.0, 10.0, 10.0, 10.0], max_rounds=4)
         after_first = out.split("轮次 2/4", 1)[-1]
-        self.assertIn("禁用配方", after_first)
+        self.assertNotIn("禁用配方", after_first)
+        self.assertIn("性能未改善", after_first)
+
+    def test_regression_beyond_band_disables_recipes(self):
+        """SLOW 仍然是可以禁用配方那一态 —— 修语义不能把停止恶化能力一起废掉"""
+        _, out, _ = self._run([20.0, 10.0, 10.0, 10.0], max_rounds=4)
+        self.assertIn("性能退步", out)
+        self.assertIn("禁用配方", out)
+
+    def test_within_band_gain_is_not_an_improvement(self):
+        """带宽内的小涨不改 best、不重置停滞计数器
+
+        这条是四态判决的代价, 写明白: 每步都小于噪声的缓慢爬升会被判停滞。真机上
+        单轮的可测下限是 0.1% (doc 34 第四节), 这样的爬升本来也不该被当成证据。
+        """
+        _, out, _ = self._run([10.0, 10.002, 10.0], max_rounds=3)
+        self.assertNotIn("[Conductor] 性能改善 (", out)
+        self.assertIn("落在带宽", out)
 
 
 class TestMissingGflopsFirstRound(StagnationCase):
@@ -187,6 +239,75 @@ class TestMissingGflopsFirstRound(StagnationCase):
         # 同上: else 分支的禁用是静默的, 只能看 Planner 后续还有没有方可选
         self.assertNotIn("本轮无新增优化配方", out)
         self.assertGreaterEqual(out.count("[Planner] 选中"), 2)
+
+
+class TestRooflineConvergedTerminatesSearch(StagnationCase):
+    """缺口 4 的正解要落在循环的调用点上
+
+    `roofline_converged()` 在 `test_measurement_validity` 里有单测, 但变异 P8
+    (把 conductor 里这段出口整个删掉) 逃逸了 —— 那就是缺口 1 记过的那类失效:
+    判据算出来了, 下游没人读。所以这里断言的是**轮次确实停在这里**。
+
+    四个方向都要钉住: 两条轴各自能触发 (取 max 而不是按 `bound_type` 分支选指标,
+    才能在名字说 compute-bound、而带宽先贴上界时认出收敛)、不够高时不能停、
+    测量不可信/没有 L3 时不能停。
+    """
+
+    # 峰值故意设得很小, 让脚本注入的 gflops / 带宽能落在利用率尺度的两端:
+    # fp32 峰值 20 GFLOPS, 带宽峰值 1000 GB/s。
+    PEAK = {"fp32_tflops": 0.02, "tf32_tflops": 0.0,
+            "fp16_tflops": 0.0, "bf16_tflops": 0.0,
+            "memory_bandwidth_gbs": 1000.0,
+            "launch_floor_us": None, "compute_capability": "",
+            "device": "mock_gpu", "name": "MockGPU"}
+
+    def test_compute_axis_converged_stops_early(self):
+        """50% → 95% GFLOPS 利用率: 第 2 轮已达上界, 不该再跑第 3、4 轮"""
+        _, out, _ = self._run([10.0, 19.0, 40.0, 80.0], max_rounds=4, peak=self.PEAK)
+        self.assertIn("判定已收敛", out)
+        self.assertEqual(self._rounds_run(out, 4), 2)
+        self.assertIn("95.0%", out, "报出来的利用率要能对上注入值/峰值")
+        self.assertNotIn("提前终止", out, "停因是收敛而不是停滞 —— 两者是不同的判据")
+
+    def test_memory_axis_converged_stops_early(self):
+        """matmul 的名字是 compute-bound, 但先贴上界的是带宽轴 —— 仍该停"""
+        _, out, _ = self._run([1.0, 1.0, 1.0, 1.0], max_rounds=4,
+                              bandwidth_seq=[100.0, 950.0, 950.0, 950.0],
+                              peak=self.PEAK)
+        self.assertIn("判定已收敛", out)
+        self.assertEqual(self._rounds_run(out, 4), 2)
+        self.assertIn("95.0%", out)
+
+    def test_below_threshold_runs_full_budget(self):
+        """反向保护: 利用率不够就不能停, 否则把「收敛」写成了「恒定终止」"""
+        _, out, _ = self._run([10.0, 15.0, 16.0, 16.5], max_rounds=4, peak=self.PEAK)
+        self.assertNotIn("判定已收敛", out)
+        self.assertEqual(self._rounds_run(out, 4), 4)
+
+    def test_no_l3_result_is_never_called_converged(self):
+        """L2 挂掉的轮次压根没有 L3 结果: 既不能崩, 更不能宣布「已到上界」
+
+        数值不过关时性能数字毫无意义, 而这里拿的是 `l3_result is not None` 这一道
+        守卫 —— 去掉它, 收敛判定会在 None 上取 .metrics (变异 P9)。
+        """
+        _, out, _ = self._run([19.0, 19.0, 19.0, 19.0], max_rounds=4,
+                              peak=self.PEAK, code=WRONG_MATMUL)
+        self.assertIn("[Verifier] L2 FAILED", out, "前提: 数值门禁确实没过")
+        self.assertNotIn("[Verifier] L3", out, "前提: 没有 L3 结果")
+        self.assertNotIn("判定已收敛", out)
+        self.assertEqual(self._rounds_run(out, 4), 4)
+
+    def test_uninformative_measurement_is_not_called_converged(self):
+        """档位 uninformative 的数字不能说「已经到顶」: 那是拿不可信的测量结束搜索
+
+        这一条走的是 `roofline_converged` 里的 can_gate 守卫。它必须单独测: 停滞
+        那条出口被 `measurement_ok` 挡住时就不再执行, 而收敛出口是独立的 if ——
+        少一道守卫就会在脏数据上直接终止整个搜索。
+        """
+        _, out, _ = self._run([19.0, 19.0, 19.0, 19.0], max_rounds=4,
+                              peak=self.PEAK, dispersion=0.5)
+        self.assertNotIn("判定已收敛", out)
+        self.assertEqual(self._rounds_run(out, 4), 4)
 
 
 if __name__ == "__main__":

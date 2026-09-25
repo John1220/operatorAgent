@@ -31,7 +31,8 @@ from operator_agent import Conductor, KernelDatabase, MockGPU
 from operator_agent.measurement import (
     CONTAMINATION_UTIL_PCT, DISPERSION_DEGRADED, DISPERSION_UNINFORMATIVE,
     INTRUDER_MAX_OVER_MEDIAN, LAUNCH_DOMINANCE_UNINFORMATIVE, LAUNCH_DOMINANCE_VALID,
-    MeasurementAssessment, Validity, assess, launch_dominance,
+    NOISE_BAND, MeasurementAssessment, Validity, Verdict, assess, binding_attainment,
+    launch_dominance, roofline_converged, verdict,
 )
 from operator_agent.remote_executor import RemoteExecutor
 from operator_agent.schemas import (
@@ -906,6 +907,56 @@ class TestVerifierPropagatesDispersion(unittest.TestCase):
         # min 才是判污染用的那个数, first 不许越权
         self.assertEqual(0, r.metrics["gpu_util_pct"])
         self.assertFalse(r.metrics.get("benchmark_contaminated"))
+
+
+class TestFourStateVerdict(unittest.TestCase):
+    """D4: 打平与退步必须是两态 (docs/research/20 第三节 D4、34 第四节)"""
+
+    def test_band_is_defined_for_every_validity_tier(self):
+        """新增档位却没有带宽 → 这里红, 而不是运行时 KeyError"""
+        self.assertEqual({v.value for v in Validity},
+                         {k.value for k in NOISE_BAND})
+
+    def test_bands_are_ordered_by_tier_and_anchored_on_measurement(self):
+        """带宽随档位变宽, 且宽度来自 H20 实测的跨次散布 (doc 34 第四节)"""
+        self.assertLess(NOISE_BAND[Validity.VALID], NOISE_BAND[Validity.DEGRADED])
+        self.assertLess(NOISE_BAND[Validity.DEGRADED], NOISE_BAND[Validity.UNINFORMATIVE])
+        self.assertAlmostEqual(0.001, NOISE_BAND[Validity.VALID], places=6)
+        self.assertAlmostEqual(0.004, NOISE_BAND[Validity.DEGRADED], places=6)
+
+    def test_gain_loss_and_tie_split_into_three_states(self):
+        cases = [(10.05, Verdict.FAST), (10.0, Verdict.SAME), (10.0005, Verdict.SAME),
+                 (9.95, Verdict.SLOW)]
+        for cur, want in cases:
+            with self.subTest(current=cur):
+                v, why = verdict(cur, 10.0, Validity.VALID)
+                self.assertIs(want, v, why)
+
+    def test_same_delta_is_same_when_degraded_but_fast_when_valid(self):
+        """DEGRADED 的带宽更宽 (0.4% vs 0.1%): 同一个 +0.2% 在两档下判决不同"""
+        self.assertIs(Verdict.SAME, verdict(10.02, 10.0, Validity.DEGRADED)[0])
+        self.assertIs(Verdict.FAST, verdict(10.02, 10.0, Validity.VALID)[0])
+
+    def test_uninformative_and_missing_values_are_ambiguous(self):
+        self.assertIs(Verdict.AMBIGUOUS, verdict(20.0, 10.0, Validity.UNINFORMATIVE)[0])
+        for cur, prev in ((None, 10.0), (10.0, None), (0.0, 10.0), (10.0, 0.0)):
+            with self.subTest(cur=cur, prev=prev):
+                self.assertIs(Verdict.AMBIGUOUS, verdict(cur, prev, Validity.VALID)[0])
+
+    def test_binding_attainment_takes_the_tighter_axis(self):
+        """取 max 而不是按 bound 分支选一个: 分支在两条轴接近时会选错"""
+        self.assertAlmostEqual(93.0, binding_attainment(
+            {"gflops_utilization_pct": 12.0, "bandwidth_utilization_pct": 93.0}))
+        self.assertIsNone(binding_attainment({}))
+        self.assertIsNone(binding_attainment({"gflops_utilization_pct": None}))
+
+    def test_roofline_converged_needs_a_trustworthy_measurement(self):
+        hot = {"gflops_utilization_pct": 101.0, "bandwidth_utilization_pct": 5.6}
+        self.assertTrue(roofline_converged(dict(hot)))
+        self.assertFalse(roofline_converged(dict(hot, benchmark_contaminated=True)),
+                        "不可信的测量没说得出「已经到顶」")
+        self.assertFalse(roofline_converged(dict(hot, measurement_can_gate=False)))
+        self.assertFalse(roofline_converged({"gflops_utilization_pct": 40.0}))
 
 
 if __name__ == "__main__":

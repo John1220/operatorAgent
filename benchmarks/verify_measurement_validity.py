@@ -11,6 +11,9 @@
 第一行是项目已经踩过的那个坑: 改动前它报出「0.65x / 带宽利用率 5.4% /
 memory-bound 需优化」, Conductor 拿这套数字去禁用配方并累计停滞轮次, 而这三个数
 描述的都是 kernel launch 开销, 不是核的质量。
+
+D4 之后每个 case 还顺带跑一遍四态判决与 roofline 收敛判定 (同一份真机 metrics),
+看达成率的量级和带宽相对实际散布是宽还是窄 —— 那两条判据决定了循环会不会提前停。
 """
 import sys
 from pathlib import Path
@@ -24,6 +27,8 @@ from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, Targe
 from operator_agent.verifier import Verifier
 from operator_agent.measurement import (
     DISPERSION_DEGRADED, DISPERSION_UNINFORMATIVE, INTRUDER_MAX_OVER_MEDIAN,
+    NOISE_BAND, ROOFLINE_CONVERGED_PCT, Validity, binding_attainment,
+    roofline_converged, verdict,
 )
 
 TRITON_LN = '''
@@ -160,3 +165,20 @@ for label, code, kernel_type, inputs, traffic_mb, roof_us in CASES:
     if m.get("measurement_intruder_suspected") and \
             m.get("measurement_validity") == "valid":
         print("  ✓ 抢占观察已上报但未改变档位 (符合当前设计)")
+
+    # ---- D4: 拿本轮的真机数字跑一遍四态判决与收敛判定 ----
+    #
+    # 这两个判据只在离线单测里见过合成的 metrics, 到这里才算吃过真数。要看的不是
+    # 「对不对」而是「量级合不合理」: 达成率是不是真在 0~100% 附近、判决带宽是不是
+    # 比这一档的实际散布宽 (窄了会把噪声当改善, 宽了会永远判 SAME)。
+    att = binding_attainment(m)
+    print(f"  绑定轴达成率 = {att}%   roofline_converged = {roofline_converged(m)} "
+          f"(阈值 {ROOFLINE_CONVERGED_PCT:.0f}%)")
+    validity = Validity(m.get("measurement_validity", Validity.VALID.value))
+    band = NOISE_BAND[validity]
+    cur = float(m.get("gflops", 0) or 0)
+    for tag, prev in (("与上一轮持平", cur), ("上一轮差 3 倍", cur / 3.0),
+                      ("上一轮好 1.5 倍", cur * 1.5)):
+        vd, why = verdict(cur, prev, validity)
+        print(f"    verdict(cur={cur:.1f} vs {tag}) = {vd.value}  "
+              f"({why}; 本档带宽 ±{band:.2%})")

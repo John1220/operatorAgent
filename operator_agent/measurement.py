@@ -38,6 +38,90 @@ class Validity(str, Enum):
     UNINFORMATIVE = "uninformative"    # 只作诊断信息呈现, 不参与任何闭环决策
 
 
+class Verdict(str, Enum):
+    """两轮性能之间的四态判决 (吸纳自测量方法论一系, docs/research/20 第三节 D4)
+
+    二元的「改善 / 没改善」把两件不同的事压成一件:
+      - 真的更慢 (有证据说明这轮的配方有害)
+      - 落在噪声里 (没有证据, 只是这次没测出差别)
+    前者才可以禁用配方 —— 那是**永久**决策; 后者只该累计停滞轮次。原来的写法是
+    `current > best` 的严格比较, 于是「完全打平」和「差 0.0001%」都会去禁用配方。
+    """
+
+    FAST = "faster"            # 超出带宽的改善
+    SAME = "same"              # 落在带宽内: 计停滞, 但不据此禁用配方
+    SLOW = "slower"            # 超出带宽的退步: 唯一可以禁用配方的一态
+    AMBIGUOUS = "ambiguous"    # 证据不足 (没有可比前值, 或测量本身不可信)
+
+
+# 判决带宽 = 3 × 实测的「同一份代码连跑多次的加速比散布」。
+#
+# 实测值来自 H20 GPU 2、无注入、每档连跑 8 次 L3 (docs/research/34 第四节表):
+#   valid (matmul 4096³)         跨次 iqr 0.02%
+#   degraded (layernorm 16384×6144)   0.13%
+#   uninformative (layernorm 1024×768) 0.66% (范围宽到 2.1%)
+#
+# 外部 (SOL-ExecBench 一系) 的 0.5%/2% 是锁频专用机上的值, 不能照抄: 0.5% 在 valid
+# 档是真实噪声底的 25 倍 (会把真的小改善判成「没变」), 在 uninformative 档又比实测
+# 范围 2.1% 还窄 (一切都落 SAME/AMBIGUOUS) —— 这正是 doc 20 当初暂缓 D4 的理由,
+# 现在有了本机的数就按档分开设。
+NOISE_BAND = {
+    Validity.VALID: 0.001,
+    Validity.DEGRADED: 0.004,
+    Validity.UNINFORMATIVE: 0.02,
+}
+
+# 绑定轴上达到 roofline 上界的这个比例, 就认为「再优化也不会有 measurable 收益」。
+# 缺口 4 的正解在这里: 判据该看**离上界还有多远**, 而不是继续拿一个标量比大小。
+# 0.90 是经验值 (真机上 matmul 4096³ fp16 的 Triton 核实测 101% GFLOPS 利用率,
+# 峰值表本身有 ±5% 的余量), 改动需回归验证。
+ROOFLINE_CONVERGED_PCT = 90.0
+
+
+def binding_attainment(metrics: dict) -> Optional[float]:
+    """绑定轴上的 roofline 达成率 (%), 拿不到返回 None
+
+    memory-bound 看带宽利用率、compute-bound 看 GFLOPS 利用率。取两者的 **max**
+    而不是按 bound 分支选一个: roofline 的语义就是「离上界多远由紧的那条轴决定」,
+    分支选指标会在两条轴接近时选错 (而 `roofline_bound` 这个字符串本身还有过
+    memory/compute 与 name/bound 两套拼法飘掉的历史, 见 docs/research/15 第五节)。
+    """
+    vals = []
+    for key in ("gflops_utilization_pct", "bandwidth_utilization_pct"):
+        v = metrics.get(key)
+        if isinstance(v, (int, float)) and v >= 0:
+            vals.append(float(v))
+    return max(vals) if vals else None
+
+
+def roofline_converged(metrics: dict) -> bool:
+    """已经贴着 roofline 上界 —— 继续换配方只会白烧 GPU 与 LLM token"""
+    if (metrics.get("measurement_can_gate") is False
+            or metrics.get("benchmark_contaminated")):
+        return False          # 不可信的测量不能说「已经到顶」
+    a = binding_attainment(metrics)
+    return a is not None and a >= ROOFLINE_CONVERGED_PCT
+
+
+def verdict(current: Optional[float], previous: Optional[float],
+            validity: Validity) -> tuple[Verdict, str]:
+    """两轮性能值的四态判决。current/previous 是同一轴上的标量 (越大越好)。
+
+    打平不算退步: `SAME` 与 `SLOW` 的区别就是「能不能禁用配方」的分界。
+    """
+    if current is None or previous is None or current <= 0 or previous <= 0:
+        return Verdict.AMBIGUOUS, "无可比的性能值 (缺 current 或 previous)"
+    if validity is Validity.UNINFORMATIVE:
+        return Verdict.AMBIGUOUS, "测量档位 uninformative: 判决带宽比信号本身宽"
+    band = NOISE_BAND[validity]
+    delta = (current - previous) / previous
+    if delta > band:
+        return Verdict.FAST, f"+{delta:.4%} > 带宽 {band:.2%}"
+    if delta < -band:
+        return Verdict.SLOW, f"{delta:.4%} < -带宽 {band:.2%}"
+    return Verdict.SAME, f"{delta:+.4%} 落在带宽 ±{band:.2%} 内"
+
+
 # launch_dominance = 地板 / 候选 median 时间。
 # 0.10 与 0.30 是 docs/research/01 第二节的经验分界 (<10% 时实测/下界已收敛到
 # 1.1×; >30% 时曲线仍完全平坦), **不是推导值**, 改动需回归验证。
