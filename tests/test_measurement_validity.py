@@ -881,6 +881,32 @@ class TestVerifierPropagatesDispersion(unittest.TestCase):
         self.assertEqual(stats["median_time_ms"], r.metrics["median_time_ms"])
         self.assertNotEqual(stats["min_time_ms"], r.metrics["min_time_ms"])
 
+    def test_raw_util_samples_survive_to_metrics(self):
+        """两次原始读数必须活着到 metrics —— doc 34 的全部结论都靠它
+
+        runner 只报 min 的话, 「min 排掉的是自己的残留还是邻居的真占用」在生产里
+        永远查不了; 这次能量出「残留 <0.3 s 就衰减完、而生产 L3 采样根本撞不上那个
+        窗口」(docs/research/34), 就是因为 first/second 被搬了出来。
+        """
+        backend = RemoteExecutor(mode="local")
+        bench = {"success": True, "device": "cuda:0", "gflops": 1000.0,
+                 "memory_bandwidth_gbs": 500.0,
+                 "candidate": {"median_time_ms": 1.0, "min_time_ms": 1.0},
+                 "baselines": {"pytorch_eager": {"median_time_ms": 1.0,
+                                                 "min_time_ms": 1.0}},
+                 "baseline_selected": "pytorch_eager",
+                 "gpu_util_pct": 0, "gpu_util_samples": [34, 0], "gpu_other_procs": 7}
+        backend.benchmark_with_baselines = lambda *a, **kw: bench
+        backend.get_hardware_info = lambda: dict(H20_HW_INFO)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            r = Verifier(backend)._verify_performance(
+                PYTHON_MATMUL, _matmul_inputs(), 0.0, _task())
+        self.assertEqual([34, 0], r.metrics["gpu_util_samples"])
+        # min 才是判污染用的那个数, first 不许越权
+        self.assertEqual(0, r.metrics["gpu_util_pct"])
+        self.assertFalse(r.metrics.get("benchmark_contaminated"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

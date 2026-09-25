@@ -105,7 +105,7 @@ def _fmt_gpu(g: dict) -> str:
 
 
 def _sample_gpu_idle():
-    """采样选中 GPU 的测量前状态: (利用率%, 其他进程数)。拿不到返回 (None, None)。
+    """采样选中 GPU 的测量前状态: (利用率%, 其他进程数, 两次原始读数)。拿不到返回 (None, None, [])。
 
     利用率统计的是"有 kernel 在跑的时间占比", 我们自己的 benchmark 会把它顶到
     100%, 所以只能在测量前采样。其他计算进程数比利用率更可靠地反映是否被共享,
@@ -119,10 +119,25 @@ def _sample_gpu_idle():
     这个假阳性会直接判「基准被污染」→ 加速比不可比 → Conductor 不计停滞、
     不禁用配方, 也就是让闭环静默失效。
 
-    取 min 而不是 max/mean: 自己的残留会在这 1.2 s 里排空, 邻居的持续负载不会,
-    所以两次里较小的那个才更接近"别人占了多少"。代价是每次 L3 多 1.2 s。
+    取 min 而不是 max/mean: 自己的残留会在这个间隔里排空, 邻居的持续负载不会,
+    所以两次里较小的那个才更接近"别人占了多少"。
+
+    ⚠️ 两个当时没量、后来量出来与假设不符的事实 (真机探针, docs/research/34):
+      1. 残留衰减得比「utilization.gpu 是约 1 秒窗口」这个说法快得多 —— 8192² fp16
+         matmul 跑满 0.3 s / 2.0 s 之后, t+0s 读到 100%, **t+0.3s 已经回到 0%**。
+         所以 1.2 s 的间隔有 4 倍以上是纯代价, 值得下调 (本轮未改, 因为 L3 墙钟
+         数字被 doc 36 引用过)。
+      2. 生产 L3 路径根本撞不上这个窗口: 每个 action 都是新的远端进程 (ssh + uv +
+         import torch 要好几秒), 到自己的核排空之后才采样。连跑 24 次 L3, 现规则与
+         「旧单次快照」规则的污染触发率都是 0%。所以这层是**保险** (进程复用 /
+         HTTP 常驻模式下才用得上), 不是当前在响的警报器。
+
+    两次原始读数一并回报 (第三个返回值): 「min 是在去自污染还是在掩盖真污染」只能靠
+    first/second 的差来判断, 只留 min 的话上面这两条结论根本量不出来, 生产里也不可疑
+    审计。
     """
     util, others = None, None
+    samples = []
     try:
         import subprocess
 
@@ -139,8 +154,8 @@ def _sample_gpu_idle():
         first = _read_util()
         time.sleep(1.2)
         second = _read_util()
-        readings = [u for u in (first, second) if u is not None]
-        util = min(readings) if readings else None
+        samples = [u for u in (first, second) if u is not None]
+        util = min(samples) if samples else None
 
         r2 = subprocess.run(
             ["nvidia-smi", f"--id={_SELECTED_GPU_ID}",
@@ -157,7 +172,7 @@ def _sample_gpu_idle():
             others = len(pids)
     except Exception:
         pass
-    return util, others
+    return util, others, samples
 
 
 def _auto_select_gpu() -> tuple[int, str]:
@@ -1285,9 +1300,10 @@ if __name__ == "__main__":
                             float(payload.get("max_error", 1e-5)),
                             precision=payload.get("precision", ""))
     elif action in ("benchmark", "benchmark_with_baselines"):
-        # 共享机器: 只在测量前采一次卡上占用情况。被其他租户占用会让加速比失真,
-        # 把实测占用随结果返回, 由控制端标记污染, 而不是静默采信这个数字。
-        util_before, other_procs = _sample_gpu_idle()
+        # 共享机器: 只在测量前采卡上占用情况 (间隔 1.2 s 采两次, 见 _sample_gpu_idle)。
+        # 被其他租户占用会让加速比失真, 把实测占用与两次原始读数随结果返回, 由控制端
+        # 标记污染, 而不是静默采信这个数字。
+        util_before, other_procs, util_samples = _sample_gpu_idle()
         if action == "benchmark":
             result = run_benchmark(code, inputs,
                                    payload.get("warmup", 3), payload.get("repeat", 10))
@@ -1300,6 +1316,7 @@ if __name__ == "__main__":
             )
         if isinstance(result, dict):
             result["gpu_util_pct"] = util_before
+            result["gpu_util_samples"] = util_samples
             result["gpu_other_procs"] = other_procs
             result["selected_gpu"] = _SELECTED_GPU_ID
     else:

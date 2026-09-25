@@ -473,7 +473,7 @@ class Verifier:
                           "max_time_ms",
                           "p25_time_ms", "p75_time_ms",
                           "dispersion_iqr_over_median", "dispersion_max_over_median",
-                          "gpu_util_pct", "gpu_other_procs", "selected_gpu"):
+                          "gpu_util_pct", "gpu_util_samples", "gpu_other_procs", "selected_gpu"):
             if extra_key in bench:
                 metrics[extra_key] = bench[extra_key]
             elif extra_key in candidate_metrics:
