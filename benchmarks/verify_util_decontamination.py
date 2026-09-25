@@ -22,6 +22,12 @@
       这次修复省下的假阳性数)
   3. **配对散布分布**: D3 新增的 `paired_speedup_dispersion` 在本机的真实分布 ——
      D4 (四态判决) 的阈值要按它标, 不能沿用锁频独占机上的 0.5%/2%。
+  4. **跨轮 SM 时钟** (D2 的第一步, 只观测不判定): runner 现在在计时窗口前后各读一次
+     `clocks.sm` / `clocks_throttle_reasons.active`。要看的是**跨轮**时钟散布, 因为
+     Conductor 的改善判据比的是隔几分钟的两轮 gflops, 而加速比是同窗口内之比
+     (时钟涨落对后者几乎无影响, 两边同涨同落)。关键产出是一个可判的数:
+     「gflops 跨轮 iqr/median」对比「gflops/时钟 的 iqr/median」—— 归一化收得下多少
+     散布, 决定 D2 是做「阈值降级」还是做「除法归一化」。
 
 形状选两个: matmul 4096³ 是「valid」档 (单样本 ms 级, 自污染窗口相对短),
 layernorm 1024×768 是 launch 主导档 —— 自动加采样会连着跑几千个微秒级 kernel,
@@ -135,13 +141,14 @@ def report(label, runs):
     n = len(runs)
     print(f"\n===== {label}  (n={n}) =====")
     print(f"{'#':<4}{'两次读数':<14}{'min':<6}{'others':<8}{'污染?':<7}"
-          f"{'旧规则会响?':<14}{'加速比':<10}{'配对散布':<10}{'档':<14}")
+          f"{'旧规则会响?':<14}{'加速比':<10}{'配对散布':<10}{'档':<14}{'SM钟前/后':<14}")
     for i, r in enumerate(runs):
         old = "是" if r["first"] is not None and r["first"] > CONTAMINATION_UTIL_PCT else "否"
         now = "是" if r["contaminated"] else "否"
         paired = "-" if r["paired"] is None else f"{r['paired']:.4f}"
+        clk = f"{r.get('sm_b')}/{r.get('sm_a')}"
         print(f"{i:<4}{str(r['samples']):<14}{str(r['min']):<6}{str(r['others']):<8}"
-              f"{now:<7}{old:<14}{r['speedup']:<10.4f}{paired:<10}{r['validity']:<14}")
+              f"{now:<7}{old:<14}{r['speedup']:<10.4f}{paired:<10}{r['validity']:<14}{clk:<14}")
 
     contam = sum(1 for r in runs if r["contaminated"])
     old_hit = sum(1 for r in runs
@@ -166,6 +173,74 @@ def report(label, runs):
         print(f"  paired_speedup_dispersion: median={m:.4f}  iqr={iqr:.4f}  "
               f"范围 {lo:.4f}~{hi:.4f}")
         print(f"    → D4 阈值该按这条分布定, 而不是独占锁频机的 0.005/0.02")
+    report_clocks(runs)
+
+
+def report_clocks(runs):
+    """D2 的观测段: SM 时钟到底跨不跨轮漂, 以及归一化能不能把散布收下来
+
+    为什么这是 D2 的关键量而不是「窗口内稳不稳」: Conductor 的改善判据
+    (`best_gflops` vs 本轮 gflops) 比的是**隔了几分钟的两轮**测量, 而加速比是
+    同一窗口内候选/基线之比 —— 时钟涨落对后者几乎无影响 (两边同涨同落),
+    对前者是直接的系统误差。所以要看的是跨轮时钟散布, 以及 gflops/时钟 是不是
+    比 gflops 本身稳。
+    """
+    sm_b = [r["sm_b"] for r in runs if r.get("sm_b")]
+    if not sm_b:
+        print("  SM 时钟: runner 没回报 (nvidia-smi 查询失败或字段不支持) —— D2 无从判断")
+        return
+    sm_a = [r["sm_a"] for r in runs if r.get("sm_a")]
+    mx = [r["sm_max"] for r in runs if r.get("sm_max")]
+    m, iqr, lo, hi = dist(sm_b)
+    print(f"\n  SM 时钟 (窗口起点读数): median={m:.0f} MHz  范围 {lo:.0f}~{hi:.0f}  "
+          f"iqr/median={iqr / m:.2%}")
+    if mx:
+        print(f"    标称上限 clocks.max.sm = {statistics.median(mx):.0f} MHz  "
+              f"→ 实际/上限 = {m / statistics.median(mx):.1%}")
+    inside = [a - b for a, b in zip(sm_a, sm_b)] if len(sm_a) == len(sm_b) else []
+    if inside:
+        print(f"    窗口内漂移 (after − before): median={statistics.median(inside):+.0f} MHz  "
+              f"最大 |Δ|={max(abs(x) for x in inside)} MHz")
+    # ⚠️ 不能把 None 折成 0 再数「非零」: 「throttle 位全 0」和「throttle 位没读到」
+    # 会输出同一行字。probe_clock_dvfs.py 控制 0 已确认本驱动这个字段可解析, 但那只是
+    # 换机器时的假设 —— 这里按「读到/没读到」分开报。
+    got = [r.get("thr_b") for r in runs] + [r.get("thr_a") for r in runs]
+    have = [b for b in got if b is not None]
+    nz = sorted({b for b in have if b})
+    print(f"    throttle 位图: 读到 {len(have)}/{len(got)} 个读数  "
+          f"非零 {sum(1 for b in have if b)}/{len(have)}  出现过的位={nz}  "
+          f"(0x1=GPU idle, 通常无害)")
+    if len(have) < len(got):
+        print(f"      ⚠️ 有 {len(got) - len(have)} 次没读到 → 「全 0」不能当成「没有被限频」")
+
+    pairs = [(r["sm_b"], r["gflops"]) for r in runs
+             if r.get("sm_b") and r.get("gflops")]
+    if len(pairs) >= 4:
+        # 按窗口起点时钟分高低两组: 若 gflops 随时钟走, 跨轮比 gflops 就是拿两个口径比
+        pairs.sort(key=lambda p: p[0])
+        half = len(pairs) // 2
+        lo_g = pairs[:half]
+        hi_g = pairs[half:]
+        lo_clk = statistics.median([p[0] for p in lo_g])
+        hi_clk = statistics.median([p[0] for p in hi_g])
+        lo_gf = statistics.median([p[1] for p in lo_g])
+        hi_gf = statistics.median([p[1] for p in hi_g])
+        print(f"    低钟组 {lo_clk:.0f}MHz → {lo_gf:.0f} GFLOPS   "
+              f"高钟组 {hi_clk:.0f}MHz → {hi_gf:.0f} GFLOPS   "
+              f"比值 {hi_gf / lo_gf:.4f} vs 时钟比 {hi_clk / lo_clk:.4f}")
+        raw = [g for _, g in pairs]
+        norm = [g / c for c, g in pairs]
+        _, iqr_raw, _, _ = dist(raw)
+        _, iqr_norm, _, _ = dist(norm)
+        rel_raw = iqr_raw / statistics.median(raw)
+        rel_norm = iqr_norm / statistics.median(norm)
+        print(f"    跨轮散布: gflops iqr/median={rel_raw:.2%}   "
+              f"gflops/时钟={rel_norm:.2%}")
+        if rel_raw > 0:
+            print(f"      → 按时钟归一化收下 {(1 - rel_norm / rel_raw) * 100:.0f}% 的跨轮散布"
+                  "  (这才是 D2 该不该做的判据)")
+        else:
+            print("      → gflops 跨轮散布为 0, 归一化无从比较")
 
 
 PROBE = '''
@@ -274,6 +349,13 @@ def main():
                 "speedup": m.get("speedup_vs_baseline"),
                 "paired": m.get("paired_speedup_dispersion"),
                 "validity": m.get("measurement_validity"),
+                # D2: 窗口边界上的 SM 时钟与 throttle 位图 (只观测, 不判定)
+                "sm_b": m.get("sm_clock_mhz_before"),
+                "sm_a": m.get("sm_clock_mhz_after"),
+                "sm_max": m.get("sm_clock_max_mhz_before"),
+                "thr_b": m.get("throttle_bits_before"),
+                "thr_a": m.get("throttle_bits_after"),
+                "gflops": m.get("gflops"),
             })
         report(label, runs)
 

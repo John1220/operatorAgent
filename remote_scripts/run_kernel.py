@@ -105,7 +105,11 @@ def _fmt_gpu(g: dict) -> str:
 
 
 def _sample_gpu_idle():
-    """采样选中 GPU 的测量前状态: (利用率%, 其他进程数, 两次原始读数)。拿不到返回 (None, None, [])。
+    """采样选中 GPU 的测量前状态。
+
+    返回 `(利用率%, 其他进程数, 两次 util 原始读数, 第二次的完整 GPU 状态字典)`。
+    拿不到时前三个是 None/None/[]，第四个是 {}。第四个返回值顺路带回了时钟与
+    throttle 读数 (D2) —— 见 `read_gpu_state`，那里说明了为什么合并进同一条查询。
 
     利用率统计的是"有 kernel 在跑的时间占比", 我们自己的 benchmark 会把它顶到
     100%, 所以只能在测量前采样。其他计算进程数比利用率更可靠地反映是否被共享,
@@ -138,23 +142,15 @@ def _sample_gpu_idle():
     """
     util, others = None, None
     samples = []
+    state_second = {}
     try:
         import subprocess
 
-        def _read_util():
-            r = subprocess.run(
-                ["nvidia-smi", f"--id={_SELECTED_GPU_ID}",
-                 "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                return int(r.stdout.strip().splitlines()[0])
-            return None
-
-        first = _read_util()
+        first = read_gpu_state()
         time.sleep(1.2)
-        second = _read_util()
-        samples = [u for u in (first, second) if u is not None]
+        state_second = read_gpu_state()
+        samples = [s for s in (first.get("util_pct"), state_second.get("util_pct"))
+                   if s is not None]
         util = min(samples) if samples else None
 
         r2 = subprocess.run(
@@ -172,7 +168,70 @@ def _sample_gpu_idle():
             others = len(pids)
     except Exception:
         pass
-    return util, others, samples
+    return util, others, samples, state_second
+
+
+_STATE_QUERY_FIELDS = ("utilization.gpu,clocks.sm,clocks.mem,clocks.max.sm,"
+                       "clocks.max.mem,clocks_throttle_reasons.active")
+
+
+def read_gpu_state() -> dict:
+    """一次 nvidia-smi 调用读回测量的旁证: 利用率 + SM/显存时钟 + throttle 位图
+
+    为什么合成一条查询: 每次 `nvidia-smi` 进程调用实测中位 ~130 ms (最大见过 306 ms),
+    单独为时钟再开一次就是给每次 L3 白加几百毫秒。util 的采样本来就要付这个钱,
+    顺路把时钟读回来是免费的。
+
+    ⚠️ 窗口前的读数取自 `_sample_gpu_idle()` 的**第二次**采样, 也就是 warmup 之前
+    ~130 ms 那一刻; 不是 launch 那一瞬。窗口内部的涨落只能靠 before/after 之差捕捉,
+    捕捉不到就是捕捉不到 —— 这条限制要连数据一起交给下游读。
+
+    D2 (docs/research/20 第三节) 的第一步。为什么要看时钟：这台卡 8 租户共享,
+    邻居的负载理论上会通过功耗/温度预算把我们的 SM 频率压下来 (DVFS)。那种情况下
+    「这一轮比上一轮慢」描述的可能是**这一轮跑在 1.4 GHz、上一轮跑在 1.8 GHz**,
+    而不是核的质量 —— 与缺口 1 处理过的两种情形同构 (launch 地板支配、邻居抢时间)。
+
+    ⚠️ **只观测不判定**: 不预设阈值。本机的实测结论 (空载与持续 tensor-core 满载 40 s
+    之间 `clocks.sm` 恒为 1980 MHz = 上限、throttle 位全 0, 而同批传感器里 util/功耗/温度
+    都在动) 见 docs/research/40 —— 注意那里同时收回了「时钟被锁在 1980」这个说法:
+    本驱动的 `clocks.applications.sm` 不是合法字段, 「锁频」与「无压力所以不降」区分不了。
+    真要加判据, 得先在新平台上看到它动。
+    """
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["nvidia-smi", f"--id={_SELECTED_GPU_ID}",
+             f"--query-gpu={_STATE_QUERY_FIELDS}", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return {}
+        parts = [p.strip() for p in r.stdout.strip().splitlines()[0].split(",")]
+        if len(parts) < 6:
+            return {}
+
+        def _num(s):
+            # nvidia-smi 对不支持的字段回 "[N/A]"/"N/A", 不能直接 int()
+            try:
+                return int(s)
+            except ValueError:
+                return None
+
+        # throttle 位图是十六进制串 ("0x0000000000000004" = SW power cap)
+        try:
+            throttle = int(parts[5], 16)
+        except ValueError:
+            throttle = None
+        return {
+            "util_pct": _num(parts[0]),
+            "sm_clock_mhz": _num(parts[1]),
+            "mem_clock_mhz": _num(parts[2]),
+            "sm_clock_max_mhz": _num(parts[3]),
+            "mem_clock_max_mhz": _num(parts[4]),
+            "throttle_bits": throttle,
+        }
+    except Exception:
+        return {}
 
 
 def _auto_select_gpu() -> tuple[int, str]:
@@ -1303,7 +1362,7 @@ if __name__ == "__main__":
         # 共享机器: 只在测量前采卡上占用情况 (间隔 1.2 s 采两次, 见 _sample_gpu_idle)。
         # 被其他租户占用会让加速比失真, 把实测占用与两次原始读数随结果返回, 由控制端
         # 标记污染, 而不是静默采信这个数字。
-        util_before, other_procs, util_samples = _sample_gpu_idle()
+        util_before, other_procs, util_samples, state_before = _sample_gpu_idle()
         if action == "benchmark":
             result = run_benchmark(code, inputs,
                                    payload.get("warmup", 3), payload.get("repeat", 10))
@@ -1314,11 +1373,18 @@ if __name__ == "__main__":
                 precision=payload.get("precision", ""),
                 baseline_priority=payload.get("baseline_priority") or None,
             )
+        # D2: 窗口之后的时钟/throttle 读数。窗口之前那次由 _sample_gpu_idle 顺路带回,
+        # 所以整个 L3 只多付一次 nvidia-smi 调用 (~130 ms), 不是三次。
+        state_after = read_gpu_state()
         if isinstance(result, dict):
             result["gpu_util_pct"] = util_before
             result["gpu_util_samples"] = util_samples
             result["gpu_other_procs"] = other_procs
             result["selected_gpu"] = _SELECTED_GPU_ID
+            for side, snap in (("before", state_before), ("after", state_after)):
+                for key, val in snap.items():
+                    if key != "util_pct":      # util 已经有自己的三个键
+                        result[f"{key}_{side}"] = val
     else:
         result = {"success": False, "error": f"Unknown action: {action}"}
 

@@ -473,7 +473,14 @@ class Verifier:
                           "max_time_ms",
                           "p25_time_ms", "p75_time_ms",
                           "dispersion_iqr_over_median", "dispersion_max_over_median",
-                          "gpu_util_pct", "gpu_util_samples", "gpu_other_procs", "selected_gpu"):
+                          "gpu_util_pct", "gpu_util_samples", "gpu_other_procs",
+                          "selected_gpu",
+                          # D2: 窗口边界上的 SM/显存时钟与 throttle 位图。搬运是必须的
+                          # —— 缺口 1 的教训就是「runner 报了但控制端没人搬, 于是没人读」。
+                          "sm_clock_mhz_before", "sm_clock_mhz_after",
+                          "sm_clock_max_mhz_before", "sm_clock_max_mhz_after",
+                          "mem_clock_mhz_before", "mem_clock_mhz_after",
+                          "throttle_bits_before", "throttle_bits_after"):
             if extra_key in bench:
                 metrics[extra_key] = bench[extra_key]
             elif extra_key in candidate_metrics:
