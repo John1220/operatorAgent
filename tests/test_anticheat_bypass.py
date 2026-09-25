@@ -198,11 +198,23 @@ class TestSyntaxErrorFailClosed(unittest.TestCase):
 #   参考 (reference)  _reference_torch 产出的 torch 原生实现, 绝不能被包住
 #   基线 (baseline)   eager / fp16 / tf32 / torch.compile, 同样绝不能被包住
 # 用「被调用者的名字」来分类, 因为 runner 里有两种形态: 直接调
-# `module.kernel(**inputs)` / `kernel_func(**inputs)`, 以及把 lambda 交给
-# `_bench_callable(fn, ...)` 去跑 —— 后者要靠首参名才能区分候选和基线。
+# `module.kernel(**inputs)` / `kernel_func(**inputs)`, 以及把可调用对象交给
+# `_bench_callable(fn, ...)` / `_timed_runs(fn, ...)` 去跑 —— 后者要靠首参才能
+# 区分候选和基线。
+#
+# 首参有两种形态, 都得认:
+#   `_bench_callable(candidate, ...)`     candidate 是 lambda, 但名字本身就有语义
+#   `_timed_runs(call, ...)`              call = lambda: kernel_func(...) —— 名字
+#                                         毫无语义, 必须顺着绑定解析到 lambda 体里
+#                                         那个真正的被调用者
+# 只认名字的话, 后一种形态会整个从检查里消失: 把 `kernel_func(**inputs)` 重构成
+# `call = lambda: kernel_func(**inputs)` + `_timed_runs(call, ...)` 之后, 结构断言
+# 会静默少覆盖两个函数。这个漏洞是真实发生过的 (见 test_shield_sites_are_non_trivial)。
 
 _CANDIDATE_CALLEES = frozenset({"kernel", "kernel_func", "candidate"})
 _REFERENCE_CALLEES = frozenset({"reference", "fp16_reference", "compiled"})
+# 首参是「待跑的可调用对象」的那些调度函数
+_BENCH_DISPATCHERS = frozenset({"_bench_callable", "_timed_runs", "_resolve_counts"})
 
 
 def _has_shield_item(with_node) -> bool:
@@ -225,13 +237,47 @@ def _shield_regions(tree) -> list:
     return regions
 
 
-def _callee_label(call: ast.Call):
+def _lambda_bindings(tree) -> dict:
+    """`name = lambda: <callee>(...)` → {name: callee 标签}
+
+    只收 lambda 体里**确实调用了**候选/参考的绑定。`fp16_reference = lambda:
+    a @ b` 的体是 BinOp 不是 Call, 因此不进表 —— 它靠名字本身分类就够了。
+    """
+    bindings = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Lambda):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            inner = node.value.body
+            if isinstance(inner, ast.Call):
+                label = _direct_callee_label(inner)
+                if label in _CANDIDATE_CALLEES or label in _REFERENCE_CALLEES:
+                    bindings[target.id] = label
+    return bindings
+
+
+def _direct_callee_label(call: ast.Call):
+    """只看这个 Call 自己调了谁, 不做首参解析 (供 _lambda_bindings 复用)"""
     func = call.func
     if isinstance(func, ast.Attribute):
         return func.attr                                  # module.kernel(...)
     if isinstance(func, ast.Name):
-        if func.id == "_bench_callable" and call.args and isinstance(call.args[0], ast.Name):
-            return call.args[0].id                        # _bench_callable(candidate, ...)
+        return func.id                                    # kernel_func(...) / reference()
+    return None
+
+
+def _callee_label(call: ast.Call, bindings: dict):
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr                                  # module.kernel(...)
+    if isinstance(func, ast.Name):
+        if func.id in _BENCH_DISPATCHERS and call.args and isinstance(call.args[0], ast.Name):
+            name = call.args[0].id
+            # 顺着绑定解析到 lambda 体里真正的被调用者; 解析不到就用名字本身
+            # (`candidate` / `reference` / `compiled` 这些名字自带语义)
+            return bindings.get(name, name)
         return func.id                                    # reference() / compiled()
     return None
 
@@ -264,12 +310,13 @@ def _kernel_call_sites(tree) -> list:
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[id(child)] = node
+    bindings = _lambda_bindings(tree)
     regions = _shield_regions(tree)
     sites = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        label = _callee_label(node)
+        label = _callee_label(node, bindings)
         if label not in _CANDIDATE_CALLEES and label not in _REFERENCE_CALLEES:
             continue
         line = _execution_lineno(node, parents)
