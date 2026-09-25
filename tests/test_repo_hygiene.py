@@ -194,10 +194,13 @@ class TestResearchDocReferencesResolve(unittest.TestCase):
 
     SKIP_DIRS = {".git", "__pycache__", "triton", "output", "logs", "debug",
                  ".venv", "node_modules"}
-    # 三种写法: `docs/research/20` / `doc 33 第三节` / markdown 链接 `(15-xxx.md)`
+    # 三种写法: `docs/research/20` / `doc 33 第三节` / markdown 链接 `(15-xxx.md)`。
+    # ⚠️ 第三种捕获**整个文件名**而不是编号: 编号对、文件名错一样是断链, 而这一类
+    # 真实发生过 —— 新文档写着 `(20-吸纳决策-测量与harness.md)`, 实际文件叫
+    # `20-吸纳决策与阶段总结.md`, 只查编号的守卫放它过了关。
     REF_RE = re.compile(
         r"(?:docs/research/|\bdocs?\s+)(\d{2})(?!(?:\d|[a-z]))"
-        r"|\((\d{2})-[^\s()]+\.md\)"
+        r"|\((\d{2}-[^\s()]+\.md)\)"
     )
 
     def _files(self):
@@ -216,31 +219,61 @@ class TestResearchDocReferencesResolve(unittest.TestCase):
         return {f.name[:2] for f in (REPO_ROOT / "docs" / "research").glob("*.md")
                 if f.name[:2].isdigit()}
 
+    def _existing_names(self):
+        return {f.name for f in (REPO_ROOT / "docs" / "research").glob("*.md")}
+
     def test_every_reference_points_at_an_existing_doc(self):
         ids = self._existing_ids()
         self.assertGreater(len(ids), 5, f"docs/research 里只认出 {ids}, 扫描前提不成立")
+        names = self._existing_names()
         bad = []
         n_refs = 0
         for p in self._files():
             body = p.read_text(encoding="utf-8", errors="ignore")
             for m in self.REF_RE.finditer(body):
-                ref = m.group(1) or m.group(2)
+                num, fname = m.group(1), m.group(2)
                 n_refs += 1
-                if ref not in ids:
+                ok = (num in ids) if num else (fname in names)
+                if not ok:
                     line = body[:m.start()].count("\n") + 1
-                    bad.append(f"{p.relative_to(REPO_ROOT)}:{line} -> docs/research/{ref}")
+                    shown = f"docs/research/{num}" if num else f"docs/research/{fname}"
+                    bad.append(f"{p.relative_to(REPO_ROOT)}:{line} -> {shown}")
         self.assertGreaterEqual(n_refs, 15,
                                 f"只认出 {n_refs} 条引用, 这条守卫几乎没在做事")
         self.assertEqual([], bad, "存在指向不存在文档的引用 (一手核实的链条断了)")
 
     def test_guard_is_not_a_no_op(self):
-        """反向验证: 三种写法的不存在编号都要被抓到, 存在编号不该被算进来"""
-        probe = ("见 docs/research/99 与 doc 98 第二节; 链接写法则 `(97-xxx.md)`。"
-                 "正常的 doc 33 与 (33-离散度门真机验证.md) 是存在的。")
-        got = [m.group(1) or m.group(2) for m in self.REF_RE.finditer(probe)]
-        for missing in ("99", "98", "97"):
-            self.assertIn(missing, got)
-        self.assertNotIn("33", [g for g in got if g not in self._existing_ids()])
+        """反向验证: 三种写法的不存在编号都要被抓到, 存在编号不该被算进来
+
+        ⚠️ 还要抓「编号对但文件名错」: 只查编号的守卫会把 `(20-随便写.md)` 放过去,
+        而这条守卫存在的意义就是「点得开的链接」, 不是「点得开的编号」。
+        """
+        ids = self._existing_ids()
+        names = self._existing_names()
+
+        def resolve(text):
+            out = []
+            for m in self.REF_RE.finditer(text):
+                num, fname = m.group(1), m.group(2)
+                out.append((num, fname,
+                            (num in ids) if num else (fname in names)))
+            return out
+
+        probe = ("见 docs/research/99 与 doc 98 第二节; 链接写法则 `(97-xxx.md)`。\n"
+                 "正常的 doc 33 与 (33-离散度门真机验证.md) 是存在的。\n"
+                 "编号存在、文件名写错: (33-这个文件名不存在.md)。")
+        got = resolve(probe)
+        broken = [x for x in got if not x[2]]
+        self.assertIn("99", [x[0] for x in broken])
+        self.assertIn("98", [x[0] for x in broken])
+        # 链接式引用现在按整个文件名判定, 所以被抓到的是 "97-xxx.md" 而不是编号 "97"
+        self.assertIn("97-xxx.md", [x[1] for x in broken])
+        # 三条正向引用不该被误报
+        self.assertNotIn("33", [x[0] for x in broken])
+        # 关键: 「(33-这个文件名不存在.md)」必须被算成断链, 尽管 33 这个编号存在
+        self.assertIn("33-这个文件名不存在.md", [x[1] for x in broken])
+        self.assertTrue(any(x[0] is None and x[1] == "33-离散度门真机验证.md" and x[2]
+                            for x in got), "存在的文件名链接被误判为断链")
 
 
 if __name__ == "__main__":
