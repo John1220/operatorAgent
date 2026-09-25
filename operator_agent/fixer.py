@@ -19,6 +19,78 @@ from .prompt_manager import PromptManager
 from .kernel_db import FailureRecord  # 用于回写 Reflexion 教训
 
 
+# ── 处方式错误反馈 (docs/research/20 C1) ─────────────────────────
+#
+# 依据是 SPARC (arXiv:2607.09803, ✅ 读过全文): **同一个错误, 归因为外部来源
+# (编译器/硬件/GPU) 时模型能修, 归因为它自己的输出时修不了**; 其理论条件是误差
+# 传播算子的谱半径 >= 1。它测的四个骨干是 Llama-3-8B / Qwen2.5-7B /
+# DeepSeek-R1-Distill-7B / QwQ-32B —— 正是本项目自建 Qwen 27B 的档位, 所以这条
+# 证据不是外推来的。另外该文报告加一个 `Wait` 类修正标记可把盲区降 89.3%。
+#
+# 所以这里做三件事, 顺序固定:
+#   1. 措辞上把错误的来源指给编译器与数值检查器, 不写「你上一版写错了」;
+#   2. 每条错误给「要求什么 / 该改哪一处」, 而不是只把 traceback 丢过去;
+#   3. 开头放一个 Wait 标记, 强制先复述直接原因再生成代码。
+#
+# 处方表有两个入口, 少一个就会有半张表永远没人读: `_format_failures` 吃
+# VerificationResult (Verifier / anticheat / 远程执行), 重试 feedback 吃
+# `_validate_code` 的 issue 原文 —— 截断、结构缺失、跨硬件禁令三条只在那里出现。
+#
+# 表里的签名全部来自本项目真实出现过的失败 (logs/ 里的 28 条 L1/预检失败) 或
+# doc 15/30 一手核实的 Triton 3.8 行为, 不是凭空的 Triton 错误百科。
+_ATTRIBUTION = (
+    "下面每一条都是编译器、GPU 或数值检查器在执行时实测到的现象, 与上一版是谁写的无关。"
+    "Wait —— 动手改之前, 先按输出要求用 `根因:` 一行说明每条错误的直接原因, "
+    "再照「要求 / 该改哪里」修。"
+)
+
+_PRESCRIPTIONS: list[tuple[str, str, str]] = [
+    # ── 来自 _validate_code 本地预检 (重试 feedback 走 prescribe) ──
+    (r"疑似输出截断|不配对",
+     "上一版在某个结构闭合之前就被截断了, 所以它不是完整可解析的程序",
+     "这一次必须从 import 到 return 输出完整函数, 不许续写片段; 若长度是瓶颈, "
+     "删掉冗余的 BLOCK 常量组或注释来缩短, **不要**靠省略结尾"),
+    (r"未能从 LLM 回复中提取有效代码|代码为空",
+     "上一版里没有可编译的代码: 整段被解释文字占掉, 或只回到一半",
+     "这次回复必须有且只有一份完整代码, 以 `import` 开头, 到 `return` 结束"),
+    (r"expected an indented block",
+     "某个 def/if/for 之后没有缩进块",
+     "在报错那一行下面补至少一行 4 空格缩进的语句; 注意 Triton 核体不能是空的"),
+    (r"invalid syntax|SyntaxError|unexpected EOF|unmatched|was never closed|语法错误",
+     "编译器在这一行停止解析; 真正缺的闭合符号往往在**上面几行**",
+     "从报错行往上找第一个未闭合的 ( [ { 并补上; 别只改报错那一行"),
+    (r"缺少 @triton\.jit|缺少 kernel 入口|缺少 load_inline|缺少 C\+\+ 源码",
+     "这份代码缺了跑起来必需的结构, 预检不会放行, 远程编译也不会开始",
+     "按 SKILL 的最小骨架补齐: import → `@triton.jit` 的核函数 → `def kernel(...)` "
+     "入口调用核并 return; 只补缺的结构, 不要顺手引入新的抽象层"),
+    (r"但代码里出现了 Triton API|严禁使用任何 Triton",
+     "目标平台上没有 Triton 运行时, 这份代码即使编译通过也跑不起来",
+     "彻底重写为纯 Python/PyTorch: 删掉 import triton / @triton.jit / 所有 tl.* 行, "
+     "矩阵乘法用 torch.matmul 或分块 torch.mm, 不要只注释掉报错的那几行"),
+    # ── 来自 VerificationResult (Verifier / anticheat / 远程执行) ──
+    (r"CheatDetected|反作弊|禁止调用|shield",
+     "候选核里出现了被屏蔽的高层算子, 运行时拒绝执行",
+     "参考实现由 harness 自己跑, 候选里不要调 torch 的高层算子 (matmul/softmax/"
+     "layer_norm 等); 用显式分块循环 + tl.load/tl.store 把计算写出来"),
+    (r"has been removed|no attribute|\bAttributeError\b|\bNameError\b",
+     "这个标识符在当前 Triton 版本里不存在, 照记忆补 API 一定会再错一次",
+     "只允许用 SKILL SPECIFICATION 与优化配方里明确出现的 tl.* 写法; 想用的 API "
+     "不在其中就换成等价实现, 不要猜名字"),
+    (r"max_abs|最大绝对误差|超出容差|数值",
+     "输出与参考实现不一致, 超出了该精度档的容差",
+     "按顺序查: 累加器是否 fp32 (R-UNIV-03) → tl.dot 的 input_precision → "
+     "边界 mask 与 other= 的取值 → stride 是否从 tensor.stride() 取"),
+]
+
+
+def prescribe(err_text: str) -> Optional[tuple[str, str]]:
+    """把一个错误文本映射到 (要求, 该改哪里); 认不出来返回 None。"""
+    for pat, requirement, action in _PRESCRIPTIONS:
+        if re.search(pat, err_text, re.IGNORECASE):
+            return requirement, action
+    return None
+
+
 class FixerAgent:
     """
     Fixer Agent (错误修复)
@@ -106,11 +178,20 @@ class FixerAgent:
                     print(f"  [Fixer] 第 {attempt} 次修复通过预检")
                 break
             print(f"  [Fixer] 第 {attempt} 次修复预检未通过: {'; '.join(issues)}")
-            bullets = "\n".join(f"- {i}" for i in issues)
+            # 预检问题同样给处方: 这些正是表里"截断/结构/跨硬件禁令"三条的产出方,
+            # 只把 issue 原文丢回去等于让模型自己猜预检想听什么
+            bullets = []
+            for i in issues:
+                bullets.append(f"- {i}")
+                fx = prescribe(i)
+                if fx is not None:
+                    bullets.append(f"  要求: {fx[0]}\n  该改哪里: {fx[1]}")
             feedback = (
-                f"\n\n## 上次修复未通过预检 (尝试 {attempt}/{self.MAX_FIX_ATTEMPTS})\n{bullets}\n"
+                f"\n\n## 上次修复未通过预检 (尝试 {attempt}/{self.MAX_FIX_ATTEMPTS})\n"
+                + "\n".join(bullets) + "\n"
                 f"请重新输出完整修复代码: 以 `import` 开头，包含 kernel 入口函数，"
-                f"括号配对完整，不要输出解释；特别注意当前 dsl={dsl!r} 的 API 禁令。"
+                f"括号配对完整；除 `根因:` 那几行外不要输出解释；"
+                f"特别注意当前 dsl={dsl!r} 的 API 禁令。"
             )
         if not fixed:
             raise ValueError("Fixer 未能从 LLM 回复中提取有效代码")
@@ -141,7 +222,7 @@ class FixerAgent:
         if task is None:
             return None
 
-        error_details = self._format_failures(failed)
+        error_details = self._format_failures(failed, prescriptive=False)
         levels = "+".join(sorted({r.level.value for r in failed})) or "L?"
 
         prompt = self.pm.render(
@@ -307,17 +388,39 @@ class FixerAgent:
     # 错误信息组装与压缩
     # ------------------------------------------------------------------
 
-    def _format_failures(self, failed_results: list[VerificationResult]) -> str:
-        """将失败结果格式化为注入 prompt 的错误描述 (日志已截断)"""
+    def _format_failures(self, failed_results: list[VerificationResult],
+                         prescriptive: bool = True) -> str:
+        """将失败结果格式化为注入 prompt 的错误描述 (日志已截断)
+
+        `prescriptive=False` 给 Reflexion 用: 那一步只是回看这次失败, 把处方混进去会
+        让沉淀的教训变成抄我们的模板; 而且 `failure_id` 的哈希取的是本函数输出的前
+        200 字符, 开头换成固定的归因段会让不同的错误撞进同一个签名。
+        """
         if not failed_results:
-            return "无详细错误信息"
+            return _ATTRIBUTION if prescriptive else "无详细错误信息"
+
         parts = []
         for r in failed_results:
-            part = f"[{r.level.value}] {r.message}"
+            lines = [f"[{r.level.value}] {r.message}"]
             if r.error_log:
-                part += f"\n错误日志:\n{self._truncate_error(r.error_log)}"
-            parts.append(part)
-        return "\n\n".join(parts)
+                lines.append("   执行侧原话:" if prescriptive else "错误日志:")
+                lines.append(self._truncate_error(r.error_log))
+            if prescriptive:
+                lines.extend(self._prescribe_lines(r))
+            parts.append("\n".join(lines))
+
+        if not prescriptive:
+            return "\n\n".join(parts)
+        return "\n\n".join([_ATTRIBUTION] + ["── " + p for p in parts])
+
+    @staticmethod
+    def _prescribe_lines(r: VerificationResult) -> list[str]:
+        # 用未截断的全文匹配: 签名可能正好落在 _truncate_error 省略掉的中间段
+        fx = prescribe(f"{r.message}\n{r.error_log or ''}")
+        if fx is None:
+            return ["   要求: (无现成处方 —— 这不是已知的失败形态, 只依据上面的执行侧"
+                    "原话定位根因, 不要假设项目之外的限制)"]
+        return [f"   要求: {fx[0]}", f"   该改哪里: {fx[1]}"]
 
     @classmethod
     def _truncate_error(cls, log: str, max_chars: Optional[int] = None) -> str:

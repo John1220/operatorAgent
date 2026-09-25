@@ -62,6 +62,52 @@ _PEAK_BY_CC: dict[str, tuple[float, float, float, float, float]] = {
 }
 
 
+def syntax_error_report(source: str, err: SyntaxError, context: int = 2) -> str:
+    """把 SyntaxError 摊成「哪一行 / 编译器看到什么 / 它在哪一列停下」。
+
+    `str(SyntaxError)` 只有 `invalid syntax (<file>, line N)` 一行, **不含出错源码与
+    插入符** —— 那是 traceback 模块额外加上去的。Verifier 以前存的就是 str(e), 于是
+    Fixer 拿到「第 4 行语法错」却从来看不到第 4 行长什么样, 只能凭猜改。
+
+    LLM 修复回路里最贵的不是信息不准, 而是信息不全: 一次猜错就是一次完整的
+    生成 + 远程编译往返。
+    """
+    lines = (source or "").splitlines()
+    n = err.lineno or 0
+    start = max(1, n - context)
+    end = min(len(lines), n + context)
+    out = [f"{type(err).__name__}: {err.msg}",
+           f"位置: 第 {n} 行" + (f", 第 {err.offset} 列" if err.offset else "")]
+    if n:
+        out.append("  编译器看到的源码 (>>> 标出出错那一行):")
+        for i in range(start, end + 1):
+            marker = ">>>" if i == n else "   "
+            out.append(f"  {marker} {i:4d} | {lines[i - 1]}")
+        if err.offset:
+            # 插入符要对齐到文本列: 前缀 "       i | " 的长度必须一并补偿
+            gutter = len(f"   {n:4d} | ")
+            out.append("        " + " " * (gutter + max(0, err.offset - 1)) + "^")
+    if err.text and err.text.strip() and not n:
+        out.append(f"  出错行内容: {err.text.rstrip()}")
+    end_lineno = getattr(err, "end_lineno", None)
+    if end_lineno and n and end_lineno != n:
+        out.append(f"  该语法结构从第 {n} 行一直延伸到第 {end_lineno} 行 "
+                   f"(通常意味着中间少了闭合符号, 而不是这一行本身写错)")
+    return "\n".join(out)
+
+
+def failure_pair(err) -> tuple[str, str]:
+    """把执行侧错误摊成 (单行现象, 全文日志)。
+
+    message 只留首行是因为 `_format_failures` 会把 message 与 error_log 都写进 Fixer
+    prompt: 全文放两份 = 双份上下文, 而 `_truncate_error` 只压得住 error_log 那一份。
+    远程 Triton `CompilationError` 会把整个核的源码回显一遍, 一份就上千字符。
+    """
+    text = str(err or "")
+    lines = text.strip().splitlines()
+    return (lines[0] if lines else "无错误详情"), text
+
+
 class Verifier:
     """
     验证器 - 执行三级验证
@@ -119,7 +165,12 @@ class Verifier:
                 print(f"  [Verifier] L1 FAILED: {msg}")
                 return VerificationResult(
                     level=VerificationLevel.L1_COMPILE, passed=False,
-                    message=f"编译失败: {msg}", error_log=str(e),
+                    message=f"编译失败: {msg}",
+                    # ⚠️ str(SyntaxError) 只有 "invalid syntax (<..., line 4)" 这一行,
+                    # **不含出错的源码内容与插入符** (那是 traceback 才加的)。此前
+                    # error_log=str(e) 让 Fixer 拿到「第 4 行语法错」却从来看不到第 4
+                    # 行长什么样, 只能猜。这里把 e.text/e.offset 连同上下文一起带上。
+                    error_log=syntax_error_report(kernel_code, e),
                 )
         import hashlib
         cache_key = hashlib.sha256(kernel_code.encode("utf-8")).hexdigest()
@@ -133,7 +184,11 @@ class Verifier:
             return VerificationResult(level=VerificationLevel.L1_COMPILE, passed=True, message="编译验证通过", metrics={"compile_status": "success", "backend": str(self.backend)})
         except Exception as e:
             print(f"  [Verifier] L1 FAILED: {e}")
-            return VerificationResult(level=VerificationLevel.L1_COMPILE, passed=False, message=f"编译失败: {e}", error_log=str(e))
+            # 远程编译错误全文可达上千字符 (gcc/Triton 会回显源码), 只把首行放进 message,
+            # 否则 Fixer prompt 里同一份全文会出现两遍
+            head, full = failure_pair(e)
+            return VerificationResult(level=VerificationLevel.L1_COMPILE, passed=False,
+                                      message=f"编译失败: {head}", error_log=full)
 
     def _verify_function(self, kernel_code: str, test_inputs, expected_output, task: TaskSchema) -> VerificationResult:
         print("  [Verifier] L2: 功能验证...")
@@ -246,9 +301,12 @@ class Verifier:
                                      f"{remote_verify['expected_shape']}"),
                             error_log=remote_verify.get("error", ""),
                         )
-                    return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False,
-                                              message=f"远程执行失败: {remote_verify.get('error', '')}",
-                                              error_log=remote_verify.get("error", ""))
+                    # message 只带首行, 全文放 error_log (见 failure_pair)
+                    head, full = failure_pair(remote_verify.get("error", ""))
+                    return VerificationResult(
+                        level=VerificationLevel.L2_FUNCTION, passed=False,
+                        message=f"远程执行失败: {head}",
+                        error_log=full)
                 return VerificationResult(
                     level=VerificationLevel.L2_FUNCTION, passed=True,
                     message=(f"远程全量比对通过 ({remote_verify.get('compared_elements', 0)} 元素), "
@@ -260,7 +318,8 @@ class Verifier:
             # 旧执行器兼容路径。新 SSHExecutor 不会进入这里。
             result = self.backend.execute(kernel_code, inputs)
             if not result.success:
-                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"执行失败: {result.error}", error_log=result.error)
+                head, full = failure_pair(result.error)
+                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"执行失败: {head}", error_log=full)
             if expected_output is None:
                 expected_output = self._generate_reference(task, inputs)
             if expected_output is None:
@@ -287,7 +346,8 @@ class Verifier:
         from .mock_gpu import ExecutionResult
         result: ExecutionResult = self.backend.execute(kernel_code, inputs)
         if not result.success:
-            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"执行失败: {result.error}", error_log=result.error)
+            head, full = failure_pair(result.error)
+            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"执行失败: {head}", error_log=full)
         if expected_output is None:
             expected_output = self._generate_reference(task, inputs)
         if expected_output is None:
