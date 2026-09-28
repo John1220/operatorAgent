@@ -23,6 +23,7 @@ from .agents import DesignerAgent, CoderAgent, SearchAgent
 from .fixer import FixerAgent
 from .verifier import Verifier
 from .kernel_db import KernelDatabase, FailureDatabase, FailureRecord, failure_signature
+from .novelty import signature_of
 from .mock_gpu import MockGPU
 from .remote_executor import RemoteExecutor
 from .llm_client import LLMClient
@@ -342,6 +343,11 @@ class Conductor:
         # 环境, 续跑时机器负载早变了, 恢复旧值没有意义。
         invalid_measurement_rounds = 0
 
+        # 本次运行内每轮候选的结构签名 (doc 47)。同上, 不进快照 —— 它只在「这一次搜索
+        # 有没有原地打转」这个尺度上有意义。
+        round_signatures: list = []
+        duplicate_rounds = 0
+
         for round_num in range(start_round, self.max_optimize_rounds + 1):
             print(f"\n{'─'*40}")
             print(f"轮次 {round_num}/{self.max_optimize_rounds}")
@@ -392,6 +398,20 @@ class Conductor:
                     optimization_recipes=current_recipes_text,
                 )
 
+            # ---- 候选新颖度观测 (doc 47) ----
+            # 只做两件事: 把结构签名写进 iteration_history (它会被序列化进 result.json,
+            # 于是「模型重新生成时有多少轮是结构重复」第一次有一个能复盘的数), 以及在
+            # 当场打印出来。**不跳过验证** —— 假阳的代价是丢掉一个真的更好的核, 在没有
+            # 基率之前拿它省 GPU 时间就是拿判决换一个还没量的东西。
+            sig = signature_of(current_code)
+            dup_of = next((r for (r, s) in round_signatures if s and s == sig), None)
+            if sig:
+                round_signatures.append((round_num, sig))
+            if dup_of is not None and action == "optimize":
+                duplicate_rounds += 1
+                print(f"\n[Novelty] 第 {round_num} 轮与第 {dup_of} 轮结构相同 (签名 {sig}) "
+                      f"—— 照常验证, 本轮只在量基率")
+
             # Step 4: Verifier 验证
             print(f"\n[Verifier] 执行三级验证...")
             verify_results = self.verifier.verify(
@@ -415,6 +435,10 @@ class Conductor:
                 "all_passed": all_passed,
                 "gflops": l3_result.metrics.get("gflops") if l3_result else None,
                 "recipes_applied": list(applied_recipes),
+                # 重复率的原料: 签名进 result.json 之后, 「模型重新生成时有多少轮是同一份
+                # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
+                "candidate_signature": sig,
+                "duplicate_of": dup_of,
             })
 
             def _snap() -> str:
@@ -783,6 +807,11 @@ class Conductor:
         print(f"[FailureDB] {self.failure_db.summary()} "
               f"本次被复发门挡住 {len(self.failure_db.suppressed_by_gate)} 条"
               f"·被类别门挡住 {len(self.failure_db.suppressed_by_kind)} 条")
+        # 候选新颖度: 现在只有「重复了几轮」这一个数, 它的读者是 doc 47 里那条基率 ——
+        # 在拿签名去省 GPU 时间之前, 先得知道重复到底常不常见。
+        n_rounds = len(artifact.iteration_history)
+        print(f"[Novelty] {n_rounds} 轮候选, {len({s for _, s in round_signatures})} 个不同结构, "
+              f"其中 {duplicate_rounds} 轮与更早的轮次结构相同")
 
         if invalid_measurement_rounds:
             print(f"\n[Conductor] ⚠️ 本次 {invalid_measurement_rounds} 轮的 L3 测量被判为不可信 "
