@@ -24,33 +24,46 @@
 | 功能模块 | 说明 |
 |---------|------|
 | **LLM 驱动生成** | Designer Agent 生成设计草图，Coder Agent 生成代码，Search Agent 优化性能 |
-| **三级验证体系** | L1 编译验证、L2 功能验证、L3 性能验证 |
-| **远程执行支持** | 支持 SSH/HTTP/Local 三种模式远程执行代码 |
-| **自动日志管理** | 所有执行过程自动记录到日志文件，自动清理旧日志（保留最新10个） |
-| **产物持久化** | 生成的算子代码、Sketch、验证结果自动保存到 `output/` 目录 |
-| **RAG 知识库** | 算子知识库支持历史案例检索和复用 |
+| **三级验证体系** | L1 编译验证（含静态接口契约门）、L2 功能验证 + 反作弊、L3 交错 A/B 性能验证；L3 读数先分「测量有效性」档位再决定它能驱动哪些决策 |
+| **远程执行支持** | 支持 SSH/HTTP/Local 三种模式远程执行代码；共享 GPU 机器上可固定卡号（见 4.2） |
+| **自动日志管理** | 所有执行过程自动记录到日志文件，自动清理旧日志（默认保留最新 10 个，`OPERATOR_AGENT_LOG_KEEP` 可调，`OPERATOR_AGENT_LOG_DIR=off` 可完全不落文件） |
+| **产物持久化** | 生成的算子代码、Sketch、验证结果自动保存到 `output/` 目录；每轮的动作为结果（含结构签名）记进血缘 `iteration_history` |
+| **两级跨运行记忆** | 正样本 `KernelDatabase`（Designer/Coder 检索）与负样本 `FailureDatabase`（Fixer 检索），都是追加式本机 JSONL；写入要过入库门，负样本还要过复发门与类别门（见 6.5、6.6） |
 
 ### 1.3 架构设计
 
 ```
 用户请求
     ↓
-IntentParser (意图解析)
+IntentParser (意图解析 → TaskSchema)
     ↓
-Conductor (调度编排)
+Conductor (调度编排, 最多 max_optimize_rounds 轮)
     ├── Router (路由决策)
-    ├── DesignerAgent (设计草图)
-    ├── CoderAgent (代码生成)
+    ├── Planner (选优化配方)              ← 配方禁用 / 停滞计数受第 6 章的门约束
+    ├── DesignerAgent (设计草图)          ← 读正样本经验库 (KernelDatabase) 做 RAG
+    ├── CoderAgent (代码生成 + 预检重试)   ← 同上
     ├── Verifier (三级验证)
-    │   ├── L1: 编译验证
-    │   ├── L2: 功能验证
-    │   └── L3: 性能验证
-    └── SearchAgent (性能优化)
+    │   ├── L1: 接口契约门 (静态, 不占 GPU) → 语法 → 远程编译
+    │   ├── L2: 功能验证 + 反作弊          ← 绝对/相对 AND 容差, 按精度分档
+    │   └── L3: 交错 A/B 性能 + Roofline   ← 输出先过「测量有效性」分档
+    ├── FixerAgent (L1/L2 失败时修复)      ← 读负样本经验库 (FailureDatabase)
+    └── SearchAgent (L3 失败时调 tiling/hints)
     ↓
-ArtifactStore (产物存储)
+ArtifactStore (产物快照) → output/<kernel_type>/<hardware>/<时间戳>_<id>/
     ↓
-output/ 目录
+入库门 persist_decision() → 只有「可信 + 未污染 + 真的加速」才写进跨运行经验库
 ```
+
+三条读图要点：
+
+1. **通过 ≠ 生效**。每轮的性能读数先被分档（`valid / degraded / uninformative`），
+   档位决定它有没有资格去禁用配方、累计停滞、或写进经验库 —— 详见第 6 章。
+2. **两级记忆**。正样本（成功且可信的核，Designer/Coder 会检索）与负样本
+   （失败签名，Fixer 会检索）都是本机 JSONL 文件，默认落在 `output/` 下且不进仓库。
+3. **候选代码的每次执行都在反作弊屏蔽区内**（静态 AST 审计 + 运行时 `shield_torch` 两层），
+   见 6.8。
+
+英文/源码视角的同一张图见仓库根目录 [`CLAUDE.md`](../CLAUDE.md) 的 Architecture 一节。
 
 ### 1.4 支持的硬件与 DSL
 
@@ -711,9 +724,16 @@ AMBIGUOUS   没有可比值，或档位是 uninformative（带宽比信号本身
 
 | 等级 | 名称 | 验证内容 |
 |------|------|---------|
-| L1 | 编译验证 | 代码可编译、语法正确 |
-| L2 | 功能验证 | 输出正确，误差在容许范围内 |
-| L3 | 性能验证 | 性能达到预期加速比（GFLOPS） |
+| L1 | 编译验证 | 先过**接口契约门**（静态，参数名与 `kernel(**输入)` 的调用约定一致，不占 GPU），再语法检查、远程编译 |
+| L2 | 功能验证 | 输出与参考实现比对，用**绝对 + 相对两项 AND** 的容差、按精度分档（见 5.4）；同时执行**反作弊**两层（见 6.8） |
+| L3 | 性能验证 | 与**远端选定的基线**做块交错的 A/B 计时，判据是**加速比** `speedup_vs_baseline ≥ min_speedup`，并给出 Roofline 达成率；同时产出峰值显存、逐块比值序列、时钟旁证 |
+
+⚠️ 三个常见误解：
+
+- **GFLOPS 不是 L3 的通过判据**。它是 Roofline 报告的输入之一；跨运行经验库的分数用
+  `speedup_vs_baseline`，因为对 memory-bound 算子 GFLOPS 整个失真（缺口 4）。
+- **L3 的数字先分档再决定用途**。`uninformative` 档的读数只作诊断，不参与任何闭环决定（6.3）。
+- **「通过」不等于「入库」**。不可信、被抢占、或没真加速的运行会被入库门拒收（6.5）。
 
 ### A.3 路由策略
 
