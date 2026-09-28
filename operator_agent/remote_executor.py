@@ -33,7 +33,7 @@ import threading
 import hashlib
 import urllib.request
 import urllib.error
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -63,6 +63,47 @@ class RemoteExecutionResult:
     memory_bandwidth_gbs: float = 0.0
     error: str = ""
     device: str = ""
+
+
+@dataclass
+class Resolution:
+    """门面「到底解析成了什么」的记录 —— 降级必须是**数据**, 不是一行 print
+
+    `attempts` 保留每一级探测的 `(label, reason)`: 旧的 `check_connection() -> bool`
+    把异常吞成 False, 于是「连不上」在日志里只剩一行 print, 而**为什么**连不上
+    (DNS / 认证 / 超时) 永远查不到 (DSH postmortem 0004: 保留下层拥有的结构化失败)。
+    """
+
+    requested: str                       # 请求的 mode
+    resolved: str = ""                   # 解析到的后端 label; 抛 BackendUnavailable 时为空
+    degraded: bool = False               # 请求的与实际拿到的不一致
+    attempts: list = field(default_factory=list)
+
+
+class BackendUnavailable(RuntimeError):
+    """请求的执行侧连不上。**不降级**
+
+    `mode="ssh"` 以前只是**偏好**: 连不上就试 HTTP, 再连不上就无条件落到 LocalExecutor,
+    唯一的信号是一行 `print("回退到本地 CPU 模式")` —— 不抛异常、不存标志、没有 strict
+    模式 (doc 49 §3.3 S3)。加上 `LocalExecutor.check_connection()` 恒 True (S4),
+    这个梯子**永远以「成功」结束**。于是驱动只能靠 `"LocalExecutor" in remote.name`
+    这种显示名子串去猜到底连上没有 (A3), 猜错时**凭空造一台 SM 数是真的假 H20**。
+
+    现在: `"ssh"`/`"http"` 是承诺, 兑现不了就在**第一次访问执行侧时**抛这个异常;
+    `"auto"` 仍是偏好, 可以一路降到 CPU, 但降级写进 `Resolution.degraded` 并由
+    `capabilities` 变成空集暴露出来。DSH `2026-08-19` 笔记的三条要求正好对上:
+    "configuration errors must fail explicitly"、"explicit first-access failure …
+    without allowing silent degradation"、"it never degrades to a default value"。
+    """
+
+    def __init__(self, resolution: Resolution):
+        self.resolution = resolution
+        detail = "; ".join(f"{label}: {reason or '未知原因'}"
+                           for label, reason in resolution.attempts) or "没有可用的探测目标"
+        super().__init__(
+            f"mode={resolution.requested!r} 是一次承诺, 但执行侧不可用 —— {detail}。"
+            f"不降级到 CPU: 那会把「没有加速卡」翻译成「有一个更慢的」, 而产物里看不出区别。"
+            f"要显式跑本机 CPU 请写 mode=\"local\", 要允许降级请写 mode=\"auto\"。")
 
 
 class SSHExecutor(Backend):
@@ -465,13 +506,23 @@ class SSHExecutor(Backend):
             print(f"  [SSHExecutor] 部署失败: {e}")
             return False
 
-    def check_connection(self) -> bool:
-        """检查 SSH 连接是否可用"""
+    def probe_connection(self) -> tuple:
+        """探一次连通性, 返回 `(ok, reason)`
+
+        `reason` 必须带出来: 旧的 `check_connection() -> bool` 把异常吞成一个 False,
+        于是「连不上」在日志里只剩一行 print, 而**为什么**连不上 (DNS? 认证? 超时?)
+        永远查不到。降级梯子的每一级都要把这个 reason 记进 `Resolution.attempts`
+        (doc 49 §3.3 S3/S4; DSH postmortem 0004: 保留下层拥有的结构化失败)。
+        """
         try:
             self._ssh_exec("echo ok")
-            return True
-        except Exception:
-            return False
+            return True, ""
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    def lock_identity(self) -> str:
+        """按**目标机器**取键, 不带 platform: 锁保护的是那张卡, 不是那份配置"""
+        return f"ssh:{self._ssh_target()}"
 
     def ensure_environment(self, required_pips: Optional[list] = None) -> tuple:
         """
@@ -726,7 +777,7 @@ class HTTPExecutor(Backend):
 
     def __init__(self, base_url: Optional[str] = None, timeout: int = 120):
         # 默认留空: 新环境没有本项目的 HTTP 服务, 8091 属于其他租户。
-        # 空串会让 check_connection 失败, auto 模式据此降级, 不会误连别人的服务。
+        # 空串会让 probe_connection 直接失败, auto 模式据此降级, 不会误连别人的服务。
         self.base_url = (base_url or os.environ.get("REMOTE_HTTP_URL", "")).rstrip("/")
         self.timeout = timeout
         self.name = f"HTTPExecutor@{self.base_url}"
@@ -748,16 +799,21 @@ class HTTPExecutor(Backend):
         """
         return frozenset()
 
-    def check_connection(self) -> bool:
+    def probe_connection(self) -> tuple:
+        """探一次连通性, 返回 `(ok, reason)`。同 `SSHExecutor.probe_connection` 的理由"""
+        if not self.base_url:
+            return False, "未配置 base_url (REMOTE_HTTP_URL 为空)"
         try:
-            req = urllib.request.Request(
-                f"{self.base_url}/health",
-                method="GET",
-            )
+            req = urllib.request.Request(f"{self.base_url}/health", method="GET")
             with urllib.request.urlopen(req, timeout=5) as resp:
-                return resp.status == 200
-        except Exception:
-            return False
+                if resp.status == 200:
+                    return True, ""
+                return False, f"/health 返回 HTTP {resp.status}"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    def lock_identity(self) -> str:
+        return f"http:{self.base_url}"
 
     def get_hardware_info(self) -> dict:
         return {
@@ -832,14 +888,19 @@ class LocalExecutor(Backend):
     def capabilities(self) -> frozenset:
         """**空集**: CPU 回退, 不是加速卡, 也不提供任何远端协议能力
 
-        它 `check_connection()` 恒 True (doc 49 §3.3 S4), 所以「连得上」这件事
-        不能拿来当能力; 空集让降级后的门面**在能力上看得出来**是降级了 ——
-        这是第 2 片「把解析结果记成数据」的落点。
+        空集让降级后的门面**在能力上看得出来**是降级了 —— 调用方不必再去
+        `"LocalExecutor" in remote.name` 里做子串匹配 (doc 49 §3.1 A3, 三个驱动各抄了一遍)。
         """
         return frozenset()
 
-    def check_connection(self) -> bool:
-        return True
+    def lock_identity(self) -> str:
+        return "local"
+
+    # 这里**故意没有** `check_connection` / `probe_connection`。
+    # 它以前恒返回 True (doc 49 §3.3 S4), 与降级梯子 (S3) 合起来的结果是「梯子永远以
+    # 成功结束」: 任何一级探测失败都会被它兜住, 于是「连不上」与「连上了一个 CPU 回退」
+    # 在返回值上无法区分。对 CPU 回退问「能不能连上」本身没有意义 —— 它不是一个远端。
+    # 删掉而不是改成返回 False: 降级到它是**梯子的终点**, 不是一次探测的结果。
 
     def get_hardware_info(self) -> dict:
         return {
@@ -929,20 +990,23 @@ class LocalExecutor(Backend):
 
 class RemoteExecutor(Backend):
     """
-    统一远程执行入口 - 自动选择最佳后端
-    
-    优先级:
-    1. SSH 模式 (直接连远程 GPU 服务器)
-    2. HTTP 模式 (如果远程有接口服务)
-    3. 本地模式 (fallback)
-    
+    统一远程执行入口 —— `mode` 决定「连不上」意味着什么
+
+    * `mode="ssh"` / `"http"`：**承诺**。探测失败就抛 `BackendUnavailable`, 不降级。
+    * `mode="auto"`（默认）：**偏好**。SSH → HTTP → 本地 CPU 一路降, 但降级会记进
+      `resolution.degraded`, 并由 `capabilities` 变成空集暴露出来。
+    * `mode="local"`：显式选择本机 CPU。
+
+    能力与锁的标识都**派生自解析后的内层后端**, 门面自己一个都不加 —— 所以「解析成了
+    什么」是可读的数据 (`resolution`), 不需要靠显示名子串去猜。
+
     使用方式:
         # SSH 模式 (推荐) — 默认连 ~/.ssh/config 里的 algorithm-h20 Host 别名,
         # 端口 / 用户名 / 密钥均由该 Host 块提供, 仓库中不出现真实值
         executor = RemoteExecutor(mode="ssh")
-        
+
         # 自动检测模式
-        executor = RemoteExecutor()  # 默认尝试 SSH -> HTTP -> Local
+        executor = RemoteExecutor()  # 尝试 SSH -> HTTP -> Local, 降级留痕
     """
 
     def __init__(
@@ -959,6 +1023,7 @@ class RemoteExecutor(Backend):
     ):
         self._mode = mode
         self._backend = None
+        self._resolution: Optional[Resolution] = None
         self._platform = platform
         self._host = host
         self._port = port
@@ -969,15 +1034,22 @@ class RemoteExecutor(Backend):
         self._timeout = timeout
 
     def _init_backend(self):
-        """延迟初始化后端，自动检测可用连接"""
+        """延迟解析执行侧, 并把解析结果记成 `Resolution` 数据
+
+        `mode` 的三种语义 (doc 49 §3.3 S3): `"ssh"`/`"http"` 是**承诺** —— 探测失败就抛
+        `BackendUnavailable`, 不试别的传输、不落到 CPU; `"auto"` 是**偏好** —— 可以一路
+        降到 LocalExecutor, 但降级会写进 `Resolution.degraded`; `"local"` 是显式选择本机 CPU。
+        """
         if self._backend is not None:
             return
 
         if self._mode == "local":
             self._backend = LocalExecutor()
+            self._resolution = Resolution("local", self._backend.label)
             print(f"  [RemoteExecutor] 使用本地 CPU 模式")
             return
 
+        attempts = []
         if self._mode in ("ssh", "auto"):
             ssh = SSHExecutor(
                 host=self._host,
@@ -988,28 +1060,47 @@ class RemoteExecutor(Backend):
                 timeout=self._timeout,
                 platform=self._platform,
             )
-            if ssh.check_connection():
+            ok, reason = ssh.probe_connection()
+            if ok:
                 self._backend = ssh
+                self._resolution = Resolution(self._mode, ssh.label, attempts=attempts)
                 print(f"  [RemoteExecutor] SSH 连接成功: {ssh.name}")
                 return
-            print(f"  [RemoteExecutor] SSH 不可用 ({ssh.host})")
+            attempts.append((ssh.label, reason))
+            print(f"  [RemoteExecutor] SSH 不可用 ({ssh.host}): {reason}")
 
         if self._mode in ("http", "auto"):
             http = HTTPExecutor(base_url=self._http_url, timeout=self._timeout)
-            if http.check_connection():
+            ok, reason = http.probe_connection()
+            if ok:
                 self._backend = http
+                self._resolution = Resolution(self._mode, http.label, attempts=attempts)
                 print(f"  [RemoteExecutor] HTTP 连接成功: {http.name}")
                 return
-            print(f"  [RemoteExecutor] HTTP 不可用")
+            attempts.append((http.label, reason))
+            print(f"  [RemoteExecutor] HTTP 不可用: {reason}")
 
-        # Fallback to local
+        if self._mode != "auto":
+            # 承诺没兑现。这里**不**给 self._backend 赋值, 于是下一次访问会再抛一次 ——
+            # 「失败状态」不该被缓存成一个能用的对象 (DSH: it never degrades to a default)。
+            raise BackendUnavailable(Resolution(self._mode, degraded=True, attempts=attempts))
+
         self._backend = LocalExecutor()
-        print(f"  [RemoteExecutor] 回退到本地 CPU 模式")
+        self._resolution = Resolution("auto", self._backend.label, degraded=True,
+                                      attempts=attempts)
+        print(f"  [RemoteExecutor] auto 模式降级到本地 CPU 模式 "
+              f"(试过 {len(attempts)} 个远端: {', '.join(l for l, _ in attempts) or '无'})")
 
     @property
     def backend(self):
         self._init_backend()
         return self._backend
+
+    @property
+    def resolution(self) -> Resolution:
+        """解析结果 (会触发延迟初始化)。降级是**数据**, 不是一行 print"""
+        self._init_backend()
+        return self._resolution
 
     @property
     def name(self) -> str:
@@ -1055,15 +1146,16 @@ class RemoteExecutor(Backend):
         return self.backend.compile(kernel_code)
 
     def _lock_key(self) -> str:
-        """执行锁键: 同一目标主机的 execute/benchmark 进程内串行"""
-        if self._mode == "local":
-            return "local"
-        # 未显式传 host/base_url 时按各后端自己的默认解析, 否则不同目标都会落到
-        # "ssh:None" 上被误判为同一主机 (过度串行, 不会漏锁, 但违背本方法的语义)。
-        if self._mode == "http":
-            return f"http:{self._http_url or HTTPExecutor().base_url}"
-        host = self._host or os.environ.get("REMOTE_SSH_HOST", "algorithm-h20")
-        return f"{self._mode}:{host}"
+        """执行锁键: 同一执行侧的 execute/benchmark 进程内串行
+
+        按**解析后的**后端取键 (doc 49 §3.3 S6)。旧写法按请求的 `self._mode`:
+        `mode="auto"` 降级到本地之后键是 `auto:<host>`, 而 `if self._mode == "local"`
+        永远不触发 ⇒ 一个真跑在本机 CPU 上的后端与另一个 `mode="local"` 的后端拿到
+        **两把不同的锁**, 于是它们可以并发争同一份 CPU。
+        顺带的好处: 取键会触发解析, 所以 `mode="ssh"` 连不上时在**取锁那一步**就抛,
+        而不是等到锁里面。
+        """
+        return self.backend.lock_identity()
 
     def execute(self, kernel_code: str, inputs: dict) -> RemoteExecutionResult:
         with _get_exec_lock(self._lock_key()):

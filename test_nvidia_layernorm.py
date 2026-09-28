@@ -25,11 +25,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from operator_agent import (
     LLMClient,
-    Conductor, RemoteExecutor, MockGPU,
+    Conductor, RemoteExecutor,
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision,
     get_latest_logs,
 )
+from operator_agent.backend_caps import Cap
 
 
 # ─── LLM 配置 (唯一来源) ─────────────────────────────────────
@@ -126,19 +127,15 @@ def test_nvidia_layernorm_llm(llm: LLMClient, ssh_host, ssh_user, ssh_port):
         user=ssh_user,
         timeout=600,
     )
-    try:
-        remote.backend
-        if "LocalExecutor" in remote.name:
-            print(f"  SSH 不可用，回退到: {remote.name}")
-            backend = MockGPU(name="MockH20", compute_units=78, warp_size=32)
-            print(f"  使用 MockGPU: {backend.name}")
-        else:
-            backend = remote
-            print(f"  远程连接成功: {remote.name}")
-    except Exception as e:
-        print(f"  远程连接失败: {e}")
-        print(f"  回退到 MockGPU")
-        backend = MockGPU(name="MockH20", compute_units=78, warp_size=32)
+    # SSH 连不上就**失败退出**, 不再凭空造一台 SM 数是真的假 H20 (doc 49 §3.1 A3)。
+    # 旧写法两个毛病叠在一起: ① 用显示名子串 `"LocalExecutor" in remote.name` 猜到底连上
+    # 没有; ② 猜错时造 MockGPU(name="MockH20", compute_units=78) —— 名字与 SM 数都是真的,
+    # 只有「它是模拟器」这件事是假的, 于是跑出来的性能数字看起来完全像 H20 的。
+    # mode="ssh" 现在是**承诺**: 连不上时 require() 抛 BackendUnavailable (带每一级探测的
+    # 失败原因), 由 main 的异常出口报出来 —— 驱动不该替执行侧编一个能用的替身。
+    remote.require(Cap.REAL_DEVICE, Cap.SAME_DEVICE_BASELINE)
+    backend = remote
+    print(f"  远程连接成功: {remote.name}")
 
     # ── 5. 生成测试输入 (FP16) ──
     print("\n[Step 4] 生成测试输入...")
@@ -250,7 +247,7 @@ def main():
     print("=" * 60)
     print("  算子开发Agent v0.5.0 - Nvidia GPU LayerNorm 测试")
     print(f"  LLM: {llm_label(llm)}")
-    print(f"  验证: SSH @ {ssh_label(ssh_host, ssh_port)} (不可用时回退 MockGPU)")
+    print(f"  验证: SSH @ {ssh_label(ssh_host, ssh_port)} (不可用时直接失败, 不降级到模拟)")
     print("  日志: logs/ 目录")
     print("=" * 60)
 

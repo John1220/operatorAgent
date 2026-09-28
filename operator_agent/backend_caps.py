@@ -113,6 +113,18 @@ class Backend(ABC):
         """
         return type(self).__name__
 
+    def lock_identity(self) -> str:
+        """**同一个执行侧**的后端必须返回同一个串 —— 进程内串行锁按它取键
+
+        默认用 `label`, 但指向同一台机器的两个后端可以有不同 label
+        (`SSHExecutor@host(nvidia)` 与 `SSHExecutor@host(xpu)`), 那种情况下提供方要覆写:
+        锁保护的是**那张卡**, 不是那份配置。
+        门面以前按**请求的** mode 取键 (doc 49 §3.3 S6): `mode="auto"` 降级到本地之后
+        键是 `auto:<host>`, 而 `if self._mode == "local"` 永远不触发 —— 两个都跑在本机
+        CPU 上的后端拿到两把不同的锁, 于是它们可以并发。
+        """
+        return self.label
+
     def require(self, *caps: Cap) -> None:
         """消费方声明自己需要什么; 缺就抛, **不返回默认值**
 
