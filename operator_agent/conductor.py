@@ -433,7 +433,21 @@ class Conductor:
                 "round": round_num,
                 "action": action,
                 "all_passed": all_passed,
+                # 分级结果必须进血缘: `all_verification_results` 每轮被覆盖
+                # (见上面 `all_verification_results = verify_results`), 所以出了循环
+                # 就只剩最后一轮的分级 —— 「第 2 轮卡在 L1」与「第 2 轮卡在 L3」在产物里
+                # 无法区分, 而 rounds-to-pass 这类统计要的正是它。与 doc 33 抓到的
+                # `runs`/`max_time_ms` 从未进过 metrics 是同一类搬运缺陷。
+                "levels_passed": {r.level.value: r.passed for r in verify_results},
                 "gflops": l3_result.metrics.get("gflops") if l3_result else None,
+                # 加速比同理: `benchmark_data` 只有最后一轮的, 而「逐轮到底有没有在变快」
+                # 这个问句需要每一轮的读数
+                "speedup": (l3_result.metrics.get("speedup_vs_baseline")
+                            if l3_result else None),
+                # 档位进血缘是为了让「有多少轮的读数有资格驱动闭环」可以离线统计,
+                # 而不必重跑一遍才知道那次循环是不是全程都在盲跑
+                "measurement_validity": (l3_result.metrics.get("measurement_validity")
+                                         if l3_result else None),
                 "recipes_applied": list(applied_recipes),
                 # 重复率的原料: 签名进 result.json 之后, 「模型重新生成时有多少轮是同一份
                 # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
