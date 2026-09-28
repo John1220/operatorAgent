@@ -14,6 +14,7 @@ import numpy as np
 from typing import Callable, Optional
 from dataclasses import dataclass, field
 from .anticheat import shield_torch
+from .backend_caps import Backend, Cap
 
 
 @dataclass
@@ -44,7 +45,7 @@ def _has_cuda() -> bool:
         return False
 
 
-class MockGPU:
+class MockGPU(Backend):
     """
     Mock GPU 运行时
     模拟新 GPU 的执行环境，支持:
@@ -62,6 +63,29 @@ class MockGPU:
         self.local_memory_size = "128KB/SM"
         self._compiled_kernels: dict = {}
         self._triton_available = self._check_triton()
+        self._caps = None
+
+    @property
+    def capabilities(self) -> frozenset:
+        """有 CUDA 时它跑的是真卡 (只是后端薄), 没有时性能数字是按规格**估**的
+
+        `SIMULATED_PERF` 给 `benchmark()` 里那个一直没人读的 `"mode": "simulated"`
+        一个声明式的对应物 (doc 49 §3.5)。`FULL_OUTPUT_TENSOR`: `execute()` 回的是
+        `ExecutionResult.output` 全量张量, 所以 L2 能走 `tolerance` 的 AND 形式全量比对。
+
+        ⚠️ 词汇表里刻意**还没有**「硬件信息是真探测的」这一项: `get_hardware_info()`
+        返回的是写死的规格 (vector_width=128 / "64GB" / "128KB/SM"), 不是探测结果。
+        等 doc 49 §3.3 的 S8/S9 修完再往 `Cap` 里加它, 现在加就等于允许说谎。
+        延迟计算: `_has_cuda()` 要 import torch, 不该在构造时就付这笔钱。
+        """
+        if self._caps is None:
+            base = {Cap.REAL_DEVICE} if _has_cuda() else {Cap.EMULATED, Cap.SIMULATED_PERF}
+            self._caps = frozenset(base | {Cap.FULL_OUTPUT_TENSOR})
+        return self._caps
+
+    @property
+    def label(self) -> str:
+        return self.name
 
     def _check_triton(self) -> bool:
         """检查 Triton 是否可用"""

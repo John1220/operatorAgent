@@ -4,12 +4,13 @@ L1: 编译验证 (代码可编译、语法正确)
 L2: 功能验证 (输出正确，误差在容许范围内)
 L3: 性能验证 (性能达到预期加速比) + Roofline 分析
 
-后端可以是 MockGPU 或 RemoteExecutor，接口统一
+本模块是**消费方**: 只认 `backend_caps.Backend` 与它声明的 `Cap`, 不 import 任何
+具体提供方、也不做 `isinstance` 分派 (doc 49 §4.1 第 3 条)。
 """
 
 import time
 import numpy as np
-from typing import Union, Optional
+from typing import Optional
 from .schemas import (
     VerificationResult, VerificationLevel, TaskSchema, Precision,
 )
@@ -18,8 +19,7 @@ from .interface_contract import check_kernel_interface, input_key_sets
 from . import tolerance
 from . import measurement
 from .hardware_caps import detect_hardware_caps
-from .mock_gpu import MockGPU
-from .remote_executor import RemoteExecutor, RemoteExecutionResult
+from .backend_caps import Backend, Cap, CapabilityMissing
 
 
 # 远端 L2 返回的指标里需要透传到控制端的键。matched_ratio / bad_elements / atol /
@@ -195,13 +195,14 @@ class Verifier:
     """
     验证器 - 执行三级验证
     L1 Compile -> L2 Function -> L3 Performance + Roofline
-    后端支持 MockGPU 和 RemoteExecutor
     """
 
-    def __init__(self, backend: Union[MockGPU, RemoteExecutor]):
+    def __init__(self, backend: Backend):
         self.backend = backend
         self.name = "Verifier"
-        self._is_remote = isinstance(backend, RemoteExecutor)
+        # 能力**快照**: 门面/提供方的 `capabilities` 可能是延迟解析的 property,
+        # 每次分支都去读它会让「同一轮验证内判据变了」这种事在原理上可能发生。
+        self._caps = frozenset(backend.capabilities)
         # 编译缓存: sha256(code) -> 通过标记, 相同代码重复验证时跳过编译
         self._compile_cache: dict[str, bool] = {}
         # baseline 缓存: (算子, 输入签名) -> 耗时, 避免多轮验证重复测量
@@ -377,59 +378,67 @@ class Verifier:
         )
 
     def _verify_single_set(self, kernel_code: str, inputs: dict, expected_output, task: TaskSchema) -> VerificationResult:
-        """对单组输入执行功能验证 (远程或本地 Mock 后端)
+        """对单组输入执行功能验证
         metrics 中含 max_error 表示完成了参考比对，否则仅为可执行性验证"""
         max_allowed = task.constraints.max_error
 
-        if self._is_remote:
-            # 新协议: 候选与 reference 均在远端执行设备上比较，仅返回摘要，
+        if Cap.REMOTE_VERIFY in self._caps:
+            # 候选与 reference 均在远端执行设备上比较，仅返回摘要，
             # 避免把完整张量通过 SSH 回传到控制端。
             remote_verify = self.backend.verify_function(
                 kernel_code, inputs, task.source.kernel_type, max_allowed,
                 precision=task.constraints.precision.value,
             )
-            if remote_verify is not None:
-                if not remote_verify.get("success", False):
-                    # ``success=False`` 也可能是数值误差超标；保留远端的精确诊断。
-                    if "max_error" in remote_verify:
-                        return VerificationResult(
-                            level=VerificationLevel.L2_FUNCTION, passed=False,
-                            message=f"远程功能验证失败: 误差 {remote_verify['max_error']:.2e}",
-                            error_log=remote_verify.get("error", ""),
-                            metrics={k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
-                                     if k in remote_verify},
-                        )
-                    if remote_verify.get("output_shape") and remote_verify.get("expected_shape"):
-                        return VerificationResult(
-                            level=VerificationLevel.L2_FUNCTION, passed=False,
-                            message=(f"输出形状不匹配: {remote_verify['output_shape']} vs "
-                                     f"{remote_verify['expected_shape']}"),
-                            error_log=remote_verify.get("error", ""),
-                        )
-                    # message 只带首行, 全文放 error_log (见 failure_pair)
-                    head, full = failure_pair(remote_verify.get("error", ""))
+            # 声明了 REMOTE_VERIFY 就必须给出载荷。「内层没这个方法」已经由 Backend
+            # 基类那个一调就抛的存根拦掉了, 走到这里的 None 只能是「声明了却没数据」——
+            # 把它读成「换条路再试试」正是 doc 49 §3.2 B3: 两个意思共用一个值。
+            if remote_verify is None:
+                raise CapabilityMissing(Cap.REMOTE_VERIFY, self.backend,
+                                        "verify_function 声明可用但返回了 None")
+            if not remote_verify.get("success", False):
+                # ``success=False`` 也可能是数值误差超标；保留远端的精确诊断。
+                if "max_error" in remote_verify:
                     return VerificationResult(
                         level=VerificationLevel.L2_FUNCTION, passed=False,
-                        message=f"远程执行失败: {head}",
-                        error_log=full)
+                        message=f"远程功能验证失败: 误差 {remote_verify['max_error']:.2e}",
+                        error_log=remote_verify.get("error", ""),
+                        metrics={k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
+                                 if k in remote_verify},
+                    )
+                if remote_verify.get("output_shape") and remote_verify.get("expected_shape"):
+                    return VerificationResult(
+                        level=VerificationLevel.L2_FUNCTION, passed=False,
+                        message=(f"输出形状不匹配: {remote_verify['output_shape']} vs "
+                                 f"{remote_verify['expected_shape']}"),
+                        error_log=remote_verify.get("error", ""),
+                    )
+                # message 只带首行, 全文放 error_log (见 failure_pair)
+                head, full = failure_pair(remote_verify.get("error", ""))
                 return VerificationResult(
-                    level=VerificationLevel.L2_FUNCTION, passed=True,
-                    message=(f"远程全量比对通过 ({remote_verify.get('compared_elements', 0)} 元素), "
-                             f"最大误差={remote_verify.get('max_error', 0):.2e}"),
-                    metrics={k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
-                             if k in remote_verify},
-                )
+                    level=VerificationLevel.L2_FUNCTION, passed=False,
+                    message=f"远程执行失败: {head}",
+                    error_log=full)
+            return VerificationResult(
+                level=VerificationLevel.L2_FUNCTION, passed=True,
+                message=(f"远程全量比对通过 ({remote_verify.get('compared_elements', 0)} 元素), "
+                         f"最大误差={remote_verify.get('max_error', 0):.2e}"),
+                metrics={k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
+                         if k in remote_verify},
+            )
 
-            # 旧执行器兼容路径。新 SSHExecutor 不会进入这里。
-            result = self.backend.execute(kernel_code, inputs)
-            if not result.success:
-                head, full = failure_pair(result.error)
-                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"执行失败: {head}", error_log=full)
-            if expected_output is None:
-                expected_output = self._generate_reference(task, inputs)
-            if expected_output is None:
-                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True, message="远程执行成功 (无参考输出)", metrics={"execution_time_ms": result.execution_time_ms})
+        # 没有远端紧凑比对协议: 在执行侧跑一遍, 由 Verifier 自己比对参考输出。
+        result = self.backend.execute(kernel_code, inputs)
+        if not result.success:
+            head, full = failure_pair(result.error)
+            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"执行失败: {head}", error_log=full)
+        if expected_output is None:
+            expected_output = self._generate_reference(task, inputs)
+        if expected_output is None:
+            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True, message="无参考输出，仅验证可执行性", metrics={"execution_time_ms": result.execution_time_ms})
 
+        if Cap.FULL_OUTPUT_TENSOR not in self._caps:
+            # execute() 只回样本: 与参考的前缀比对, 并把 coverage 一起报出去 ——
+            # 覆盖不足是**数据**, 不能因为「比过的那部分都对」就读成通过。
             ref = np.asarray(expected_output, dtype=np.float32)
             # 形状检查 (此前远程模式完全不做形状校验)
             if result.output_shape and list(result.output_shape) != list(ref.shape):
@@ -438,25 +447,15 @@ class Verifier:
             ref_flat = ref.flatten()
             sample = np.array(result.output_sample[:ref_flat.size], dtype=np.float32) if result.output_sample else np.array([])
             if sample.size == 0:
-                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message="远程未返回输出样本，无法比对")
+                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message="执行侧未返回输出样本，无法比对")
 
             compared = int(sample.size)
             coverage = compared / ref_flat.size if ref_flat.size else 1.0
             max_error = float(np.max(np.abs(sample - ref_flat[:compared])))
             metrics = {"max_error": max_error, "compared_elements": compared, "coverage": coverage}
             if max_error <= max_allowed:
-                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True, message=f"远程比对通过 ({compared}/{ref_flat.size} 元素), 最大误差={max_error:.2e}", metrics=metrics)
+                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True, message=f"采样比对通过 ({compared}/{ref_flat.size} 元素), 最大误差={max_error:.2e}", metrics=metrics)
             return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"功能验证失败: 误差 {max_error:.2e}", metrics=metrics)
-
-        from .mock_gpu import ExecutionResult
-        result: ExecutionResult = self.backend.execute(kernel_code, inputs)
-        if not result.success:
-            head, full = failure_pair(result.error)
-            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"执行失败: {head}", error_log=full)
-        if expected_output is None:
-            expected_output = self._generate_reference(task, inputs)
-        if expected_output is None:
-            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True, message="无参考输出，仅验证可执行性", metrics={"execution_time_ms": result.execution_time_ms})
 
         actual = result.output
         expected = np.asarray(expected_output, dtype=np.float32)
@@ -503,7 +502,7 @@ class Verifier:
         # 多组输入套件时，性能基准使用第一组输入
         bench_inputs = test_inputs[0] if isinstance(test_inputs, list) else test_inputs
         remote_bench = None
-        if self._is_remote:
+        if Cap.SAME_DEVICE_BASELINE in self._caps:
             remote_bench = self.backend.benchmark_with_baselines(
                 kernel_code, bench_inputs, task.source.kernel_type,
                 precision=task.constraints.precision.value,
@@ -519,7 +518,10 @@ class Verifier:
                 error_log=remote_bench.get("error", ""),
             )
 
-        if self._is_remote:
+        # 按**拿到的载荷**分派, 而不是按后端类型: `candidate` 那一层只在同机基准协议
+        # 的返回里存在 (doc 49 §3.2 B4 —— 旧代码按 `_is_remote` 分派, 于是内层降级成
+        # LocalExecutor 时仍走 remote 分支, 读一个形状不对的字典)。
+        if remote_bench is not None:
             candidate = bench.get("candidate", {}) if remote_bench is not None else bench
             actual_gflops = bench.get("gflops", 0)
             exec_time = candidate.get("avg_time_ms", bench.get("avg_time_ms", 0))

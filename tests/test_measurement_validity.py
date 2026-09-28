@@ -34,12 +34,12 @@ from operator_agent.measurement import (
     NOISE_BAND, MeasurementAssessment, Validity, Verdict, assess, binding_attainment,
     launch_dominance, roofline_converged, verdict,
 )
-from operator_agent.remote_executor import RemoteExecutor
 from operator_agent.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType,
 )
 from operator_agent.verifier import Verifier, baseline_plan
+from tests.backend_fakes import fake_backend
 
 # H20 launch 开销 (空 Triton 核, CUDA event 计时, 不冲刷 L2):
 #   docs/research/01 实测 median=20.24 min=18.69 µs
@@ -269,7 +269,6 @@ def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO,
     D3 之后远端只测**一个**基线并回报 `baseline_selected`, 所以这里的 payload 也只带
     一份基线 —— 写两份会让测试继续默认「全都测过」这个已经被换掉的假设。
     """
-    backend = RemoteExecutor(mode="local")
     candidate = {"min_time_ms": candidate_ms, "median_time_ms": candidate_ms,
                  "avg_time_ms": candidate_ms, "max_time_ms": candidate_ms, "runs": 30}
     if dispersion is not None:
@@ -306,8 +305,8 @@ def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO,
     if util is not None:
         bench["gpu_util_pct"] = util
         bench["gpu_other_procs"] = 7
-    backend.benchmark_with_baselines = lambda *a, **kw: bench
-    backend.get_hardware_info = lambda: dict(hw_info)
+    backend = fake_backend(benchmark_with_baselines=lambda *a, **kw: bench,
+                           get_hardware_info=lambda: dict(hw_info))
     return Verifier(backend)
 
 
@@ -935,15 +934,14 @@ class TestVerifierPropagatesDispersion(unittest.TestCase):
         stats = rk._sample_stats([1.0, 1.05, 1.1, 1.2, 50.0])
 
         # metrics 键名应与统计量键名一致
-        backend = RemoteExecutor(mode="local")
         bench = {"success": True, "device": "cuda:0", "gflops": 1000.0,
                  "memory_bandwidth_gbs": 500.0,
                  "candidate": dict(stats, runs_requested=30),
                  "baselines": {"pytorch_eager": {"median_time_ms": 1.0,
                                                  "min_time_ms": 1.0}},
                  "baseline_selected": "pytorch_eager"}
-        backend.benchmark_with_baselines = lambda *a, **kw: bench
-        backend.get_hardware_info = lambda: dict(H20_HW_INFO)
+        backend = fake_backend(benchmark_with_baselines=lambda *a, **kw: bench,
+                               get_hardware_info=lambda: dict(H20_HW_INFO))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             r = Verifier(backend)._verify_performance(
@@ -968,7 +966,6 @@ class TestVerifierPropagatesDispersion(unittest.TestCase):
         永远查不了; 这次能量出「残留 <0.3 s 就衰减完、而生产 L3 采样根本撞不上那个
         窗口」(docs/research/34), 就是因为 first/second 被搬了出来。
         """
-        backend = RemoteExecutor(mode="local")
         bench = {"success": True, "device": "cuda:0", "gflops": 1000.0,
                  "memory_bandwidth_gbs": 500.0,
                  "candidate": {"median_time_ms": 1.0, "min_time_ms": 1.0},
@@ -976,8 +973,8 @@ class TestVerifierPropagatesDispersion(unittest.TestCase):
                                                  "min_time_ms": 1.0}},
                  "baseline_selected": "pytorch_eager",
                  "gpu_util_pct": 0, "gpu_util_samples": [34, 0], "gpu_other_procs": 7}
-        backend.benchmark_with_baselines = lambda *a, **kw: bench
-        backend.get_hardware_info = lambda: dict(H20_HW_INFO)
+        backend = fake_backend(benchmark_with_baselines=lambda *a, **kw: bench,
+                               get_hardware_info=lambda: dict(H20_HW_INFO))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             r = Verifier(backend)._verify_performance(

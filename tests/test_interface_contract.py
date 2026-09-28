@@ -6,6 +6,7 @@
 """
 import unittest
 
+from operator_agent.backend_caps import Backend
 from operator_agent.interface_contract import check_kernel_interface
 from operator_agent.verifier import Verifier
 
@@ -108,12 +109,21 @@ class TestContractChecker(unittest.TestCase):
         self.assertIsNone(_msg("def kernel(A, B\n", ["A", "B"]))
 
 
-class _RecordingBackend:
-    """只在被调用时才记账 —— 「拦下了但后端也被碰了」等于没省下那一轮"""
+class _RecordingBackend(Backend):
+    """只在被调用时才记账 —— 「拦下了但后端也被碰了」等于没省下那一轮
+
+    能力是**空集**: 它只是个记账器, 不是执行设备。空集意味着任何可选方法被调用时
+    都会从基类存根抛出 `CapabilityMissing`, 而不是像从前那样安静地返回一个像样的值
+    (旧版这里写了 `deploy() -> True`, 而它根本没部署任何东西)。
+    """
 
     def __init__(self):
         self.compile_calls = 0
         self.execute_calls = 0
+
+    @property
+    def capabilities(self) -> frozenset:
+        return frozenset()
 
     def __str__(self):
         return "RecordingBackend"
@@ -126,11 +136,11 @@ class _RecordingBackend:
         self.execute_calls += 1
         raise AssertionError("不该走到执行")
 
+    def benchmark(self, *a, **kw):
+        raise AssertionError("不该走到基准")
+
     def get_hardware_info(self):
         return {}
-
-    def deploy(self):
-        return True
 
 
 class TestL1RejectsBeforeTouchingBackend(unittest.TestCase):

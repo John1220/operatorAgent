@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np  # noqa: E402
 
+from operator_agent.backend_caps import Cap  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402
 from operator_agent.llm_client import LLMClient  # noqa: E402
 from operator_agent.measurement import Validity, persist_decision  # noqa: E402
@@ -414,6 +415,11 @@ def main() -> int:
     probe = llm_from_config()
     print(f"[harness] 模型口径自检通过: {getattr(probe, 'model', '?')} (无降级模型)")
     backend = RemoteExecutor(mode="ssh", timeout=900)
+    # `mode="ssh"` 目前只是**偏好**: 连不上时门面会静默降级到 LocalExecutor, 于是这份
+    # 报表会装满 CPU 数字而表头照旧写着真机 (doc 49 §3.1 A1)。量具不许这样 ——
+    # 缺能力就在开工前响, 而不是产出一份看起来正常的报表。
+    backend.require(Cap.REAL_DEVICE, Cap.SAME_DEVICE_BASELINE)
+    print(f"[harness] 执行侧能力自检通过: {backend.label}")
 
     runs = []
     for rep in range(args.repeats):

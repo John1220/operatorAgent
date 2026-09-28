@@ -24,6 +24,7 @@ from .fixer import FixerAgent
 from .verifier import Verifier
 from .kernel_db import KernelDatabase, FailureDatabase, FailureRecord, failure_signature
 from .novelty import signature_of
+from .backend_caps import Cap
 from .mock_gpu import MockGPU
 from .remote_executor import RemoteExecutor
 from .llm_client import LLMClient
@@ -199,7 +200,7 @@ class Conductor:
         resume_from: Optional[str] = None,
     ) -> KernelArtifact:
         """实际执行逻辑 (被 execute 的日志上下文包裹)"""
-        backend_name = self.backend.name if hasattr(self.backend, 'name') else str(self.backend)
+        backend_name = self.backend.label
         llm_info = f" (LLM: {self.llm})" if self.llm else ""
 
         print(f"\n{'='*60}")
@@ -245,7 +246,9 @@ class Conductor:
         print(f"\n[Router] 路由决策: {route.value}")
 
         # Step 1.5: 远程环境前置自检 (缺依赖自动配置/列出清单)
-        if hasattr(self.backend, "ensure_environment"):
+        # 能力判断而不是 `hasattr`: 可选方法在 Backend 基类上恒存在 (一调就抛),
+        # 于是 hasattr 恒为真 —— 那正是 doc 49 §3.2 那一类静默 no-op 的温床。
+        if Cap.ENV_PROVISION in self.backend.capabilities:
             print(f"\n[Conductor] 远程环境前置自检...")
             passed, manifest = self.backend.ensure_environment()
             if not passed:
@@ -603,11 +606,11 @@ class Conductor:
                     # L1 编译失败可能是缺依赖: 分析代码 import 并按需补装
                     l1_result = next((r for r in verify_results
                                       if r.level == VerificationLevel.L1_COMPILE and not r.passed), None)
-                    if l1_result and hasattr(self.backend, "analyze_dependencies"):
+                    if l1_result and Cap.DEP_ANALYSIS in self.backend.capabilities:
                         deps = self.backend.analyze_dependencies(current_code)
                         if deps:
                             print(f"\n[Conductor] 代码依赖: {deps}, 尝试按需补装...")
-                            if hasattr(self.backend, "ensure_environment"):
+                            if Cap.ENV_PROVISION in self.backend.capabilities:
                                 self.backend.ensure_environment(required_pips=deps)
 
                     failed_results = [r for r in verify_results if not r.passed]

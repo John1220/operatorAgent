@@ -25,12 +25,12 @@ from operator_agent.anticheat import (
 )
 from operator_agent.verifier import Verifier
 from operator_agent.mock_gpu import MockGPU
-from operator_agent.remote_executor import RemoteExecutor
 from operator_agent.intent_parser import TestInputGenerator
 from operator_agent.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision, VerificationLevel,
 )
+from tests.backend_fakes import fake_backend
 
 try:
     import torch
@@ -255,10 +255,10 @@ class TestL1LocalPrecheck(unittest.TestCase):
 
 
 class TestRemoteFullComparison(unittest.TestCase):
-    """通过 RemoteExecutor(local 模式) 在本地验证远程比对逻辑"""
+    """在控制机上验证「执行侧只回样本」那条 L2 比对路径 (能力空集 ⇒ 无远端协议)"""
 
     def _verifier(self) -> Verifier:
-        return Verifier(RemoteExecutor(mode="local"))
+        return Verifier(fake_backend())
 
     def test_remote_full_coverage_compare(self):
         results = self._verifier().verify(
@@ -288,14 +288,17 @@ class TestRemoteFullComparison(unittest.TestCase):
         self.assertIn("误差", l2.message)
 
     def test_compact_remote_verification_does_not_need_output_payload(self):
-        """新协议只消费远端摘要，不回传 output_sample。"""
-        backend = RemoteExecutor(mode="local")
-        backend.verify_function = lambda *args, **kwargs: {
+        """新协议只消费远端摘要，不回传 output_sample。
+
+        假件**声明** `Cap.REMOTE_VERIFY` (由「替换了 verify_function」自动推出):
+        在新模型下光把方法挂上去是不够的 —— 消费方读的是声明, 不是 hasattr。
+        """
+        summary = {
             "success": True, "max_error": 0.0, "max_rel_error": 0.0,
             "compared_elements": 64, "coverage": 1.0,
             "reference_type": "pytorch_eager", "device": "cuda:0",
         }
-        verifier = Verifier(backend)
+        verifier = Verifier(fake_backend(verify_function=lambda *a, **kw: summary))
         l2 = verifier._verify_function(PYTHON_MATMUL, _make_inputs(), None, _make_task())
         self.assertTrue(l2.passed, l2.message)
         self.assertEqual(l2.metrics["compared_elements"], 64)

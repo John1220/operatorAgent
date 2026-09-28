@@ -38,6 +38,7 @@ from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from .environment import EnvironmentChecker, DependencyAnalyzer, EnvironmentReport, CheckItem
+from .backend_caps import Backend, Cap
 from .hardware_caps import detect_hardware_caps
 
 
@@ -64,7 +65,7 @@ class RemoteExecutionResult:
     device: str = ""
 
 
-class SSHExecutor:
+class SSHExecutor(Backend):
     """
     通过 SSH 在远程 GPU 服务器上执行 kernel 代码。
     
@@ -135,6 +136,27 @@ class SSHExecutor:
         # 固定的 GPU 卡号: None=未解析, -1=解析过但不固定, >=0=固定该卡
         self._gpu_pin: Optional[int] = None
         self._uv_path = "~/.local/bin/uv"   # ensure_environment 复用
+
+    @property
+    def label(self) -> str:
+        return self.name
+
+    @property
+    def capabilities(self) -> frozenset:
+        """真卡 + 全套远端协议能力
+
+        ⚠️ 词汇表里刻意**还没有**「硬件信息是真探测的」这一项, 所以这里也无从声明:
+        `get_gpu_info()` 的 `except` 分支会返回一整套虚构硬件字典
+        (128 SM / 40GB / 2TB/s / 128KB/SM), 也就是 doc 49 §3.3 的 S1。
+        等第 3 片把那个分支改成「要么真探测、要么抛」之后再往 `Cap` 里加它。
+        """
+        caps = {Cap.REAL_DEVICE, Cap.REMOTE_VERIFY, Cap.SAME_DEVICE_BASELINE,
+                Cap.ENV_PROVISION, Cap.DEPLOY, Cap.DEP_ANALYSIS}
+        if self.platform == "nvidia":
+            # `_pinned_gpu()` 对非 nvidia 平台第一行就 return None (它依赖 nvidia-smi),
+            # 于是「跨轮固定同一张卡」在那个平台上根本不发生 —— 不声明就是不说谎
+            caps.add(Cap.GPU_PINNING)
+        return frozenset(caps)
 
     def _ssh_target(self) -> str:
         """连接目标。user 为空时只给 host, 用户名交由 ~/.ssh/config 的 Host 块解析。"""
@@ -697,7 +719,7 @@ class SSHExecutor:
         return {"_generate": True, "specs": specs}
 
 
-class HTTPExecutor:
+class HTTPExecutor(Backend):
     """
     通过 HTTP API 调用远程服务 (如果远程有接口服务)
     """
@@ -708,6 +730,23 @@ class HTTPExecutor:
         self.base_url = (base_url or os.environ.get("REMOTE_HTTP_URL", "")).rstrip("/")
         self.timeout = timeout
         self.name = f"HTTPExecutor@{self.base_url}"
+
+    @property
+    def label(self) -> str:
+        return self.name
+
+    @property
+    def capabilities(self) -> frozenset:
+        """**空集**, 而且是故意的
+
+        它确实能在远端执行代码, 但: ① `get_hardware_info()` 是**无条件编造**的一整套
+        A100 量级数字 (doc 49 §3.3 S2), 所以连「对面是不是加速卡」都不知道;
+        ② 没有 `verify_function` / `benchmark_with_baselines` / `ensure_environment` /
+        `deploy`, 基类那几个存根会把调用**抛出来**而不是返回 None。
+        空集意味着任何 `require(Cap.REAL_DEVICE, …)` 的消费方都会在构造时就拒绝它 ——
+        这正是想要的方向: 宁可响, 不要静默降级。等 S2 修掉再声明 `REAL_DEVICE`。
+        """
+        return frozenset()
 
     def check_connection(self) -> bool:
         try:
@@ -777,13 +816,27 @@ class HTTPExecutor:
         return out
 
 
-class LocalExecutor:
+class LocalExecutor(Backend):
     """
     本地 CPU 执行 (fallback)
     """
 
     def __init__(self):
         self.name = "LocalExecutor (CPU)"
+
+    @property
+    def label(self) -> str:
+        return self.name
+
+    @property
+    def capabilities(self) -> frozenset:
+        """**空集**: CPU 回退, 不是加速卡, 也不提供任何远端协议能力
+
+        它 `check_connection()` 恒 True (doc 49 §3.3 S4), 所以「连得上」这件事
+        不能拿来当能力; 空集让降级后的门面**在能力上看得出来**是降级了 ——
+        这是第 2 片「把解析结果记成数据」的落点。
+        """
+        return frozenset()
 
     def check_connection(self) -> bool:
         return True
@@ -874,7 +927,7 @@ class LocalExecutor:
         }
 
 
-class RemoteExecutor:
+class RemoteExecutor(Backend):
     """
     统一远程执行入口 - 自动选择最佳后端
     
@@ -962,31 +1015,41 @@ class RemoteExecutor:
     def name(self) -> str:
         return self.backend.name
 
+    @property
+    def label(self) -> str:
+        return self.name
+
+    @property
+    def capabilities(self) -> frozenset:
+        """**派生自解析后的内层后端**, 门面自己一个都不加
+
+        这是「把解析结果记成数据」的落点: `mode="auto"` 降级到 LocalExecutor 之后,
+        这里返回的就是空集 —— 降级**在能力上看得出来**, 而不是靠调用方去
+        `"LocalExecutor" in remote.name` 里做子串匹配 (doc 49 §3.1 A3, 三个驱动各抄了一遍)。
+        与 `name` 一样会触发延迟初始化。
+        """
+        return self.backend.capabilities
+
     def get_hardware_info(self) -> dict:
         return self.backend.get_hardware_info()
 
     def ensure_environment(self, required_pips: Optional[list] = None) -> tuple:
-        """前置环境自检 + 自动配置, 委托给底层后端
+        """前置环境自检 + 自动配置。**只转发**
 
-        门面必须显式暴露本方法: conductor.py 的守卫是
-        `if hasattr(self.backend, "ensure_environment")`, 而 driver 传进 Conductor
-        的是 RemoteExecutor 门面。门面没有这个方法时守卫恒为 False, 于是「任务开始
-        前的环境自检」在真机路径上被静默跳过 —— 不报错, 只是不执行。
+        旧写法在内层没有这个方法时返回 `(True, "")`, 理由是「没有要 provision 的东西
+        就是就绪的诚实答案」。对 LocalExecutor 诚实, 对 HTTPExecutor 不诚实 ——
+        它把「这个后端没法准备自己的环境」上报成了「环境已就绪」(doc 49 §3.2 B1)。
+        现在: 内层没有 ⇒ 基类存根抛 `CapabilityMissing`; 要不要调用由消费方按
+        `Cap.ENV_PROVISION in backend.capabilities` 决定。
 
         Returns:
-            (all_passed, manifest_text)。底层后端无需配置环境时 (LocalExecutor /
-            HTTPExecutor) 返回 (True, ""): 没有要 provision 的东西, 这就是「就绪」
-            的诚实答案; manifest 只在 all_passed 为 False 时被消费。
+            (all_passed, manifest_text)
         """
-        fn = getattr(self.backend, "ensure_environment", None)
-        if fn is None:
-            return True, ""
-        return fn(required_pips=required_pips)
+        return self.backend.ensure_environment(required_pips=required_pips)
 
     def deploy(self) -> bool:
-        """把 runner 及其同级依赖同步到远端; 底层后端无需部署时视为已成功"""
-        fn = getattr(self.backend, "deploy", None)
-        return fn() if fn is not None else True
+        """把 runner 及其同级依赖同步到远端。只转发, 不再把「没东西可部署」当成「部署成功」"""
+        return self.backend.deploy()
 
     def compile(self, kernel_code: str) -> bool:
         return self.backend.compile(kernel_code)
@@ -1012,21 +1075,36 @@ class RemoteExecutor:
 
     def verify_function(self, kernel_code: str, inputs: dict, kernel_type: str,
                         max_error: float, precision: str = "") -> Optional[dict]:
-        """Remote-only compact verification protocol; legacy backends return None."""
+        """远端紧凑比对协议。**只转发, 不判断内层有没有这个方法**
+
+        旧写法是 `fn = getattr(self.backend, "verify_function", None); return fn(...) if fn else None`,
+        于是「内层不支持」与「内层支持但返回了 None」共用一个值, 而 verifier 把 None 读成
+        「走旧执行器兼容路径」—— doc 49 §3.2 B3/B4。现在内层是 `Backend`, 不支持时
+        基类存根会抛 `CapabilityMissing`, 异常里带着**内层**的身份。
+        """
         with _get_exec_lock(self._lock_key()):
-            fn = getattr(self.backend, "verify_function", None)
-            return fn(kernel_code, inputs, kernel_type, max_error, precision=precision) if fn else None
+            return self.backend.verify_function(kernel_code, inputs, kernel_type, max_error,
+                                                precision=precision)
 
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,
                                  repeat: int = 30, precision: str = "",
                                  baseline_priority=None) -> Optional[dict]:
-        """Same-device benchmark protocol; legacy backends return None."""
+        """同机同卡基准协议。同上: 只转发"""
         with _get_exec_lock(self._lock_key()):
-            fn = getattr(self.backend, "benchmark_with_baselines", None)
-            return (fn(kernel_code, inputs, kernel_type, warmup, repeat,
-                       precision=precision, baseline_priority=baseline_priority)
-                    if fn else None)
+            return self.backend.benchmark_with_baselines(
+                kernel_code, inputs, kernel_type, warmup, repeat,
+                precision=precision, baseline_priority=baseline_priority)
+
+    def analyze_dependencies(self, kernel_code: str) -> list:
+        """解析源码里缺失的 import (L1 编译失败后的按需补装要用)
+
+        **门面此前根本没有这个方法**, 而 conductor 的守卫是
+        `hasattr(self.backend, "analyze_dependencies")` ⇒ 那条恢复路径在生产里从来没跑过
+        (doc 49 §3.2 B6, 与已修好的 B5 完全同型)。基类存根 + 转发一起装上之后,
+        `hasattr` 恒为真, 能力判断改由 `Cap.DEP_ANALYSIS in backend.capabilities` 承担。
+        """
+        return self.backend.analyze_dependencies(kernel_code)
 
     def __repr__(self) -> str:
         return self.name

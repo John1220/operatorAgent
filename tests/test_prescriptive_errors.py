@@ -28,6 +28,7 @@ from operator_agent.mock_gpu import MockGPU
 from operator_agent.schemas import VerificationResult, VerificationLevel
 
 import tests.test_fixer as tfx
+from tests.backend_fakes import fake_backend
 
 
 # ─── 1. 处方表的产出方样本 ───────────────────────────────────
@@ -304,11 +305,10 @@ class TestErrorTextAppearsOnce(unittest.TestCase):
                ("    src line\n" * 300) + self.MARKER
 
     def _backend(self, **patch):
-        from operator_agent.remote_executor import RemoteExecutor
-        b = RemoteExecutor(mode="local")
-        for k, val in patch.items():
-            setattr(b, k, val)
-        return Verifier(b)
+        # 声明式假件: 替换了哪个可选方法就等于声明了那项能力。旧的
+        # `setattr(RemoteExecutor(mode="local"), ...)` 在能力模型下会静默失效 ——
+        # 门面声明的能力派生自内层 LocalExecutor (空集), 挂上去的方法没人会调。
+        return Verifier(fake_backend(**patch))
 
     def test_l1_remote_compile_error_not_duplicated(self):
         err = self._long_error()

@@ -1,0 +1,172 @@
+"""后端能力声明与「缺失必须响」(doc 49 §4.1 的第 1/2/4 条)
+
+三条设计, 每条都有外部一手出处:
+
+1. **可选方法在基类上存在、一调就 raise** —— Triton `python/triton/backends/driver.py:149-153`
+   的 `allocate_default_profile_scratch` **不是** `@abstractmethod`, 函数体就是
+   `raise NotImplementedError`。于是 `hasattr()` 恒为真、`getattr(..., None)` 恒不为 None,
+   「静默 no-op」在这个设计下**不可表达**。本仓那一整类缺陷就是这么活下来的:
+   `hasattr` 返回 False 时, 调用方把它读成「不需要」而不是「没有」——
+   `conductor.py` 的 `analyze_dependencies` 分支因此在生产里死了很久 (doc 49 §3.2 B6)。
+2. **能力是提供方声明的闭合词汇**, 不是调用方猜的类型 (Triton 用类属性
+   `supports_native_tensor_specialization` 声明差异、无人 `isinstance`;
+   DSH `docs/subsystems/sandbox.md:22` 的说法是「完备度是**被上报的事实**」)。
+   用 Enum 而不是字符串: 拼错的名字在写下的那一刻就炸, 而不是被 `.get(...)` 读成「不支持」。
+3. **缺失时抛出的异常必须携带下层的原因** —— DSH postmortem 0004 的 Lessons:
+   适配器要保留下层拥有的结构化失败, 不能换成自己最近的泛型类别。
+   所以门面对可选方法只做**转发**: 内层没有时, 抛出来的是内层那一层的 `CapabilityMissing`。
+
+⚠️ 这里的 capability 是**传输/提供方能力**, 与 `hardware_caps.py` 的**器件能力**
+(`has_tma` / `supported_dsls` / `launch_floor_us`) 是两条正交的轴 —— DSH 在
+2026-06-13 那篇笔记 `:38` 专门点名了这个同名陷阱。证明它们独立的例子: 指向**同一台 H20** 的
+`SSHExecutor` 与 `HTTPExecutor`, 器件能力完全相同、后端能力完全不同。
+"""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from enum import Enum
+
+
+class Cap(str, Enum):
+    """闭合词汇。新增成员要同时给出「谁声明它」与「谁读它」, 否则它就是死词汇
+
+    (DSH `scripts/gen-doc-graphs.ts:563` 对「声明了却没人派发的事件」直接构建失败;
+     本仓对应的失败模式叫「算了没人读」。)
+    """
+
+    #: 真加速卡上执行 —— 不是模拟、不是 CPU 回退
+    REAL_DEVICE = "real_device"
+    #: 提供方是模拟器 (SYCL 的 `aspect::emulated` 那个意思: 不为性能而生)
+    EMULATED = "emulated"
+    #: 性能数字是按硬件规格**估**的, 不是测的 (`mock_gpu` 的 `"mode": "simulated"`)
+    SIMULATED_PERF = "simulated_perf"
+    #: `verify_function`: 候选与参考在**同一台设备**上比对, 只回摘要
+    REMOTE_VERIFY = "remote_verify"
+    #: `benchmark_with_baselines`: 候选与基线在同一张卡上交错计时
+    SAME_DEVICE_BASELINE = "same_device_baseline"
+    #: `ensure_environment`: 能自检并 provision 自己的运行环境
+    ENV_PROVISION = "env_provision"
+    #: `deploy`: 能把 runner 及其依赖同步到执行侧
+    DEPLOY = "deploy"
+    #: `analyze_dependencies`: 能从源码里解析出缺失的 import
+    DEP_ANALYSIS = "dep_analysis"
+    #: 跨轮固定同一张卡 (依赖 nvidia-smi; 非 NVIDIA 平台上 `_pinned_gpu` 返回 None)
+    GPU_PINNING = "gpu_pinning"
+    #: `execute()` 回传**完整输出张量** (`ExecutionResult.output`), 而不是采样
+    #: (`RemoteExecutionResult.output_sample`)。L2 的比对方式由它决定: 全量比对走
+    #: `tolerance` 的 AND 形式并给出 matched_ratio, 采样比对只能覆盖前缀、
+    #: 并且必须把 `coverage` 一起报出去。
+    FULL_OUTPUT_TENSOR = "full_output_tensor"
+
+
+#: 可选能力 → 实现它的方法名。基类为每个方法都准备了「一调就 raise」的存根,
+#: 所以这张表同时是**声明**与**实现**的对照表 (守卫会拿它核两边是否一致)。
+OPTIONAL_CAP_METHODS = {
+    Cap.REMOTE_VERIFY: "verify_function",
+    Cap.SAME_DEVICE_BASELINE: "benchmark_with_baselines",
+    Cap.ENV_PROVISION: "ensure_environment",
+    Cap.DEPLOY: "deploy",
+    Cap.DEP_ANALYSIS: "analyze_dependencies",
+}
+
+
+class CapabilityMissing(RuntimeError):
+    """能力缺失。**必须**带着下层给出的原因, 不换成自己最近的泛型类别
+
+    `reason` 存在的理由是 DSH postmortem 0004: 那个 bash 后端把下层的
+    `SandboxUnavailableError` 一律换成了自己的 `SEARCH_FAILED`, 于是「沙箱不可用」
+    在日志里长得像「目录扫描失败」。本仓的对应版本是 `getattr(..., None)` 返回 None,
+    然后调用方把 None 读成「走兼容路径」——两个意思共用一个值。
+    """
+
+    def __init__(self, caps, backend, reason: str = ""):
+        self.caps = frozenset(caps if isinstance(caps, (set, frozenset, list, tuple)) else [caps])
+        self.backend_label = backend.label
+        self.reason = reason
+        names = "/".join(sorted(c.value for c in self.caps))
+        msg = f"后端 {self.backend_label} 不具备能力: {names}"
+        if reason:
+            msg += f" ({reason})"
+        super().__init__(msg)
+
+
+class Backend(ABC):
+    """执行后端的 Service Definition (DSH 三角色里的第一个)
+
+    必需方法用 `@abstractmethod`: 少一个就**构造不出来** (Triton 把同类校验写在
+    `BaseBackend.__init__` 的 `assert self.supports_target(target)` 里, 意思一样:
+    拿错后端不该有机会跑起来)。可选方法**不是** abstract, 而是基类上「一调就 raise」
+    的存根 —— 见模块 docstring 第 1 条。
+    """
+
+    @property
+    @abstractmethod
+    def capabilities(self) -> frozenset:
+        """本后端**真实**具备的 `Cap` 集合。声明得比实际多, 就是 3.3 那类静默降级"""
+
+    @property
+    def label(self) -> str:
+        """日志与异常里用的名字
+
+        刻意不叫 `name`: 各提供方早就有自己的 `name` (有的是实例属性、有的是 property),
+        在基类上再定义一个同名 property 会让 `self.name = ...` 直接 AttributeError。
+        """
+        return type(self).__name__
+
+    def require(self, *caps: Cap) -> None:
+        """消费方声明自己需要什么; 缺就抛, **不返回默认值**
+
+        DSH `2026-08-19-session-projection-mandatory-seam.md:23,24,30` 把「给缺失状态
+        一个默认值」列为被否决的方案: "configuration errors must fail explicitly"、
+        "Explicit first-access failure … without allowing silent degradation"、
+        "it never degrades to a default value"。
+        """
+        missing = [c for c in caps if c not in self.capabilities]
+        if missing:
+            raise CapabilityMissing(missing, self)
+
+    # ── 必需能力 ──────────────────────────────────────────────
+    @abstractmethod
+    def get_hardware_info(self) -> dict:
+        """返回硬件信息。**要么真探测、要么抛** —— 不许编一个像样的字典 (doc 49 §3.3 S1/S2)"""
+
+    @abstractmethod
+    def compile(self, kernel_code: str) -> bool:
+        ...
+
+    @abstractmethod
+    def execute(self, kernel_code: str, inputs: dict):
+        ...
+
+    @abstractmethod
+    def benchmark(self, kernel_code: str, inputs: dict, warmup: int = 3, repeat: int = 10) -> dict:
+        ...
+
+    # ── 可选能力: 基类上存在, 一调就抛 ─────────────────────────
+    # 这五个存根是本模块的全部意义所在: 有了它们, `hasattr(backend, "deploy")`
+    # 恒为真, 于是「用方法存不存在来判断能力」这种写法**再也得不到 False**。
+    def verify_function(self, *args, **kwargs):
+        raise CapabilityMissing(Cap.REMOTE_VERIFY, self)
+
+    def benchmark_with_baselines(self, *args, **kwargs):
+        raise CapabilityMissing(Cap.SAME_DEVICE_BASELINE, self)
+
+    def ensure_environment(self, *args, **kwargs):
+        raise CapabilityMissing(Cap.ENV_PROVISION, self)
+
+    def deploy(self, *args, **kwargs):
+        raise CapabilityMissing(Cap.DEPLOY, self)
+
+    def analyze_dependencies(self, *args, **kwargs):
+        raise CapabilityMissing(Cap.DEP_ANALYSIS, self)
+
+
+def concrete_backends() -> set:
+    """`Backend` 的全部具体子类 (递归)。完备性守卫拿它与登记表双向对照"""
+    out, stack = set(), list(Backend.__subclasses__())
+    while stack:
+        cls = stack.pop()
+        stack.extend(cls.__subclasses__())
+        if not getattr(cls, "__abstractmethods__", None):
+            out.add(cls)
+    return out

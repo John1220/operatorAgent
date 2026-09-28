@@ -22,11 +22,11 @@ import numpy as np
 from operator_agent.agents import SearchAgent
 from operator_agent.verifier import Verifier, baseline_plan
 from operator_agent.mock_gpu import MockGPU
-from operator_agent.remote_executor import RemoteExecutor
 from operator_agent.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, UnifiedSketch,
     TaskType, TaskComplexity, Precision, VerificationLevel,
 )
+from tests.backend_fakes import fake_backend
 
 
 PYTHON_MATMUL = """import numpy as np
@@ -167,8 +167,7 @@ class TestBaselineCache(unittest.TestCase):
 class TestSameDeviceRemoteBenchmark(unittest.TestCase):
 
     def test_remote_uses_returned_same_device_baseline(self):
-        backend = RemoteExecutor(mode="local")
-        backend.benchmark_with_baselines = lambda *args, **kwargs: {
+        payload = {
             "success": True, "device": "cuda:0", "gflops": 1000.0,
             "memory_bandwidth_gbs": 500.0,
             "candidate": {"min_time_ms": 1.0, "median_time_ms": 2.0,
@@ -180,6 +179,7 @@ class TestSameDeviceRemoteBenchmark(unittest.TestCase):
             },
             "baseline_selected": "torch_compile",
         }
+        backend = fake_backend(benchmark_with_baselines=lambda *args, **kwargs: payload)
         verifier = Verifier(backend)
         verifier._measure_baseline = lambda *_: self.fail("控制端 baseline 不得参与远程评测")
         r = _l3(verifier, PYTHON_MATMUL, _matmul_inputs(), _make_task(min_speedup=1.2))
@@ -195,7 +195,6 @@ class TestSameDeviceRemoteBenchmark(unittest.TestCase):
         同时带上 tf32 与 eager 两份耗时、且 selected 指向名单里**靠后**的那个: 一旦有人
         把重排逻辑加回来, 这里会立刻选到 tf32 并给出 4.5x 的假加速比。
         """
-        backend = RemoteExecutor(mode="local")
         seen = {}
 
         def _bench(*a, **kw):
@@ -214,7 +213,7 @@ class TestSameDeviceRemoteBenchmark(unittest.TestCase):
             "paired": {"speedup_paired_median": 1.47, "speedup_paired_iqr_over_median": 0.03,
                        "paired_runs": 240, "paired_block_samples": 8},
             }
-        backend.benchmark_with_baselines = _bench
+        backend = fake_backend(benchmark_with_baselines=_bench)
         v = Verifier(backend)
         r = _l3(v, PYTHON_MATMUL, _matmul_inputs(),
                 _make_task(kernel="matmul", min_speedup=1.2))
