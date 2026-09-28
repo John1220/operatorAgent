@@ -1413,17 +1413,18 @@ if __name__ == "__main__":
     _ensure_gpu_device()
 
     action = payload.get("action", "execute")
-    code = payload.get("code", "")
-    inputs = payload.get("inputs", {})
 
+    # 每个 action 用到的键都在自己那一支里读, 不提到分派之前: tests/test_runner_contract.py
+    # 按「这一支读了哪些键」对照两个 runner, 提到外面会让所有 action 都算成读了全部键。
     if action == "gpu_info":
         result = get_gpu_info()
     elif action == "compile":
-        result = run_compile(code)
+        result = run_compile(payload.get("code", ""))
     elif action == "execute":
-        result = run_execute(code, inputs)
+        result = run_execute(payload.get("code", ""), payload.get("inputs", {}))
     elif action == "verify":
-        result = run_verify(code, inputs, payload.get("kernel_type", ""),
+        result = run_verify(payload.get("code", ""), payload.get("inputs", {}),
+                            payload.get("kernel_type", ""),
                             float(payload.get("max_error", 1e-5)),
                             precision=payload.get("precision", ""))
     elif action in ("benchmark", "benchmark_with_baselines"):
@@ -1432,11 +1433,12 @@ if __name__ == "__main__":
         # 标记污染, 而不是静默采信这个数字。
         util_before, other_procs, util_samples, state_before = _sample_gpu_idle()
         if action == "benchmark":
-            result = run_benchmark(code, inputs,
+            result = run_benchmark(payload.get("code", ""), payload.get("inputs", {}),
                                    payload.get("warmup", 3), payload.get("repeat", 10))
         else:
             result = run_benchmark_with_baselines(
-                code, inputs, payload.get("kernel_type", ""),
+                payload.get("code", ""), payload.get("inputs", {}),
+                payload.get("kernel_type", ""),
                 payload.get("warmup", 10), payload.get("repeat", 30),
                 precision=payload.get("precision", ""),
                 baseline_priority=payload.get("baseline_priority") or None,

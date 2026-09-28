@@ -15,7 +15,11 @@ Actions:
   compile   - L1 compile/import check
   execute   - L2 functional run
   verify    - L2 functional correctness verification
-  benchmark - L3 performance with baselines
+  benchmark - L3 candidate-only timing
+  benchmark_with_baselines - L3 candidate vs one baseline chosen by the control side
+
+action 名与每个 action 读的 payload 键必须和 NVIDIA 的 run_kernel.py 一致, 由
+tests/test_runner_contract.py 从两边的源码里解析出来对照。
 """
 
 import sys
@@ -253,6 +257,20 @@ def _reference_torch(kernel_type: str, inputs: dict):
     return None, None
 
 
+def _precision_refusal(precision: str):
+    """声明精度本平台能不能如实兑现: 能则返回 None, 不能则返回拒绝原因
+
+    拒绝而不是「收下再忽略」: 控制端按 `_REMOTE_L2_METRIC_KEYS` 那样的闭合名单搬运
+    响应, 新加的留痕字段到不了任何产物里, `error` 是唯一保证被下游看到的通道。
+    """
+    p = (precision or "").lower()
+    if p in ("", "fp32", "float32"):
+        return None
+    return (f"precision={p} 在昆仑芯 runner 上无法如实兑现: 本文件的数值门只有绝对项 "
+            f"(max_abs_error <= max_error), 没有 NVIDIA 那边的相对项与 matched_ratio; "
+            f"按声明精度喂 fp16 会误杀合法核, 不喂又等于拿 fp32 的成绩充当 fp16")
+
+
 def run_gpu_info() -> dict:
     """Return GPU hardware info for the selected device."""
     try:
@@ -334,10 +352,14 @@ def run_execute(code: str, inputs: dict) -> dict:
                 "traceback": traceback.format_exc()[:2000]}
 
 
-def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float) -> dict:
+def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
+               precision: str = "") -> dict:
     lang = _detect_language(code)
     if lang == "triton":
         return {"success": False, "error": "Triton not supported on Kunlunxin P800"}
+    refusal = _precision_refusal(precision)
+    if refusal:
+        return {"success": False, "error": refusal}
     try:
         import torch
         real_inputs = _deserialize_inputs(inputs)
@@ -404,11 +426,45 @@ def _bench_callable(fn, warmup: int, repeat: int, device_is_cuda: bool) -> dict:
             "runs": repeat}
 
 
-def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
-                                 warmup: int = 10, repeat: int = 30) -> dict:
+def run_benchmark(code: str, inputs: dict, warmup: int = 3, repeat: int = 10) -> dict:
+    """只测候选, 不测基线 —— 与 run_kernel.py 的同名 action 同口径。
+
+    控制端这条 payload 不带 kernel_type, 所以本函数也不能需要它: 拿它去建基线的话,
+    收到空 kernel_type 就只剩 "No remote reference for " 这一种结果。
+    """
     lang = _detect_language(code)
     if lang == "triton":
         return {"success": False, "error": "Triton not supported on Kunlunxin P800"}
+    try:
+        import torch
+        real_inputs = _deserialize_inputs(inputs)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        _ensure_gpu_device()
+        module = _load_module(code)
+        torch_inputs = {k: torch.from_numpy(v).to(device).contiguous()
+                        for k, v in real_inputs.items()}
+        stats = _bench_callable(lambda: module.kernel(**torch_inputs), warmup, repeat,
+                                device.type == "cuda")
+        gflops, bandwidth = _compute_metrics(real_inputs, stats["median_time_ms"] / 1000)
+        return {"success": True, "language": lang, "device": "kunlunxin_xpu", **stats,
+                "gflops": round(gflops, 4), "memory_bandwidth_gbs": round(bandwidth, 4)}
+    except Exception as e:
+        return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+
+def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
+                                 warmup: int = 10, repeat: int = 30,
+                                 precision: str = "", baseline_priority=None) -> dict:
+    """候选 vs **一个**基线, 基线由控制端的有序偏好决定。
+
+    控制端只排序、远端取第一个能跑的并回报 `baseline_selected` (verifier.baseline_plan)。
+    """
+    lang = _detect_language(code)
+    if lang == "triton":
+        return {"success": False, "error": "Triton not supported on Kunlunxin P800"}
+    refusal = _precision_refusal(precision)
+    if refusal:
+        return {"success": False, "error": refusal}
     try:
         import torch
         real_inputs = _deserialize_inputs(inputs)
@@ -422,23 +478,46 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                             for k, v in real_inputs.items()}
         candidate = lambda: module.kernel(**candidate_inputs)
         is_cuda = device.type == "cuda"
-        candidate_stats = _bench_callable(candidate, warmup, repeat, is_cuda)
-        eager_stats = _bench_callable(reference, warmup, repeat, is_cuda)
-        baselines = {"pytorch_eager": eager_stats}
-        # torch.compile baseline (if available)
+
+        # 只登记本平台真能建出来的基线。偏好名单里的 pytorch_eager_fp16 / pytorch_eager_tf32
+        # 指的是 cuBLAS FP16 与 TF32 数据通路, 昆仑芯上没有对应物 —— 拿 xblas FP32 冒充
+        # TF32 基线比不测更糟, 所以显式过滤掉。被过滤的名字记进 baseline_attempts 而不是
+        # 单开一个字段: 控制端只搬运它认识的那几个键, 单开的字段到不了产物里。
+        specs = {"pytorch_eager": lambda: reference}
         if hasattr(torch, "compile"):
+            specs["torch_compile"] = lambda: torch.compile(reference)
+        requested = list(baseline_priority or [])
+        order = [n for n in requested if n in specs]
+        attempts = [f"{n}: skipped: 昆仑芯 runner 建不出这个基线"
+                    for n in requested if n not in specs]
+        order += [n for n in specs if n not in order]
+
+        chosen = None
+        for name in order:
             try:
-                compiled = torch.compile(reference)
-                compiled()
+                fn = specs[name]()
+                fn()                      # 一次实跑探可用性 (编译 / 显存 / 数值)
                 if is_cuda:
                     torch.cuda.synchronize()
-                baselines["torch_compile"] = _bench_callable(compiled, warmup, repeat, is_cuda)
+                chosen = (name, fn)
+                break
             except Exception as e:
-                baselines["torch_compile_error"] = str(e)[:300]
+                attempts.append(f"{name}: {type(e).__name__}: {str(e)[:160]}")
+        if chosen is None:
+            return {"success": False, "baseline_attempts": attempts,
+                    "error": f"No usable remote baseline for {kernel_type}; "
+                             f"attempts={attempts}"}
+        base_name, base_fn = chosen
+
+        candidate_stats = _bench_callable(candidate, warmup, repeat, is_cuda)
+        base_stats = _bench_callable(base_fn, warmup, repeat, is_cuda)
         elapsed = candidate_stats["median_time_ms"] / 1000
         gflops, bandwidth = _compute_metrics(real_inputs, elapsed)
         return {"success": True, "device": "kunlunxin_xpu", "candidate": candidate_stats,
-                "baselines": baselines, "reference_type": reference_type,
+                "baselines": {base_name: base_stats},
+                "baseline_selected": base_name,
+                "baseline_attempts": attempts,
+                "reference_type": reference_type,
                 "gflops": round(gflops, 4), "memory_bandwidth_gbs": round(bandwidth, 4)}
     except Exception as e:
         import traceback
@@ -476,16 +555,18 @@ def main():
         "compile": lambda: run_compile(args.get("code", "")),
         "execute": lambda: run_execute(args.get("code", ""), args.get("inputs", {})),
         "verify": lambda: run_verify(args.get("code", ""), args.get("inputs", {}),
-                                      args.get("kernel_type", ""), args.get("max_error", 1e-3)),
-        "benchmark": lambda: run_benchmark_with_baselines(
-            args.get("code", ""), args.get("inputs", {}),
-            args.get("kernel_type", ""),
-            warmup=args.get("warmup", 10), repeat=args.get("repeat", 30)),
-        # 兼容 verifier.py 使用的 action 名称: benchmark_with_baselines
+                                     args.get("kernel_type", ""),
+                                     args.get("max_error", 1e-3),
+                                     precision=args.get("precision", "")),
+        "benchmark": lambda: run_benchmark(args.get("code", ""), args.get("inputs", {}),
+                                           warmup=args.get("warmup", 3),
+                                           repeat=args.get("repeat", 10)),
         "benchmark_with_baselines": lambda: run_benchmark_with_baselines(
             args.get("code", ""), args.get("inputs", {}),
             args.get("kernel_type", ""),
-            warmup=args.get("warmup", 10), repeat=args.get("repeat", 30)),
+            warmup=args.get("warmup", 10), repeat=args.get("repeat", 30),
+            precision=args.get("precision", ""),
+            baseline_priority=args.get("baseline_priority") or None),
     }
     fn = dispatch.get(action)
     if fn is None:
