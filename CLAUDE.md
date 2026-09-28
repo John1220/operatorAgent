@@ -47,11 +47,37 @@ User Request (NL or structured)
       ├── CoderAgent (LLM): Sketch → kernel code (with pre-validation + retry loop)
       │     └── Optional CoderPipeline: Plan → 3 parallel samples (T=0.1/0.4/0.7)
       │           → compile-select first-pass → stateful repair (≤2 rounds) → rule template fallback
-      ├── Verifier: L1 (compile) → L2 (functional + anti-cheat) → L3 (performance + Roofline)
+      ├── Verifier: L1 (contract gate → syntax → compile) → L2 (functional + anti-cheat) → L3 (perf + Roofline)
+      │     └── L3 output is tiered by measurement validity; the tier decides what the
+      │         number may drive (see "Decision eligibility" below)
       ├── FixerAgent (LLM): on L1/L2 failure, repairs code with error logs
       └── SearchAgent (LLM + rule fallback): on L3 failure, adjusts tiling/hints
   → ArtifactStore.save() → output/<kernel_type>/<hardware>/<timestamp>_<id>/
+  → KernelDatabase.add() only if persist_decision() passes (see below)
 ```
+
+**Decision eligibility** (`operator_agent/measurement.py`). The recurring failure mode this
+guards against is "a signal was computed but a downstream consumer treated it as trustworthy"
+— e.g. a speedup inflated by launch overhead permanently blacklisting a working recipe.
+Validity is tiered `valid / degraded / uninformative` (from launch-floor dominance, sample
+dispersion, and pre-measure GPU util) and exposed as **uses**, not as a tier:
+
+- `can_gate` — may this number gate a pass/fail verdict at all (`not uninformative`)
+- `can_disable_recipe` — **only `valid`**; recipe disabling is permanent, so ties and
+  no-evidence verdicts must not trigger it
+- `can_count_stagnation` — **only `valid`**; a contaminated round must not end the loop
+
+Related rules: round-to-round comparison is a four-state `verdict()` (`FAST/SAME/SLOW/
+AMBIGUOUS`) with a per-tier noise band, and only `SLOW` disables recipes; a roofline
+convergence exit exists but stays closed when the peak denominator is unverified;
+`persist_decision()` refuses to write a passing-but-untrustworthy kernel into the corpus.
+
+**Anti-cheat and interface contract**: `anticheat.py` statically blocks library calls in
+generated code and `remote_scripts/run_kernel.py` wraps *every* candidate execution in a
+runtime `shield_torch()` (both are required — a `return A @ B` fake kernel once passed all
+three levels). `interface_contract.py` checks, at L1 and before any GPU time, that the
+kernel's parameter names match the all-keyword call convention `kernel(**inputs)`; it errs
+toward passing when it cannot tell (`**kwargs`, defaulted params, no `def kernel`).
 
 **Key data structures** (`operator_agent/schemas.py`):
 - `TaskSchema` — the universal contract: `SourceSpec` (kernel type, complexity), `TargetSpec` (hardware, DSL), `ConstraintSpec` (precision, min speedup, max error)
@@ -72,9 +98,10 @@ User Request (NL or structured)
 - `MockGPU` — local simulation backend (no GPU needed); falls back to NumPy reference implementations when CUDA is unavailable
 
 **Verification** (`operator_agent/verifier.py`):
-- L1: syntax check + remote compilation (with SHA256 cache to skip re-compiles)
-- L2: functional correctness — runs kernel, compares against PyTorch/NumPy reference. Supports multi-input suites. Anti-cheat (`operator_agent/anticheat.py`) blocks `torch.matmul`/`F.softmax` etc. in generated code
-- L3: benchmark vs. PyTorch eager baseline (same-device on remote), Roofline analysis (arithmetic intensity, ridge point, utilization %)
+- L1: interface-contract check (static, no GPU) → syntax check → remote compilation (with SHA256 cache to skip re-compiles)
+- L2: functional correctness — runs kernel, compares against PyTorch/NumPy reference, with an **absolute + relative AND** tolerance check tiered by precision dtype. Supports multi-input suites. Anti-cheat (`operator_agent/anticheat.py`) blocks `torch.matmul`/`F.softmax` etc. in generated code
+- L3: benchmark vs. a baseline **selected on the remote side** (control trusts only `baseline_selected`; for fp32 matmul the first choice is TF32-enabled eager, since a TF32-off baseline inflates speedup ~1.9x). Candidate and baseline are timed **block-interleaved** with L2 flushes; outputs include peak-memory-per-call for both arms, per-block speedup medians, SM clock/throttle readings, and the measurement-validity tier
+- Baseline note: `RemoteExecutor` must delegate `ensure_environment`/`deploy` — the P1-3 environment pre-check silently never ran on the real-hardware path before this was fixed
 
 **Routing** (`conductor.py` Router):
 - Fused ops or HIGH complexity → `AGENT_GENERATION`
@@ -83,8 +110,20 @@ User Request (NL or structured)
 - MEDIUM + RAG hit → `COMPILER_BACKEND`; no hit → `AGENT_GENERATION`
 
 **Knowledge bases** (`operator_agent/kernel_db.py`):
-- `KernelDatabase` — seeded with Triton matmul/softmax/attention examples; score-based retrieval weighted by DSL match, token overlap, performance
-- `FailureDatabase` — stores (error → fix) pairs; searched by FixerAgent to avoid repeating past mistakes
+- `KernelDatabase` — seeded with Triton matmul/softmax/attention examples; score-based retrieval weighted by DSL match, token overlap, performance. Since v0.6.x it is an **append-only JSONL event log** (`output/kernel_db.jsonl`, override with `OPERATOR_AGENT_KERNEL_DB=off` to disable) with a usage counter, and writes go through `persist_decision()` — a kernel that passed but whose measurement can't gate, was preempted, or didn't beat the baseline is refused. Retrieval has readers (Designer, Coder, Fixer); **ranking does not yet prefer the historical best**
+- `FailureDatabase` — negative samples, also append-only JSONL. Each failure carries a
+  task-independent `failure_signature` = `level | error_class | innermost_frame`, and two gates
+  decide whether a record may become a reusable lesson: a **recurrence gate** (default 3
+  distinct `task_id`s, `OPERATOR_AGENT_FAILURE_GATE`; applies only to records replayed from
+  disk) and a **class gate** that excludes numeric-tolerance and infrastructure failures —
+  the only thing learnable from "error exceeded threshold" is "loosen the check"
+- Both default paths live under `output/` (gitignored): the corpus is what *this* machine
+  measured, so it is not portable
+
+**Cross-run lineage**: `KernelArtifact.iteration_history` records per round the action
+(`generate`/`optimize`/`fix`), pass/fail, gflops, applied recipes, and an α-equivalent
+structural signature of the candidate (`operator_agent/novelty.py`) with the round it
+duplicates — **observation only**, nothing is skipped on the basis of it.
 
 **Prompt system** (`operator_agent/prompt_manager.py`):
 - Templates in `operator_agent/prompts/*.md` with `{{variable}}` substitution
@@ -99,7 +138,19 @@ User Request (NL or structured)
 - `optimization.max_rounds`: 3 (max LLM optimization cycles per task)
 - `optimization.min_speedup`: 1.0 (minimum speedup vs. baseline for L3 pass)
 
-Environment variables: `LLM_API_KEY`, `REMOTE_SSH_HOST/PORT/USER/KEY`, `REMOTE_WORK_DIR`, `REMOTE_HTTP_URL`.
+Connection settings stay env-driven: `LLM_API_KEY`, `REMOTE_SSH_HOST/PORT/USER/KEY`,
+`REMOTE_WORK_DIR`, `REMOTE_HTTP_URL` (see `config.example.yaml`; `~/.ssh/config` aliases are
+the expected way to supply host details, so no real addresses ever land in the repo).
+
+Runtime switches (env only, no code change): `OPERATOR_AGENT_GPU` (pin the card — required on
+shared machines, otherwise L1/L2/L3 each re-pick a different GPU and the speedup is not
+comparable), `OPERATOR_AGENT_KERNEL_DB` / `OPERATOR_AGENT_FAILURE_DB` (JSONL paths, or
+`off`/`none`/`0`/`false` to disable persistence), `OPERATOR_AGENT_FAILURE_GATE` (recurrence
+threshold, default 3 distinct tasks), `OPERATOR_AGENT_OUTPUT_DIR` and
+`OPERATOR_AGENT_LOG_DIR` (`off` = never write to the repo) + `OPERATOR_AGENT_LOG_KEEP`
+(default 10). The last group exists because `Conductor` writes unconditionally, so a test run
+used to flood `output/` and rotate away real experiment logs — 5316 of 5326 stored snapshots
+were unit-test mock sites. Full table: `docs/user_guide.md` §4.2; what each gate does: §6.
 
 The LLM client (`operator_agent/llm_client.py`) is a zero-dependency OpenAI-compatible client using only `urllib`. It disables Qwen3 thinking mode (`chat_template_kwargs={"enable_thinking": False}`) to prevent JSON/code truncation, and has robust JSON extraction with auto-repair of common formatting errors.
 
