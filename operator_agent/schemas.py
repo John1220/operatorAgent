@@ -51,6 +51,19 @@ class Precision(Enum):
     BF16 = "bf16"
     INT8 = "int8"
 
+    @property
+    def itemsize(self) -> int:
+        """一个元素占几字节
+
+        roofline 的 Byte 轴要用**任务声明的精度**, 不能用调用方传进来的数组 dtype:
+        runner 会按声明精度转换输入 (`remote_scripts/run_kernel.py`: precision == "fp16"
+        时 `.to(torch.float16)`), 所以控制端拿到的 float32 数组是核**根本见不到**的形态。
+        用错会让算数强度整体偏小 2 倍 (matmul 4096³: 682.67 而不是 1365.33)。
+        TF32 不是独立精度而是 fp32 的一种计算档位, 存储仍是 4 字节。
+        """
+        return {Precision.FP32: 4, Precision.FP16: 2,
+                Precision.BF16: 2, Precision.INT8: 1}[self]
+
 
 class TaskState(Enum):
     """任务状态机"""

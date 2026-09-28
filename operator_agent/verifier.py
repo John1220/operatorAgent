@@ -843,8 +843,17 @@ class Verifier:
     @staticmethod
     def _compute_arithmetic_intensity(task: TaskSchema, inputs: dict) -> float:
         """计算算子的算数强度 (FLOPs / Bytes transferred)
-        返回 FLOP/Byte 或 0 (无法计算时)"""
+        返回 FLOP/Byte 或 0 (无法计算时)
+
+        ⚠️ Byte 轴用的是**任务声明精度**的字节数, 不是 `inputs` 里数组自己的 dtype。
+        runner 会按声明精度转换输入 (`remote_scripts/run_kernel.py`: precision == "fp16"
+        时 `.to(torch.float16)`), 所以控制端手里那份 float32 数组是核**根本见不到**的形态。
+        第一版就是这么写的: matmul 4096³ 声明 FP16 而输入是 float32, AI 算成 682.67
+        而不是 1365.33 —— 正好差 2 倍 (doc 48 §6.5)。达成率与计时对比都不受影响,
+        但 AI 决定脊点两侧的分类, 而分类决定收敛出口与 SearchAgent 走哪条建议。
+        """
         kt = (task.source.kernel_type or "").lower()
+        nbytes = task.constraints.precision.itemsize
 
         if "matmul" in kt or "gemm" in kt:
             # GEMM: 2*M*N*K FLOPs, 数据量 = (M*K + K*N + M*N) * dtype_bytes
@@ -856,7 +865,7 @@ class Verifier:
                 if K != K2:
                     return 0.0
                 flops = 2.0 * M * N * K
-                bytes_transferred = (M * K + K * N + M * N) * a.itemsize
+                bytes_transferred = (M * K + K * N + M * N) * nbytes
                 return flops / bytes_transferred if bytes_transferred > 0 else 0.0
 
         if "softmax" in kt:
@@ -865,7 +874,7 @@ class Verifier:
                 x = np.asarray(inputs["X"])
                 n = int(np.prod(x.shape))
                 flops = 5.0 * n
-                bytes_transferred = 2.0 * n * x.itemsize  # read + write
+                bytes_transferred = 2.0 * n * nbytes  # read + write
                 return flops / bytes_transferred if bytes_transferred > 0 else 0.0
 
         if any(op in kt for op in ("relu", "gelu", "sigmoid", "add", "elementwise")):
@@ -875,17 +884,19 @@ class Verifier:
                     x = np.asarray(inputs[key])
                     n = int(np.prod(x.shape))
                     flops = 1.0 * n
-                    bytes_transferred = 2.0 * n * x.itemsize
+                    bytes_transferred = 2.0 * n * nbytes
                     return flops / bytes_transferred if bytes_transferred > 0 else 0.0
 
         if "layernorm" in kt or "layer_norm" in kt:
             # LayerNorm: ~7*N FLOPs (mean, var, norm, scale, shift), memory: ~2*N
+            # (只算 X 的读写, 不含 weight/bias 那 O(N) 项; 远端 runner 的公式含它们,
+            #  两边在 M≫1 时差 <0.1%, 但确实不是同一个公式)
             for key in ("X", "input"):
                 if key in inputs:
                     x = np.asarray(inputs[key])
                     n = int(np.prod(x.shape))
                     flops = 7.0 * n
-                    bytes_transferred = 2.0 * n * x.itemsize
+                    bytes_transferred = 2.0 * n * nbytes
                     return flops / bytes_transferred if bytes_transferred > 0 else 0.0
 
         return 0.0
