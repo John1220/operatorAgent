@@ -123,6 +123,59 @@ def _pct(num, den):
     return round(num / den * 100, 1) if den else None
 
 
+def _duplicate_rate(ok_runs):
+    """候选重复率 —— doc 47 没能量到的那个基率, 顺手在每份报表里带上。
+
+    **分母是「本轮之前在同一任务里已经有过候选」的轮数**: 第一轮没有可比对象,
+    算进分母就是把「不可能重复」记成「没重复」, 与 `_level_rate` 那条「没走到 ≠ 没通过」
+    是同一个错的镜像 (doc 47 第一版把 `generate` 轮算进 optimize 分母也是它)。
+
+    返回 `(重复轮数, 可比分母, 血缘里有没有签名)`。第三项是必须的: 签名缺失时要报
+    「测不到」而**不是 0%** —— 这正是 doc 48 那一批 12 轮的处境, 键在血缘里算好了,
+    却被报表自己的键白名单丢在落盘之前。
+    """
+    dup = at_risk = signed = 0
+    for r in ok_runs:
+        for i, h in enumerate(r.get("rounds") or []):
+            if h.get("candidate_signature") is not None:
+                signed += 1
+            if i == 0:
+                continue
+            at_risk += 1
+            if h.get("duplicate_of") is not None:
+                dup += 1
+    return dup, at_risk, signed > 0
+
+
+def cost_from_metadata(metadata):
+    """从 `artifact.metadata["llm_cost"]` 取出 (tokens, usd, calls)
+
+    键名必须与 `LLMUsageTracker.summary()` 一致: 是 **`total_cost_usd`** 而不是
+    `cost_usd`。第一版读错了键, 于是整场测量的成本一律报成 $0.0 —— 540114 tokens
+    配一个 0 美元, 安静得像是对的。`tests/test_harness_pass_rate.py` 里有一条机械守卫
+    直接对着真的 `summary()` 查这几个键在不在, 键名再漂移就会红。
+    """
+    c = (metadata or {}).get("llm_cost") or {}
+    return (int(c.get("total_tokens") or 0),
+            float(c.get("total_cost_usd") or 0.0),
+            int(c.get("total_calls") or 0))
+
+
+def first_pass_round(rounds):
+    """第一次 `all_passed` 的那一轮 → (轮号, 该轮的 action); 从没通过则 (None, None)
+
+    **不管那轮的 action 是什么**。第一版把 `fix` 轮排除在外 (理由是「修好的不算一次
+    干净的通过」), 真机第 4 次运行立刻证伪: layernorm#2 第 1 轮失败、Fixer 修完第 2 轮
+    通过, 于是 `最终通过=True` 而 `rounds_to_pass=None` —— 这个样本被 rounds-to-pass 的
+    分位数**静默丢掉**。指标悄悄少算样本比指标算错更难发现。
+    「本来就对」还是「修好的」这个区分保留在返回的 action 里, 不去动分母。
+    """
+    for r in rounds or ():
+        if r.get("all_passed"):
+            return r.get("round"), r.get("action")
+    return None, None
+
+
 def _quantiles(values):
     if not values:
         return None
@@ -165,6 +218,12 @@ def aggregate(runs):
 
     admitted = [r for r in ok_runs if r.get("admitted")]
 
+    dup, at_risk, has_sig = _duplicate_rate(ok_runs)
+    via = {}
+    for r in passed_runs:
+        k = r.get("passed_via") or "(未记)"
+        via[k] = via.get(k, 0) + 1
+
     return {
         "runs": len(runs),
         "runs_ok": len(ok_runs),
@@ -176,17 +235,22 @@ def aggregate(runs):
         "task_success": (len(passed_runs), len(ok_runs)),
         "task_success_pct": _pct(len(passed_runs), len(ok_runs)),
         "rounds_to_pass": _quantiles(rtp),
+        "passed_via": via,
         "validity_tiers": tiers,
         "decision_grade": (len(decision_grade), len(graded)),
         "decision_grade_pct": _pct(len(decision_grade), len(graded)),
         "speedup_all": _quantiles(sp_all),
         "speedup_decision_grade": _quantiles(sp_grade),
+        "duplicate_rounds": (dup, at_risk),
+        "duplicate_measurable": has_sig,
+        "duplicate_pct": _pct(dup, at_risk) if has_sig else None,
         "admitted": (len(admitted), len(passed_runs)),
         "admitted_pct": _pct(len(admitted), len(passed_runs)),
         "admit_rejections": sorted({r["admit_reason"] for r in ok_runs
                                     if r.get("admit_reason") and not r.get("admitted")}),
         "cost": {
             "tokens": sum(int(r.get("tokens") or 0) for r in ok_runs),
+            "calls": sum(int(r.get("llm_calls") or 0) for r in ok_runs),
             "usd": round(sum(float(r.get("cost_usd") or 0.0) for r in ok_runs), 4),
             "wall_s": round(sum(float(r.get("wall_s") or 0.0) for r in ok_runs), 1),
         },
@@ -216,6 +280,17 @@ def format_report(agg):
         q = agg["rounds_to_pass"]
         lines.append(f"【rounds-to-pass】median {q['median']} · p25 {q['p25']} · "
                      f"p75 {q['p75']} · max {q['max']} (n={q['n']})")
+    if agg.get("passed_via"):
+        # 「靠哪一轮过的」不是花边: doc 48 的读数 ④ (33% 的运行首轮死在 L1、被 Fixer
+        # 一轮救回) 只能从这里读出来, 手算的话下一次就没人算了。
+        lines.append(f"  通过方式: {agg['passed_via']}")
+
+    d, dt = agg["duplicate_rounds"]
+    lines.append("\n【候选重复率】分母 = 本轮之前同一任务里已有候选的轮数")
+    if not agg["duplicate_measurable"]:
+        lines.append(f"  测不到: 血缘里没有 candidate_signature (可比轮 {dt}) —— 这不是 0%")
+    else:
+        lines.append(f"  {d}/{dt}" + (f" = {agg['duplicate_pct']}%" if dt else " (无可比轮)"))
 
     dg, dgt = agg["decision_grade"]
     lines.append(f"\n【读数可信度】decision-grade (valid 档) {dg}/{dgt}"
@@ -239,7 +314,8 @@ def format_report(agg):
         lines.append(f"  拒收: {reason}")
 
     c = agg["cost"]
-    lines.append(f"\n【成本】{c['tokens']} tokens ≈ ${c['usd']} · 墙钟 {c['wall_s']} s")
+    lines.append(f"\n【成本】{c['tokens']} tokens / {c.get('calls', 0)} 次调用 ≈ ${c['usd']}"
+                 f" · 墙钟 {c['wall_s']} s")
     return "\n".join(lines)
 
 
@@ -254,12 +330,43 @@ def _git_head():
         return "?"
 
 
-def run_one(label, kernel_type, precision, shape, backend, llm, rounds):
-    """跑一次完整任务, 返回一份原始记录 (不聚合, 便于落盘复盘)"""
+def record_rounds(history):
+    """把 `iteration_history` 原样搬进报表记录, **不做键白名单**
+
+    第一版是白名单 (`round`/`action`/`all_passed`/`levels_passed`/
+    `measurement_validity`/`gflops`/`speedup`), 于是 Conductor 写的
+    `candidate_signature`/`duplicate_of`/`recipes_applied` 三键在这一步被悄悄丢掉 ——
+    而 doc 48 第七节第 2 条正承诺「跑完就能离线算重复率」。真机跑完才发现落盘 JSON 里
+    根本没有签名, 那一批 12 轮的重复基率**永久丢了** (只剩终端里那行 `[Novelty]` 汇总)。
+    与 doc 33 的 `runs`/`max_time_ms`、doc 37 的 `llm_cost` 同一族: 值算出来了,
+    死在搬运路上。**白名单的问题不是漏了哪几个键, 而是「血缘以后每加一个键都要记得来
+    这里加一次」—— 而忘记的代价是静默的。**
+    """
+    out = []
+    for h in history or ():
+        rec = dict(h)
+        rec["all_passed"] = bool(h.get("all_passed"))
+        rec["levels_passed"] = h.get("levels_passed") or {}
+        out.append(rec)
+    return out
+
+
+def run_one(label, kernel_type, precision, shape, backend, rounds):
+    """跑一次完整任务, 返回一份原始记录 (不聚合, 便于落盘复盘)
+
+    **每次运行新建一个 LLMClient**: `CostTracker` 是挂在 client 上累加的, 共用一个
+    client 会让 `metadata["llm_cost"]` 变成**从头到现在的累计值**而不是本次的值。
+    第一版就是这么写的, 于是六次运行的 token 数成了 15638 → 34457 → 78801 → 101156
+    → 143717 → 166345 这样一条单调递增曲线, 报表把「累计值」再求和得到 540114,
+    而真实总量是 166345 —— **高估 3.25 倍**, 且每一条单独看都像合理的数。
+    顺带也让每次运行成为独立样本 (不共享任何跨运行状态)。
+    """
+    llm = llm_from_config()
     rec = {"case": label, "kernel_type": kernel_type, "shape": list(shape),
            "ok": False, "error": None, "rounds": [], "final_all_passed": False,
-           "rounds_to_pass": None, "admitted": False, "admit_reason": "",
-           "tokens": 0, "cost_usd": 0.0, "wall_s": 0.0}
+           "rounds_to_pass": None, "passed_via": None, "admitted": False,
+           "admit_reason": "", "tokens": 0, "cost_usd": 0.0, "llm_calls": 0,
+           "wall_s": 0.0}
     t0 = time.time()
     try:
         conductor = Conductor(backend=backend, llm=llm, max_optimize_rounds=rounds)
@@ -273,28 +380,19 @@ def run_one(label, kernel_type, precision, shape, backend, llm, rounds):
 
     rec["ok"] = True
     rec["wall_s"] = round(time.time() - t0, 1)
-    rec["rounds"] = [
-        {"round": h.get("round"), "action": h.get("action"),
-         "all_passed": bool(h.get("all_passed")),
-         "levels_passed": h.get("levels_passed") or {},
-         "measurement_validity": h.get("measurement_validity"),
-         "gflops": h.get("gflops"), "speedup": h.get("speedup")}
-        for h in (art.iteration_history or [])
-    ]
+    rec["rounds"] = record_rounds(art.iteration_history)
     # `KernelArtifact.all_passed` 是 `all(v.passed for v in verification_results)`,
     # 而 **all([]) 是 True** —— 一份没有任何验证结果的产物会被它判成「全过」。
     # 两条早退路径 (入口校验失败 / 环境自检未通过) 都填了合成的 L1 失败, 所以现在踩不到;
     # 但「跑出了候选」本来就该是任务成功的定义之一, 所以这里显式要求至少有一轮。
     rec["final_all_passed"] = bool(rec["rounds"]) and bool(getattr(art, "all_passed", False))
-    rec["rounds_to_pass"] = next((r["round"] for r in rec["rounds"]
-                                  if r["all_passed"] and r["action"] != "fix"), None)
+    # rounds_to_pass 的口径见 first_pass_round 的 docstring (含被真机证伪的那一版)
+    rec["rounds_to_pass"], rec["passed_via"] = first_pass_round(rec["rounds"])
     # 入库决定在 Conductor 里只打印、不落产物, 所以这里用同一个纯函数复算一遍。
     # 复算而不是解析 stdout: 后者会把报表绑在日志文案上。
     keep, reason = persist_decision(art.benchmark_data or {})
     rec["admitted"], rec["admit_reason"] = bool(keep), reason
-    cost = (art.metadata or {}).get("llm_cost") or {}
-    rec["tokens"] = cost.get("total_tokens", 0)
-    rec["cost_usd"] = cost.get("cost_usd", 0.0)
+    rec["tokens"], rec["cost_usd"], rec["llm_calls"] = cost_from_metadata(art.metadata)
     return rec
 
 
@@ -310,7 +408,11 @@ def main() -> int:
         / time.strftime("%Y%m%d_%H%M%S"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    llm = llm_from_config()
+    # 不在这里建 LLMClient: run_one 每次自建一个, 否则 CostTracker 会跨运行累加
+    # (见 run_one 的 docstring —— 第一版因此把成本高估了 3.25 倍)。
+    # 这里只先建一次做**口径自检**: 判别实验不允许混进付费降级模型。
+    probe = llm_from_config()
+    print(f"[harness] 模型口径自检通过: {getattr(probe, 'model', '?')} (无降级模型)")
     backend = RemoteExecutor(mode="ssh", timeout=900)
 
     runs = []
@@ -318,7 +420,7 @@ def main() -> int:
         for kernel_type, precision, shape in CASES:
             label = f"{kernel_type}/{precision.value}/{'x'.join(map(str, shape))}#{rep + 1}"
             print(f"\n{'=' * 62}\n[{label}] 真跑 (门槛 {MIN_SPEEDUP}x, 最多 {args.rounds} 轮)\n{'=' * 62}")
-            rec = run_one(label, kernel_type, precision, shape, backend, llm, args.rounds)
+            rec = run_one(label, kernel_type, precision, shape, backend, args.rounds)
             runs.append(rec)
             print(f"[{label}] ok={rec['ok']} 轮数={len(rec['rounds'])} "
                   f"最终通过={rec['final_all_passed']} rounds_to_pass={rec['rounds_to_pass']} "
@@ -341,7 +443,10 @@ def main() -> int:
         "runs": runs,
     }
     path = out_dir / "pass_rate.json"
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # record_rounds 不再挑键, 所以血缘里万一出现一个不可序列化的值, 退化成它的 repr
+    # 也比让整份报表在落盘这一步崩掉好 —— 崩在这里会连带丢掉已经付过钱的 12 轮真机数据。
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8")
     print(f"\n报表已落盘: {path}")
     print("⚠️ 引用这些数字时必须带上 git_head 与 knobs —— 换一次配方/判据/prompt, "
           "上一份报表就只是历史, 不是基线。")
