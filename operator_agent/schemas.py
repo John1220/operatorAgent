@@ -9,6 +9,8 @@ from typing import Any, Optional
 import uuid
 import time
 
+from .backend_caps import Cap
+
 
 class TaskType(Enum):
     """任务类型"""
@@ -190,6 +192,14 @@ class TargetSpec:
     warp_size: int = 32
     vector_width: int = 128
     triton_config: Optional[TritonCompileConfig] = None  # Triton 专用编译配置
+    #: 这次运行**要求执行侧具备**的 `Cap`。消费方声明自己需要什么 (与 `Backend.require()`
+    #: 同一套词汇), 缺了不是「降级继续」而是「这份读数没有资格判定 L3」——
+    #: 见 `measurement.provenance_conflicts` 与 doc 49 §3.5 第 2/3 处。
+    #:
+    #: 默认空集是有意的: 本地 mock 运行本来就没有真卡, 无条件要求 `REAL_DEVICE`
+    #: 等于把整条离线链路判死。要真卡的是**量具与真机驱动**, 由它们显式声明
+    #: (`benchmarks/harness_pass_rate.py` 就是这么声明的)。
+    required_caps: tuple = ()
 
     # 已知硬件 + 已知 DSL (允许 Router 的 _DSL_CAPABILITY 之外的值, 只做 warning)
     _KNOWN_HARDWARE = frozenset({
@@ -203,6 +213,11 @@ class TargetSpec:
         """当 dsl 为 triton 但未提供 config 时，自动创建默认配置"""
         if DSLEnum.is_triton(self.dsl) and self.triton_config is None:
             self.triton_config = TritonCompileConfig()
+        # `required_caps` 一律归一成 `Cap` 成员的 frozenset。走 `Cap(v)` 而不是原样收
+        # 字符串: 闭合词汇的意义就是「拼错的名字在写下的那一刻炸」。收字符串的话,
+        # 一个拼错的要求会被下游的集合差读成「不要求任何事」, 门就此静默敞开
+        # (doc 49 §4.1 第 2 条)。
+        self.required_caps = frozenset(Cap(v) for v in (self.required_caps or ()))
 
     def validate(self) -> list[str]:
         errors = []
@@ -269,6 +284,11 @@ class TaskSchema:
         }
         if self.target.triton_config:
             target_dict["triton_config"] = self.target.triton_config.to_dict()
+        # 只在非空时写: 产物里一个恒为 [] 的键会被读成「任务声明过、要求为空」,
+        # 而绝大多数任务确实没声明 —— 这两种情况该在产物里长得不一样。
+        if self.target.required_caps:
+            target_dict["required_caps"] = sorted(
+                c.value for c in self.target.required_caps)
         return {
             "task_id": self.task_id,
             "task_type": self.task_type.value,
@@ -529,6 +549,14 @@ class KernelArtifact:
     benchmark_data: dict = field(default_factory=dict)
     compile_info: dict = field(default_factory=dict)  # 编译元信息 (Triton: num_warps, registers, etc.)
     iteration_history: list = field(default_factory=list)  # 血缘: 每轮 {round, action, all_passed, gflops}
+    #: 本次运行的环境指纹 (`environment.fingerprint_of` 的产物)。它以前只在
+    #: `conductor` 里被 `print` 一次就丢掉 (doc 49 §3.5 第 1 处), 于是「环境漂移自检」
+    #: 这句注释描述的是一个不存在的机制。落盘的读者是**下一次运行**: 没有它, 下一次
+    #: 就无从比较。
+    environment_fingerprint: dict = field(default_factory=dict)
+    #: 与上一次运行的指纹比较结果 (`environment.EnvironmentDrift.as_dict()`)。
+    #: None = 本次没做比较 (无从比较时也写一个 comparable=False 的字典, 不写 None)。
+    environment_drift: Optional[dict] = None
     metadata: Optional[dict] = None    # 存放成本监控账单 / 执行快照路径 等外挂字段 (可 JSON 化)
     saved_dir: str = ""                # ArtifactStore.save 落盘目录 (由 Conductor 赋值, 便于引用)
     created_at: float = field(default_factory=time.time)

@@ -69,6 +69,13 @@ class ArtifactStore:
             result_data["task"] = task.to_dict()
         if artifact.iteration_history:
             result_data["iteration_history"] = artifact.iteration_history
+        # 环境指纹与漂移比较 (doc 49 §3.5 第 1 处)。落在这里而不是 `metadata`:
+        # `metadata` 整个不进 result.json (llm_cost 也一样只在内存里), 而指纹的
+        # **读者是下一次运行** —— 不落盘就等于没算。
+        if artifact.environment_fingerprint:
+            result_data["environment_fingerprint"] = artifact.environment_fingerprint
+        if artifact.environment_drift is not None:
+            result_data["environment_drift"] = artifact.environment_drift
         result_path = artifact_dir / "result.json"
         result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -94,6 +101,50 @@ class ArtifactStore:
             )
 
         return artifact_dir
+
+    #: 往回翻多少个产物目录找「上一次」。仓库 output/ 里存着上千份**没有指纹**的
+    #: 历史产物 (2026-09-26 盘点: 2872 份 result.json), 不设上限的话每次运行都要把它们
+    #: 全读一遍才承认「没有上一次」。设了上限之后, 找不到就如实说找不到。
+    PREVIOUS_SCAN_LIMIT = 200
+
+    def previous_environment(self, kernel_type: str, hardware: str) -> Optional[dict]:
+        """最近一次同 `(kernel_type, hardware)` 运行留下的环境指纹
+
+        返回 `{"fingerprint": {...}, "artifact_dir": "...", "saved_at": "..."}`。
+        找不到就返回 **None**, 不返回一个空指纹 —— `compare_fingerprints` 把空的一侧
+        读成「无从比较」, 而一个 `{}` 的「上一次」会被读成「上一次什么都没报」,
+        于是每一个键都变成漂移。
+
+        ⚠️ 调用方必须在**本次落盘之前**问 (Conductor 就是这么调的): 这个方法不知道
+        「本次」是谁, 落盘之后再问就会把自己当成上一次。
+
+        按 (kernel_type, hardware) 分桶而不是全库找最近一份: 跨算子比较会把
+        「换了一个任务」误报成「换了环境」。目录名以时间戳开头, 所以按 mtime 排就够。
+        """
+        if not kernel_type or not hardware:
+            return None
+        base = self.output_dir / kernel_type / hardware
+        try:
+            if not base.is_dir():
+                return None
+            candidates = sorted((p for p in base.iterdir() if p.is_dir()),
+                                key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            return None
+        for artifact_dir in candidates[:self.PREVIOUS_SCAN_LIMIT]:
+            result_file = artifact_dir / "result.json"
+            if not result_file.exists():
+                continue          # 循环内预创建的 snap_* 目录只有 execution_snapshot.json
+            try:
+                data = json.loads(result_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                continue
+            fp = data.get("environment_fingerprint")
+            if fp:
+                return {"fingerprint": fp,
+                        "artifact_dir": str(artifact_dir),
+                        "saved_at": data.get("saved_at", "")}
+        return None
 
     def list_all(self, kernel_type: str = "", hardware: str = "") -> list[dict]:
         results = []

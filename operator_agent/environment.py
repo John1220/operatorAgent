@@ -1,5 +1,6 @@
 """环境自检与依赖管理
 职责: 远程 GPU 机器的链路自检 + 依赖分析 + 自动配置 + 依赖清单输出
+     + 环境指纹的构造与跨运行漂移比较 (doc 49 §3.5 第 1 处)
 
 链路: SSH → uv → Python → torch → triton → CUDA → GPU 硬件
 依赖分析: 从生成的 kernel 代码静态提取 import, 与已装包对比, 输出缺失清单
@@ -9,6 +10,101 @@ import ast
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+
+
+# ─── 环境指纹 (doc 49 §3.5 第 1 处「算了没人读」) ────────────────────────────────
+#
+# `conductor.py` 一直算着一个 `fingerprint` (name/device/cc/torch/triton), 旁边那行
+# 注释写着「用于环境漂移自检与结果追溯」, 然后 `print` 一次就丢了 —— 全仓 3 次命中
+# 全在那 6 行里, 不入库、不比较。**没有环境漂移自检**, 注释描述的是一个不存在的机制。
+#
+# 这一节是那个机制本身: 构造 (fingerprint_of) + 比较 (compare_fingerprints)。放这个
+# 模块是因为它就是「环境自检」的归宿, 而判据的**后果** (降到哪一档) 在
+# `measurement.assess()` 里 —— 两件事分开, 各自可离线单测。
+
+#: 指纹只收**跨运行可比的身份量**: 器件名与三个版本号。
+#: 刻意不收 `compute_units`/`memory` 这类规格 —— 它们在 `hardware_caps` 的表里, 而
+#: doc 49 §八 第 4 条记着「探测值因为字段名不匹配被丢掉」, 收进来会让漂移报告混进
+#: 一个本来就不稳定的量。
+FINGERPRINT_KEYS = ("name", "device", "compute_capability",
+                    "torch_version", "triton_version")
+
+#: 执行侧身份单独立一个键。「同一台机器、换了个后端」是最要紧的一种漂移: 门面
+#: `RemoteExecutor(mode="ssh")` 连不上时会解析到 `LocalExecutor`, 器件名与版本号
+#: 一项都不会变, 只有这个键会变 (doc 49 §3.1 A1 / §八 第 1 条)。
+FINGERPRINT_BACKEND_KEY = "backend"
+
+
+def fingerprint_of(hw_info: Optional[dict], backend_label: str = "") -> dict:
+    """从 `Backend.get_hardware_info()` 抽出环境指纹 (只留可比的键)
+
+    `hw_info` 里缺的键就**不出现在指纹里**, 不填默认值: 「上一次报了 triton_version、
+    这一次没报」本身就是一种漂移, 用默认值填平会把它抹掉 (与 doc 49 §3.3 那类
+    「把不知道翻译成一个像样的值」是同一个错误)。
+    """
+    fp = {k: hw_info[k] for k in FINGERPRINT_KEYS if k in (hw_info or {})}
+    if backend_label:
+        fp[FINGERPRINT_BACKEND_KEY] = backend_label
+    return fp
+
+
+def compare_fingerprints(current: Optional[dict], previous: Optional[dict],
+                         previous_from: str = "") -> "EnvironmentDrift":
+    """比较两份指纹, 返回差异。任一侧为空 ⇒ `comparable=False`, **不是**「没漂移」
+
+    「没有上一次可比」与「比过了、一样」是两件事, 混成一个空列表就会把前者读成后者 ——
+    那正是 `measurement.assess()` 里「launch 地板未知」那条已经付过学费的坑
+    (缺证据不等于检查过了)。
+    """
+    if not current or not previous:
+        return EnvironmentDrift(changed=(), comparable=False,
+                                previous_from=previous_from)
+    changed = []
+    for k in sorted(set(current) | set(previous)):
+        if k not in previous:
+            changed.append(f"{k}: 上一次没有 → {current[k]!r}")
+        elif k not in current:
+            changed.append(f"{k}: {previous[k]!r} → 本次没报")
+        elif current[k] != previous[k]:
+            changed.append(f"{k}: {previous[k]!r} → {current[k]!r}")
+    return EnvironmentDrift(changed=tuple(changed), comparable=True,
+                            previous_from=previous_from)
+
+
+@dataclass(frozen=True)
+class EnvironmentDrift:
+    """一次漂移比较的结果
+
+    `changed` 是给人读的句子 (它会被打进日志、写进产物、并作为
+    `measurement.assess(environment_drift=…)` 的输入, 于是同一份措辞在三个地方一致)。
+    """
+
+    changed: tuple = ()
+    comparable: bool = False
+    previous_from: str = ""
+
+    @property
+    def drifted(self) -> bool:
+        return self.comparable and bool(self.changed)
+
+    def as_dict(self) -> dict:
+        """落进 result.json / execution_snapshot.json 的形状"""
+        return {"comparable": self.comparable,
+                "drifted": self.drifted,
+                "changed": list(self.changed),
+                "previous_from": self.previous_from}
+
+    def report_lines(self) -> list:
+        """日志里的几行。没漂移时也报一句 —— 只报坏消息的话, 「机制没跑」与「跑了没问题」
+        在日志里长得一样。"""
+        if not self.comparable:
+            return ["[Env] 环境漂移: 没有可比的上一次运行 (首次跑 / 旧产物没记指纹)"]
+        if not self.drifted:
+            return [f"[Env] 环境漂移: 无 (与 {self.previous_from or '上一次运行'} 一致)"]
+        out = [f"[Env] ⚠️ 环境漂移: 与 {self.previous_from or '上一次运行'} 相比有 "
+               f"{len(self.changed)} 项变了 —— 本轮读数与上一次不可比"]
+        out += [f"[Env]   - {c}" for c in self.changed]
+        return out
 
 
 @dataclass

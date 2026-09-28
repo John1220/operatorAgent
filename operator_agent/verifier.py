@@ -217,8 +217,15 @@ class Verifier:
         test_inputs: dict,
         expected_output=None,
         target_gflops: float = 10.0,
+        environment_drift: Optional[list] = None,
     ) -> list[VerificationResult]:
-        """执行完整三级验证"""
+        """执行完整三级验证
+
+        `environment_drift`: 本次运行的环境指纹与上一次相比变了哪些项
+        (`environment.compare_fingerprints` 的输出)。它是 L3 有效性判定的一个输入,
+        所以必须由**拿着产物库的那一层** (Conductor) 传进来 —— Verifier 自己不知道
+        「上一次」是谁。None = 没做比较, 与「比过了没变」(空列表) 是两件事。
+        """
         results = []
 
         l1 = self._verify_compile(kernel_code, task.target.dsl,
@@ -232,7 +239,8 @@ class Verifier:
         if not l2.passed:
             return results
 
-        l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task)
+        l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
+                                      environment_drift=environment_drift)
         results.append(l3)
         return results
 
@@ -496,7 +504,9 @@ class Verifier:
             message=f"功能验证失败: {reason}, 最大误差={metrics['max_error']:.2e}",
             metrics=metrics)
 
-    def _verify_performance(self, kernel_code: str, test_inputs, target_gflops: float, task: TaskSchema) -> VerificationResult:
+    def _verify_performance(self, kernel_code: str, test_inputs, target_gflops: float,
+                            task: TaskSchema,
+                            environment_drift: Optional[list] = None) -> VerificationResult:
         min_required = task.constraints.min_speedup
         print(f"  [Verifier] L3: 性能验证 (要求加速比 >= {min_required:.2f}x vs baseline)...")
         # 多组输入套件时，性能基准使用第一组输入
@@ -673,8 +683,10 @@ class Verifier:
                 util = bench.get("gpu_util_pct")
                 others = bench.get("gpu_other_procs")
                 metrics["gpu_shared_with_others"] = bool(others)
-                msg = self._assess_measurement(metrics, msg, kernel_min_ms,
-                                               gpu_util_pct=util)
+                msg, assessment = self._assess_measurement(
+                    metrics, msg, kernel_min_ms, gpu_util_pct=util, task=task,
+                    environment_drift=environment_drift)
+                passed = self._refuse_l3_pass(passed, assessment)
                 if not metrics.get("benchmark_contaminated") and others:
                     msg += f" (注: 卡与 {others} 个其他进程共享, 瞬时 util={util}%)"
 
@@ -705,7 +717,10 @@ class Verifier:
             passed = speedup >= min_required
             msg = (f"加速比 {speedup:.2f}x vs {baseline['baseline_type']} "
                    f"(要求 >= {min_required:.2f}x, {bound}-bound)")
-            msg = self._assess_measurement(metrics, msg, kernel_min_ms)
+            msg, assessment = self._assess_measurement(
+                metrics, msg, kernel_min_ms, task=task,
+                environment_drift=environment_drift)
+            passed = self._refuse_l3_pass(passed, assessment)
             print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
             return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                       passed=passed, message=msg, metrics=metrics)
@@ -716,14 +731,29 @@ class Verifier:
         passed = target_gflops <= 0 or actual_gflops >= target_gflops * min_required
         msg = (f"无 baseline 参考, 按绝对目标判定: {actual_gflops:.2f} GFLOPS "
                f"(目标 {target_gflops * min_required:.2f})")
-        msg = self._assess_measurement(metrics, msg, kernel_min_ms)
+        msg, assessment = self._assess_measurement(
+            metrics, msg, kernel_min_ms, task=task,
+            environment_drift=environment_drift)
+        passed = self._refuse_l3_pass(passed, assessment)
         print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
         return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                   passed=passed, message=msg, metrics=metrics)
 
+    @staticmethod
+    def _refuse_l3_pass(passed: bool, assessment) -> bool:
+        """出处不对的 L3 不许记成通过 (doc 49 §3.5 第 2/3 处 + §五 第 4 片验收)
+
+        与 `can_gate` 分开: 档位 `uninformative` 只说明「这个数字撑不住结论」, 历史上
+        它并不把 `passed` 拉成 False (launch 地板支配那一档的核可能确实是对的)。
+        而**任务声明了要真卡、执行侧给不出**是另一回事 —— 那份加速比不是测得不准,
+        是压根没测, 「通过」这个结论没有对象。
+        """
+        return False if (passed and assessment.l3_pass_is_refused) else passed
+
     def _assess_measurement(self, metrics: dict, msg: str, candidate_ms,
-                            gpu_util_pct=None) -> str:
-        """写入测量有效性三态判定, 返回追加了原因说明的 msg
+                            gpu_util_pct=None, task: Optional[TaskSchema] = None,
+                            environment_drift: Optional[list] = None):
+        """写入测量有效性三态判定, 返回 `(追加了原因说明的 msg, assessment)`
 
         缺口 1 的失效方式不是「没算」而是「算了没人读」: `benchmark_contaminated`
         早就写进 metrics, 但 conductor / fixer / agents 三个文件里 grep 零命中。
@@ -732,13 +762,24 @@ class Verifier:
             这个决定」—— 暴露用途而不是档位, 免得调用方各自重新解释一遍分档表;
           - 把结论写进 message。message 会进 Fixer 与 SearchAgent 的 prompt, 是
             唯一保证被下游看到的通道。
+
+        出处那两条信号 (doc 49 §3.5 第 2/3 处) 读的是**已经搬进 metrics 的**
+        `mode`/`device`, 而不是回头再问一次载荷: 判定看的必须就是产物里记的那份,
+        否则「记录说 A、判定按 B」这种分叉永远查不出来。能力则一律走
+        `self._caps` 的声明, 不从 `device`/`name` 的字符串去猜 (doc 49 §3.1)。
         """
+        required = frozenset(task.target.required_caps) if task else frozenset()
         assessment = measurement.assess(
             median_time_ms=candidate_ms,
             launch_floor_us=self._detect_theoretical_peak().get("launch_floor_us"),
             gpu_util_pct=gpu_util_pct,
             dispersion=metrics.get("dispersion_iqr_over_median"),
             max_over_median=metrics.get("dispersion_max_over_median"),
+            backend_caps=self._caps,
+            required_caps=required,
+            reported_mode=metrics.get("mode"),
+            reported_device=metrics.get("device"),
+            environment_drift=environment_drift,
         )
         metrics.update(assessment.as_metrics())
         metrics["benchmark_contaminated"] = assessment.contaminated
@@ -747,7 +788,11 @@ class Verifier:
         if assessment.reasons:
             msg += (f"  ⚠️ 测量有效性={assessment.validity.value}: "
                     + "; ".join(assessment.reasons))
-        return msg
+        if assessment.l3_pass_is_refused:
+            msg += ("  ⛔ 本轮 L3 不记为通过: 任务声明要的执行侧能力没拿到 "
+                    f"(缺 {', '.join(assessment.capability_shortfall) or '—'}"
+                    f"{'; 且 ' + '; '.join(assessment.provenance_conflict) if assessment.provenance_conflict else ''})")
+        return msg, assessment
 
     # 算子类型 -> bound 分类 (决定优化时关注的参考指标)
     _COMPUTE_BOUND_OPS = ("matmul", "gemm", "conv", "attention", "einsum")

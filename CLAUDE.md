@@ -59,13 +59,22 @@ User Request (NL or structured)
 **Decision eligibility** (`operator_agent/measurement.py`). The recurring failure mode this
 guards against is "a signal was computed but a downstream consumer treated it as trustworthy"
 — e.g. a speedup inflated by launch overhead permanently blacklisting a working recipe.
-Validity is tiered `valid / degraded / uninformative` (from launch-floor dominance, sample
-dispersion, and pre-measure GPU util) and exposed as **uses**, not as a tier:
+Validity is tiered `valid / degraded / uninformative`, from five signals: three ask *is this
+measurement accurate* (launch-floor dominance, sample dispersion, pre-measure GPU util) and
+two ask *is this measurement even about this thing* (provenance — a `Cap` the task declared in
+`TargetSpec.required_caps` that the backend does not declare, or a payload that self-reports
+`mode="simulated"` / `device="cpu"` while the backend claims `REAL_DEVICE`; environment
+fingerprint drifted from the previous run) — exposed as **uses**, not as a tier:
 
 - `can_gate` — may this number gate a pass/fail verdict at all (`not uninformative`)
 - `can_disable_recipe` — **only `valid`**; recipe disabling is permanent, so ties and
   no-evidence verdicts must not trigger it
 - `can_count_stagnation` — **only `valid`**; a contaminated round must not end the loop
+- `l3_pass_is_refused` — deliberately *not* folded into `can_gate`: a low tier means "this
+  number cannot support a conclusion" and has never rewritten `passed`, whereas a provenance
+  shortfall means the number was **never measured**, so "passed" has no referent. Only fires
+  when the task actually required `REAL_DEVICE` (a bare contradiction degrades but does not
+  refuse, otherwise honest local mock runs would be judged dead)
 
 Related rules: round-to-round comparison is a four-state `verdict()` (`FAST/SAME/SLOW/
 AMBIGUOUS`) with a per-tier noise band, and only `SLOW` disables recipes; a roofline

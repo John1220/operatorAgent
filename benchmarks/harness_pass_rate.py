@@ -85,7 +85,13 @@ def _task(kernel_type: str, precision: Precision) -> TaskSchema:
     return TaskSchema(
         task_type=TaskType.OPERATOR_GENERATION,
         source=SourceSpec(kernel_type=kernel_type, complexity=TaskComplexity.MEDIUM),
-        target=TargetSpec(hardware="nvidia_gpu", dsl="triton"),
+        # 这份量具的表头写着「真机」, 所以任务就把「要真机」声明出来。声明的读者是
+        # `Verifier._verify_performance`: 执行侧给不出 `REAL_DEVICE` 时 L3 不再记为通过
+        # (doc 49 §3.5 第 2/3 处)。`main()` 里那道 `backend.require(...)` 是**开工前**的
+        # 硬门, 挡的是「门面静默降级成 LocalExecutor 而报表照旧写着真机」; 这一条是
+        # **每一轮读数**上的门, 挡的是「某一路载荷其实是在 CPU 上测的」。两道不重复。
+        target=TargetSpec(hardware="nvidia_gpu", dsl="triton",
+                          required_caps=(Cap.REAL_DEVICE, Cap.SAME_DEVICE_BASELINE)),
         constraints=ConstraintSpec(precision=precision, min_speedup=MIN_SPEEDUP,
                                    max_error=MAX_ERROR),
     )

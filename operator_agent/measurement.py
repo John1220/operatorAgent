@@ -15,7 +15,21 @@ L3 的数字有三种「不可信」, 而它们都不该被当成「性能不达
    看着权威其实是噪声。这条以前完全没检查: runner 跑了 n 个样本, 只报 min/median/
    avg/max, 从不看它们散不散 (决策与出处: docs/research/20 §3.1 D1)。
 
-`VerificationResult.passed` 只有两态, 于是这三种情况都被记成失败, 再被 Conductor
+上面三条问的都是「**测得准不准**」。2026-09-28 又补了两条问「**测的是不是这个东西**」
+(doc 49 §3.5 第 1/2/3 处, 那一节记的失效方式叫「算了没人读」):
+
+4. **出处不对** —— 数字可能压根不是测出来的: `MockGPU` 无 CUDA 时按硬件规格**估**
+   (`"mode": "simulated"`), `LocalExecutor` 在控制机 CPU 上真测 (那不是加速卡的成绩)。
+   两者以前都在产物里与真机读数**权威性等价**。判据走 `backend_caps` 的声明而不是
+   字符串匹配 `device`/`name`: 任务在 `target.required_caps` 里声明它要什么, 执行侧
+   声明它有什么, 缺就是 UNINFORMATIVE 且 L3 不许 `passed=True`。载荷自报的
+   `mode`/`device` 只用作**与声明对照**的第二手证据 (两者打架说明连声明都不可信)。
+5. **环境漂移** —— 器件名/torch/triton 版本/执行侧身份与上一次运行不一致时, 这一轮的
+   加速比与上一轮不可比。按本项目「观测先于判定」的处置: **只降到 DEGRADED**
+   (不禁用配方、不计停滞), 不据此判核失败, 也没有阈值 —— 一份「变了哪些键」的清单
+   还没有分布支撑, 现在定阈值就是编一个门。
+
+`VerificationResult.passed` 只有两态, 于是前三种情况都被记成失败, 再被 Conductor
 拿去禁用配方、累计停滞轮次。已记录的后果: matmul 那轮触发污染 (测量前 util=14%)
 → gflops 被压低 → 判「未改善」→ 把**实际有效**的配方拉黑; 而
 `max_stagnant_rounds=2`, 两次误判就终止整个搜索。这台机器上恒有 7 个其他进程,
@@ -28,6 +42,8 @@ L3 的数字有三种「不可信」, 而它们都不该被当成「性能不达
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
+
+from .backend_caps import Cap
 
 
 class Validity(str, Enum):
@@ -115,14 +131,22 @@ def persist_decision(metrics: dict) -> tuple:
     写成判据而不是写在 conductor 里, 是为了让它有单测与变异守卫 —— 缺口 2 原先的
     失效方式正是「快照一直在写, 但没人读」(docs/research/43 第三节)。
 
-    门比 Voyager 的 `if success` 严两条, 理由都来自本机实测:
+    门比 Voyager 的 `if success` 严三条, 理由都来自本机实测:
       - `measurement_can_gate` (缺口 1 的产物): 「通过」可以是被 launch 地板喂出来的
         假信号 (doc 31/32: 同一个 layernorm 核换个计时口径, 加速比从 0.895x 翻到 1.346x)。
         持久化会把这种假信号**固化成下一次检索的样本**, 比一次性误判更贵。
+      - `backend_real_device` (doc 49 §3.5 第 2/3 处): 执行侧没声明 `Cap.REAL_DEVICE`
+        时, 那个加速比要么是按规格**估**的 (`MockGPU` 的 `mode="simulated"`), 要么是
+        控制机 CPU 上真测的 (`LocalExecutor`)。两者都不是「这张卡上这个核有多快」的
+        证据, 而语料是按 (algorithm, hardware) 检索的 —— 一条 mock 成绩会被下一次
+        真机运行当示范取出来。用 `is False` 而不是 `not`: 老产物没这个键, 不做追溯性重判。
       - score 用 speedup 而不是 gflops: 对 memory-bound 算子 gflops 整个失真 (缺口 4)。
     """
     if metrics.get("measurement_can_gate") is False:
         return False, "测量不可信 (can_gate=False): 不能把假信号固化成语料"
+    if metrics.get("backend_real_device") is False:
+        return False, ("执行侧未声明 REAL_DEVICE: 数字来自模拟或 CPU, "
+                       "不是这张卡上的成绩, 不能当语料")
     if metrics.get("benchmark_contaminated"):
         return False, "窗口被抢占污染 (util 超阈值)"
     speedup = metrics.get("speedup_vs_baseline")
@@ -211,6 +235,62 @@ DISPERSION_UNINFORMATIVE = 0.30
 INTRUDER_MAX_OVER_MEDIAN = 2.0
 
 
+# ─── 数字的出处 (doc 49 §3.5 第 2/3 处) ────────────────────────────────────────
+#
+# 两个字符串是**载荷自报**的值, 只用来与执行侧的能力声明对照, 不用来推断能力:
+#   `"simulated"` = `MockGPU._benchmark_triton_simulated` 按硬件规格估出来的那份;
+#   `"cpu"`       = `LocalExecutor` / `MockGPU._benchmark_python` / runner 的
+#                   `"device": str(device) if lang == "torch" else "cpu"` 三处会打的标。
+# 判据本身走 `Cap` (声明), 见 `provenance_conflicts` 的 docstring。
+SIMULATED_MODE = "simulated"
+CPU_DEVICE = "cpu"
+
+
+def provenance_conflicts(backend_caps, required_caps,
+                         reported_mode: Optional[str] = None,
+                         reported_device: Optional[str] = None) -> tuple:
+    """这批数字的**出处**站不站得住。返回 `(能力缺口, 自相矛盾)`, 都是字符串 tuple
+
+    为什么要两份而不是一份: 它们的后果不同。
+
+    * **能力缺口** = 任务在 `target.required_caps` 里声明了它要什么, 执行侧的
+      `capabilities` 里没有。这是 doc 49 §五 第 4 片的验收条件所要拦的那件事:
+      `mode == "simulated"` 的 L3 不许 `passed=True` (当任务声明了 `REAL_DEVICE`)。
+      数字不是「测得不准」, 是**根本没测** —— 一份按规格估出来的加速比, 它的
+      「通过」与「不通过」都没有对象。
+    * **自相矛盾** = 声明与载荷自己报的对不上。声明 `REAL_DEVICE` 却报
+      `mode="simulated"` / `device="cpu"`, 说明提供方要么在说谎、要么中途回退了
+      (真有其事: `MockGPU` 有 CUDA 时声明 `REAL_DEVICE`, 而跑 python 核走的是
+      `_benchmark_python`, 载荷老老实实写着 `device="cpu"`); 反过来, 载荷自报
+      `simulated` 而后端没声明 `SIMULATED_PERF`, 是一次**未声明的降级**
+      (doc 49 §3.3 那一族)。
+
+    ⚠️ 刻意**不**用 `device`/`name` 的子串去推断能力 (那正是 doc 49 §3.1 记的三处
+    名字匹配的毛病): 这里只判「等于 `cpu`」这一个精确值, 且只在它**与声明打架**时
+    才算证据。`"cuda (fallback)"` 这类串一律不认 —— 认了就等于把能力判断又搬回
+    字符串匹配。
+    """
+    caps = frozenset(backend_caps or ())
+    required = frozenset(required_caps or ())
+    shortfall = tuple(sorted(c.value for c in (required - caps)))
+
+    declares_real = Cap.REAL_DEVICE in caps
+    mode = str(reported_mode or "").strip().lower()
+    device = str(reported_device or "").strip().lower()
+
+    conflicts: List[str] = []
+    if declares_real and mode == SIMULATED_MODE:
+        conflicts.append(f"声明了 {Cap.REAL_DEVICE.value}, 载荷却自报 "
+                         f"mode={reported_mode!r} (性能是按规格估的)")
+    if declares_real and device == CPU_DEVICE:
+        conflicts.append(f"声明了 {Cap.REAL_DEVICE.value}, 载荷却自报 "
+                         f"device={reported_device!r} (这一轮在 CPU 上测的)")
+    if mode == SIMULATED_MODE and Cap.SIMULATED_PERF not in caps:
+        conflicts.append(f"载荷自报 mode={reported_mode!r}, 后端却没声明 "
+                         f"{Cap.SIMULATED_PERF.value} (未声明的降级)")
+    return shortfall, tuple(conflicts)
+
+
 def _worse(a: "Validity", b: "Validity") -> "Validity":
     """取更差的一档。三个信号各自独立判定, 合成时不做加权 —— 任一项不可信,
     整个数字就不该拿去做闭环决策。"""
@@ -236,6 +316,16 @@ class MeasurementAssessment:
     dispersion: Optional[float] = None           # iqr/median, None = 样本不足或未上报
     max_over_median: Optional[float] = None      # 窗口内抢占的旁证, 与 dispersion 互补
     intruder_suspected: bool = False             # 仅诊断; 为何不作判据见 assess() 内说明
+    #: 任务要求、而执行侧没声明的能力 (`Cap.value` 字符串, 已排序)
+    capability_shortfall: tuple = ()
+    #: 声明与载荷自报互相打架的地方 (doc 49 §3.5 第 2/3 处)
+    provenance_conflict: tuple = ()
+    #: 任务声明要的能力, 用来决定「矛盾」够不够格拒绝 L3 通过
+    required_caps: tuple = ()
+    #: 执行侧是否声明了 `Cap.REAL_DEVICE`。None = 调用方没给能力信息 (老路径)
+    backend_real_device: Optional[bool] = None
+    #: 与上一次运行相比变了哪些环境项; 空 = 比过了没漂移或无从比较 (见 EnvironmentDrift)
+    environment_drift: tuple = ()
 
     @property
     def can_gate(self) -> bool:
@@ -251,6 +341,25 @@ class MeasurementAssessment:
     def can_count_stagnation(self) -> bool:
         """能否据此累计停滞轮次 / 触发提前终止 —— 只有 VALID 可以"""
         return self.validity is Validity.VALID
+
+    @property
+    def l3_pass_is_refused(self) -> bool:
+        """L3 的 `passed` 不许为 True —— 与 `can_gate` 刻意分成两条
+
+        `can_gate=False` 说的是「这个数字不足以判定通过/不通过」, 它**不**把 passed
+        拉成 False: launch 地板支配 / 离散度超标的那一档, 核可能确实是对的, 只是数字
+        撑不住结论, 而既有链路 (含真机标定过的 layernorm 1024×768) 一直按这个语义跑。
+
+        出处不对是另一回事。任务声明了要真卡, 执行侧给不出 (或给了却自报在 CPU 上测),
+        这时「通过」这个结论**没有对象** —— 那份加速比不是测得不准, 是压根没测。
+        doc 49 §五 第 4 片的验收条件就是这一条: `mode == "simulated"` 的 L3 结果
+        不许 `passed=True` (当任务声明了 `REAL_DEVICE`)。
+        """
+        if self.capability_shortfall:
+            return True
+        # 声明与载荷打架时, 只有「任务真的要过真卡」才够格拒绝通过: 否则一份本地
+        # mock 运行会因为载荷老实写了 device="cpu" 而被判失败, 那是把观测当判据。
+        return bool(self.provenance_conflict) and Cap.REAL_DEVICE.value in self.required_caps
 
     def as_metrics(self) -> dict:
         """摊平进 VerificationResult.metrics 的部分"""
@@ -270,6 +379,12 @@ class MeasurementAssessment:
         if self.max_over_median is not None:
             out["dispersion_max_over_median"] = self.max_over_median
         out["measurement_intruder_suspected"] = self.intruder_suspected
+        # 这一个键是**判据的输入**而不是装饰: `persist_decision` 读它决定「这份成绩
+        # 能不能进跨运行语料」。有了它, 一份纯模拟的基准与一份真机实测的基准在产物里
+        # 不再权威性等价 (doc 49 §3.5 第 2 处)。只在调用方给了能力信息时才写 ——
+        # 缺键与 False 是两件事, 老产物走 `is False` 判定, 不会被追溯性重判。
+        if self.backend_real_device is not None:
+            out["backend_real_device"] = self.backend_real_device
         return out
 
 
@@ -303,11 +418,20 @@ def assess(median_time_ms: Optional[float] = None,
            launch_floor_us: Optional[float] = None,
            gpu_util_pct: Optional[float] = None,
            dispersion: Optional[float] = None,
-           max_over_median: Optional[float] = None) -> MeasurementAssessment:
-    """综合判定测量有效性: 三个信号取更差的一档, 第四个只作观察
+           max_over_median: Optional[float] = None,
+           backend_caps: Optional[frozenset] = None,
+           required_caps: Optional[frozenset] = None,
+           reported_mode: Optional[str] = None,
+           reported_device: Optional[str] = None,
+           environment_drift: Optional[List[str]] = None) -> MeasurementAssessment:
+    """综合判定测量有效性: 信号各自独立判定, 合成时取更差的一档
 
-    参与判定的三个: launch 地板支配 (`median_time_ms` vs `launch_floor_us`)、
+    问「测得准不准」的三个: launch 地板支配 (`median_time_ms` vs `launch_floor_us`)、
     测量前 util 污染 (`gpu_util_pct`)、样本主体离散度 (`dispersion` = iqr/median)。
+
+    问「测的是不是这个东西」的两个 (doc 49 §3.5): 出处 (`backend_caps` 对
+    `required_caps`, 加上载荷自报的 `reported_mode`/`reported_device` 作对照) 与
+    环境漂移 (`environment_drift`, 由 `environment.compare_fingerprints` 算出)。
 
     污染判为 DEGRADED 而不是 UNINFORMATIVE: `benchmark_with_baselines` 是同机同卡
     依次测候选与各基线的, 两者落在同一个污染窗口里, 比值仍保留部分意义; 但绝对
@@ -315,6 +439,10 @@ def assess(median_time_ms: Optional[float] = None,
 
     离散度同理: iqr/median 超过 0.10 说明这台机器此刻在抖, median 本身仍是无偏的,
     但它的精度撑不住「加速比 1.02x」这种量级的结论。
+
+    环境漂移也停在 DEGRADED, 而且**没有阈值**: 「torch 从 2.14 变成 2.15」到底该不该
+    让一次运行作废, 本机还没有分布能回答。按项目「观测先于判定」的处置, 先把
+    「变了哪些键」这件事变得可见 (产物 + 日志), 并且不让它去驱动永久决策。
 
     max_over_median **不改变档位**, 只写进 reasons 并置 `intruder_suspected` —— 它被
     顺序统计量效应污染, 实测干净测量就已打到 1.86。详见 INTRUDER_MAX_OVER_MEDIAN
@@ -383,6 +511,38 @@ def assess(median_time_ms: Optional[float] = None,
             f"{INTRUDER_MAX_OVER_MEDIAN:.0f}, 实测样本数越多该值天然越高): "
             f"窗口内可能有抢占, 也可能只是长尾; **仅诊断, 不影响本轮判定**")
 
+    # ── 出处 (doc 49 §3.5 第 2/3 处) ──────────────────────────────────
+    # `backend_caps is None` 表示调用方压根没提供能力信息 (老路径 / 直接调 assess 的
+    # 单测), 与「提供了空集」必须分开: 后者是 `LocalExecutor` 如实声明的样子, 该判;
+    # 前者无从判, 只能显式记一句。
+    shortfall: tuple = ()
+    conflicts: tuple = ()
+    real_device: Optional[bool] = None
+    if backend_caps is None:
+        if required_caps:
+            reasons.append("任务声明了 required_caps 但调用方没提供后端能力, 未做出处检查")
+    else:
+        real_device = Cap.REAL_DEVICE in frozenset(backend_caps)
+        shortfall, conflicts = provenance_conflicts(
+            backend_caps, required_caps, reported_mode, reported_device)
+        if shortfall:
+            validity = _worse(validity, Validity.UNINFORMATIVE)
+            reasons.append(
+                f"任务要求的能力执行侧没有: {', '.join(shortfall)} —— 这批数字不是"
+                f"在满足要求的设备上测出来的, 「通过/不通过」都没有对象")
+        for c in conflicts:
+            validity = _worse(validity, Validity.UNINFORMATIVE)
+            reasons.append(f"出处自相矛盾: {c}")
+
+    # ── 环境漂移 (doc 49 §3.5 第 1 处) ────────────────────────────────
+    drift = tuple(environment_drift or ())
+    if drift:
+        validity = _worse(validity, Validity.DEGRADED)
+        reasons.append(
+            "环境指纹与上一次运行不一致 (" + "; ".join(drift) + "): "
+            "本轮加速比与上一次不可比, 不得据此禁用配方或累计停滞; "
+            "**不据此判核失败** (观测先于判定)")
+
     return MeasurementAssessment(
         validity=validity,
         reasons=reasons,
@@ -392,4 +552,9 @@ def assess(median_time_ms: Optional[float] = None,
         dispersion=dispersion,
         max_over_median=max_over_median,
         intruder_suspected=intruder,
+        capability_shortfall=shortfall,
+        provenance_conflict=conflicts,
+        required_caps=tuple(sorted(c.value for c in frozenset(required_caps or ()))),
+        backend_real_device=real_device,
+        environment_drift=drift,
     )

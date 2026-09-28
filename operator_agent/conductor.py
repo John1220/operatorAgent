@@ -30,6 +30,7 @@ from .remote_executor import RemoteExecutor
 from .llm_client import LLMClient
 from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
+from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
 from .measurement import (ROOFLINE_CONVERGED_PCT, Validity, Verdict,
                           binding_attainment, roofline_converged, verdict)
 from .agent_logger import capture_execution
@@ -155,6 +156,9 @@ class Conductor:
         self.fixer = FixerAgent(llm=llm, prompt_manager=self.pm, failure_db=self.failure_db)
         # 优化配方选择器 (确定性规则，不依赖 LLM)
         self.planner = OptimizationPlanner()
+        # 本次运行的环境指纹与漂移比较结果 (由 `_execute_inner` 填)。初值给空指纹:
+        # `_flush_snapshot` 也可以在 `execute()` 之外被调到 (单测直接调它), 不该 AttributeError。
+        self._environment: dict = {"fingerprint": {}, "drift": None}
 
     def execute(
         self,
@@ -270,13 +274,19 @@ class Conductor:
                 )
                 return artifact
 
-        # 获取硬件信息 + 环境指纹 (用于环境漂移自检与结果追溯)
+        # 获取硬件信息 + 环境指纹。
+        #
+        # 指纹以前只在这里被 `print` 一次就丢掉 (doc 49 §3.5 第 1 处: 全仓 3 次命中
+        # 全在这 6 行里), 旁边那行注释却写着「用于环境漂移自检」—— 描述的是一个不存在
+        # 的机制。现在它有三个读者: 落进 result.json / execution_snapshot.json (下一次
+        # 运行据此比较)、打进日志、以及作为 L3 测量有效性的一个输入 (漂移 ⇒ 降到
+        # DEGRADED, 不禁用配方也不计停滞, 但**不**据此判核失败)。
         hw_info = self.backend.get_hardware_info()
-        fingerprint = {
-            k: hw_info[k]
-            for k in ("name", "device", "compute_capability", "torch_version", "triton_version")
-            if k in hw_info
-        }
+        fingerprint = fingerprint_of(hw_info, self.backend.label)
+        # 挂在实例上而不是加到 `_flush_snapshot` 的 12 个形参里: 它在一次运行内是常量,
+        # 而 `_flush_snapshot` 有 7 个调用点 (与 `capture_execution` 写 `self._log_path`
+        # 同一种「本次运行的上下文」)。`execute()` 不是可重入的。
+        self._environment = {"fingerprint": fingerprint, "drift": None}
         if fingerprint:
             print(f"  环境指纹: {fingerprint}")
 
@@ -304,6 +314,7 @@ class Conductor:
 
         # ── 可复现性 Harness: 若提供 resume_from 则加载快照恢复状态 ──
         snap_path = self._resolve_snapshot_path(resume_from)
+        snap_fingerprint: Optional[dict] = None
         if snap_path:
             try:
                 snap = self._load_snapshot(snap_path)
@@ -323,12 +334,44 @@ class Conductor:
                      all_verification_results) = self._restore_state_from_snapshot(snap, task)
                     # 快照目录就是续跑写入目录
                     snapshot_target_dir = os.path.dirname(snap_path)
+                    snap_fingerprint = snap.get("environment_fingerprint") or None
                     print(f"\n[Conductor] 🔄 断点续跑: 已恢复到完成 {start_round-1} 轮, "
                           f"best_gflops={best_gflops:.2f}, 当前从轮次 {start_round} 开始")
                     if pending_fix:
                         print(f"  有 pending_fix ({len(pending_fix)} chars), 下一轮直接用修复代码")
                     if current_sketch:
                         artifact.sketch = current_sketch
+
+        # ── 环境漂移自检 (doc 49 §3.5 第 1 处) ────────────────────────────────
+        # 「上一次」优先取续跑快照: 那条路径上 `best_gflops` / `iteration_history` /
+        # 已禁用配方**全都是从上一次继承来的**, 环境一变, 继承下来的那个数就不再与本
+        # 轮可比 —— 这是漂移唯一会直接污染判决的场合, 所以它排在产物库前面。
+        # 没有续跑时才回落到产物库里最近一次同 (算子, 硬件) 的运行。
+        #
+        # 刻意**不**每轮重探一次 `get_hardware_info()`: 那会给每一轮加一次远端往返,
+        # 而「这一轮跑在哪张卡上」已经随 L3 载荷回来了 (`selected_gpu` / `device` /
+        # `sm_clock_*`)。轮内漂移用那些键复盘, 跨运行漂移用指纹。
+        if snap_fingerprint:
+            previous_fp, previous_from = snap_fingerprint, "断点续跑的快照"
+        else:
+            # 必须在本次 `store.save()` 之前问: `previous_environment` 不知道「本次」
+            # 是谁, 落盘之后再问就会把自己当成上一次。
+            prev = self.store.previous_environment(
+                task.source.kernel_type or "unknown",
+                task.target.hardware or "unknown",
+            )
+            previous_fp = (prev or {}).get("fingerprint")
+            previous_from = (f"上一次运行的产物 ({os.path.basename(prev['artifact_dir'])})"
+                             if prev else "")
+        drift = compare_fingerprints(fingerprint, previous_fp, previous_from)
+        for line in drift.report_lines():
+            print(line)
+        artifact.environment_fingerprint = fingerprint
+        artifact.environment_drift = drift.as_dict()
+        self._environment["drift"] = artifact.environment_drift
+        # 传给 Verifier 的只有「变了哪些项」; 无从比较时传 None (与「比过了没变」分开,
+        # 见 `measurement.assess` 里那条「没提供 ≠ 检查过」的处理)。
+        verify_drift = list(drift.changed) if drift.drifted else None
 
         if current_sketch is None:
             # 非续跑: 正常跑 Designer
@@ -423,6 +466,7 @@ class Conductor:
                 test_inputs=test_inputs,
                 expected_output=expected_output,
                 target_gflops=target_gflops,
+                environment_drift=verify_drift,
             )
             all_verification_results = verify_results
 
@@ -831,8 +875,11 @@ class Conductor:
               f"其中 {duplicate_rounds} 轮与更早的轮次结构相同")
 
         if invalid_measurement_rounds:
+            # 括号里以前写死「污染 / launch 地板支配」两项, 而判据已经有五项 (还有
+            # 样本离散度、数字的出处、环境漂移)。列举会过期, 逐轮的原因本来就在上面
+            # 打过一遍, 这里只报数。
             print(f"\n[Conductor] ⚠️ 本次 {invalid_measurement_rounds} 轮的 L3 测量被判为不可信 "
-                  f"(污染 / launch 地板支配), 这些轮次未参与配方禁用与停滞计数")
+                  f"(逐轮原因见上), 这些轮次未参与配方禁用与停滞计数")
 
         self._print_summary(artifact, task, saved_dir)
 
@@ -904,6 +951,7 @@ class Conductor:
                              applied_recipes: set,
                              disabled_recipes: set,
                              all_verification_results: list,
+                             environment: Optional[dict] = None,
                              ) -> dict:
         """把运行时状态打包成可 JSON 化的 dict"""
         def vr_to_dict(vr: VerificationResult) -> dict:
@@ -914,6 +962,7 @@ class Conductor:
                 "error_log": vr.error_log,
                 "metrics": vr.metrics or {},
             }
+        env = environment or {}
         return {
             "schema_version": 1,
             "created_at": __import__("time").time(),
@@ -932,6 +981,12 @@ class Conductor:
             "applied_recipes": sorted(applied_recipes or set()),
             "disabled_recipes": sorted(disabled_recipes or set()),
             "verification_results": [vr_to_dict(v) for v in (all_verification_results or [])],
+            # 指纹进快照是为了续跑: `resume_from` 会把 `best_gflops` 与已禁用配方一并
+            # 继承过来, 环境一变那些就不再可比 —— 那是漂移唯一直接污染判决的场合
+            # (doc 49 §3.5 第 1 处)。旧快照没这个键, 读出来是 None, 比较时会如实报
+            # 「没有可比的上一次」而不是「没漂移」。
+            "environment_fingerprint": env.get("fingerprint") or None,
+            "environment_drift": env.get("drift"),
         }
 
     def _flush_snapshot(self, *, task: TaskSchema, artifact_dir: Optional[str],
@@ -957,6 +1012,7 @@ class Conductor:
             applied_recipes=applied_recipes,
             disabled_recipes=disabled_recipes,
             all_verification_results=all_verification_results,
+            environment=self._environment,
         )
         target_dir = artifact_dir
         # 若没有 artifact_dir (第 1 轮还没走 save), 就预创建一个 "staging" 快照目录
