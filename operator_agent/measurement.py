@@ -379,12 +379,23 @@ class MeasurementAssessment:
         if self.max_over_median is not None:
             out["dispersion_max_over_median"] = self.max_over_median
         out["measurement_intruder_suspected"] = self.intruder_suspected
-        # 这一个键是**判据的输入**而不是装饰: `persist_decision` 读它决定「这份成绩
-        # 能不能进跨运行语料」。有了它, 一份纯模拟的基准与一份真机实测的基准在产物里
-        # 不再权威性等价 (doc 49 §3.5 第 2 处)。只在调用方给了能力信息时才写 ——
-        # 缺键与 False 是两件事, 老产物走 `is False` 判定, 不会被追溯性重判。
+        # `backend_real_device` 是**判据的输入**而不是装饰: `persist_decision` 读它决定
+        # 「这份成绩能不能进跨运行语料」。有了它, 一份纯模拟的基准与一份真机实测的基准
+        # 在产物里不再权威性等价 (doc 49 §3.5 第 2 处)。
+        # 只在调用方给了能力信息时才写 —— 缺键与 False 是两件事, 老产物走 `is False`
+        # 判定, 不会被追溯性重判。同一批里的 shortfall/矛盾/拒绝是同一个理由: 没做过
+        # 出处检查时不写, 免得下游把「没检查」读成「检查过、干净的」。
         if self.backend_real_device is not None:
             out["backend_real_device"] = self.backend_real_device
+            out["measurement_capability_shortfall"] = list(self.capability_shortfall)
+            out["measurement_provenance_conflict"] = list(self.provenance_conflict)
+            # 这个布尔是**判据的输出**: 没有它, 下游想区分「核太慢所以没过」与
+            # 「压根没测所以没资格过」就只能去 string-match message 里那个 ⛔。
+            out["measurement_l3_pass_refused"] = self.l3_pass_is_refused
+        # 漂移这里落成列表: 空 = 本轮没有漂移信号。注意「比过了没变」与「没有上一次可比」
+        # 在这一层分不开 (conductor 两条都传 None) —— 那个区分在产物级的
+        # `environment_drift.comparable` 里, 不在轮级 metrics 里。
+        out["measurement_environment_drift"] = list(self.environment_drift)
         return out
 
 

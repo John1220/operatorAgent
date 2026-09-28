@@ -418,7 +418,51 @@ def _exec_result():
                            memory_bandwidth_gbs=100.0, device="cpu")
 
 
-# ─── 三、真提供方: 不用假件的那一组 ────────────────────────────────
+# ─── 三、拒绝这件事在产物里读得出来 ────────────────────────────────
+
+class TestRefusalIsReadableInMetrics(unittest.TestCase):
+    """`capability_shortfall` / `provenance_conflict` / 拒绝位此前只活在内存里的
+    `MeasurementAssessment` 上, **从没进 `metrics`** —— 也就是进不了 `result.json`。
+    下游想区分「核太慢所以没过」与「压根没测所以没资格过」就只能去 string-match
+    message 里那个 ⛔。这是 doc 49 §3.5 那一族的最后一个现场: 这一片修「算了没人读」,
+    自己又留了一个算了没人读的。
+
+    发现方式值得记一次: 是在真机上**试图读这几个键**时撞出来的
+    (`benchmarks/verify_provenance_gate.py`), 不是读代码读出来的。
+    """
+
+    def test_a_refusal_is_readable_without_string_matching_the_mark(self):
+        v = _verifier(NOT_REAL, _bench(mode="simulated"))
+        r, _ = _l3(v, _task(required=(Cap.REAL_DEVICE,)))
+        self.assertFalse(r.passed, r.message)
+        self.assertTrue(r.metrics["measurement_l3_pass_refused"])
+        self.assertEqual(["real_device"], r.metrics["measurement_capability_shortfall"])
+
+    def test_a_slow_kernel_fails_without_raising_the_refusal_flag(self):
+        """控制变量: 同一份核、能力齐全, 只是门槛高 —— 那必须是「慢」而不是「没测」"""
+        v = _verifier(REAL, _bench())
+        r, _ = _l3(v, _task(required=(Cap.REAL_DEVICE,), min_speedup=5.0))
+        self.assertFalse(r.passed, "这份载荷的加速比约 1.12x, 5.0x 门槛应当没过")
+        self.assertFalse(r.metrics["measurement_l3_pass_refused"],
+                         "慢不是出处问题 —— 拒绝位必须区分这两件事")
+        self.assertEqual([], r.metrics["measurement_capability_shortfall"])
+
+    def test_the_keys_are_absent_when_no_capability_info_was_given(self):
+        """缺键 ≠ 空列表: 没做过出处检查时不许下游读成「检查过、干净的」"""
+        a = assess(median_time_ms=CANDIDATE_MS)   # 不传 backend_caps
+        m = a.as_metrics()
+        self.assertNotIn("measurement_capability_shortfall", m)
+        self.assertNotIn("measurement_l3_pass_refused", m)
+        self.assertNotIn("backend_real_device", m)
+
+    def test_drift_reaches_metrics_as_a_list(self):
+        a = assess(median_time_ms=CANDIDATE_MS,
+                   environment_drift=["torch_version: '2.14' → '2.15'"])
+        self.assertEqual(["torch_version: '2.14' → '2.15'"],
+                         a.as_metrics()["measurement_environment_drift"])
+
+
+# ─── 四、真提供方: 不用假件的那一组 ────────────────────────────────
 
 @unittest.skipIf(_has_cuda(), "本机有 CUDA 时 MockGPU 声明 REAL_DEVICE, 这组前提不成立")
 class TestRealProviderMockGPU(unittest.TestCase):
@@ -695,6 +739,13 @@ class TestReadersAreNotJustMentions(unittest.TestCase):
         sites = [s for s in self._read_sites("device") if s.startswith("verifier.py")]
         self.assertGreaterEqual(len(sites), 3,
                                 f"`device` 的读者又只剩显示名了: {sites}")
+
+    def test_the_refusal_flag_has_a_production_reader(self):
+        """写进 metrics 却没人读 = 又造一个 §3.5。Conductor 的汇总必须读它"""
+        sites = [s for s in self._read_sites("measurement_l3_pass_refused")
+                 if s.startswith("conductor.py")]
+        self.assertTrue(sites,
+                        "`measurement_l3_pass_refused` 又变成零读者了 (doc 49 §3.5)")
 
     def test_the_fingerprint_helpers_are_called_by_the_conductor(self):
         for name in ("fingerprint_of", "compare_fingerprints", "previous_environment"):

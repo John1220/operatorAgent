@@ -388,6 +388,11 @@ class Conductor:
         # 本次运行内累计的「测量无效」轮数。不进快照: 它描述的是本次会话的测量
         # 环境, 续跑时机器负载早变了, 恢复旧值没有意义。
         invalid_measurement_rounds = 0
+        # 出处不对而拒绝通过的那些轮 (doc 49 §7.9)。与上面那个计数器**分开**数是因为
+        # 两者的含义相反: `invalid` 是「测了但撑不住结论」, `refused` 是「压根没测过
+        # 一个可判定的东西」—— 后者的轮次烧了 LLM 与远程编译, 却没有产出任何关于这台
+        # 机器的证据, 混在一个数里就看不出搜索其实在空转。
+        refused_rounds = 0
 
         # 本次运行内每轮候选的结构签名 (doc 47)。同上, 不进快照 —— 它只在「这一次搜索
         # 有没有原地打转」这个尺度上有意义。
@@ -550,6 +555,10 @@ class Conductor:
                 measurement_ok = self._measurement_drives_loop(l3_result, round_num)
                 if not measurement_ok:
                     invalid_measurement_rounds += 1
+                # 读的是 metrics 里那个布尔而不是重算一遍判据: 键没了就说明提供方
+                # 没做过出处检查, 此时如实计 0, 不假装数过了。
+                if (l3_result.metrics or {}).get("measurement_l3_pass_refused"):
+                    refused_rounds += 1
 
             # L3 性能改善追踪: 连续无改善时提前终止，避免浪费 LLM token
             if l3_result and l3_result.passed is False and measurement_ok:
@@ -880,6 +889,11 @@ class Conductor:
             # 打过一遍, 这里只报数。
             print(f"\n[Conductor] ⚠️ 本次 {invalid_measurement_rounds} 轮的 L3 测量被判为不可信 "
                   f"(逐轮原因见上), 这些轮次未参与配方禁用与停滞计数")
+
+        if refused_rounds:
+            print(f"\n[Conductor] ⛔ 本次 {refused_rounds} 轮的 L3 因**出处不对**而不记为通过 "
+                  f"(任务声明了执行侧没有的能力) —— 这些轮不是「核太慢」, 是压根没测过"
+                  f"一个可判定的东西; 它们烧了 LLM 与远程编译, 没产出关于这台机器的证据")
 
         self._print_summary(artifact, task, saved_dir)
 
