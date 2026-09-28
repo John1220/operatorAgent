@@ -18,7 +18,27 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .hardware_caps import HardwareCaps, detect_hardware_caps, get_caps_for_target
+from .hardware_caps import (
+    HardwareCaps,
+    UnknownHardware,
+    detect_hardware_caps,
+    get_caps_for_target,
+    unknown_caps,
+)
+
+
+class CapsRequirementUnparsable(ValueError):
+    """`requires_caps` 里出现判不了的条件。
+
+    判不了 ≠ 满足: 这里曾经 `return True`, 于是配方里一个拼错的字段名会让该配方在
+    **任何**硬件上都入选。抛出来是为了让「无法判定」在类型上不可能被读成 True;
+    策略留给调用方 —— `_check_all_caps` 把它当成不通过并写进拒绝原因, 因为一轮
+    plan() 崩掉的代价比少选一条配方大。
+    """
+
+    def __init__(self, req: str):
+        self.req = req
+        super().__init__(f"无法判定的 requires_caps 条件: {req!r}")
 
 
 @dataclass
@@ -240,12 +260,15 @@ class OptimizationPlanner:
         return reqs
 
     @staticmethod
-    def _check_caps_requirement(req: str, caps: HardwareCaps) -> bool:
-        """检查单个硬件能力要求是否满足"""
+    def _evaluate_caps_requirement(req: str, caps: HardwareCaps) -> Optional[bool]:
+        """判定单条能力要求; 返回 None 表示这条字符串根本判不了 (配方写错)。
+
+        三态而不是 bool: 有了 None 这一态, 「判不了」就没法在下游被读成「满足」。
+        """
         req = req.strip()
         # 布尔要求裸名: "has_tensor_core" 等同 "has_tensor_core=True"。
         # 按前缀判定而不是枚举字段名 —— 枚举表漏一个新字段, 该配方就会走到函数
-        # 末尾的「无法解析则默认通过」, 于是被塞给不具备该能力的硬件。
+        # 末尾的「无法判定」, 于是被塞给不具备该能力的硬件。
         if re.fullmatch(r"has_\w+", req):
             return bool(getattr(caps, req, False))
 
@@ -271,18 +294,23 @@ class OptimizationPlanner:
             actual = actual or 0
             if op == ">=":
                 return actual >= val
-            elif op == "<=":
+            if op == "<=":
                 return actual <= val
-            elif op == ">":
+            if op == ">":
                 return actual > val
-            elif op == "<":
+            if op == "<":
                 return actual < val
-            elif op == "==":
-                return actual == val
+            return actual == val
 
-        # vector_width_bytes >= 16 之类
-        # 如果无法解析，默认通过 (不阻塞)
-        return True
+        return None
+
+    @staticmethod
+    def _check_caps_requirement(req: str, caps: HardwareCaps) -> bool:
+        """检查单个硬件能力要求是否满足; 判不了就抛, 不默认通过"""
+        verdict = OptimizationPlanner._evaluate_caps_requirement(req, caps)
+        if verdict is None:
+            raise CapsRequirementUnparsable(req)
+        return verdict
 
     def plan(
         self,
@@ -320,7 +348,16 @@ class OptimizationPlanner:
 
         # Layer 1: 获取硬件能力描述
         if hw_caps is None:
-            hw_caps = detect_hardware_caps(hardware) if hardware else get_caps_for_target("nvidia_gpu")
+            if hardware:
+                hw_caps = detect_hardware_caps(hardware)
+            else:
+                try:
+                    hw_caps = get_caps_for_target("nvidia_gpu")
+                except UnknownHardware:
+                    # 调用方没给任何硬件信息 ⇒ 认不出。"nvidia_gpu" 这个字面量以前会
+                    # 被兜到 A100 的完整能力表上, 于是一轮没做过任何探测的优化按
+                    # 108 SM / 2039 GB/s 选配方。
+                    hw_caps = unknown_caps("nvidia_gpu")
 
         # DSL 标准化
         dsl_normalized = self.DSL_ALIASES.get(dsl.lower(), dsl.lower())
@@ -375,13 +412,19 @@ class OptimizationPlanner:
     def _check_all_caps(self, reqs: list[str], caps: HardwareCaps) -> tuple[bool, str]:
         """检查所有硬件能力要求，返回 (是否满足, 失败原因)"""
         for req in reqs:
-            if not self._check_caps_requirement(req, caps):
+            try:
+                ok = self._check_caps_requirement(req, caps)
+            except CapsRequirementUnparsable:
+                ok = False        # 判不了按不通过处理, 原因由 _caps_failure_note 留下
+            if not ok:
                 return False, req + self._caps_failure_note(req, caps)
         return True, ""
 
     @staticmethod
     def _caps_failure_note(req: str, caps: HardwareCaps) -> str:
         """区分「硬件不够」和「配方条件写错」—— 后者不写进拒绝原因就没人会去修。"""
+        if OptimizationPlanner._evaluate_caps_requirement(req, caps) is None:
+            return "  [条件无法判定 (既不是 has_* 布尔也不是整数比较), 按不满足处理]"
         m = re.match(r"(\w+)\s*(?:>=|<=|>|<|==)\s*\d+", req.strip())
         if m:
             attr = m.group(1)

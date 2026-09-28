@@ -14,8 +14,24 @@
   - Execution: 执行模型 (warp/sub_group 大小、最大并发)
 """
 
+import copy
+import re
 from dataclasses import dataclass, field, asdict
 from typing import Optional
+
+
+class UnknownHardware(KeyError):
+    """查表未命中的目标硬件。
+
+    继承 KeyError 是因为它本来就是查表未命中; 带 target 与 known_keys 是因为
+    「认不出」这个事实要能被调用方原样转述出来, 而不是被某个具体型号的规格顶掉。
+    """
+
+    def __init__(self, target: str, known_keys):
+        self.target = target
+        self.known_keys = sorted(known_keys)
+        super().__init__(
+            f"认不出的目标硬件 {target!r}; 已知键名: {self.known_keys}")
 
 
 @dataclass
@@ -268,6 +284,49 @@ def _nvidia_cc_major(cc: str) -> int:
     return int(head) if head.isdigit() else 0
 
 
+def _match_known_key(*texts: str) -> Optional[str]:
+    """在若干**已小写化**的串里找 _KNOWN_HARDWARE 的键, 返回命中的键名。
+
+    detect_hardware_caps 与 get_caps_for_target 共用这一套策略 (此前一个按键名长度
+    降序、一个按字典插入顺序)。两条规则各自挡一类事故:
+
+      * 长者优先 —— 短键不许靠插入顺序抢在包含它的长键前面;
+      * 键的前后都不许紧跟数字 —— 表里没有 h200 条目, 纯子串匹配会让 "nvidia h200"
+        命中 "h20", 于是 H200 拿着 H20 的 4000 GB/s / 148 TFLOPS 当自己的规格,
+        roofline 分母偏小 6.7 倍, 正是会提前判停的那个方向。型号尾部再接数字就是
+        另一个型号; 尾部接字母 (MI250X / V100S / MockGPU) 仍按同族的能力表处理,
+        那是本表一贯的粗粒度。
+    """
+    needles = [t for t in texts if t]
+    if not needles:
+        return None
+    for key in sorted(_KNOWN_HARDWARE, key=len, reverse=True):
+        token = re.compile(r"(?<![0-9])" + re.escape(key) + r"(?![0-9])")
+        if any(token.search(t) for t in needles):
+            return key
+    return None
+
+
+def unknown_caps(device_name: str = "") -> HardwareCaps:
+    """显式标注为「认不出」的能力描述: 所有 has_* 为 False, 算力/带宽/SM 数为 0。
+
+    给「拿不到硬件事实但流程要继续」的调用方用。dataclass 上默认为 True 的那几个
+    has_* 在这里一并置 False, supported_dsls 置空: 未知设备不该拿到任何以硬件特性
+    为前提的配方, 也不该宣称支持某套 DSL。
+    """
+    return HardwareCaps(
+        vendor="unknown",
+        device_name=device_name or "unknown",
+        has_block_reduce=False,
+        has_warp_shuffle=False,
+        has_warp_primitives=False,
+        has_shared_memory=False,
+        has_atomic_fadd=False,
+        has_fast_math=False,
+        supported_dsls=set(),
+    )
+
+
 def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
     """
     从 backend.get_hardware_info() 返回的 dict 自动推断硬件能力。
@@ -281,13 +340,15 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
     cc = str(hw_info.get("compute_capability", "") or "")
     device = str(hw_info.get("device", "") or "")
 
-    # 尝试匹配已知硬件 (键名长者优先, 避免 "h20" 抢在 "h200" 之前命中)
-    for key in sorted(_KNOWN_HARDWARE, key=len, reverse=True):
-        if key in name or key in vendor or key in device:
-            caps = _KNOWN_HARDWARE[key]
-            # 用 hw_info 中的动态数据覆盖预定义值
-            caps.sm_count = hw_info.get("multiprocessor_count", caps.sm_count) or caps.sm_count
-            return caps
+    key = _match_known_key(name, vendor, device)
+    if key is not None:
+        # 必须是副本: 表里存的是模块级共享实例, 就地写 sm_count 等于把这一次探测到的
+        # 数字留给之后所有调用方 (跨任务、跨设备都读到同一份污染值)。deepcopy 而不是
+        # dataclasses.replace —— supported_dsls 是可变 set, 浅拷贝仍然共享同一个对象。
+        caps = copy.deepcopy(_KNOWN_HARDWARE[key])
+        # 用 hw_info 中的动态数据覆盖预定义值
+        caps.sm_count = hw_info.get("multiprocessor_count", caps.sm_count) or caps.sm_count
+        return caps
 
     # 未知硬件：根据字段尽力推断
     caps = HardwareCaps(
@@ -326,12 +387,15 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
 
 
 def get_caps_for_target(target_hardware: str, dsl: str = "triton") -> HardwareCaps:
-    """根据 target.hardware 字符串获取硬件能力 (用于 Planner 初始化时)"""
+    """根据 target.hardware 字符串获取硬件能力 (用于 Planner 初始化时)
+
+    认不出来就抛 UnknownHardware。这里曾经按字样兜底: 含 "nvidia" 的一律返回 A100 的
+    完整能力表 (156 TF32 / 312 FP16 / 2039 GB/s / 108 SM), 其余一律返回 2 个 SM 的
+    mock —— 两个兜底都把「不知道这台卡是什么」翻译成了一个像样的规格, 调用方无从
+    分辨。宁可让调用方拿到一个显式的未知 (unknown_caps), 也不给它一个能当分母用的数。
+    """
     th = (target_hardware or "").lower()
-    for key, caps in _KNOWN_HARDWARE.items():
-        if key in th:
-            return caps
-    # 通用 nvidia_gpu 回退到 A100 级别
-    if "nvidia" in th:
-        return _KNOWN_HARDWARE["a100"]
-    return _KNOWN_HARDWARE["mock"]
+    key = _match_known_key(th)
+    if key is None:
+        raise UnknownHardware(target_hardware, _KNOWN_HARDWARE)
+    return copy.deepcopy(_KNOWN_HARDWARE[key])
