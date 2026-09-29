@@ -47,8 +47,11 @@ ROWS = [
         "假 urlopen 全抛错跑一次 `main` ⇒ 退出码仍是 1，但收尾不再带 id、也不说「没取回字节」。"
         "AST 那条同时红 (main 里没有 closing_advice 这个 Name)"),
 
+    # ⚠️ 这一行的锚点 2026-09-30 被本片自己撞模糊了: 新加的「HTTPError 且正文为空」分支里也有
+    #    一句一模一样的 `fetch_failed.append(arxiv_id)` ⇒ 表直接报「锚点出现 2 次」。
+    #    把上一行 (`except Exception as exc:`) 一起写进锚点来定住位置 —— 那是唯一的一条。
     Row("R5 except 里不记 id (接线断)", "rc",
-        "            fetch_failed.append(arxiv_id)\n",
-        "            pass  # (变异掉: 不记是哪个 id)\n",
+        "        except Exception as exc:  # noqa: BLE001\n            fetch_failed.append(arxiv_id)\n",
+        "        except Exception as exc:  # noqa: BLE001\n            pass  # (变异掉: 不记是哪个 id)\n",
         "假 urlopen 全抛错 ⇒ 收尾那句印成「本轮 0 个 id 没取回字节」，具体是哪个查不到"),
 ]
