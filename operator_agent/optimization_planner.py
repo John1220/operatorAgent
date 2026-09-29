@@ -549,8 +549,12 @@ class OptimizationPlanner:
             conds["compute_bound"] = True
         if "memory-bound" in cl or "memory_bound" in cl:
             conds["memory_bound"] = True
-        if "utilization" in cl and "<" in cl:
-            m = re.search(r"util(?:ization)?\s*<\s*(\d+)", cl)
+        # 入口守卫以前要的是字面量 "utilization", 而配方实际写的是 `gflops_util < 80%`
+        # ⇒ 三条配方的利用率条件从来没被解析出来过 (正则本身是认得的, 守卫先把它挡了)。
+        # 放宽到 "util" 之后, 那个「不算这里说的」的语义就交给下面的否定先行断言:
+        # `bandwidth_util` 那一族走 `low_bandwidth_util`, 不许被这条一并设上。
+        if "util" in cl and "<" in cl:
+            m = re.search(r"(?<!bandwidth_)util(?:ization)?\s*<\s*(\d+)", cl)
             if m:
                 conds["low_utilization"] = int(m.group(1))
         if "bandwidth" in cl and "<" in cl:
