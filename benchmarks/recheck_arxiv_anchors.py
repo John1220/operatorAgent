@@ -20,10 +20,16 @@
 用法:
     python3 -B benchmarks/recheck_arxiv_anchors.py            # 走网络, 真重跑
     python3 -B benchmarks/recheck_arxiv_anchors.py --selftest # 不打网络, 只核这台机器
+    python3 -B benchmarks/recheck_arxiv_anchors.py --doc docs/research/59-*.md   # 只核一份
+
+⚠️ 锚点表**可以住在多份文档里** (每轮调研各开一份), 而 `CITATIONS` 是一份扁平清单 —— 只读一份
+的后果不是报错而是**假红**: 另一份里的引文全被判成「锚点对不上」 (第一次给 doc 59 跑时 13/32,
+19 条 ❌ 全是 doc 58 的引文)。不 `--doc` 时默认把 `DEFAULT_DOCS` 那几份并起来读。
 """
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import re
 import sys
@@ -33,6 +39,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from arxiv_html_to_lines import to_lines  # noqa: E402  ← 同一把尺, 不复制实现
 
 URL = "https://export.arxiv.org/html/{arxiv_id}"
+
+#: 带锚点表的调研文档 (glob, 相对仓库根)。新开的调研单文档要往这里加一行 ——
+#: 漏掉的表现不是报错, 是那份表里的锚点从来没被重跑过 (I28 那一族)。
+DEFAULT_DOCS = ("docs/research/58-*.md", "docs/research/59-*.md")
 
 # 那张表的形状: | 论文 | `arXiv id` | 字节 | 行数 | 读到哪 |
 # 只认「第 2 格是个 arXiv id、第 3/4 格是带千分位的数」的行 —— README 里那种把 id 写进长句子的
@@ -151,6 +161,22 @@ CITATIONS = [
     ("2609.33074v1", 117, 117, "explicitly defined interfaces"),
     ("2609.33074v1", 181, 181, "performance optimization is activated only when correctness becomes sufficiently reliable"),
     ("2609.33074v1", 191, 191, "their normalized speedup scores are set to zero"),
+    # ↓ 2026-09-30 读的 Φ-Bench (doc 59)。这十二句是那一篇里被我方**用来下结论**的全部引用,
+    #   每条都先在 `arxiv_html_to_lines.py` 产出的文本里 `grep -F -c` 核过命中数为 1 (I28:
+    #   needle 不许凭印象拼)。行 78 与 103 是**同一意思的两个措辞** —— 分别登记而不是复用一条,
+    #   因为 `citation_in_range` 按声明区间找, 措辞相同的两句落在不同行时必须各自可重建。
+    ("2609.10226v1", 172, 172, "the reference solution must achieve a stable performance of at least 1.15"),
+    ("2609.10226v1", 172, 172, "the starter solution must fail at least one test"),
+    ("2609.10226v1", 173, 173, "revised or excluded rather than assigned a score"),
+    ("2609.10226v1", 177, 177, "buildability, functional correctness, edit constraints, and anti-cheating checks are evaluated before any reward"),
+    ("2609.10226v1", 181, 181, "AB-BA paired measurement protocol with at least five measurement pairs"),
+    ("2609.10226v1", 183, 183, "A candidate receives a reward of zero if the reference solution does not yield a valid performance"),
+    ("2609.10226v1", 193, 193, "recovering upstream code from published Python packages"),
+    ("2609.10226v1", 193, 193, "hard-coding expected outputs, skipping or bypassing correctness checks"),
+    ("2609.10226v1", 306, 306, "a single NVIDIA H20 GPU to every task, while disabling all other GPU types"),
+    ("2609.10226v1", 319, 319, "performance does not increase consistently with reasoning budget"),
+    ("2609.10226v1", 103, 103, "their evaluation settings are typically restricted to individual functions or small collections of isolated components"),
+    ("2609.10226v1", 78, 78, "existing benchmarks mainly focus on isolated kernels, predefined operators, or pre-specified optimization targets"),
 ]
 
 
@@ -217,13 +243,27 @@ def selftest() -> int:
 def main(argv) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--doc", default=os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "docs/research/58-缓存语义与墙钟上界等新吸收.md"))
+    ap.add_argument("--doc", action="append", default=None,
+                    help="锚点表所在的文档, 可重复; 不给就用 DEFAULT_DOCS 那两份 glob")
     args = ap.parse_args(argv)
     if args.selftest:
         return selftest()
 
-    doc_md = open(args.doc, encoding="utf-8").read()
+    # 表可以住在**多份**文档里 (doc 58 之后每轮调研各开一份), 而 `CITATIONS` 是一份扁平清单。
+    # 只读一份的后果不是报错, 是**假红**: 另一份里那些句子会被判成「锚点对不上」(第一轮跑
+    # doc 59 时 13/32, 而 19 条 ❌ 全是 doc 58 的引文 —— 与「表改了这里没跟着改」是同一种失效)。
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    patterns = args.doc or [os.path.join(root, p) for p in DEFAULT_DOCS]
+    texts = []
+    for pattern in patterns:
+        hits = sorted(glob.glob(pattern))
+        if not hits:
+            print(f"❌ 找不到锚点表所在的文档: {pattern}"
+                  " —— 表搬了家而这里的模式没跟着改, 这条检查已经空转")
+            return 2
+        for path in hits:
+            texts.append(open(path, encoding="utf-8").read())
+    doc_md = "\n".join(texts)
     table = parse_anchor_table(doc_md)
     if not table:
         print(f"❌ 在 {args.doc} 里一条锚点都没解析出来 —— 表的形状变了, 这条检查已经空转")

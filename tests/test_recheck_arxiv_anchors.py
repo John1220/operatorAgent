@@ -28,6 +28,15 @@ M7 的逃逸是**结构性的、不是用例写松了**：`citation_in_range` �
 「守卫被拆 **且** 用真值判断」两件事同时发生才会出错。这两处是**一组**，登记在这里而不是
 给 M7 编一个证人（I23 那条「两种覆盖分开计数」的又一例：一条变异杀不掉时，先问它是没被
 测到，还是它本来就不可观察 —— 后者的正确动作是把它写进注释，不是把用例改成假的绿）。
+
+⚠️ **上面那张表是 2026-09-30 在「只有一份表」的世界里标的**。同日读 Φ-Bench 开出 doc 59 之后，
+`main()` 改成按 `DEFAULT_DOCS` 并读多份（doc 59 §一 记了那次假红：指到 doc 59 跑报 13/32，
+19 条 ❌ 全是 doc 58 的引文），这套里随之加了两条守卫：孤儿判据改用 `main()` 真读的那组文件
+（`test_every_cited_id_appears_in_a_table_that_main_actually_reads`），以及 `DEFAULT_DOCS` 里
+每个模式必须仍匹配到文件（`test_every_default_doc_pattern_still_matches_a_file`）。
+**这两条各自的变异没有重跑** —— 不是它们不可杀，是这次没标；M1~M7 那七条也不覆盖新的多文档
+路径（它们改的是单份表内的判据）。下一个人若要动 `DEFAULT_DOCS` 或 `main()` 的读表逻辑，
+先补这两条的变异标定再动。
 """
 from __future__ import annotations
 
@@ -37,13 +46,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmarks.recheck_arxiv_anchors import (CITATIONS, audit, citation_in_range,  # noqa: E402
+from benchmarks.recheck_arxiv_anchors import (CITATIONS, DEFAULT_DOCS, audit,  # noqa: E402
+                                              citation_in_range,
                                               main, parse_anchor_table, to_int)
 
 REPO = Path(__file__).resolve().parents[1]
 DOC58 = REPO / "docs/research/58-缓存语义与墙钟上界等新吸收.md"
 
 BODY = b"<!DOCTYPE html><body><p>one</p><p>two</p><p>three</p></body>"
+
+
+def _read_default_tables() -> dict:
+    """把 `DEFAULT_DOCS` 指到的那些表并起来解析 —— 与 `main()` 读同一组文件"""
+    texts = []
+    for pattern in DEFAULT_DOCS:
+        for path in sorted(REPO.glob(pattern)):
+            texts.append(path.read_text(encoding="utf-8"))
+    return parse_anchor_table("\n".join(texts))
 
 
 def _table_row(arxiv_id: str, body: bytes = BODY) -> str:
@@ -149,11 +168,30 @@ class TestAuditVerdicts(unittest.TestCase):
 class TestCitationRegistryIsUsable(unittest.TestCase):
     """CITATIONS 自己不许是一串装饰"""
 
-    def test_every_cited_id_appears_in_the_table_it_claims_to_reconstruct(self):
-        table = parse_anchor_table(DOC58.read_text(encoding="utf-8"))
+    def test_every_cited_id_appears_in_a_table_that_main_actually_reads(self):
+        """CITATIONS 里每个 id 都要落在**这条检查真会读到的那些表**里
+
+        原先它只读 doc 58 那一份。`main()` 现在按 `DEFAULT_DOCS` 并读几份 (doc 59 起每轮调研
+        各开一份文档)，两边口径一旦分叉就有两种失效：新文档的引文被误判成孤儿（今天真的红了），
+        或者真正的孤儿因为藏在某份被读到的表里而蒙过去。所以这里读的是 `DEFAULT_DOCS`，
+        与 `main()` 同一组文件 —— 判据与被测对象共用一个真源，而不是各写一遍 glob。
+        """
+        table = _read_default_tables()
         orphans = {c[0] for c in CITATIONS} - set(table)
         self.assertEqual(set(), orphans,
                          f"引文引用了表里没有的论文, 它永远不会被取到: {sorted(orphans)}")
+
+    def test_every_default_doc_pattern_still_matches_a_file(self):
+        """`DEFAULT_DOCS` 里的模式不许悄悄指到空集
+
+        文档改名而这里没跟着改时，`main()` 会退回「只解析到剩下那几份」—— 少一份表就是少一批
+        从来没被重跑过的锚点，而它表现的形态是**一条绿**（I28：可重建这件事没被重建过就只是修辞）。
+        """
+        for pattern in DEFAULT_DOCS:
+            hits = sorted(REPO.glob(pattern))
+            self.assertTrue(hits, f"DEFAULT_DOCS 的模式没匹配到任何文件: {pattern}")
+            self.assertTrue(len(hits) <= 3,
+                            f"模式 {pattern} 匹配到 {len(hits)} 份, 宽到会把别的东西算进表里")
 
     def test_ranges_are_well_formed_and_non_empty(self):
         self.assertTrue(CITATIONS)
