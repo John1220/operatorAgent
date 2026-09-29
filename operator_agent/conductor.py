@@ -112,6 +112,48 @@ def _validity_of(metrics: dict) -> Validity:
         return Validity.VALID
 
 
+def correctness_verified(results: list) -> bool:
+    """L1 与 L2 **都到场且都通过**才算「正确性已验证」
+
+    外部一手 (arXiv:2609.35140v1 行 214, 逐字): "If an offspring fails, revisions must start
+    from a retained **verified** parent, not that offspring." 我方要落地它, 第一件事不是改
+    Fixer, 而是把「这一版被验证过」写成一条能判的谓词 —— 而这里的「verified」是**正确性**
+    (L1+L2), 不含 L3 的性能门: 一个「正确但不够快」的核完全可以当修订起点, 一个「编不过」的
+    不行。
+
+    两个都不是多余的细节:
+    * **要求两级都在场**。`Verifier.verify()` 是 fail-fast (L1 挂就 return), 所以「L2 通过」
+      单独出现时它根本不存在于这份列表里 —— 用 `all(...)` 数空集会得到 True, 那是把
+      「没测过」读成「测过且通过」(本仓那条老纪律, doc 49 §八 那一族)。
+    * **用 `is True` 而不是真值判断**。缺那一级时 `dict.get` 给 None, 而 None 是假值这件事
+      恰好对, 但只对得靠运气; 写死 `is True` 之后「通过」这个词只可能来自一个真的布尔。
+    """
+    passed = {r.level: r.passed for r in results}
+    return (passed.get(VerificationLevel.L1_COMPILE) is True
+            and passed.get(VerificationLevel.L2_FUNCTION) is True)
+
+
+def verified_parent_from(iteration_history: list[dict],
+                         current_code: str) -> Optional[str]:
+    """续跑时从血缘里重建「最近一份已验证的实现」, 重建不出来就返回 None
+
+    判据取**最后一条**血缘: 快照里的 `current_code` 就是那一轮被验证的那份代码, 所以只有
+    最后一轮过了 L1/L2 时两者才对得上。更早的已验证版本不在快照里 (血缘只存了每轮的
+    `levels_passed` 与签名, 没存代码文本), 于是那种情况下这里**如实返回 None** ⇒ Fixer
+    退回今天的形状 (在失败那一版上继续修), 而不是猜一个祖先。
+
+    这一条「续跑后只能重建一步」的限制是有意接受的, 写在 doc 58 §三 的 #85 落地段里。
+    """
+    if not iteration_history or not current_code:
+        return None
+    last = iteration_history[-1]
+    levels = last.get("levels_passed") or {}
+    if (levels.get(VerificationLevel.L1_COMPILE.value) is True
+            and levels.get(VerificationLevel.L2_FUNCTION.value) is True):
+        return current_code
+    return None
+
+
 def _round_axes(l3_result, test_inputs) -> dict:
     """本轮 roofline 的轴 + 输入形状身份, 原样搬进血缘。
 
@@ -366,6 +408,12 @@ class Conductor:
         current_sketch = None
         current_code = ""
         pending_fix: Optional[str] = None  # Fixer 修复后的代码，下一轮优先于重新生成
+        # 「最近一份 L1+L2 已验证的实现」(arXiv:2609.35140v1 行 214 的 retained verified
+        # parent)。它存在的理由是一句话: 修订要从未验过的后代身上退回那个被验过的祖先,
+        # 否则修环就是在坏的那一版上继续叠 —— 而今天的代码正是那样 (`fixer.run(current_code, ...)`)。
+        # None = 「本次运行还没有任何一版过了正确性验证」, 那时退回哪里都不是这件事的语义。
+        verified_parent: Optional[str] = None
+        verified_parent_round: int = 0
         fix_attempts: list[tuple] = []     # (失败结果, 修复说明, 那条失败的 Reflexion 记录或 None)
         # Reflexion 记录创建那一刻**还不知道**这次修复成没成 (下一轮验证才有答案), 所以先按
         # fixed=False 落盘 (崩溃也不丢教训), 任务结束时若产物通过再补写一次。这里存的是
@@ -425,6 +473,14 @@ class Conductor:
                          best_gflops, rounds_without_improvement,
                          optimization_history, applied_recipes, disabled_recipes,
                          all_verification_results) = self._restore_state_from_snapshot(snap, task)
+                        # 已验证祖先不在快照的字段里, 但**可以从血缘的最后一条重建**
+                        # (`levels_passed` 每轮都存了, 而快照的 `current_code` 就是那一轮那份)。
+                        # 重建不出来时是 None ⇒ 续跑后的第一次修复退回今天的形状, 不猜祖先。
+                        verified_parent = verified_parent_from(
+                            artifact.iteration_history, current_code)
+                        if verified_parent is not None:
+                            verified_parent_round = int(
+                                (artifact.iteration_history[-1] or {}).get("round") or 0)
                         # 快照目录就是续跑写入目录
                         snapshot_target_dir = os.path.dirname(snap_path)
                         snap_fingerprint = snap.get("environment_fingerprint") or None
@@ -575,6 +631,12 @@ class Conductor:
             all_verification_results = verify_results
 
             all_passed = all(r.passed for r in verify_results)
+            # 「这一版被验证过」必须在这一刻、由这一刻的读数记下 —— 等下一轮再回头找就没了:
+            # `current_code` 会被 `pending_fix` 覆盖掉 (见上面 `if pending_fix:` 那一支)。
+            # 注意这里**不看** L3: 正确性已验证但不够快的核正是要留在手里的那个起点。
+            if correctness_verified(verify_results):
+                verified_parent = current_code
+                verified_parent_round = round_num
             l3_result = next(
                 (r for r in verify_results if r.level == VerificationLevel.L3_PERFORMANCE), None,
             )
@@ -779,9 +841,22 @@ class Conductor:
 
                     failed_results = [r for r in verify_results if not r.passed]
                     print(f"\n[Fixer] L1/L2 验证失败，启动错误修复...")
+                    # 修订起点 (arXiv:2609.35140v1 行 214)。有已验证的祖先就不从这一版出发:
+                    # 它没通过正确性验证, 在它上面继续叠就是「在坏的后代上盖一层」—— 那正是
+                    # 这句规则要挡的漂移。但**错误信息仍然取这一版的**: 那是「上一次改动坏在哪」
+                    # 的唯一证据, 换成祖先的错误信息就什么都修不了。
+                    # `!= current_code` 那半句管的是同一份文本这次没过 (验证非确定: 共享卡、
+                    # 容差边界) 的场合 —— 那时起点没变, 少了它就印一句「退回」的谎话。
+                    # 它的证人是 `tests/test_verified_parent_retreat.py` 里用假 Verifier 造的
+                    # 那个现场; 没有那一条时这个条件构造不出反例, 就会被当成死文字删掉 (M4)。
+                    repair_base = current_code
+                    if verified_parent is not None and verified_parent != current_code:
+                        repair_base = verified_parent
+                        print(f"  [Conductor] 修订起点退回第 {verified_parent_round} 轮那份 "
+                              f"L1/L2 已验证的实现 (本轮这一版没有通过正确性验证)")
                     try:
                         fixed_code, fix_note = self.fixer.run(
-                            current_code, task, failed_results,
+                            repair_base, task, failed_results,
                         )
                     except Exception as e:
                         print(f"\n[Conductor] Fixer 修复失败 ({e})，停止迭代")
