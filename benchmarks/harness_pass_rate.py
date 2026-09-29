@@ -223,7 +223,21 @@ def aggregate(runs):
     sp_grade = [r["speedup"] for r in decision_grade
                 if isinstance(r.get("speedup"), (int, float))]
 
-    admitted = [r for r in ok_runs if r.get("admitted")]
+    # 入库率与拒收名单必须同分母。`_save_to_db()` 只在 `artifact.all_passed` 那一支被调
+    # (`conductor.py:1112` 明写), 所以**未通过的运行在生产里根本不会被问这道门** —— 把它们
+    # 的判定混进「拒收」名单, 就是让读者以为入库门拒了一些好核, 而它其实一条都没拒
+    # (2026-09-29 那份报表印了「入库 3/3」紧跟三条拒收, 三条全来自未通过的运行)。
+    admitted = [r for r in passed_runs if r.get("admitted")]
+    # 假想事件单独放: 它有用的场合是「如果这些运行当时通过了, 门会不会放它进去」,
+    # 那是一个关于门的问题, 不是一个关于本轮成果的问题。两者必须分栏。
+    counterfactual = sorted({r["admit_reason"] for r in ok_runs
+                             if r.get("admit_reason") and not r.get("admitted")
+                             and not r.get("final_all_passed")})
+    # 名单是**去重后的理由**, 不是运行数 —— 三次同样的拒收只印一行。所以两个数都要给,
+    # 否则「另 3 条」会被读成「还有 3 次被拒」, 而它可能只是 1 种理由的 3 次重复。
+    counterfactual_runs = sum(1 for r in ok_runs
+                              if r.get("admit_reason") and not r.get("admitted")
+                              and not r.get("final_all_passed"))
 
     dup, at_risk, has_sig = _duplicate_rate(ok_runs)
     via = {}
@@ -253,8 +267,14 @@ def aggregate(runs):
         "duplicate_pct": _pct(dup, at_risk) if has_sig else None,
         "admitted": (len(admitted), len(passed_runs)),
         "admitted_pct": _pct(len(admitted), len(passed_runs)),
-        "admit_rejections": sorted({r["admit_reason"] for r in ok_runs
+        "admit_rejections": sorted({r["admit_reason"] for r in passed_runs
                                     if r.get("admit_reason") and not r.get("admitted")}),
+        "gate_never_asked": sorted({r["admit_reason"] for r in passed_runs
+                                    if not r.get("admit_reason")}),
+        "counterfactual_rejections": counterfactual,
+        "counterfactual_runs": counterfactual_runs,
+        "admit_rejection_runs": sum(1 for r in passed_runs
+                                    if r.get("admit_reason") and not r.get("admitted")),
         "cost": {
             "tokens": sum(int(r.get("tokens") or 0) for r in ok_runs),
             "calls": sum(int(r.get("llm_calls") or 0) for r in ok_runs),
@@ -319,6 +339,19 @@ def format_report(agg):
                  + (f" = {agg['admitted_pct']}%" if at else "") + " 被写进跨运行经验库")
     for reason in agg["admit_rejections"]:
         lines.append(f"  拒收: {reason}")
+    if agg["admit_rejections"]:
+        lines.append(f"  （{agg['admit_rejection_runs']} 次运行, "
+                     f"{len(agg['admit_rejections'])} 种不同的理由——名单按理由去重）")
+    if at and not agg["admit_rejections"]:
+        # 空名单也要说一句: 不印的话「门拒了 0 条」与「门没被问过」在报表里长得一样
+        lines.append("  入库门本轮没有拒收任何一次通过的运行")
+    if agg.get("gate_never_asked"):
+        lines.append(f"  ⚠️ 有 {len(agg['gate_never_asked'])} 次通过的运行**没有入库判定记录**"
+                     f" —— 门没被问, 不等于门放过了")
+    if agg.get("counterfactual_rejections"):
+        lines.append(f"  (另 {agg['counterfactual_runs']} 次**未通过**的运行给出了 "
+                     f"{len(agg['counterfactual_rejections'])} 种假想判定 —— 生产里 "
+                     f"`_save_to_db` 只在 all_passed 那一支问这道门, 所以它们不算拒收)")
 
     c = agg["cost"]
     lines.append(f"\n【成本】{c['tokens']} tokens / {c.get('calls', 0)} 次调用 ≈ ${c['usd']}"

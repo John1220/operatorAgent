@@ -435,3 +435,69 @@ class TestOldPayloadStillRenders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAdmissionDenominatorsMatch(unittest.TestCase):
+    """入库率的分母是「通过的运行」, 而拒收名单以前取自**所有未崩溃的运行** —— 两个口径
+    不同源 (2026-09-29 那份真机报表: 「入库 3/3 = 100%」紧跟三条拒收, 而三条全部来自
+    **未通过**的运行)。`_save_to_db()` 只在 `artifact.all_passed` 那一支被调
+    (`conductor.py:1112` 明写), 所以那些运行在生产里**从没被这道门问过**。
+    后果不是数字算错, 是故事讲反: 读者会以为入库门拒了 3 个好核。
+    """
+
+    def _mixed(self):
+        """今天那份数据的样子: 3 次通过且入库 + 3 次未通过但都被量具问了这道门"""
+        passed = [_run([_round(1, l2=True, l3=True, validity=VALID, speedup=1.07)],
+                       admitted=True, reason="speedup=1.070x, validity=valid")
+                  for _ in range(3)]
+        failed = [_run([_round(1, l2=False, l3=False, validity=VALID, speedup=None)],
+                       final=False, admitted=False,
+                       reason="相对同机基线没有加速 (speedup=0.99)")
+                  for _ in range(3)]
+        return passed + failed
+
+    def test_unpassed_runs_are_not_counted_as_rejections(self):
+        agg = aggregate(self._mixed())
+        self.assertEqual([], agg["admit_rejections"],
+                         "未通过的运行被算进拒收名单了 —— 分子分母又不同源")
+        self.assertEqual(1, len(agg["counterfactual_rejections"]),
+                         "名单按理由去重: 三次同一个理由只该有一种")
+        self.assertEqual(3, agg["counterfactual_runs"],
+                         "但运行数不能跟着被去重掉, 否则「另 3 条」到底是 3 次还是 3 种说不清")
+
+    def test_rejection_kinds_and_runs_are_both_reported(self):
+        """拒收名单是按理由去重的, 所以「几条」必须同时给运行数与理由数。
+        4 条而不是 3 条: 量具自己「分母不足不出百分数」那条纪律 (§3.2) 会短路整份报表。
+        """
+        reasons = ("0.99", "0.9688", "None", "0.97")
+        runs = [_run([_round(1, l2=True, l3=True, validity=VALID, speedup=1.07)],
+                     final=True, admitted=False,
+                     reason=f"相对同机基线没有加速 (speedup={sp})") for sp in reasons]
+        text = format_report(aggregate(runs))
+        self.assertIn("4 次运行, 4 种不同的理由", text)
+        runs[1]["admit_reason"] = runs[0]["admit_reason"]
+        text = format_report(aggregate(runs))
+        self.assertIn("4 次运行, 3 种不同的理由", text)
+
+    def test_report_says_the_gate_rejected_nothing(self):
+        text = format_report(aggregate(self._mixed()))
+        self.assertIn("没有拒收任何一次通过的运行", text)
+        self.assertNotIn("  拒收: 相对同机基线没有加速", text)
+        self.assertIn("假想判定", text)
+
+    def test_a_real_rejection_still_shows_up(self):
+        """方向对照: 修复不能把拒收名单清空成「门从没拒过任何东西」"""
+        runs = self._mixed()
+        runs[0]["admitted"] = False
+        runs[0]["admit_reason"] = "窗口被抢占污染 (util 超阈值)"
+        agg = aggregate(runs)
+        self.assertEqual(["窗口被抢占污染 (util 超阈值)"], agg["admit_rejections"])
+        self.assertIn("  拒收: 窗口被抢占污染", format_report(agg))
+
+    def test_a_passed_run_with_no_verdict_is_flagged_not_silent(self):
+        """门没被问 ≠ 门放过了 —— 这两种情况在报表里必须长得不一样"""
+        runs = self._mixed()
+        runs[0]["admitted"] = False
+        runs[0]["admit_reason"] = ""
+        agg = aggregate(runs)
+        self.assertIn("没有入库判定记录", format_report(agg))

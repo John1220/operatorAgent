@@ -323,6 +323,22 @@ class TestCorpusGateReadsIt(unittest.TestCase):
         keep, _ = persist_decision(dict(self.BASE))
         self.assertTrue(keep, "缺键走 `is False`, 老产物不被追溯性重判")
 
+    def test_missing_speedup_is_not_reported_as_no_speedup(self):
+        """2026-09-29 真机报表里 `speedup=None` 被印成「相对同机基线没有加速」——
+        那是把**没有读数**说成**读数说不快**。拒收照旧, 但理由必须是缺陷信号而不是判定。
+        """
+        for bad in (None, "n/a", True):
+            keep, why = persist_decision(dict(self.BASE, speedup_vs_baseline=bad))
+            self.assertFalse(keep, f"非法 speedup={bad!r} 不能当合格样本入库")
+            self.assertIn("没有可用的 speedup 读数", why, why)
+            self.assertNotIn("没有加速", why, f"不能把缺读数讲成判定: {why}")
+
+    def test_a_measured_slow_run_is_still_called_a_verdict(self):
+        """方向对照: 拆成三态之后, 「测到了、确实不快」那条理由不能丢"""
+        keep, why = persist_decision(dict(self.BASE, speedup_vs_baseline=0.97))
+        self.assertFalse(keep)
+        self.assertIn("相对同机基线没有加速 (speedup=0.97)", why)
+
 
 # ─── 二、Verifier 的三条 L3 返回路径 ──────────────────────────────
 

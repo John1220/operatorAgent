@@ -150,7 +150,18 @@ def persist_decision(metrics: dict) -> tuple:
     if metrics.get("benchmark_contaminated"):
         return False, "窗口被抢占污染 (util 超阈值)"
     speedup = metrics.get("speedup_vs_baseline")
-    if not isinstance(speedup, (int, float)) or speedup <= 1.0:
+    # `bool` 显式排除: `isinstance(True, int)` 在 Python 里是真的, 而 `True <= 1.0` 为假,
+    # 于是一个被写成 `True` 的 speedup 会被这道门当成「1x 且合格」放过去。schemas 校验
+    # `min_speedup` 时同一条规矩 (`schemas.py:257`)。
+    if isinstance(speedup, bool) or not isinstance(speedup, (int, float)):
+        # 三态而不是两态: 「没有这个读数」与「读数说不快」不是一回事。前者是缺陷信号
+        # (该轮没走到 L3, 或载荷没把 speedup 搬回来), 报成「没有加速」就把缺证据当成了
+        # 否定证据 —— 与 `EnvironmentDrift.comparable`、`assess()` 里「地板未知」、
+        # `_duplicate_rate` 里「没有签名 ≠ 0%」是同一条纪律 (2026-09-29 真机报表里
+        # `speedup=None` 被印成「相对同机基线没有加速」, 见 doc 48 §六B)。
+        return False, (f"没有可用的 speedup 读数 (speedup={speedup!r}) —— "
+                       f"这不是「没加速」的判定, 是缺陷信号: 该轮没走到 L3 或载荷没搬回来")
+    if speedup <= 1.0:
         return False, f"相对同机基线没有加速 (speedup={speedup})"
     return True, (f"speedup={speedup:.3f}x, "
                   f"validity={metrics.get('measurement_validity', '未知')}")
