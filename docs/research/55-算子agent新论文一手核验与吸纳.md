@@ -346,12 +346,18 @@ trapped in the same faulty pattern."
 | `operator_agent/prompts/fixer_repair.md` | 合写那句换成 `本轮报失败的阶段: {{failure_stage}}` + `{{stage_directive}}` |
 | `tests/test_fixer_stage_branch.py` | 22 条用例 + 21 行变异表（第 1 片 7 条 / 8 行，#76③ 之后 11 条 / 13 行，#76① 第 2 片 +11 例 / +10 行） |
 
-**变异标定：⚠️ 这句原来写的「13/13 拦住、0 逃逸」不可复现，已按 2026-09-29 的一次合并重跑
-改成 21/21**（那 13 行里 M10a/M10b 两行的**锚点在任何文件里都查不到** —— 表只在 doc 里数过、
-没把「改哪一处」落到能重建脚本的地方。这正是我自己记过的那族：计数要连着产它的锚点一起写）。
-重跑把两张表合成一张：第 1 片的 M1–M8 + M9a/M9b + M11（conductor 那道门放宽到 L3）+ 本片的
-M12–M21 = **21 行，21/21 拦住、0 逃逸**，每行锚点现在写在
-`tests/test_fixer_stage_branch.py` 的模块 docstring 里。其中三条值得单独点出：
+**变异标定：⚠️ 这句原来写的「13/13 拦住、0 逃逸」不可复现，2026-09-29 的一次合并重跑把它改成
+21/21，而那个 21/21 在 2026-09-30 又被自己拆开了**（第一次的错：那 13 行里 M10a/M10b 两行的
+**锚点在任何文件里都查不到** —— 表只在 doc 里数过、没把「改哪一处」落到能重建脚本的地方，
+这正是我自己记过的那族：计数要连着产它的锚点一起写。第二次的错：21 行里有 3 行
+（M11/M16/M21）**今天没有任何输入能让它与原文在行为上分家**，拦住它们的是 AST / 契约那类
+结构守卫，把它们算进同一个分母等于宣称「21 行都有行为证据」）。
+现在的读数：**行为分母 18/18 拦住、结构分母 3/3 拦住**，两个数恒并排印。
+表的可执行形态已进仓库 —— 规格 `benchmarks/mut_specs/fixer_stage_branch.py`（每行一条
+`Row(名字, 文件, 锚点, 变异, kill witness)`）+ harness `benchmarks/mutation_calibrate.py`，
+命令 `python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/fixer_stage_branch.py`；
+`tests/test_fixer_stage_branch.py` 的 docstring 只留人读的表，数字由脚本产。详见 doc 57 §六/§七（#83）。
+其中三条值得单独点出：
 
 - **M12/M17 抓的是本片自己那只 bug**（分流拿整条签名去比裸类名 ⇒ 第三路恒假），见 §3.3；
 - **M20 是重跑前唯一一条真逃逸**：那条「三路互斥」用例只朝一个方向查缺席，删掉第三路自己
