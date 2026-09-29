@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from benchmarks.measure_prompt_layers import (  # noqa: E402
     CapturingLLM, EmptyDB, initial_sketch, perf_data, task)
 from operator_agent.agents import CoderAgent, SearchAgent, _clean, _hint_log  # noqa: E402
+from operator_agent.interface_contract import broadcast_calling_convention  # noqa: E402
 from operator_agent.schemas import UnifiedSketch  # noqa: E402
 
 
@@ -140,7 +141,8 @@ class TestPromptIsHotOnly(unittest.TestCase):
         sketch = _advanced(6)
         cold_only = [h for h in sketch.optimization_hints if h not in sketch.hot_hints()]
         self.assertTrue(cold_only)
-        pipe._sample_one("步骤1: 分块", sketch, task(), "", 0.1)
+        pipe._sample_one("步骤1: 分块", sketch, task(), "", 0.1,
+                         broadcast_calling_convention(None))
         prompt = llm.prompts[-1]
         for h in cold_only:
             self.assertEqual(0, prompt.count(h), f"冷层 hint 漏进 pipeline 的 prompt")

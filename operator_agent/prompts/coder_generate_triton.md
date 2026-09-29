@@ -11,6 +11,8 @@
 ## 设计草图 (Sketch)
 {{sketch}}
 
+{{calling_convention}}
+
 ## 参考代码
 {{ref_code}}
 

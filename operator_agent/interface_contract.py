@@ -95,6 +95,53 @@ def input_key_sets(test_inputs) -> list:
     return []
 
 
+_CONTRACT_HEADER = "## 调用契约 (由 harness 广播, 不是你的推测)"
+
+_UNKNOWN = (
+    "调用方固定以 `kernel(**输入)` 的**全关键字**方式调用你的入口函数。\n"
+    "本轮 harness **没有**拿到输入名 (任务没带 test_inputs) ⇒ 请以参考实现/任务描述里出现的"
+    "输入名逐一作为参数名, 不要新增, 也不要省略。"
+)
+
+
+def broadcast_calling_convention(test_inputs) -> str:
+    """生成一段可以直接进 prompt 的调用契约广播。永远返回非空文字。
+
+    为什么由 harness 来说而不是让模型猜 (CUDA-Harness arXiv:2609.00058v1 §4.1.2 一手):
+    那边的 scaffold 把 calling convention 在**编译期**打出来, 目的是
+    "the agent remains unaware of the details of the test inputs when implementing the
+    kernel and cannot tailor an overfitted implementation to them" —— 契约是**测出来的事实**,
+    不是 prompt 里的一句话。我方的 `planner.py:54,84` 恰好相反: 它按 `kernel_type` 猜一个
+    `def kernel(A, B)` 写进计划 JSON, 而那份 JSON 会整体注入 coder 的 prompt ⇒
+    layernorm 这类输入名不是 A/B 的任务, prompt 里就同时存在一条**错的**契约和一个
+    只能等 TypeError 才出现的纠正。这段文字取代那个猜测的位置, 并注明以本节为准。
+    """
+    sets = [sorted({str(k) for k in s}) for s in (input_key_sets(test_inputs) or [])]
+    # 空组不算契约: `{}` 摊出来是 `[[]]`, 直接走「单组」分支会印出一句
+    # 「会传入的输入名: (什么都没有)」—— 那是把「不知道」说成一个假的空集。
+    distinct = {tuple(s) for s in sets if s}
+    if not distinct:
+        return _CONTRACT_HEADER + "\n\n" + _UNKNOWN
+
+    if len(distinct) == 1:
+        names = ", ".join(f"`{n}`" for n in sorted(distinct.pop()))
+        tail = f"  (共 {len(sets)} 组输入, 名字完全相同)" if len(sets) > 1 else ""
+        body = f"本次任务实际会传入的输入名: {names}{tail}"
+    else:
+        listing = "\n".join(f"  - 第 {i} 组会传入的输入名: "
+                            + ", ".join(f"`{n}`" for n in s)
+                            for i, s in enumerate(sets, 1))
+        body = ("本次任务有多组输入, 各组的输入名**不同**:\n" + listing +
+                "\n⇒ 你的入口必须接得住上面每一组。")
+
+    return (_CONTRACT_HEADER + "\n\n"
+            "调用方固定以 `kernel(**输入)` 的**全关键字**方式调用你的入口函数。\n"
+            + body + "\n"
+            "`def kernel(...)` 的参数名必须与上面**逐一相等** —— 多一个或少一个都会在运行时"
+            "抛 `TypeError`。\n"
+            "计划 JSON 里的 `kernel_signature` 只是 Planner 的建议, **以本节为准**。")
+
+
 def check_kernel_interface(source: str, input_keys) -> Optional[str]:
     """签名对不上就返回一句处方式说明, 对得上或看不准返回 None
 

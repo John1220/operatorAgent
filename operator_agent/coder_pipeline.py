@@ -13,6 +13,7 @@ from typing import Callable, Optional
 from .planner import PlannerAgent
 from .rule_templates import RuleTemplateCoder
 from .fixer import FixerAgent
+from .interface_contract import broadcast_calling_convention
 from .schemas import TaskSchema, UnifiedSketch
 from .prompt_manager import PromptManager
 
@@ -68,10 +69,13 @@ class CoderPipeline:
         self._agent_role = "coder"
         self._skill_name = "triton_skill"
 
-    def run(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None, **kwargs) -> str:
+    def run(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None,
+            test_inputs=None, **kwargs) -> str:
         """主流程: Plan → 采样 → 筛选 → 修复 → 回退"""
         dsl = task.target.dsl
         recipes_ctx = optimization_recipes or ""
+        # 三个采样线程共用同一份广播 (契约不随 temperature 变), 也避免每个线程各算一遍
+        calling_convention = broadcast_calling_convention(test_inputs)
 
         # 1. Plan 阶段
         print(f"\n  [CoderPipeline] Plan 阶段...")
@@ -82,7 +86,7 @@ class CoderPipeline:
         # 2. 并行采样
         print(f"  [CoderPipeline] 并行采样 {len(self.SAMPLE_TEMPERATURES)} 候选 "
               f"(temps={self.SAMPLE_TEMPERATURES})...")
-        candidates = self._parallel_sample(plan, sketch, task)
+        candidates = self._parallel_sample(plan, sketch, task, calling_convention)
 
         # 3. 独立编译筛选 - 取首个通过项
         chosen = self._select_first_pass(candidates, dsl)
@@ -114,7 +118,7 @@ class CoderPipeline:
     # ─── 并行采样 ────────────────────────────────────────────
 
     def _parallel_sample(self, plan: dict, sketch: UnifiedSketch,
-                         task: TaskSchema) -> list[str]:
+                         task: TaskSchema, calling_convention: str) -> list[str]:
         """并行生成 N 个候选 (不同 temperature)"""
         ref_code = self._ref_code(task, sketch)
         plan_str = json.dumps(plan, ensure_ascii=False, indent=2)
@@ -123,7 +127,8 @@ class CoderPipeline:
             max_workers=len(self.SAMPLE_TEMPERATURES)
         ) as pool:
             futures = [
-                pool.submit(self._sample_one, plan_str, sketch, task, ref_code, temp)
+                pool.submit(self._sample_one, plan_str, sketch, task, ref_code, temp,
+                            calling_convention)
                 for temp in self.SAMPLE_TEMPERATURES
             ]
             results = [f.result() for f in futures]
@@ -132,7 +137,8 @@ class CoderPipeline:
         return results
 
     def _sample_one(self, plan_str: str, sketch: UnifiedSketch,
-                    task: TaskSchema, ref_code: str, temperature: float) -> str:
+                    task: TaskSchema, ref_code: str, temperature: float,
+                    calling_convention: str) -> str:
         """单次采样 (Code 阶段: 仅输出纯代码)"""
         hot = sketch.hot_hints()
         optimization_hints = "\n".join(f"- {h}" for h in hot) if hot else "无"
@@ -151,6 +157,7 @@ class CoderPipeline:
             block_k=sketch.tiling.block_k,
             ref_code=ref_code or "无",
             optimization_hints=optimization_hints,
+            calling_convention=calling_convention,
         )
         raw = self.llm.chat(
             [{"role": "user", "content": prompt}],

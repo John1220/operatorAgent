@@ -5,6 +5,8 @@
 ## 实现计划
 {{plan}}
 
+{{calling_convention}}
+
 ## 算子规格
 - 类型: {{kernel_type}}
 - 硬件: {{hardware}}

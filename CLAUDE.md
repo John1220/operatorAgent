@@ -86,7 +86,9 @@ generated code and `remote_scripts/run_kernel.py` wraps *every* candidate execut
 runtime `shield_torch()` (both are required — a `return A @ B` fake kernel once passed all
 three levels). `interface_contract.py` checks, at L1 and before any GPU time, that the
 kernel's parameter names match the all-keyword call convention `kernel(**inputs)`; it errs
-toward passing when it cannot tell (`**kwargs`, defaulted params, no `def kernel`).
+toward passing when it cannot tell (`**kwargs`, defaulted params, no `def kernel`). The same
+module also **broadcasts** that convention into every generation prompt (before the model
+writes a line) so the names come from the harness, not from the Planner's guess.
 
 **Key data structures** (`operator_agent/schemas.py`):
 - `TaskSchema` — the universal contract: `SourceSpec` (kernel type, complexity), `TargetSpec` (hardware, DSL), `ConstraintSpec` (precision, min speedup, max error)

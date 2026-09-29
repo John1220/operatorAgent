@@ -572,6 +572,13 @@ output/matmul/nvidia_gpu/20260726_203150_af206fdd/
 现在它在 [`interface_contract.py`](../operator_agent/interface_contract.py) 里被静态检查，
 调用点是 `verifier._verify_compile`（即 L1，不占 GPU）。
 
+**生成之前也说一遍**（2026-09-29）：同一个模块的 `broadcast_calling_convention()` 会把「本次实际
+会传入的输入名」作为一节放进 Coder 的 prompt，四条生成路径（Plan 采样 + 三份 legacy 模板）都带。
+在此之前 prompt 里唯一的签名是 Planner 按算子类型猜出来的 `def kernel(A, B)`，而真机读数是
+**16 轮里 4 轮被这道门拦下**（[`docs/research/48`](research/48-端到端成功率量具.md) §六B、
+[`docs/research/41`](research/41-核函数接口契约静态检查.md) §七）。任务没带输入名时这段仍然会写，
+并明说「harness 没有拿到输入名」—— 一句消失的约束比一句「不知道」更容易被模型当成「没有约束」。
+
 **你会看到什么**：一段处方式说明，含「本次会传入的输入名 / `kernel()` 声明的参数 /
 具体哪几项不匹配 / 改法 / `def kernel` 的行号」。
 

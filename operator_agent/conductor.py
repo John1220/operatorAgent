@@ -545,6 +545,7 @@ class Conductor:
                 current_code = self.coder.run(
                     current_sketch, task,
                     optimization_recipes=current_recipes_text,
+                    test_inputs=test_inputs,
                 )
 
             # ---- 候选新颖度观测 (doc 47) ----

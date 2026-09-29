@@ -13,6 +13,7 @@ from .schemas import (
 from .kernel_db import KernelDatabase
 from .prompt_manager import PromptManager
 from .fixer import FixerAgent
+from .interface_contract import broadcast_calling_convention
 from .triton_opt_rules import TritonOptimizationRules
 
 
@@ -192,24 +193,28 @@ class CoderAgent:
         # 默认 None: 走 legacy 单线程生成+预检重试, 保持兼容
         self.pipeline = pipeline
 
-    def run(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None, **kwargs) -> str:
+    def run(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None,
+            test_inputs=None, **kwargs) -> str:
         if self.llm is None:
             raise RuntimeError("LLM 未配置，规则模板已移除")
 
         # 注入了 CoderPipeline 时走优化流程 (Plan→并行采样→筛选→修复→回退)
         if self.pipeline is not None:
-            code = self.pipeline.run(sketch, task, optimization_recipes=optimization_recipes, **kwargs)
+            code = self.pipeline.run(sketch, task, optimization_recipes=optimization_recipes,
+                                     test_inputs=test_inputs, **kwargs)
             print(f"  [Coder] Pipeline 生成代码: {len(code)} chars, language={sketch.target_dsl}")
             return code
 
-        code = self._llm_generate_code(sketch, task, optimization_recipes=optimization_recipes)
+        code = self._llm_generate_code(sketch, task, optimization_recipes=optimization_recipes,
+                                       test_inputs=test_inputs)
         print(f"  [Coder] LLM 生成代码: {len(code)} chars, language={sketch.target_dsl}")
         return code
 
     MAX_GENERATE_ATTEMPTS = 3   # 首次生成 + 最多 2 次带预检反馈重试
     MAX_REF_CODE_CHARS = 2000   # 注入 prompt 的参考代码上限 (摘要级注入, 控制上下文)
 
-    def _llm_generate_code(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None) -> str:
+    def _llm_generate_code(self, sketch: UnifiedSketch, task: TaskSchema,
+                           optimization_recipes=None, test_inputs=None) -> str:
         similar = self.kernel_db.search(algorithm=task.source.kernel_type, hardware=task.target.hardware, dsl=sketch.target_dsl)
         ref_code = similar[0].code if similar else ""
         if len(ref_code) > self.MAX_REF_CODE_CHARS:
@@ -236,6 +241,11 @@ class CoderAgent:
         # 同一个模板一边说"这里放配方"一边什么都不放, 而 hints 那一块从此装两种东西。
         # (与 `schemas.py` 里 `to_prompt_dict` 那条"hint 只留一个通道"是同一条纪律。)
         recipes_text = optimization_recipes or "（本轮没有新增配方，按上述提示优化即可）"
+        # 入口契约由 harness 说, 不由模型猜: 远端固定 `kernel(**输入)` (doc 41), 而
+        # 输入名只有调用方知道。不广播的话, prompt 里唯一一处签名是 Planner 按
+        # kernel_type 猜出来的 `def kernel(A, B)` ⇒ 对不上的任务只能等一次 SSH 往返抛出
+        # TypeError 才知道契约长什么样。
+        calling_convention = broadcast_calling_convention(test_inputs)
 
         prompt = self.pm.render(
             template_name,
@@ -249,6 +259,7 @@ class CoderAgent:
             ref_code=ref_code or "无",
             optimization_hints=optimization_hints,
             optimization_recipes=recipes_text,
+            calling_convention=calling_convention,
         )
         # tiling 的三个数不单独传: `{{sketch}}` 那份 JSON 里就带 `tiling.block_m/n/k`
         # (`UnifiedSketch.to_dict`), 单独传第二遍是同一份内容的第二个注入点。
