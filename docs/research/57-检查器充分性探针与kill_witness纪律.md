@@ -200,7 +200,7 @@ memory management, representing genuine domain knowledge and nontrivial computat
 三个新文件（不写行数：那正是「刚写完就已经过期」的那种数字，本文档 §七 写的这一小节自己
 就把它改过一次）：`benchmarks/mutation_calibrate.py` 是 harness，
 `benchmarks/mut_specs/fixer_stage_branch.py` 是那 21 行的可执行规格，
-`tests/test_mutation_calibration.py` 是标定 harness 自己的 13 条用例：
+`tests/test_mutation_calibration.py` 是标定 harness 自己的 12 条用例：
 
 | 件 | 作用 | 为什么长这样 |
 |---|---|---|
@@ -213,7 +213,11 @@ memory management, representing genuine domain knowledge and nontrivial computat
 
 ### 先标定量具，再让它报数（这一段是我自己的学费）
 
-harness 自己的 13 条用例分两组：A 组 8 条拿**假仓库**标定它，B 组 5 条核真规格不腐烂。
+harness 自己的 12 条用例分两组：A 组 7 条拿**假仓库**标定它，B 组 5 条核真规格不腐烂。
+（这一节初稿写的是 13：A 组 8 条，第 8 条是 `stamp()` 的读数条件断言。`benchmarks/provenance.py`
+被两份报表共用之后那条用例搬进了 `tests/test_run_provenance.py`，所以这里改的是**归属**不是删掉 ——
+「13 条」现在仍然成立，只是不再全在这个文件里；数一条用例的归属要连着它住在哪个文件一起数，
+否则搬一次家就变成一次无人察觉的覆盖流失。）
 A 组那份假生产文件是 `pick(x)`（返 `"a"` 或 `"b"`），配两种测试 —— 「盲」的那份只钉常量
 （`assertEqual(1, 1)`，所以**用例数不是零、汇总行照样印 `1 passed`**，而这正是最容易被读成
 「覆盖了」的形态），「覆盖」的那份钉 `pick` 两侧的取值。

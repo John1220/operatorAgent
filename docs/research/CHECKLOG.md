@@ -431,6 +431,24 @@
 - **类别**：I/S · **状态**：✅ 已修（配一条「拿不存在的 root 必须红」的用例）
 
 
+### I26 · 键名不是语义：判别缓存 token 的约定要看「出现的是哪个字段」，猜错方向有两种相反的错法
+- **原话**：`parse_usage()` 第一版写的是「有 `input_tokens` 这个键 ⇒ 走 Anthropic 的 exclusive 约定」，
+  而 OpenAI Responses 的 `usage.input_tokens_details.cached_tokens` **同名且语义相反**（包含），
+  于是那一家的缓存被读成 0
+- **实证**：三层。(1) 外部一手同一件事（arXiv:2609.11987v1 行 78）："a normalizer that assumes one
+  convention **doubles** the other" —— 我猜的方向反过来时不是翻倍而是**漏掉**，两种都表现为「一个像样的
+  数字」，所以读数本身不含任何自我怀疑的信号。(2) 抓到它靠的不是读文档，是那条
+  `test_responses_key_is_the_same_convention`：三种 payload（Anthropic exclusive / OpenAI chat inclusive /
+  Responses 同名键）各钉一个绝对数，第一版让其中一条直接红。(3) 事后把判别规则反着变异回去
+  （改回「看键名」）⇒ **3 条用例红**，所以这条不是设计出来的教训而是被变异验过的
+- **出处**：doc 58 §2.3；`operator_agent/llm_client.py::parse_usage` 的注释；`tests/test_llm_usage_semantics.py`
+- **后果**：凡是「同一个键在不同来源有不同含义」的字段，**判别键必须选那个只在一种约定下出现的字段**
+  （这里 `cache_read_input_tokens` 只在 exclusive 侧存在，`prompt_tokens_details` 只在 inclusive 侧存在），
+  而不是拿两家都有的那个键当分支条件。与 I22（用「两条路都产它」的字段当分支判别键 ⇒ 一半读数印到
+  错的那条路）是同一族的第二个实例；不同的是这次两个含义**数值上相反**，所以印出来的数不会像错位，只会像预算
+- **类别**：I/S · **状态**：✅ 已修（按字段存在性判别 + 三种 payload 各一条绝对锚点）
+
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -563,6 +581,7 @@
 | I23 | 「21/21 拦住」混了两种覆盖：三行今天行为不可区分，只有结构守卫杀得掉 | S/I | ✅ 已修 |
 | I24 | 「哪套解释器」也是读数条件；stamp 兜成 `?` 就是兜底值冒充读数 | I/S | ✅ 已修 |
 | I25 | 全 ABSENT 的指纹清单让归属门绿：输入是空气时「逐元素相等」等于「通过」 | I/S | ✅ 已修 |
+| I26 | 键名 ≠ 语义：`input_tokens` 在两家含义相反，判别必须看「出现的是哪个字段」 | I/S | ✅ 已修 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
