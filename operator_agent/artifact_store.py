@@ -81,6 +81,19 @@ class ArtifactStore:
         # 留下「为什么」的地方 —— 以前那件事只发生在 stdout 上的一行 print。
         if artifact.resume_status is not None:
             result_data["resume"] = artifact.resume_status
+        # LLM 账单 (doc 53 §五.1)。写侧 `conductor.py:926` 把它塞进 `metadata`, 而
+        # `metadata` 整个不进 `result.json` —— 所以**每次生产运行的产物里没有这份成本**。
+        # 今天能读到它的两处都读的是同一次调用链里的内存对象
+        # (`harness_pass_rate.py:176 cost_from_metadata`、`golden_regression.py:357`),
+        # 后者再抄两列进 `tests/golden_registry.json` —— 那是 golden 路径的出口, 不是产物。
+        # 预算/成本出口的读者在**下一次运行**与事后复盘里, 那里没有内存对象可读,
+        # 所以同指纹、同 `resume` 一样单独立顶层键。
+        # 只取 `llm_cost` 这一个键, 不把整个 `metadata` 倒出来: `metadata` 里还放着
+        # 「执行快照路径」这类含真实路径的外挂 (落盘键白名单静默丢值与整包外泄是同一枚硬币)。
+        # 缺账单时**不写这个键** —— 「没有成本记录」与「成本为 0」是两件事。
+        _llm_cost = (artifact.metadata or {}).get("llm_cost")
+        if _llm_cost:
+            result_data["llm_cost"] = _llm_cost
         result_path = artifact_dir / "result.json"
         result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
