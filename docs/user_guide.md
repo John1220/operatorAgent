@@ -329,7 +329,7 @@ hardware_presets:
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|-------|
-| `OPERATOR_AGENT_GPU` | 固定 L1/L2/L3 用哪张卡。**共享机器上必须固定** —— 不固定时三级验证各自重选、落在不同卡上，加速比就不可比 | 不设 → 按 (低利用率, 高显存余量) 自动选；利用率读不到时按最坏的 100% 处理 |
+| `OPERATOR_AGENT_GPU` | ⚠️ **只在远端 runner 那一侧生效**：手工直接跑 `remote_scripts/run_kernel.py` 时用它指定卡号。**走 agent 流水线时它不生效** —— `SSHExecutor` 从不读这个变量，而是本进程按 (低利用率, 高显存余量) 自动选一张卡，再把**自己选中的号**作为前缀下发（覆盖你设的值）。查实际用了哪张卡：量具报表的 `device` 字段（来源是后端，不是环境变量）或日志里的「固定使用 GPU N」。目前**没有**受支持的「钉死某张卡」开关，要改 `_pinned_gpu()` | 不设 → 自动选；利用率读不到时按最坏的 100% 处理 |
 | `OPERATOR_AGENT_KERNEL_DB` | 正样本经验库（成功且可信的核）的 JSONL 路径。取 `off`/`none`/`0`/`false` 时整个关闭持久化，只留本次进程内存 | `<repo>/output/kernel_db.jsonl` |
 | `OPERATOR_AGENT_FAILURE_DB` | 负样本经验库（失败签名）的 JSONL 路径，关闭语义同上 | `<repo>/output/failure_db.jsonl` |
 | `OPERATOR_AGENT_FAILURE_GATE` | 一条失败签名要在**多少个不同任务**上复发，才升级为可复用教训（见 6.5） | `3` |

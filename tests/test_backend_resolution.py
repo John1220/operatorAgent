@@ -22,7 +22,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import operator_agent.remote_executor as rx
-from operator_agent.backend_caps import Backend, Cap
+from operator_agent.backend_caps import Backend, Cap, concrete_backends
 from operator_agent.remote_executor import (
     BackendUnavailable, LocalExecutor, RemoteExecutor, Resolution,
 )
@@ -328,6 +328,56 @@ class TestDriversDoNotFabricateADevice(unittest.TestCase):
             if "MockGPU" in imported:
                 used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
                 self.assertIn("MockGPU", used, f"{name} import 了 MockGPU 却不再使用")
+
+
+class TestActualDeviceIsReportable(unittest.TestCase):
+    """#52: 「这一轮实际跑在哪张卡上」是执行侧的事实, 必须**问得到**
+
+    量具的报表以前写 `os.environ["OPERATOR_AGENT_GPU"]` —— 那是用户**想**的卡,
+    而 `SSHExecutor` 从不读那个变量。修法的第一步是把事实暴露成一个只读视图,
+    报表改读它。基类必须有这个 property: 否则「有没有这个信息」又只能靠 `hasattr` 猜
+    (doc 49 §4.1 第 1 条那条病)。
+    """
+
+    def test_the_property_exists_on_every_concrete_backend(self):
+        for cls in concrete_backends():
+            self.assertTrue(hasattr(cls, "selected_gpu"), f"{cls.__name__} 少了 selected_gpu")
+
+    def test_reading_it_never_triggers_a_round_trip(self):
+        """问它在用哪张卡不许变成「再花一次 ssh」"""
+        ex = rx.SSHExecutor(host="probe.invalid")
+        with mock.patch.object(ex, "_ssh_exec") as exec_spy:
+            self.assertIsNone(ex.selected_gpu)
+        exec_spy.assert_not_called()
+
+    def test_a_resolved_pin_is_reported(self):
+        ex = rx.SSHExecutor(host="probe.invalid")
+        ex._gpu_pin = 7
+        self.assertEqual(7, ex.selected_gpu)
+
+    def test_the_two_ways_to_have_no_card_both_read_none(self):
+        """-1 (解析过但不固定) 与 None (还没解析) 对读者的意思一样: 这一轮没有固定卡号
+
+        区分它们靠 `capabilities` 里有没有 `GPU_PINNING`, 不靠往值里塞哨兵数 ——
+        「没有卡」与「第 -1 号卡」不能共用一个数。
+        """
+        for pin in (None, -1):
+            ex = rx.SSHExecutor(host="probe.invalid", platform="iluvatar")
+            ex._gpu_pin = pin
+            self.assertIsNone(ex.selected_gpu)
+
+    def test_the_facade_forwards_the_inner_value(self):
+        ex = rx.RemoteExecutor(mode="ssh")
+        inner = mock.Mock()
+        inner.selected_gpu = 5
+        inner.capabilities = frozenset({Cap.GPU_PINNING})
+        ex._backend = inner
+        self.assertEqual(5, ex.selected_gpu)
+
+    def test_the_facade_of_a_cpu_backend_reads_none(self):
+        ex = rx.RemoteExecutor(mode="local")
+        self.assertIsNone(ex.selected_gpu)
+        self.assertNotIn(Cap.GPU_PINNING, ex.capabilities)
 
 
 if __name__ == "__main__":

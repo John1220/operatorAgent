@@ -285,6 +285,38 @@ def aggregate(runs):
     }
 
 
+def device_record(backend, env=None) -> dict:
+    """报表里的「跑在哪张卡」必须来自**执行侧**, 不是本地环境变量 (#52)
+
+    旧写法是 `"gpu": os.environ.get("OPERATOR_AGENT_GPU", "(未固定)")` —— 读的是用户
+    **想**的那张卡。而 `SSHExecutor` 从不读那个变量: 它在本进程里自动挑一张最闲的卡
+    (`_pinned_gpu()`), 再把**自己选中的那个号**作为前缀下发给远端。于是第一份基线里
+    「GPU 2 起跑」可能是报表值而不是事实值 (实际是 GPU 7) —— 记录的字段与发生的事不同源,
+    是本项目那一族缺陷的「读了, 但读错了对象」变体。
+
+    三态要**分开表达**, 不能都塌成 `(未固定)`:
+      * 后端不具备 `GPU_PINNING` (CPU / 模拟器 / HTTP) → 没有「固定一张卡」这件事;
+      * 具备但没解析出卡号 → 本来该固定, 这一轮其实是远端自动选的;
+      * 具备且有号 → 就是它。
+    `conflicts` 只在本地设了那个变量时才可能为真: 设了就说明用户想钉一张卡, 而这条路
+    今天做不到, 所以必须响一行, 不能静默换卡。
+    """
+    env = os.environ if env is None else env
+    requested = (env.get("OPERATOR_AGENT_GPU") or "").strip()
+    actual = backend.selected_gpu
+    can_pin = Cap.GPU_PINNING in backend.capabilities
+    if not can_pin:
+        state = f"({backend.label} 不具备 {Cap.GPU_PINNING.value}, 没有固定卡号这件事)"
+    elif actual is None:
+        state = "(声明可固定, 但这一轮没解析出卡号 ⇒ 由远端自动选择)"
+    else:
+        state = f"GPU {actual}"
+    conflicts = bool(requested) and (str(actual) if actual is not None else "") != requested
+    return {"state": state, "gpu": actual, "can_pin": can_pin,
+            "requested_env": requested or None, "conflicts": conflicts,
+            "source": "backend.selected_gpu"}
+
+
 def format_report(agg):
     lines = ["", "=" * 62, "端到端成功率报表", "=" * 62]
     lines.append(f"运行 {agg['runs_ok']}/{agg['runs']} 次完成"
@@ -478,13 +510,21 @@ def main() -> int:
     report = format_report(agg)
     print(report)
 
+    device = device_record(backend)
+    print(f"\n【实际用卡】{device['state']}  (来源: {device['source']})")
+    if device["conflicts"]:
+        print(f"  ⚠️ 本地设了 OPERATOR_AGENT_GPU={device['requested_env']}, 但 "
+              f"`SSHExecutor` **从不读它** —— 它在本进程自动挑最闲的卡, 再把选中的号"
+              f"下发给远端。这份报表记录的卡号以 {device['state']} 为准; "
+              f"要真的钉住某张卡得改 `_pinned_gpu()` 的选卡策略 (那是行为改动, 另一次对照)。")
+
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "git_head": _git_head(),
         "knobs": {"min_speedup": MIN_SPEEDUP, "max_error": MAX_ERROR,
                   "max_optimize_rounds": args.rounds, "repeats": args.repeats,
                   "min_denom": MIN_DENOM, "cases": [c[0] for c in CASES]},
-        "gpu": os.environ.get("OPERATOR_AGENT_GPU", "(未固定)"),
+        "device": device,
         "aggregate": agg,
         "runs": runs,
     }

@@ -561,6 +561,18 @@ class SSHExecutor(Backend):
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
 
+    @property
+    def selected_gpu(self) -> Optional[int]:
+        """`_pinned_gpu()` 已经解析出来的那张卡; 没解析出来就回 None
+
+        刻意**不**在这里触发一次选卡: 这是一个给报表读的只读视图, 触发往返会让「问它在用
+        哪张卡」变成「再花一次 ssh」。`_gpu_pin` 的三态 (None 未解析 / -1 解析过但不固定 /
+        >=0 固定该号) 在这里折叠成两态, 因为 -1 与「还没解析」对读者的意思是一样的:
+        **这一轮没有固定卡号** (doc 49 §7.12)。
+        """
+        pin = self._gpu_pin
+        return pin if pin is not None and pin >= 0 else None
+
     def lock_identity(self) -> str:
         """按**目标机器**取键, 不带 platform: 锁保护的是那张卡, 不是那份配置"""
         return f"ssh:{self._ssh_target()}"
@@ -1166,6 +1178,15 @@ class RemoteExecutor(Backend):
         与 `name` 一样会触发延迟初始化。
         """
         return self.backend.capabilities
+
+    @property
+    def selected_gpu(self) -> Optional[int]:
+        """转发内层的实际用卡 (#52): 报表问的是「跑在哪张卡上」, 那只有执行侧知道
+
+        门面**不**自己记一份: 以前 `knobs.gpu` 读的是本地环境变量 (用户想的那张卡),
+        于是「记录」与「事实」不同源。与 `capabilities` 一样会触发延迟初始化。
+        """
+        return self.backend.selected_gpu
 
     def get_hardware_info(self) -> dict:
         return self.backend.get_hardware_info()

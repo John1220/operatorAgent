@@ -13,8 +13,10 @@ import unittest
 from pathlib import Path
 
 from benchmarks.harness_pass_rate import (MIN_DENOM, aggregate, cost_from_metadata,
-                                          first_pass_round, format_report,
+                                          device_record, first_pass_round, format_report,
                                           record_rounds)
+from operator_agent.backend_caps import Cap
+from tests.backend_fakes import DeclaredFakeBackend
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VALID, DEGRADED, UNINFO = "valid", "degraded", "uninformative"
@@ -501,3 +503,123 @@ class TestAdmissionDenominatorsMatch(unittest.TestCase):
         runs[0]["admit_reason"] = ""
         agg = aggregate(runs)
         self.assertIn("没有入库判定记录", format_report(agg))
+
+
+def _backend(caps=(), gpu=None, override=True):
+    """一个能控制「实际用哪张卡」的假件
+
+    `override=False` 走基类那个 `selected_gpu` (返回 None), 用来验「后端压根不固定卡」
+    这一态 —— 它必须由**基类**回答, 不是由假件忘记覆盖来回答。
+    """
+    if not override:
+        return DeclaredFakeBackend(caps=caps, label="FakeBackend")
+
+    class _Pinned(DeclaredFakeBackend):
+        @property
+        def selected_gpu(self):
+            return gpu
+
+    return _Pinned(caps=caps, label="FakeBackend")
+
+
+class TestReportedDeviceComesFromBackend(unittest.TestCase):
+    """#52: 报表里的「跑在哪张卡」必须来自执行侧, 不是本地环境变量
+
+    旧写法是 `"gpu": os.environ.get("OPERATOR_AGENT_GPU", "(未固定)")` —— 读的是用户**想**的卡,
+    而 `SSHExecutor` 从不读那个变量 (它在本进程自动挑一张最闲的卡, 再把选中的号下发给远端)。
+    第一份基线里那句「GPU 2 起跑」因此无法确认是报表值还是 runner 日志值 (实际是 GPU 7)。
+    """
+
+    def test_the_backend_wins_over_the_environment(self):
+        """已知会被看见的信号: 两个来源给两个答案, 记录里必须是执行侧那个"""
+        rec = device_record(_backend(caps={Cap.GPU_PINNING}, gpu=7),
+                            env={"OPERATOR_AGENT_GPU": "2"})
+        self.assertEqual(7, rec["gpu"])
+        self.assertEqual("GPU 7", rec["state"])
+        self.assertEqual("2", rec["requested_env"])
+        self.assertTrue(rec["conflicts"], "用户想 2、实际 7 —— 这必须响, 不能静默换卡")
+
+    def test_direction_is_right_not_just_a_value(self):
+        """反向: 反过来设 (env=7、实卡=2) 时记录跟着变成 2, 而不是仍写 7"""
+        rec = device_record(_backend(caps={Cap.GPU_PINNING}, gpu=2),
+                            env={"OPERATOR_AGENT_GPU": "7"})
+        self.assertEqual(2, rec["gpu"])
+        self.assertTrue(rec["conflicts"])
+
+    def test_matching_values_are_not_a_conflict_but_still_come_from_the_backend(self):
+        rec = device_record(_backend(caps={Cap.GPU_PINNING}, gpu=7),
+                            env={"OPERATOR_AGENT_GPU": "7"})
+        self.assertFalse(rec["conflicts"])
+        self.assertEqual("backend.selected_gpu", rec["source"])
+
+    def test_no_env_var_means_no_conflict(self):
+        rec = device_record(_backend(caps={Cap.GPU_PINNING}, gpu=7), env={})
+        self.assertFalse(rec["conflicts"])
+        self.assertIsNone(rec["requested_env"])
+
+    def test_a_backend_without_pinning_is_not_reported_as_unpinned(self):
+        """「没有固定卡号这件事」与「本来该固定但这轮没解析出来」不许共用一个字符串"""
+        rec = device_record(_backend(caps=(), gpu=None, override=False), env={})
+        self.assertIsNone(rec["gpu"])
+        self.assertIn("不具备", rec["state"])
+        self.assertNotIn("未固定", rec["state"])
+
+    def test_declared_pinning_but_unresolved_is_its_own_state(self):
+        rec = device_record(_backend(caps={Cap.GPU_PINNING}, gpu=None), env={})
+        self.assertIn("远端自动选择", rec["state"])
+
+    def test_the_three_states_are_mutually_distinguishable(self):
+        states = {
+            device_record(_backend(caps={Cap.GPU_PINNING}, gpu=7), env={})["state"],
+            device_record(_backend(caps={Cap.GPU_PINNING}, gpu=None), env={})["state"],
+            device_record(_backend(caps=(), override=False), env={})["state"],
+        }
+        self.assertEqual(3, len(states), f"三态塌成了 {states}")
+
+    def test_record_is_json_serialisable(self):
+        """这条数据要落进 `pass_rate.json` —— 不可序列化会在落盘那一步毁掉整份报表"""
+        json.dumps(device_record(_backend(caps={Cap.GPU_PINNING}, gpu=3),
+                                env={"OPERATOR_AGENT_GPU": "3"}))
+
+
+def _env_lookup_sites(source: str) -> list:
+    """哪个函数在读 `OPERATOR_AGENT_GPU` 这个环境变量
+
+    ⚠️ 判据必须比「字面上的 `os.environ.get(...)`」宽一层: 真代码里 `device_record` 收的是
+    `env=None → os.environ` 这个默认参数, 所以它写的是 `env.get(...)`。只认前一种写法的扫描器
+    会对**真代码返回空集**, 于是那条守卫就变成恒真的绿 —— 这是「守卫空转」的镜像形态:
+    不是解析区域找错, 而是解析的写法比被测代码窄。这里认任何 `.get("OPERATOR_AGENT_GPU")`
+    (接收者是 `Name` 或 `os.environ`), 两种写法都漏不掉。
+    """
+    out = []
+    for fn in [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)]:
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get"
+                    and isinstance(node.func.value, (ast.Name, ast.Attribute))
+                    and node.args and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "OPERATOR_AGENT_GPU"):
+                out.append(fn.name)
+    return out
+
+
+class TestReportNeverReadsTheEnvForTheDevice(unittest.TestCase):
+    """源码级守卫: 那个环境变量的读取只能活在 `device_record` 里当**对照**, 不能当来源"""
+
+    def test_only_device_record_reads_it(self):
+        source = (REPO_ROOT / "benchmarks" / "harness_pass_rate.py").read_text(
+            encoding="utf-8")
+        self.assertEqual(["device_record"], _env_lookup_sites(source),
+                         "又有一处把本地环境变量当成了实际用卡")
+
+    def test_the_scanner_is_not_vacuous(self):
+        """两种写法都要认: 直接读 `os.environ`, 以及经过一个指向它的局部别名"""
+        synthetic = (
+            "import os\n"
+            "def device_record(b, env=None):\n"
+            "    env = os.environ if env is None else env\n"
+            "    return env.get(\"OPERATOR_AGENT_GPU\", \"\")\n"
+            "def main():\n"
+            "    return {\"gpu\": os.environ.get(\"OPERATOR_AGENT_GPU\", \"(未固定)\")}\n"
+        )
+        self.assertEqual(["device_record", "main"], _env_lookup_sites(synthetic))

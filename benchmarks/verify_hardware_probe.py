@@ -21,6 +21,7 @@
 | 4 | 把 runner 打桩成抛异常 (模拟 runner 坏) | 抛 `HardwareProbeFailed`, 不返回字典 |
 | 5 | host 指向不可达别名 (传输层真的坏) | 同样抛 —— 证明第 4 条不是只有打桩才能触发 |
 | 6 | 真机 `_setup_uv_env()` | True, 且远端 `.python-version` 与远端解释器版本**读回来**一致 |
+| 7 | 报表读的卡号 (#52) | == 远端 runner 自报的 `selected_gpu`; 读它**不**再花一次往返; 本地设 `OPERATOR_AGENT_GPU=2` 时 `conflicts` 必须为真而 `gpu` 仍是实卡 |
 
 ⚠️ 只打印派生值 (布尔、数字、版本号)。远端原文必然带那台机器的工作目录与用户名,
 按项目约定不进仓库、也不进本脚本的输出。
@@ -85,11 +86,28 @@ def main() -> int:
     transport = _probe_failure_raises(broken_host)
 
     # 检查 6: 远端 pin 的**实际内容**读回来核对 (第 5 处改成致命之后的关键对照)
+    ssh_calls = []
+    _real_ssh_exec = ex._ssh_exec
+
+    def _counting(cmd, *a, **k):
+        ssh_calls.append(cmd)
+        return _real_ssh_exec(cmd, *a, **k)
+
+    ex._ssh_exec = _counting                    # 只数往返次数, 不改行为
     pin = ex._ssh_exec(f"cat {ex.work_dir}/.python-version").strip().splitlines()[-1]
     interp = ex._ssh_exec(
         "python3 -c 'import sys;print(\"%d.%d\"%sys.version_info[:2])'"
     ).strip().splitlines()[-1]
     print(f"  远端 .python-version={pin!r}  远端解释器={interp!r}")
+
+    # 检查 7 (#52): 报表读的卡号必须与**远端自报**的卡号同源, 且读它不许再花一次往返
+    from benchmarks.harness_pass_rate import device_record
+    rec = device_record(ex, env={"OPERATOR_AGENT_GPU": "2"})
+    before = len(ssh_calls)
+    _ = ex.selected_gpu
+    no_round_trip = len(ssh_calls) == before
+    print(f"  执行侧 selected_gpu={ex.selected_gpu}  远端自报={probe.get('selected_gpu')}  "
+          f"报表 state={rec['state']!r} conflicts={rec['conflicts']}")
 
     checks = [
         ("1 探测值与 nvidia-smi 的独立问法一致 (器件名 + 显存)",
@@ -111,6 +129,12 @@ def main() -> int:
         ("5 传输层真的坏时也抛 (证明第 4 条不只靠打桩)", transport),
         ("6 真机 _setup_uv_env() 仍然成功 (第 5 处改成致命没有把路堵死)", ok_setup),
         ("6b 远端 pin 与实际解释器一致", pin == interp),
+        ("7 报表读的卡号与远端自报的卡号同源 (#52)",
+         ex.selected_gpu is not None and ex.selected_gpu == probe.get("selected_gpu")),
+        ("7b 读 selected_gpu 不再花一次往返", no_round_trip),
+        ("7c 本地设了 OPERATOR_AGENT_GPU=2 时冲突必须响, 而 gpu 仍是实卡",
+         rec["conflicts"] is True and rec["gpu"] == ex.selected_gpu
+         and rec["requested_env"] == "2"),
     ]
     print(f"\n{'=' * 66}\n标定判据\n{'=' * 66}")
     bad = 0

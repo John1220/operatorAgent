@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from enum import Enum
+from typing import Optional
 
 
 class Cap(str, Enum):
@@ -112,6 +113,25 @@ class Backend(ABC):
         在基类上再定义一个同名 property 会让 `self.name = ...` 直接 AttributeError。
         """
         return type(self).__name__
+
+    @property
+    def selected_gpu(self) -> Optional[int]:
+        """**实际**用来跑核的那张卡的编号; `None` = 这里没有编号可报。
+
+        存在的理由 (#52): 量具报表以前把 `knobs.gpu` 写成 `os.environ["OPERATOR_AGENT_GPU"]`,
+        读的是用户**想**的那张卡, 而 `SSHExecutor` 从来不读那个变量 —— 它在本进程里自动挑
+        一张最闲的卡。于是报表能写「跑在 GPU 2」而实际跑在 GPU 7: 记录的字段与发生的事
+        不同源, 这正是本项目反复出现的那一族。
+
+        三个状态要**合着 `capabilities` 一起读**, 因为单看这个值分不清后两个:
+          * `Cap.GPU_PINNING` 不在能力里 → 这个后端没有「固定一张卡」这件事 (CPU / 模拟器 / HTTP)。
+          * 在能力里但值为 `None` → 本来该固定, 可这一轮**没解析出卡号** (选卡失败, 远端自动选)。
+          * 在能力里且是整数 → 就是这个数。
+        基类默认 `None` 而不是抛: 这是一个**读值**, 不是一次能力调用; 而且「不固定」对
+        CPU 后端是诚实答案。提供方要覆写它, 不许在这里加哨兵值 (如 `-1`) —— 那会让
+        「没有卡」与「第 -1 号卡」共用一个数。
+        """
+        return None
 
     def lock_identity(self) -> str:
         """**同一个执行侧**的后端必须返回同一个串 —— 进程内串行锁按它取键

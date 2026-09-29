@@ -151,9 +151,10 @@ Connection settings stay env-driven: `LLM_API_KEY`, `REMOTE_SSH_HOST/PORT/USER/K
 `REMOTE_WORK_DIR`, `REMOTE_HTTP_URL` (see `config.example.yaml`; `~/.ssh/config` aliases are
 the expected way to supply host details, so no real addresses ever land in the repo).
 
-Runtime switches (env only, no code change): `OPERATOR_AGENT_GPU` (pin the card — required on
-shared machines, otherwise L1/L2/L3 each re-pick a different GPU and the speedup is not
-comparable), `OPERATOR_AGENT_KERNEL_DB` / `OPERATOR_AGENT_FAILURE_DB` (JSONL paths, or
+Runtime switches (env only, no code change): `OPERATOR_AGENT_GPU` (**honoured only by the remote
+runner** — `SSHExecutor` never reads it: it auto-picks the least-busy card in-process and passes
+*its own* choice down, so setting it locally does nothing; the harness report takes the actual card
+from the backend via `selected_gpu`, see doc 49 §7.12), `OPERATOR_AGENT_KERNEL_DB` / `OPERATOR_AGENT_FAILURE_DB` (JSONL paths, or
 `off`/`none`/`0`/`false` to disable persistence), `OPERATOR_AGENT_FAILURE_GATE` (recurrence
 threshold, default 3 distinct tasks), `OPERATOR_AGENT_OUTPUT_DIR` and
 `OPERATOR_AGENT_LOG_DIR` (`off` = never write to the repo) + `OPERATOR_AGENT_LOG_KEEP`
