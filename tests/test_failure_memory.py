@@ -356,5 +356,78 @@ class TestConductorWiring(unittest.TestCase):
             self.assertEqual(3, len(fresh.search_by_context(kernel_type="matmul", dsl="triton")))
 
 
+class TestMarkerTableIsNotRotting(unittest.TestCase):
+    """`_FAILURE_CLASS_MARKERS` 的那句纪律需要一个读者 (doc 45 第二节, doc 49 §八 第 15 条)
+
+    表的注释写着「只收**本仓库里能找到的字面量**」。这句话本身没有读者 —— 有人改了处方文案
+    的措辞，对应 marker 就变成一条**从不发火**的规则，归类静默退回「取最后一个异常名」，
+    于是 §7.17 那种过并 (预言里的异常名被当成诊断) 随时可能复发，而没有任何东西会红。
+    本类把那句话变成一个会红的检查。
+
+    ⚠️ 两个**反空转**自核不是装饰：
+      · 不排除 `kernel_db.py` 的话，这张表自己就把五个字面量全提供了 —— 守卫会在
+        字面量从生产文案里消失的那一天照样绿 (本项目记过的「假件被当被测对象」同型)。
+      · 不剥 docstring 的话，「文案里举了一个从未发出的异常名」这种注释也能喂饱它。
+    """
+
+    @staticmethod
+    def _emitted_strings(exclude_kernel_db: bool = True) -> str:
+        import ast
+        root = Path(__file__).resolve().parent.parent
+        files = sorted(list((root / "operator_agent").glob("*.py"))
+                       + list((root / "remote_scripts").glob("*.py")))
+        out = []
+        for f in files:
+            if exclude_kernel_db and f.name == "kernel_db.py":
+                continue
+            tree = ast.parse(f.read_text(encoding="utf-8"))
+            docstring_nodes = set()
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                  ast.AsyncFunctionDef)):
+                    body = getattr(n, "body", [])
+                    if (body and isinstance(body[0], ast.Expr)
+                            and isinstance(body[0].value, ast.Constant)
+                            and isinstance(body[0].value.value, str)):
+                        docstring_nodes.add(id(body[0].value))
+            for n in ast.walk(tree):
+                if (isinstance(n, ast.Constant) and isinstance(n.value, str)
+                        and id(n) not in docstring_nodes):
+                    out.append(n.value)
+        return "\n".join(out)
+
+    def test_every_marker_literal_is_still_emitted_by_production_code(self):
+        from operator_agent.kernel_db import _FAILURE_CLASS_MARKERS
+        corpus = self._emitted_strings()
+        self.assertTrue(corpus.strip(), "取字面量这一步本身空转了")
+        for literal, cls in _FAILURE_CLASS_MARKERS:
+            self.assertIn(
+                literal, corpus,
+                f"marker {cls!r} 的字面量 {literal!r} 已经不在任何会被发出去的文本里了 —— "
+                f"它现在是死规则，归类会退回异常名那条路径 (§7.17 的过并就是这么来的)")
+
+    def test_guard_is_not_satisfied_by_its_own_table(self):
+        """反空转 ①: 表自己所在的那个文件确实会把字面量喂进来, 排除它不是装饰
+
+        判据不是「排除后取不到」(那当然取不到, 生产文案才是来源)，而是**出现次数会变少** ——
+        这条不成立就意味着 `kernel_db.py` 里其实一份字面量都没有，那排除动作是白写的，
+        而哪天有人把它加回扫描列表时也无人会红。
+        """
+        from operator_agent.kernel_db import _FAILURE_CLASS_MARKERS
+        with_table = self._emitted_strings(exclude_kernel_db=False)
+        without = self._emitted_strings(exclude_kernel_db=True)
+        dropped = [(lit, with_table.count(lit) - without.count(lit))
+                   for lit, _ in _FAILURE_CLASS_MARKERS]
+        self.assertTrue(all(n >= 1 for _, n in dropped),
+                        f"排除 kernel_db.py 后这些字面量的出现次数没有减少: {dropped} "
+                        f"⇒ 「表自己会喂饱守卫」这件事没被验证")
+
+    def test_guard_is_not_satisfied_by_a_docstring(self):
+        """反空转 ②: 只存在于 docstring 里的短语必须取不到 (剥 docstring 真的在剥)"""
+        corpus = self._emitted_strings()
+        # hardware_caps.py 里这句只在函数 docstring 中出现
+        self.assertNotIn("把 compute_capability 字符串解析成主版本号", corpus)
+
+
 if __name__ == "__main__":
     unittest.main()
