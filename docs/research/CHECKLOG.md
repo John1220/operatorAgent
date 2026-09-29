@@ -48,6 +48,20 @@
 - **后果**：不得进 KernelDatabase 正样本
 - **类别**：C/P · **状态**：🚫 禁用
 
+### C5 · doc 11 把 `NVlabs/SOLAR` 当成 SOL-ExecBench 的官方实现
+- **原话**：`11-kernel生成系统全景.md` 两处 —— L19 可信度列「方法论可信（NVIDIA 官方 + NVlabs/SOLAR）」、
+  L93 出处列「2603.19173 §4.3 · NVlabs/SOLAR」（原话已由本人**就地标注更正**，理由见下）
+- **实证**：`api.github.com/repos/NVlabs/SOLAR` 真实描述为
+  **"Speed of Light Analysis for ML Model Runtime"**，是 einsum/timeloop 方向的解析建模；
+  SOL-ExecBench 的正主是 `NVIDIA/SOL-ExecBench`（Apache-2.0，★301，push 2026-07-15）。✅ 本人本轮核到
+- **出处**：doc 17 §六
+- **后果**：照 doc 11 的指针去找「SOL Score 的实现」会找到一棵建模树、拿不到计时/评测口径；
+  我方吸纳 SOL Score（doc 11 §四 首条）的出处因此是错的
+- **对「冻结源不回写」的一次偏离**：本条纪律的原意是**保留外部宣称的原文**以便审计。
+  这里改的是**自家文档里的一个错 URL** —— 它不是一条值得冻结的宣称，是一个断掉的指针。
+  故采取「原文措辞保留 + 就地标注更正 + 此处挂号」三者并存，不是静默覆盖。用户 2026-09-29 已认可该改法。
+- **类别**：C/I · **状态**：✅ 已更正（就地标注 + 本条挂号）
+
 ---
 
 ## I — 实现与文档/注释不符（本仓）
@@ -226,6 +240,7 @@
 | C2 | AdaExplore 记忆出厂 no-op | C/I | ⚠️ |
 | C3 | OpenEvolve 去重出厂关闭 | C/I | ⚠️ |
 | C4 | Sakana 加速比不可用 | C/P | 🚫 |
+| C5 | doc 11 的 SOLAR 指错仓 | C/I | ✅ |
 | I1 | 固定 id 注释 vs uuid | I | ✅ |
 | I2 | 签名拼接顺序不稳 | I | ✅ |
 | I3 | 远端 L1 无类名 | I | ✅ |
