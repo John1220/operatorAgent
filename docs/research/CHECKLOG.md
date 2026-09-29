@@ -112,6 +112,20 @@
 - **类别**：I · **状态**：✅ 已改口（同一会话自查发现；通则写进 `tests/test_cost_persistence.py` 的 docstring）
 
 
+### I7 · 「成本进了 result.json」是真，「本次运行的成本」当时是假的
+- **原话**：#70 的提交说明与 doc 53 写「每次运行的成本进了 `result.json`」
+- **实证**：#70 接的是 `cost_tracker.summary()`，而账本挂在 client 上**累加**、`reset()`
+  全仓无人调 ⇒ 一个 client 跑第二个任务时落盘的是累计值。同一失效已由
+  `harness_pass_rate.run_one` 的 docstring 量化过一次：六次运行的 token 排成
+  15638→…→166345 的累计曲线被当独立样本求和，总量高估 **3.25 倍**（540114 vs 166345）
+- **出处**：修在 commit `2de05dc`（`summary_since(watermark())` + `scope="this_run"` +
+  `process_total_calls`）；用例 `tests/test_iteration_lineage.py::TestCostScopeIsPerRun`
+- **后果**：按累计值判停 = 第二个任务一开局就背着第一个任务的账单被提前判穷 ——
+  而 #71 的第四出口正打算按这个数判事
+- **类别**：I/H · **状态**：✅ 已修（6 条变异 0 逃逸）
+- **通则**：**值过了落盘边界 ≠ 口径是对的**。补「谁在读这个值」时，同一轮就要问
+  「它统计的是哪一段时间」；否则接好的读者会安静地把累计当单次用。
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -218,6 +232,7 @@
 | I4 | 文本判据把「名字还在」当「还在用」 | I | ✅ |
 | I5 | 用例判定随本机有无 torch 翻转 | I/S | ⚠️ |
 | I6 | 「没人读」按手里那个变量名数出来 | I | ✅ |
+| I7 | 落盘了但口径是累计 | I/H | ✅ |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
