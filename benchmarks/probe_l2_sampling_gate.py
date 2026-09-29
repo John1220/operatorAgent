@@ -25,6 +25,8 @@ Benchmark Oracles》, 行号取自本文抽出的那份带行号文本):
   臂 2  参考幅值扫描: 两路开始「看不见」的临界, 连「带宽/信号」比一起打
   臂 3  反向对照: 收紧 max_error 之后同一个候选必须被拦 —— 否则「通过」不是幅值造成的
   臂 4  常数偏移候选: 相对项在不在, 差别就在这一臂
+  臂 5  高精度参考 (float64 同一份参考) 那把尺与本级判决对照: 印出「L2 判通过而那把尺反对」的处数
+        (读数规则来自 KernelOPT `2609.30059v1` 行 372-389, 我方只观测不判定, 阈未标定 ⇒ #82)
 
 运行: python3 -B benchmarks/probe_l2_sampling_gate.py
 """
@@ -166,6 +168,38 @@ def main() -> int:
         print(f"  {label}: 走 {branch_of(r)} | passed={r.passed}  "
               f"max_error={fmt(r, 'max_error')}  max_rel={fmt(r, 'max_rel_error')}  "
               f"matched={fmt(r, 'matched_ratio')}  atol={fmt(r, 'atol')}")
+
+    # 臂 5: 高精度参考那把尺 (KernelOPT `2609.30059v1` 行 372-389) 在这同一批读数上看见什么。
+    # 它**不参与判定** (阈是别人语料上的数), 所以这一臂印的是两栏: L2 判了什么 / 那把尺反不反对。
+    # 只有两栏不一致的行才是信息 —— 一致的行说明这把尺在重复 AND 已经做的事。
+    print("\n== 臂 5 · 高精度参考 (float64 同一份参考) 那把尺 vs 本级判决 ==")
+    # ⚠️ 这一臂**不用** 上面几臂的 `PASS ❌ / FAIL ✔` 记号: 那套记号的含义是「这个候选是错的」,
+    # 而这里 correct 那一行判通过是**对的**, 跟着印 ❌ 会把读者指向反的结论。
+    print("  scale  候选          AND 判    那把尺     量级")
+    disagreements = []
+    for scale in (1.0, 1e-2, 1e-3, 1e-4, 1e-6):
+        for cname, code in (("correct", CORRECT), ("all-zeros", ZEROS), ("scaled .97", SCALED)):
+            r_local = verdict(LocalExecutor(), code, scale, 5e-1)[0]
+            r = verdict(MockGPU(), code, scale, 5e-1)[0]
+            m = r.metrics
+            state = m.get("ref_oracle")
+            called = "放行" if r.passed else "拦住"
+            if state not in ("measured", "partially_measured"):
+                print(f"  {scale:<6g} {cname:<11} {called:8s} 没测 ({state})")
+                continue
+            objects = bool(m.get("oracle_objects"))
+            rho = m.get("oracle_rho_max")
+            scale_rel = m.get("oracle_scale_relative_max")
+            mag = (f"ρ={rho:.3g}" if isinstance(rho, (int, float))
+                   else (f"幅值的 {scale_rel:.3g} 倍" if isinstance(scale_rel, (int, float)) else "—"))
+            print(f"  {scale:<6g} {cname:<11} {called:8s} "
+                  f"{'反对' if objects else '不反对':6s} {mag:16s} "
+                  f"(纯绝对那条: {'放行' if r_local.passed else '拦住'})")
+            if r.passed and objects:
+                disagreements.append((scale, cname))
+    print(f"\n  ⇒ L2 判通过而那把尺反对的读数: {len(disagreements)} 处 {disagreements}")
+    print("     这些正是臂 1/2 拍到的盲区 (AND 那条的 atol 是绝对条带); 那把尺的分母是参考自身")
+    print("     到 float64 真值的距离, 因此条带随幅值缩放。定阈要我方自己的标定 ⇒ #82。")
     return 0
 
 

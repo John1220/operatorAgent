@@ -134,6 +134,12 @@ CITATIONS = [
     # 取自这把尺产出的文本, 不能凭印象拼 (与 doc 55 §一 那条 NBSP 教训同一族: 逐字引用的
     # 反义词不是「错」, 是「引用了一份我改写过的文本」)。
     ("2609.11987v1", 1108, 1111, "exclusive of cache reads and writes"),
+    # ↓ 2026-09-30 读的 KernelOPT §4.4 与附录 B (doc 58 §四/§4.1)。这四条是那片代码与
+    #   那篇文档共同依赖的锚点 —— 引它们而不登记, 就还是「出处门没人读」。
+    ("2609.30059v1", 1344, 1347, "a float64 reference"),
+    ("2609.30059v1", 1351, 1351, "correct TF32 kernels yield"),
+    ("2609.30059v1", 363, 364, "The four gates are applied sequentially"),
+    ("2609.30059v1", 418, 421, "marginal improvements"),
 ]
 
 

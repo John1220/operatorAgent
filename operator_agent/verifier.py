@@ -402,6 +402,8 @@ class Verifier:
         # 每组输入各自上报它**实际用的那把尺**; 是否合成一个单值, 由循环后的
         # `_single_ruler` 判 (见那里的注释 —— 这一块的旧写法是「第一组赢」)
         gates: list[dict] = []
+        # 逐组的高精度读数; 聚合规则见 `_aggregate_oracles` (那里记了第一版漏搬的现场)
+        oracles: list[dict] = []
         has_reference = False
         reference_types = set()
         execution_devices = set()
@@ -427,12 +429,15 @@ class Verifier:
                 g = {k: m[k] for k in GATE_PARAM_KEYS if k in m}
                 if g:
                     gates.append(g)
+                oracles.append({k: v for k, v in m.items()
+                                if k == "ref_oracle" or k.startswith("oracle_")})
                 if m.get("reference_type"):
                     reference_types.add(m["reference_type"])
                 if m.get("device"):
                     execution_devices.add(m["device"])
 
         gate_params, gate_conflicts = _single_ruler(gates)
+        oracle_agg = self._aggregate_oracles(oracles)
         if has_reference:
             msg = (f"功能验证通过 ({len(input_sets)} 组输入), 最大误差={max_error_overall:.2e}, "
                    f"matched_ratio={min_matched_ratio:.6f}")
@@ -441,6 +446,9 @@ class Verifier:
             if gate_conflicts:
                 msg += (f" ⚠️ 这几组用的**不是同一把尺** {sorted(gate_conflicts)}, "
                         f"聚合值因此不发布单值 (见 metrics.gate_params_conflict)")
+            # 聚合这一支的 message 是**重算**的, 每组自己那句被丢掉了 ⇒ 高精度那把尺的话
+            # 必须在这里接上, 否则「通过」那一侧永远读不到它 (与 _aggregate_oracles 同一条教训)
+            msg += self._oracle_note(oracle_agg)
             metrics = {
                 "max_error": max_error_overall,
                 "max_rel_error": max_rel_error_overall,
@@ -450,6 +458,7 @@ class Verifier:
                 "compared_elements": total_compared,
                 "coverage": min_coverage,
                 **gate_params,
+                **oracle_agg,
             }
             if gate_conflicts:
                 # 摊开成 {键: {组下标: 那一组实际用的值}} —— 读的人不必重跑就能看出
@@ -574,6 +583,9 @@ class Verifier:
             "atol": atol, "rtol": rtol, "required_matched_ratio": rho,
             "compared_elements": size, "coverage": 1.0,
         }
+        # 高精度参考 (float64) 那把尺的读数。**不参与判定**，只跟着上报 —— 理由与阈值来源
+        # 写在 `tolerance.error_ratio` 的注释里 (一句话: 那三个阈是别人语料上的数)。
+        metrics.update(self._oracle_reading(task, inputs, actual_f, expected))
         # first_bad_*: 第一个坏元素的展平下标与两侧取值 (LeetCUDA book_check 同款)。
         # 展平下标够 Fixer 定位坏 tile; 顺带带上 actual/expected 才分得清
         # 「整体 scale 错」(符号同、比值恒定) 与「局部炸」(个别点)。
@@ -586,7 +598,7 @@ class Verifier:
             return VerificationResult(
                 level=VerificationLevel.L2_FUNCTION, passed=True,
                 message=(f"全量比对通过 ({size} 元素), 最大误差={metrics['max_error']:.2e}, "
-                         f"matched_ratio={matched_ratio:.6f}"),
+                         f"matched_ratio={matched_ratio:.6f}" + self._oracle_note(metrics)),
                 metrics=metrics)
         reason = ("输出含 NaN/Inf" if has_nonfinite else
                   f"{metrics['bad_elements']}/{size} 个元素同时超 atol={atol:.1e} 与 rtol={rtol:.1e}")
@@ -598,6 +610,108 @@ class Verifier:
             level=VerificationLevel.L2_FUNCTION, passed=False,
             message=f"功能验证失败: {reason}, 最大误差={metrics['max_error']:.2e}",
             metrics=metrics)
+
+    def _oracle_reading(self, task: TaskSchema, inputs: dict,
+                        actual, expected) -> dict:
+        """高精度参考 (同一份参考、float64 再算一遍) 那把尺的读数 —— **只观测, 不判定**
+
+        外部一手: KernelOPT `2609.30059v1` 行 372-389 与行 1344-1362 (规则抄在
+        `tolerance.error_ratio` 那里, 包括「这三个阈是别人语料上的数」那句警告)。
+
+        与 AND 那条的差别值得再说一遍: AND 比「候选 vs 参考」, 条带是绝对 atol ⇒ 参考幅值一小
+        就看不见任何东西 (`benchmarks/probe_l2_sampling_gate.py` 臂 1/2 拍到的全零核 PASS)。
+        这把尺的分母是**参考自己到真值的距离**, 条带自动随幅值缩放。
+
+        三种拿不到读数的情况都**不造一个数** (缺证据不是通过, 也不是 0):
+          · 没有 float64 参考 (外挂 `reference_source` / int8 任务) ⇒ `ref_oracle="absent"`
+          · 参考自己算炸了 ⇒ `"error:<异常类型名>"` (远程错误原文不进仓库)
+          · 参考输出的形状与 float32 那份不一致 ⇒ `"shape_mismatch"`
+        """
+        try:
+            oracle = self._generate_reference(task, inputs, high_precision=True)
+        except Exception as exc:  # noqa: BLE001
+            return {"ref_oracle": f"error:{type(exc).__name__}"}
+        if oracle is None:
+            return {"ref_oracle": "absent"}
+        oracle = np.asarray(oracle, dtype=np.float64)
+        if oracle.shape != expected.shape:
+            return {"ref_oracle": "shape_mismatch"}
+        r = tolerance.error_ratio(
+            d_opt=float(np.abs(actual - oracle).max()),
+            d_ref=float(np.abs(expected.astype(np.float64) - oracle).max()),
+            ref_amplitude=float(np.abs(expected).max()),
+        )
+        out = {"ref_oracle": "measured", "oracle_branch": r["branch"],
+               "oracle_d_ref": r["d_ref"], "oracle_d_opt": r["d_opt"],
+               "oracle_scale_relative": r["scale_relative_error"],
+               "oracle_abs_bound": r["abs_bound"],
+               "oracle_meets_ratio": r["meets_ratio"],
+               "oracle_meets_scale_relative": r["meets_scale_relative"],
+               "oracle_meets_abs_bound": r["meets_abs_bound"]}
+        # **按这一组该走的那一支**折成一个「那把尺反不反对」: ratio 支看 ρ, exact 支看幅值缩放。
+        # 不这么折的话, 走 exact 支的那一组的 `meets_ratio` 恒 False, 跨组再 AND 一次就成了
+        # 「分支不同 ⇒ 一律反对」—— 两个意思共用一个值 (doc 49 §3.2 B3 那一族)。
+        out["oracle_objects"] = (r["meets_ratio"] if r["branch"] == "ratio"
+                                 else r["meets_scale_relative"]) is False
+        # 退化分支没有 ρ 这个数 —— 缺就**不写这个键**, 写成 None 会被下游的
+        # `metrics.get(k, 0)` 读成「ρ=0 = 完美」(#53 那一族)。
+        if r["rho"] is not None:
+            out["oracle_rho"] = r["rho"]
+        return out
+
+    @staticmethod
+    def _aggregate_oracles(oracles: list) -> dict:
+        """把逐组的高精度读数搬进聚合 metrics
+
+        ⚠️ 这一整块为什么存在: 读数是逐组算出来的, 而聚合处**手写**了一份新 metrics ——
+        第一版就死在这条搬运路上 (值算出来了，而「通过」那一侧没有它)。本仓同一个形状撞过
+        三次: doc 33 的 `runs`/`max_time_ms`、doc 37 的 `llm_cost`、doc 48 的 `candidate_signature`。
+        「通过」正是唯一会被读的那一侧, 所以这条搬运必须有一条用例当证人。
+        """
+        if not oracles:
+            return {}
+        measured = [o for o in oracles if o.get("ref_oracle") == "measured"]
+        if not measured:
+            # 一组都没测到 ⇒ 什么都不上报 (缺席既不是 True 也不是 0)
+            return {"ref_oracle": oracles[0].get("ref_oracle", "absent")}
+        out = {"ref_oracle": ("measured" if len(measured) == len(oracles)
+                              else "partially_measured"),
+               "oracle_sets_measured": len(measured),
+               "oracle_sets_total": len(oracles),
+               "oracle_objects": any(o["oracle_objects"] for o in measured),
+               "oracle_branches": ",".join(sorted({o["oracle_branch"] for o in measured}))}
+        rhos = [o["oracle_rho"] for o in measured if "oracle_rho" in o]
+        if rhos:
+            out["oracle_rho_max"] = max(rhos)
+        scales = [o["oracle_scale_relative"] for o in measured
+                  if "oracle_scale_relative" in o]
+        if scales:
+            # 取 max 而不是 mean: 聚合要说的从来不是「平均差多少」，而是「最差那一组差多少」
+            # (与上面 min_matched_ratio / max_error_overall 同一套折叠方向)
+            out["oracle_scale_relative_max"] = max(scales)
+        return out
+
+    @staticmethod
+    def _oracle_note(metrics: dict) -> str:
+        """判决与高精度那把尺不一致时, 在 message 里说一句 (仍然不改判决)
+
+        这一句是给**读日志的人**的: 「本级判通过，而按参考自身误差缩放的那把尺它不该过」
+        是 #82 那条盲区的现场。今天只报不判，因为阈是抄来的。
+        """
+        if metrics.get("ref_oracle") not in ("measured", "partially_measured"):
+            return ""
+        if not metrics.get("oracle_objects"):
+            return ""
+        rho = metrics.get("oracle_rho_max")
+        note = (f" ⚠️ 高精度参考那把尺反对这个判决（{metrics.get('oracle_branches')} 支；"
+                f"阈取自 KernelOPT、我方未标定，仅观测）")
+        if isinstance(rho, (int, float)):
+            return note + f"，最差一组 ρ={rho:.3g}"
+        scale = metrics.get("oracle_scale_relative_max")
+        if isinstance(scale, (int, float)):
+            # exact 支没有 ρ (分母不可信时不许除) —— 说「参考幅值的多少倍」是同一件事的另一种说法
+            return note + f"，最差一组的误差是参考幅值的 {scale:.3g} 倍"
+        return note
 
     def _verify_performance(self, kernel_code: str, test_inputs, target_gflops: float,
                             task: TaskSchema,
@@ -1137,7 +1251,8 @@ class Verifier:
             "peak_table_key": peak.get("peak_table_key", ""),
         }
 
-    def _build_reference_fn(self, task: TaskSchema, inputs: dict):
+    def _build_reference_fn(self, task: TaskSchema, inputs: dict,
+                            high_precision: bool = False):
         """
         构建 PyTorch 参考实现 (可调用); torch 不可用时回退 NumPy
         返回 (callable, baseline_type) 或 (None, None)
@@ -1145,6 +1260,13 @@ class Verifier:
         **外挂参考优先**: `source.reference_source` 非空时不再查内建表。
         新架构算子没有内建参考, 没有这一层时 L3 会「无可用基线」、L2 会
         「无参考仅验证可执行性」—— 整条闭环不存在 (见 reference.py)。
+
+        `high_precision=True` 要的是**同一份参考、换 float64 再算一遍** (高精度真值 oracle,
+        给 `tolerance.error_ratio` 用), 不是另一套规则 —— 所以这里只换 dtype 取值那两行,
+        下面的整条 if-链原样复用 (另写一份 fp64 版参考实现就是第二个真源, 会漂)。
+        ⚠️ 两种情况下如实返回 None 而不是降级凑一个数:
+        · 外挂 `reference_source` —— 不保证它对 float64 输入是多态的, 喂进去可能悄悄换个算法;
+        · 整数任务 —— 没有「更高精度的整数」可算。
         """
         from operator_agent.reference import ReferenceSourceError, resolve_reference
         try:
@@ -1153,11 +1275,15 @@ class Verifier:
             # 加载失败是任务定义错误, 不是「没有参考」—— 后者会静默放行 L2
             raise ValueError(f"外挂 reference_source 不可用: {exc}") from exc
         if ext is not None:
+            if high_precision:
+                return None, None
             # 与内建参考同一约定: 闭包捕获当前 inputs, 零参可调
             return (lambda fn=ext, xs=inputs: fn(**xs)), "reference_source"
 
         kernel_type = task.source.kernel_type.lower()
         precision = task.constraints.precision
+        if high_precision and precision is Precision.INT8:
+            return None, None
         dtype_np = {Precision.FP32: np.float32, Precision.FP16: np.float16,
                     Precision.BF16: np.float32, Precision.INT8: np.int8}.get(precision, np.float32)
 
@@ -1169,6 +1295,11 @@ class Verifier:
                            Precision.BF16: torch.bfloat16, Precision.INT8: torch.int8}.get(precision, torch.float32)
         except ImportError:
             torch_available = False
+
+        if high_precision:
+            dtype_np = np.float64
+            if torch_available:
+                dtype_torch = torch.float64
 
         if ("matmul" in kernel_type or "gemm" in kernel_type) and "A" in inputs and "B" in inputs:
             if torch_available:
@@ -1218,24 +1349,29 @@ class Verifier:
 
         return None, None
 
-    def _generate_reference(self, task: TaskSchema, inputs: dict):
-        """生成参考输出 (numpy 数组); torch 张量自动转 numpy"""
-        fn, _ = self._build_reference_fn(task, inputs)
+    def _generate_reference(self, task: TaskSchema, inputs: dict,
+                            high_precision: bool = False):
+        """生成参考输出 (numpy 数组); torch 张量自动转 numpy
+
+        `high_precision=True` 时返回 float64 的那一份 (高精度真值 oracle) —— 这时**不许**再走
+        `_to_numpy` 的默认 float32 转换, 否则 oracle 自己就被压成候选同一个精度, ρ 的分母归零。
+        """
+        fn, _ = self._build_reference_fn(task, inputs, high_precision=high_precision)
         if fn is None:
             return None
         out = fn()
-        return self._to_numpy(out)
+        return self._to_numpy(out, dtype=np.float64 if high_precision else np.float32)
 
     @staticmethod
-    def _to_numpy(out):
-        """torch tensor / numpy array 统一转 numpy float32"""
+    def _to_numpy(out, dtype=np.float32):
+        """torch tensor / numpy array 统一转 numpy (默认 float32, 传 dtype 可要 float64)"""
         try:
             import torch
             if isinstance(out, torch.Tensor):
-                return out.detach().cpu().numpy().astype(np.float32)
+                return out.detach().cpu().numpy().astype(dtype)
         except ImportError:
             pass
-        return np.asarray(out, dtype=np.float32)
+        return np.asarray(out, dtype=dtype)
 
     def _measure_baseline(self, task: TaskSchema, inputs: dict,
                           warmup: int = 3, repeat: int = 10):

@@ -113,3 +113,60 @@ def evaluate(n_bad: int, total: int, has_nonfinite: bool,
     elif matched_ratio > 1.0:
         matched_ratio = 1.0
     return matched_ratio >= rho, matched_ratio
+
+
+# ---- 高精度参考那把尺 (KernelOPT `2609.30059v1` 行 372-389 与行 1344-1362) ----------------
+#
+# 外部一手 (行 375-381 逐字, 公式里的 ‖·‖∞ 在 HTML 里丢了竖线):
+#     "Let dref = rf32 - rf64 and dopt = of32 - rf64. When dref >= 1e-8 (the baseline itself
+#      has FP32 rounding error), the error ratio is: rho = dopt / dref. If rho <= 10, the
+#      error is within the range expected from different FP32 accumulation orders; correct
+#      TF32 kernels yield rho in [1,3] while algorithmically incorrect kernels yield rho > 100."
+#
+# 它与我方 AND 那条的**根本差别**: AND 比的是「候选 vs 参考」, 误差条带是**绝对**的 atol,
+# 于是参考幅值一小就看不见任何东西 (`benchmarks/probe_l2_sampling_gate.py` 臂 1/2 拍到的
+# 全零核 PASS 就是这个)。这把尺比的是「候选到真值的距离 / 参考到真值的距离」—— 分母是**参考
+# 自己的误差**, 所以条带自动随幅值缩放, 全零核在任意幅值下 ρ 都是天文数字。
+#
+# ⚠️ 今天**只观测不判定** (与 #89 的观测半边同形): 这三个阈值是**他们语料上**的数
+# (ρ∈[1,3] 对 ρ>100), 我方在 H20 上的 ρ 分布还没测过 ⇒ 拿它当门就是把抄来的数当成自己的标定。
+ORACLE_EXACT_DENOM = 1e-8     # d_ref 小于此 ⇒ 参考本身是精确运算 (max/argmax/sort 那一类)
+ORACLE_RHO_MAX = 10.0         # 他们的比值阈
+ORACLE_SCALE_REL_MAX = 1e-4   # 退化分支: d_opt / max(‖r_f32‖∞, 1e-12) <= 1e-4
+ORACLE_SCALE_EPS = 1e-12
+ORACLE_ABS_FLOOR = 5e-3       # 第三条兜底: d_opt <= max(5e-3, 1e-3 * ‖r_f32‖∞)
+ORACLE_ABS_PER_AMPLITUDE = 1e-3
+
+
+def error_ratio(d_opt: float, d_ref: float, ref_amplitude: float) -> dict:
+    """按「候选到高精度真值的距离 / 参考到它的距离」给一份读数 —— 只收标量
+
+    与 `evaluate` 同一个约定: 元素级的减法与 ∞-范数由调用方在自己的数组后端上做
+    (numpy 或 torch), 这里只把规则集中成一份。本模块会被 `SSHExecutor.deploy()` 推到远端,
+    所以真机路径将来要用同一个规则时不必再抄一遍。
+
+    **三个判据分开返回, 不折成一个布尔** (`meets_ratio` / `meets_scale_relative` /
+    `meets_abs_bound`): 原文是「ratio 不过再试 scale-relative, 再不过还有一个绝对兜底」,
+    折成一个 `passed` 就把「差一点点」与「靠兜底过的」两种完全不同的事压成一层
+    (doc 49 §3.2 B3 那一族)。`branch` 说的是**原文会走哪一支**, 不是「我方判它过不过」。
+    """
+    d_opt = float(d_opt)
+    d_ref = float(d_ref)
+    amplitude = float(ref_amplitude)
+    abs_bound = max(ORACLE_ABS_FLOOR, ORACLE_ABS_PER_AMPLITUDE * abs(amplitude))
+    out = {"d_opt": d_opt, "d_ref": d_ref, "ref_amplitude": amplitude,
+           "meets_ratio": False, "abs_bound": abs_bound,
+           "scale_relative_error": d_opt / max(amplitude, ORACLE_SCALE_EPS)}
+    out["meets_scale_relative"] = out["scale_relative_error"] <= ORACLE_SCALE_REL_MAX
+    out["meets_abs_bound"] = d_opt <= abs_bound
+    if d_ref >= ORACLE_EXACT_DENOM:
+        out["branch"] = "ratio"
+        out["rho"] = d_opt / d_ref
+        out["meets_ratio"] = out["rho"] <= ORACLE_RHO_MAX
+    else:
+        # 参考自身没有可测的舍入误差 ⇒ 除以它就是除以噪声。这里**不返回一个 ρ**,
+        # 因为「分母不可信时不许替它判」在 #64 已经付过学费了。
+        out["branch"] = "exact"
+        out["rho"] = None
+    return out
+
