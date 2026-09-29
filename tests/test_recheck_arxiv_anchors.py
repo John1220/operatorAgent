@@ -47,7 +47,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmarks.recheck_arxiv_anchors import (CITATIONS, DEFAULT_DOCS, audit,  # noqa: E402
-                                              citation_in_range,
+                                              citation_in_range, closing_advice,
                                               main, parse_anchor_table, to_int)
 
 REPO = Path(__file__).resolve().parents[1]
@@ -202,6 +202,84 @@ class TestCitationRegistryIsUsable(unittest.TestCase):
 
     def test_the_bundled_selftest_has_a_reader_in_the_suite(self):
         self.assertEqual(0, main(["--selftest"]))
+
+
+class TestAdviceIsTriaged(unittest.TestCase):
+    """收尾那句要分诊：「取数失败」与「文档里的表错了」的处置**相反**
+
+    2026-09-30 实跑撞出来的：五个 id 里有一个瞬时取回失败，那次读数是 22/36，而原句无条件
+    写着「要改的是文档里那张表」。照做就把一次网络抖动「核」成了一份错的表 —— 比不核更糟，
+    因为留下的改动看着像有依据。
+    """
+
+    def test_all_green_says_nothing(self):
+        """反向对照：全对时不许冒出一句「要改表」"""
+        rows = [{"arxiv_id": "1", "status": "ok"}, {"arxiv_id": "1", "status": "cited",
+                                                  "needle": "x"}]
+        self.assertEqual("", closing_advice(rows, []))
+
+    def test_a_fetch_failure_is_not_a_table_error(self):
+        rows = [{"arxiv_id": "9.9v1", "status": "no_bytes", "want_bytes": 1,
+                 "needle": None},
+                {"arxiv_id": "9.9v1", "status": "citation_absent", "needle": "x",
+                 "start": 1, "end": 1}]
+        advice = closing_advice(rows, ["9.9v1"])
+        self.assertIn("没取回字节", advice)
+        self.assertIn("不是表错", advice)
+        self.assertNotIn("要改的是**文档里那张表**", advice)
+
+    def test_a_real_mismatch_still_points_at_the_table(self):
+        """另一端也要有：字节都取回了、锚点却对不上 ⇒ 那才是要改表"""
+        rows = [{"arxiv_id": "1", "status": "anchor_mismatch", "want_bytes": 1,
+                 "got_bytes": 2, "got_lines": 3, "want_lines": 4, "needle": None},
+                {"arxiv_id": "1", "status": "citation_absent", "needle": "x",
+                 "start": 1, "end": 1}]
+        advice = closing_advice(rows, [])
+        self.assertIn("要改的是**文档里那张表**", advice)
+        self.assertNotIn("没取回字节", advice)
+
+    def test_no_bytes_row_alone_triggers_the_fetch_branch(self):
+        """只靠行状态也要走取数那一支 —— `fetch_failed` 可能因为表里没这行而空着"""
+        rows = [{"arxiv_id": "1", "status": "no_bytes", "want_bytes": 5, "needle": None}]
+        self.assertIn("没取回字节", closing_advice(rows, []))
+
+    def test_the_fetch_failure_reaches_the_advice_through_main(self):
+        """接线也要有证人：`except` 那支若不记 id，只剩「0 个 id 没取回字节」这种空话
+
+        打的是整条路 —— 假 urlopen 全部抛错，`main` 必须**既**报非零退出码，**又**在收尾
+        那句里带上具体的 id（而不是把取数失败说成表错）。
+        """
+        import io
+        import contextlib
+        from unittest import mock
+        from benchmarks import recheck_arxiv_anchors as rc
+
+        def _boom(*a, **kw):
+            raise OSError("模拟：端点不可达")
+
+        buf = io.StringIO()
+        with mock.patch.object(rc.urllib.request, "urlopen", _boom):
+            with contextlib.redirect_stdout(buf):
+                code = main(["--doc", "docs/research/58-*.md"])
+        out = buf.getvalue()
+        self.assertEqual(1, code, "全部取数失败却退出码 0 ⇒ 这条检查在 CI 等于没跑")
+        self.assertIn("没取回字节", out)
+        # ⚠️ 断言要打在**那句建议里的位置**上，不是「输出里有没有这个 id」：每个失败 id 都会
+        # 单独印一行 `❌ 取 <id> 失败`，所以只查 id 的话，R5（except 里不记 id）也能全绿 ——
+        # 与 H3 同一条 I32，本会话第二次撞在同一个机制上。
+        self.assertIn("没取回字节**（2609.", out,
+                      "收尾那句没把具体 id 跟在短语后面 ⇒ fetch_failed 那条接线断了")
+        self.assertNotIn("0 个 id **没取回字节**", out)
+        self.assertNotIn("要改的是**文档里那张表**", out)
+
+    def test_main_actually_asks_for_the_advice(self):
+        """函数写了没人调 = 本仓反复反对的那一种 (变异表里同款一行)"""
+        import ast
+        src = (REPO / "benchmarks/recheck_arxiv_anchors.py").read_text(encoding="utf-8")
+        mfn = next(n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.FunctionDef) and n.name == "main")
+        self.assertIn("closing_advice", ast.dump(mfn),
+                      "main() 不叫 closing_advice ⇒ 那句误诊还留在输出里")
 
 
 if __name__ == "__main__":

@@ -180,6 +180,26 @@ CITATIONS = [
 ]
 
 
+def closing_advice(rows: list, fetch_failed=None) -> str:
+    """红名单**在说什么** —— 「取数失败」与「文档里的表错了」处置相反，不许共用一句建议
+
+    2026-09-30 撞出来的：五个 id 里有一个瞬时取回失败，那次读数是 **22/36**，而收尾那句无条件
+    写着「要改的是**文档里那张表**」。照做就把一次网络抖动「核」成了一份错的表 —— 比不核更糟，
+    因为它留下的改动看着像有依据。⇒ 先分诊再给建议。
+    """
+    failed = list(fetch_failed or [])
+    bad = [r for r in rows if r.get("status") not in ("ok", "cited")]
+    if not bad:
+        return ""
+    n_no_bytes = sum(1 for r in bad if r.get("status") == "no_bytes")
+    if failed or n_no_bytes:
+        ids = ", ".join(failed) if failed else "见上面那行 ❌"
+        return (f"⇒ 本轮 {len(failed)} 个 id **没取回字节**（{ids}），"
+                f"{n_no_bytes} 行锚点因此无从比对 —— 那是**取数失败**，不是表错。"
+                f"这句建议不能拿去改文档里的表：先重跑，仍失败就把那些条如实记成「未核」")
+    return "⇒ 上面这些数要改的是**文档里那张表**, 不是这里 (表是唯一真源)"
+
+
 def selftest() -> int:
     """这台机器上不需要网络的那部分: 解析、区间判据的两侧、缺字节的诚实处理"""
     md = ("| 论文 | arXiv id | HTML 字节 | 抽出行数 | 读到哪 |\n"
@@ -269,6 +289,7 @@ def main(argv) -> int:
         print(f"❌ 在 {args.doc} 里一条锚点都没解析出来 —— 表的形状变了, 这条检查已经空转")
         return 2
     fetched: dict = {}
+    fetch_failed: list = []
     for arxiv_id in sorted(table):
         url = URL.format(arxiv_id=arxiv_id)
         try:
@@ -277,6 +298,7 @@ def main(argv) -> int:
             fetched[arxiv_id] = body
             print(f"  取回 {arxiv_id}: {len(body):,} B")
         except Exception as exc:  # noqa: BLE001
+            fetch_failed.append(arxiv_id)
             print(f"  ❌ 取 {arxiv_id} 失败: {type(exc).__name__}: {exc}")
     rows = audit(doc_md, fetched, CITATIONS)
     bad = 0
@@ -294,7 +316,9 @@ def main(argv) -> int:
         bad += 0 if r.get("status") in ("ok", "cited") else 1
     print(f"\n锚点重跑: {len(rows) - bad}/{len(rows)} 对上")
     if bad:
-        print("⇒ 上面这些数要改的是**文档里那张表**, 不是这里 (表是唯一真源)")
+        advice = closing_advice(rows, fetch_failed)
+        if advice:
+            print(advice)
     return 1 if bad else 0
 
 
