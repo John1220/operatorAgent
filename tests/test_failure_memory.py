@@ -429,5 +429,98 @@ class TestMarkerTableIsNotRotting(unittest.TestCase):
         self.assertNotIn("把 compute_capability 字符串解析成主版本号", corpus)
 
 
+class TestErrorSimilarityRetrievalDoesNotFabricateEvidence(unittest.TestCase):
+    """`search_by_error` 末尾那个 `or candidates[:limit]` 兜底: 「没找到」被写成「找到了」
+
+    发现路径不是想出来的, 是变异标定撞出来的 (#76③ 第 1 片, doc 41 §七):
+    给 `tests/test_fixer_stage_branch.py` 注入 M9a「把上下文检索里的 L3 过滤掉」时本该红,
+    却全绿 —— 当前那一轮的错误文案是**纯中文**, 而 `_tokenize` 只认 `[a-z0-9_]+`, 一个词元都
+    取不出来 ⇒ 旧代码走进 `if not error_tokens: return candidates[:limit]`, 把整套同类历史
+    原样带回。`fixer.py` 的标签是按「在不在这份返回列表里」算的, 于是这些记录全被印成
+    `[错误相似度命中]` —— 检索自己声明的依据是 Jaccard>0, 那个标签是假的。
+    另一条同族的兜底是 `... or candidates[:limit]` (有英文词元但零重叠时走它),
+    下面 `test_zero_overlap_query_returns_nothing` 钉的是这第二条。
+
+    ⚠️ 同一条用例第一次写在 `FailureDatabase()` 上是**不会红的**: 默认构造会重放
+    `<repo>/output/failure_db.jsonl` (2026-09-29 那一份里有 2 条含「加速比」的真机记录),
+    磁盘语料把断言喂饱了。所以这里全部显式 `jsonl_path="off"`。
+    """
+
+    PERF_REC = dict(kernel_type="matmul", hardware="nvidia_gpu", dsl="python",
+                    level="L3", error_summary="speedup below gate: achieved 0.97 needs 1.00",
+                    fix_summary="加大 BLOCK_K", fixed=True)
+    # 当前这一轮的错误。**中文错误文案在这条检索里等于「没有词元」**: `_tokenize` 只认
+    # `[a-z0-9_]+`, 所以纯中文文案一个词元都取不出来 —— 旧代码在这一点上直接
+    # `return candidates[:limit]`, 把整套同类历史当「相似度命中」塞进 prompt。
+    CJK_ONLY = "最大绝对误差超出容差"
+    # 有词元、但与上面那条**零重叠**的英文错误 (另一条走到 `if _ > 0` 那道筛)
+    NO_OVERLAP = "shape mismatch in tl.dot BLOCK_M"
+
+    def _db(self):
+        from operator_agent.kernel_db import FailureDatabase, FailureRecord
+        db = FailureDatabase(jsonl_path="off")
+        self.assertIsNone(db._jsonl, "持久化没关掉 ⇒ 用例会读到仓库自己的真语料")
+        db.add(FailureRecord(failure_id="h-l3", task_id="t9", **self.PERF_REC))
+        return db
+
+    def test_zero_overlap_query_returns_nothing(self):
+        db = self._db()
+        self.assertEqual([], db.search_by_error(self.NO_OVERLAP, kernel_type="matmul",
+                                                dsl="python", limit=2),
+                         "Jaccard=0 却被带回 —— 调用方会把它标成「错误相似度命中」")
+
+    def test_query_without_any_token_returns_nothing(self):
+        """两条「没有可比的东西」都算: 空串, 和**只有中文**的真实错误文案"""
+        db = self._db()
+        self.assertEqual([], db.search_by_error("", kernel_type="matmul", dsl="python"))
+        self.assertEqual([], db.search_by_error(self.CJK_ONLY, kernel_type="matmul",
+                                                dsl="python"),
+                         "取不出词元时旧代码返回整套候选 ⇒ 中文报错的任务永远带着假命中")
+
+    def test_positive_overlap_still_returns_it(self):
+        """反空转: 上面两条不许是靠「这条检索永远返回空」做到的"""
+        db = self._db()
+        hits = db.search_by_error("speedup below gate: achieved 0.98 needs 1.00",
+                                  kernel_type="matmul", dsl="python", limit=2)
+        self.assertEqual(["h-l3"], [r.failure_id for r in hits])
+
+    def test_the_context_route_still_covers_cold_start(self):
+        """删掉兜底的代价必须不是「历史栏整段消失」—— 同类算子的覆盖由上下文检索提供"""
+        db = self._db()
+        base = db.search_by_context(kernel_type="matmul", dsl="python", limit=2)
+        self.assertEqual(["h-l3"], [r.failure_id for r in base])
+
+    def test_the_fixer_labels_arrival_route_not_a_fabricated_similarity(self):
+        """活路径: 中文报错的那一轮里, 历史栏仍可出现那条 L3, 但只能标「上下文命中」"""
+        from operator_agent.fixer import FixerAgent
+        from operator_agent.schemas import (TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
+                                            TaskType, TaskComplexity, Precision,
+                                            VerificationResult, VerificationLevel)
+
+        class _LLM:
+            def __init__(self):
+                self.prompts = []
+
+            def chat(self, messages, **kw):
+                self.prompts.append(messages[-1]["content"])
+                return ("```python\nimport numpy as np\n\n"
+                        "def kernel(A, B):\n    return A @ B\n```")
+
+        task = TaskSchema(
+            task_id="t-fab", task_type=TaskType.OPERATOR_GENERATION,
+            source=SourceSpec(kernel_type="matmul", complexity=TaskComplexity.LOW),
+            target=TargetSpec(hardware="nvidia_gpu", dsl="python"),
+            constraints=ConstraintSpec(precision=Precision.FP32, max_error=1e-5))
+        llm = _LLM()
+        FixerAgent(llm=llm, failure_db=self._db()).run(
+            "def kernel(A, B:\n    return A @ B\n", task,
+            [VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False,
+                                message=self.CJK_ONLY, error_log=self.CJK_ONLY)])
+        p = llm.prompts[0]
+        self.assertIn("[L3] speedup below gate", p, "上下文检索的覆盖不该被这次修改弄丢")
+        self.assertNotIn("[错误相似度命中]", p,
+                         "零相似的记录被标成「错误相似度命中」= 把「没找到」说成「找到了」")
+
+
 if __name__ == "__main__":
     unittest.main()

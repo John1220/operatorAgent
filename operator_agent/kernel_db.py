@@ -869,15 +869,19 @@ class FailureDatabase:
         用于 Fixer 拿到当前错误日志后, 找到 "曾经相似错误 + 对应 lessons" 的历史案例。
         匹配: kernel_type/dsl 先过滤, 再按 error_text 与 r.error_summary + r.error_keywords
              的词元 Jaccard 相似度排序。
+
+        **没有相似案例时返回空, 不兜底** (2026-09-29 改)。此前末尾写着
+        `... or candidates[:limit]`, 两处「没有可比的东西」也 `return candidates[:limit]`,
+        于是零重叠的历史记录会被带回 prompt, 而 `fixer.py:423` 按「在不在这份返回列表里」
+        给它们打上 `[错误相似度命中]` —— 那是把「没找到相似的」说成「找到了相似的」。
+        同类算子的冷启动覆盖由 `search_by_context` 提供, 调用方本来就会把它并进来,
+        所以这个兜底没有买到任何东西, 只买到一个假标签。
         """
         candidates = self.search_by_context(kernel_type=kernel_type, dsl=dsl,
                                              limit=max(50, limit * 5))
-        if not error_text:
-            return candidates[:limit]
-
         error_tokens = _tokenize(error_text)
         if not error_tokens:
-            return candidates[:limit]
+            return []
 
         scored = []
         for r in candidates:
@@ -892,7 +896,7 @@ class FailureDatabase:
         # 最旧的排在新的一次性通过的最前面。同一个字段在同一个文件里的两处排序里含义相反,
         # 而 prompt 只看得见排在前面的那几条。
         scored.sort(key=lambda t: (t[0], t[1].fixed, t[1].created_at), reverse=True)
-        return [r for _, r in scored if _ > 0][:limit] or candidates[:limit]
+        return [r for _, r in scored if _ > 0][:limit]
 
     def list_all(self) -> list[FailureRecord]:
         return list(self._records.values())

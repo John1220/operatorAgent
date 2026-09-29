@@ -179,8 +179,11 @@ guided 的翻译阶段成功率从 **33/40 变成 32/40**。
 verify_results if not r.passed]`）。本轮把「取向」按阶段分支（§六）是这三路里最省钱的一片；
 完整的「redesign / code repair / interface repair」归 #76 第 ①项。
 
-顺带记一条今天就会发生的事实：那个列表**顺带**把 L3 性能失败也交给 Fixer，
-所以一份修数值错误的 prompt 里同时有「还不够快」—— 见 §六。
+> ⚠️ 这句「今天就会发生」**错了两次**，留在这里当反面：① `verifier.verify()` 是
+> fail-fast（`:233-249` 每级失败就 `return`），一份 `verify_results` 里最多只有一个未通过
+> 级别 ⇒ 同轮不可能并存；② 我随后改口说「L3 会经 `history_cases` 跨轮进来」，而那也没有
+> 生产者 —— `conductor.py:763` 的 `l1_l2_failed` 门只放行 L1/L2，兜底入库 `:952-955` 也按
+> 级别过滤 ⇒ 今天的代码不产 L3 记录。详见 doc 49 §八 第 26 条 / CHECKLOG I16。
 
 ### 3.4 每条改动的接受率（V-E，行 730-733）
 
@@ -306,10 +309,16 @@ L1/L2/L3，原料在，但**没有「把 L3 从记分里摘掉再报一次通过
 looks high-performance but is functionally flawed, subsequent refinement typically remains
 trapped in the same faulty pattern."
 
-**我方的先决事实**（不是推测）：`fixer_repair.md` 在改之前只有一句被合写的话
-「以下代码在编译 (L1) 或功能 (L2) 验证中失败」，取向永远是一条「修好它」，从不许可退让；
-而 `conductor.py:779` 交给 Fixer 的是**所有**未通过项 —— L2 失败的那一轮常常同时带着 L3
-的「还不够快」。⇒ 数值失败时 prompt 里确实存在一条把模型推向继续优化的证据。
+**我方的先决事实**（读来的，但**读错了一处，已在下面第二次纠正**）：`fixer_repair.md` 在改之前
+只有一句被合写的话「以下代码在编译 (L1) 或功能 (L2) 验证中失败」，取向永远是一条「修好它」，
+从不许可退让 —— 这半句到今天就还是真的。当时紧跟的那半句「`conductor.py:779` 交给 Fixer 的是
+**所有**未通过项，所以 L2 那一轮常同时带着 L3 的『还不够快』」**不成立**：`verify()` 每级失败就
+`return`（同轮最多一个未通过级别），而 Fixer 的入口被 `conductor.py:763` 的 `l1_l2_failed` 门
+挡着、兜底入库 `:952-955` 也按级别过滤（⇒ 今天没有 L3 记录可检索）。
+所以 `_L2_RETREAT` 末句那句「若同时出现性能未达标」今天是**明标的保险**而非现行描述，
+两条结构约束各有一条守卫钉住（`tests/test_fixer_stage_branch.py`，含 M11 变异）。
+**分支本身不受这个纠正影响**：取向按阶段分是对的，因为原文给的理由（优化叠在数值缺陷上
+会困在同一个错误模式）针对的是「本轮谁优先」，而「本轮只有 L2 在报失败」恰恰让这条更必要。
 
 **改了什么**（3 个文件，纯加法，判定路径零改动）：
 
@@ -318,10 +327,15 @@ trapped in the same faulty pattern."
 | `operator_agent/fixer.py` | `_L2_RETREAT` / `_L1_INPLACE` 两段取向 + `stage_directive(levels)`（**只有 L2** 触发退让；L1+L3 不触发） |
 | `operator_agent/fixer.py` | `run()` 先算 `levels`/`level_set`，向模板传 `failure_stage` 与 `stage_directive` |
 | `operator_agent/prompts/fixer_repair.md` | 合写那句换成 `本轮报失败的阶段: {{failure_stage}}` + `{{stage_directive}}` |
-| `tests/test_fixer_stage_branch.py` | 7 条用例 + 8 行变异表 |
+| `tests/test_fixer_stage_branch.py` | 11 条用例 + 13 行变异表（原 7 条 / 8 行，#76③ 之后长成这样） |
 
-**变异标定 8/8 拦住，0 逃逸**（逐条见测试文件 docstring）。其中 M8（删掉「本轮**不要**为此
-优化」那句）只有 1 条用例红 —— 那句唯一负责的场合就是 L2+L3 同框，这与 §六 的先决事实对齐。
+**变异标定 13/13 拦住，0 逃逸**（逐条见测试文件 docstring）。其中 M8（删掉「本轮**不要**为此
+优化」那句）只有 1 条用例红，而那条是**明标的防御性优先级**用例 —— 它钉的是「分支条件不许是
+L3」，不是「今天会发生 L2+L3 同框」。上面那句「这与 §六 的先决事实对齐」原本是错的：
+§六 那条先决事实后来被**纠正了两次**（同轮被 `verify()` 的 fail-fast 排除；跨轮那条通道也没有
+生产者，因为 Fixer 的入口只放行 L1/L2），详见 §3.3 的更正块与 doc 49 §八 第 26 条。
+这张表另外撞出一条真缺陷（`search_by_error` 的零相似兜底把不相关历史标成「错误相似度命中」，
+#79 / CHECKLOG I17），那是 M9a 第一次「逃逸」的去向 —— 记录在 doc 41 §七。
 
 **没做的事，写清楚**：真机 A/B 没跑（本轮无机时）。落下来的是**机制**，
 效果断言为 0。要判它有没有用，姿势是 doc 35 那套：同一批失败、两臂、看
