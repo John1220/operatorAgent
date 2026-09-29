@@ -100,6 +100,17 @@
   缺口 5 那四道门全在管后端与分母，**参考侧没有门**
 - **类别**：I/S · **状态**：⚠️ 已知，未修（`verifier.py` 等是并发会话的在途文件）
 ---
+### I6 · 「没人读」是按手里那个变量名数出来的
+- **原话**：doc 53 第一版与提交说明写「全仓 `cost_summary` 只有两行 ⇒ 读者数 0，成本算了没人读」
+- **实证**：按**接口上的键名** `llm_cost` 重数，读者有两处 —— `harness_pass_rate.py:176` 的
+  `cost_from_metadata()` 与 `golden_regression.py:357`（后者把两列抄进
+  `tests/golden_registry.json`）。真实缺陷是「每次运行的 `result.json` 里没有成本」，
+  缺的是**跨运行**那一半（`artifact_store.py:71-74`：`metadata` 整个不进 `result.json`）
+- **出处**：doc 53 §五.1（已改口）；落码 commit `aaa2632`
+- **后果**：两种说法要修的东西不同 —— 「没人读」会让人去动那两个本来就工作的读者，
+  而正确的动作只是补一个顶层键。**夸大的缺陷描述比没有描述更贵**
+- **类别**：I · **状态**：✅ 已改口（同一会话自查发现；通则写进 `tests/test_cost_persistence.py` 的 docstring）
+
 
 ## M — 公式 / 口径
 
@@ -206,6 +217,7 @@
 | I3 | 远端 L1 无类名 | I | ✅ |
 | I4 | 文本判据把「名字还在」当「还在用」 | I | ✅ |
 | I5 | 用例判定随本机有无 torch 翻转 | I/S | ⚠️ |
+| I6 | 「没人读」按手里那个变量名数出来 | I | ✅ |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
