@@ -132,3 +132,29 @@ $ git check-ignore -v tests/golden_registry.json            # .gitignore:30
 | `layernorm`/`relu` 死仪器本身 | 🚫 未修 —— 判据在并发会话的 `verifier.py` |
 | golden 性能轴是墙钟量（6% 散布） | 🚫 未修，开任务 #74 |
 | 真机 | ⏸ 不适用：本片全部改动在 `tests/` 与无 GPU 路径内 |
+
+## 八、`testing.md` 这 49 行的完整清点（逐条给结论，下一轮不必重读）
+
+这一篇落地了 §三 表里那几条，剩下的不写结论就会被人再 survey 一次（doc 52 §九 是同一件事
+的正面样本：清点的过程本身又撞出了 #72 与 #74 两个真实落点）。行号按 HEAD `47f943859b`。
+
+| 规则 | 结论 | 依据 |
+|---|---|---|
+| `:9` 分层 + 「每个 registry 配一条 dispose/HMR 安全测试」 | **不吸纳（形式不对应）** | 本仓没有需要热卸载的运行时注册表。最接近的那个（后端注册表）已经有 `test_backend_caps.py:109 test_every_live_backend_is_registered`、`:114 test_registry_has_no_stale_entry`、`:130 test_declarations_match_the_registry` —— 「注册了什么还在不在」这一半是齐的 |
+| `:10` 覆盖率门；*"An uncovered line is often dead code the gate is correctly flagging for deletion"* | **精神已满足，门本身不搬** | 本仓走的正是那句话而不是那个数字：`test_backend_caps.py:360 test_no_unreachable_statements` 与 `test_repo_hygiene.py::TestNoShadowedDefinitions`（同 class 里定义两次的函数 = 看着活着的死代码）。没有 CI，100%/文件的门在这里跑不起来 |
+| `:17-19` with-key 政策：*"A no-key test proves plumbing; only a with-key run proves the agent works"* | **一致，早已是本仓立场** | 就是「MockGPU 926 条全绿只证明管路，真机才证明算子」。doc 20 每一段都以真机读数为验收，且明确拒绝用无 GPU 的绿冒充效果 |
+| `:25` 恢复测试要分开 pre/post-chunk 失败 | **已满足** | `:59/:60` 续跑等价性做的就是这件事：快照出现在第几次调用、`resume_status` 五态（含 `no_snapshot`/半份快照），不是笼统的「能恢复」 |
+| `:29` ①e2e 自己拥有资源 ②**shared fixtures 住在 plain helper 里，不许住在另一个 spec 里** | **①已满足 ②撞出两件事** | ①`setUp/tearDown` 是本仓常规。②(a) `tests/test_prescriptive_errors.py:30` 确实 `import tests.test_fixer as tfx`（fixture 住在另一个 spec 里），**但 DSH 点名的后果在 pytest 下不发生** —— 实测采集 19 + 22 = 41，没有重复注册、没有重复烧调用，且改名/删除的失败方式是 import 期**大声报错** ⇒ 不为此重构（低收益、且 `test_fixer.py` 不是我的文件）。(b) 同一条让我查到自己新写的文件才是全仓**唯一**往 `sys.path` 塞 `tests/` 再裸导入的人 —— 见下一行 |
+| `:37-39` 测试只解析 source 平面；stale 副本会 *"load a second copy of module singletons"* | ✅ **本轮吸纳** | 全仓 8 处跨文件 helper 都走 `from tests.X import …`（包限定名），只有 `test_golden_tier.py` 用裸名 —— 那会把同一模块装成 `golden_regression` 与 `tests.golden_regression` 两份，于是 `FACTS`/`STATUSES` 有两个对象、`isinstance` 在两份之间不认账，而且**不报错**。已改成包限定名，并补 `test_the_module_is_not_loaded_twice` + 一条**自检**（子进程里故意装两份，要求哨兵抓得到）—— 后者是 `:34` "a guard only guards if the regression actually fails it" 的直接应用 |
+| `:35` *"Real entry path means the published artifact"*（跑构建产物，暴露 tsx 遮住的失败） | **对应 #62，补了外部依据** | 本仓同形问题是：真机跑的是部署目录里那份 `run_kernel.py`，不是仓库里这份 —— 部署副本过期时测量结果归因给错的代码。#62（干净 worktree 重跑 + 驱动自检「我跑的是哪份代码」）现在有了第三方背书 |
+| `:41-45` 子进程的双模式启动（built `lib/` vs `src`） | **不吸纳** | 没有对应物。我们的子进程边界是 `ssh + uv run`，那条的正确门是 #45 的 `mode="ssh"` 承诺（不可用时抛，而不是静默降级），已经在 |
+| `:47-49` 每个非平凡改动要在**同一次提交**里加/更新 keyless scenario | ⏳ **半条** | golden 层这一轮刚被接上读者（期望入库 + `compare` 退出码 2 持续提醒），但「改动必须带 scenario」本身还没有门。等有真机时再决定：如果 golden 拿到可靠的量化轴（#74），这条值得做成守卫；如果它永远只有 pass/fail，那这条门是给一个没有分辨力的仪器加流程 |
+
+**另一个外部文件也顺带清完了**：`docs/capability-seams.md`（471 行）主体是
+`scripts/gen-doc-graphs.ts` 生成的 mermaid，散文只有「服务分核心/可换 seam/组合点」与
+「角色分类带 **completeness guard**」。本仓对应物（`backend_caps` + `require`）的守卫
+**已经比它多**：`test_the_facade_invents_no_capability_of_its_own`、
+`test_every_driver_declares_what_it_needs`、`test_no_isinstance_or_hasattr_dispatch_on_backends`、
+`test_forwarding_contains_no_getattr_shim`（还配了一条「这条守卫别被 docstring 骗过」）。
+⇒ **没有新东西可吸纳**，这条记下来免得下一轮再读 471 行生成物。
+

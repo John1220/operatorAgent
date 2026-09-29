@@ -37,6 +37,10 @@
    差集只保证「有写者」，可达性要另一张网。
 ② 中途加一条守卫（REACH）之后，**所有**受影响的期望必须重推 —— 这一轮我漏了 M1 与 M3 两次，
    两次都是「新增守卫的期望没回头补」，不是守卫错。
+③ 最后两条守卫（模块只装一份 + 它自己的开火证据）不进上表：它们不靠变异证明，
+   `test_the_sentinel_actually_fires_when_a_second_copy_exists` 在子进程里**故意装两份**
+   并要求哨兵抓得到 —— DSH `testing.md:34` "a guard only guards if the regression
+   actually fails it" 的直接应用。
 
 运行: python3 -B -m unittest tests.test_golden_tier -v
 """
@@ -53,9 +57,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tests"))
 
-import golden_regression as gr  # noqa: E402
+# 走**包限定名**导入，与本仓其余跨文件 helper 的写法一致（`from tests.backend_fakes
+# import …` 有 8 处）。把自己塞进 `sys.path` 再裸导入会把同一个模块装成两个名字 ——
+# 那是 DSH `testing.md:39` 点名的失效（*"stale artifacts there load a second copy of
+# module singletons"*）：`FACTS`/`STATUSES` 会有两份，`isinstance` 与注册表在两份之间
+# 不认账。下面 `test_the_module_is_not_loaded_twice` 是这条的活体哨兵。
+from tests import golden_regression as gr  # noqa: E402
 
 SRC = (ROOT / "tests" / "golden_regression.py").read_text(encoding="utf-8")
 REGISTRY = ROOT / "tests" / "golden_registry.json"
@@ -266,6 +274,42 @@ class TestGradedRunDoesNotTouchItsOwnExpectations(unittest.TestCase):
                             "tests/definitely_not_tracked_73.py"],
                            cwd=str(ROOT), capture_output=True, text=True)
         self.assertNotEqual(0, r.returncode, "`--error-unmatch` 对未跟踪文件也返回 0 ⇒ 上一条是恒真的")
+
+
+class TestModuleIsLoadedOnce(unittest.TestCase):
+    """DSH `testing.md:37-39`「测试只解析 source 平面」背后的真实失效：同一个模块装两份。
+
+    两份模块意味着 `FACTS`/`STATUSES` 有两个对象、`isinstance(DeclaredFakeBackend)`
+    这类判断在两份之间不认账 —— 而它不会报错，只会让某个断言在**另一份**上成立。
+    """
+
+    def test_the_module_is_not_loaded_twice(self):
+        aliases = [name for name in sys.modules
+                   if name == "golden_regression" or name.endswith(".golden_regression")]
+        self.assertEqual(["tests.golden_regression"], aliases,
+                         f"golden_regression 被装在多个名字下: {sorted(aliases)}")
+        self.assertEqual("tests.golden_regression", gr.__name__)
+
+    def test_the_sentinel_actually_fires_when_a_second_copy_exists(self):
+        """`:34` "A guard only guards if the regression actually fails it" —— 自己验自己。
+
+        子进程里先把同一份文件以裸名导入（就是本文件改之前那种 `sys.path` 写法），
+        再把哨兵的那段判据跑一遍，必须抓出两个名字。抓不到就说明这条是恒真的。
+        """
+        probe = (
+            "import sys; sys.path.insert(0, {root!r}); sys.path.insert(0, {tdir!r})\n"
+            "import golden_regression\n"
+            "import tests.golden_regression\n"
+            "names=[n for n in sys.modules if n=='golden_regression' or n.endswith('.golden_regression')]\n"
+            "print(sorted(names))\n"
+            "assert len(names) > 1, '没有装出两份, 这条自检不成立'\n"
+        ).format(root=str(ROOT), tdir=str(ROOT / "tests"))
+        r = subprocess.run([sys.executable, "-B", "-c", probe], cwd=str(ROOT),
+                           capture_output=True, text=True)
+        self.assertEqual(0, r.returncode,
+                         f"自检没能造出两份模块: {r.stderr[-400:]}")
+        self.assertIn("'golden_regression'", r.stdout)
+        self.assertIn("'tests.golden_regression'", r.stdout)
 
 
 class TestPortableProvenance(unittest.TestCase):
