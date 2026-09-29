@@ -209,7 +209,7 @@ memory management, representing genuine domain knowledge and nontrivial computat
 | `run_suite()` | 跑目标测试、解析汇总行 | **解析不出汇总行就 `raise RuntimeError`** —— 第一版 `/tmp` 脚本正是把「两条路径当成一条传」导致零条测试运行、被读成「全绿」，即 CHECKLOG I15 那一族 |
 | `calibrate()` | 逐条：改 → 跑 → **立刻复原并逐字节断言** | 归属靠这条（doc 55 §六 我自己那次错）。红名单与上一行完全相同 ⇒ 打印 `⚠️ 复核归属`，不静默 |
 | `summarize()` | 恒印两栏 | 结构行不进行为分母；只报一个数就是这次要修的那个错 |
-| `reading_conditions()` | 报表第一行印 `python/torch/HEAD/未提交改动` | 这台控制机上有两套解释器，`python3` 解析到哪一套取决于当时的 `PATH` —— 不带条件的「N/N」下一轮分不出是**条件差**还是**回归**（见下面那小节）|
+| `stamp()`（现在住在 `benchmarks/provenance.py`，两份报表共用一个定义）| 报表第一行印 `python/torch/HEAD/未提交改动` | 这台控制机上有两套解释器，`python3` 解析到哪一套取决于当时的 `PATH` —— 不带条件的「N/N」下一轮分不出是**条件差**还是**回归**（见下面那小节；落地过程与它抓到的三处空转见 doc 50 §7.8 / CHECKLOG I25）|
 
 ### 先标定量具，再让它报数（这一段是我自己的学费）
 
@@ -275,8 +275,7 @@ A 组那份假生产文件是 `pick(x)`（返 `"a"` 或 `"b"`），配两种测�
 「条件差还是回归」这个判断（doc 20 那条计数行早就写过「读数条件要跟数字同处」，这次的新形态是
 **同一台机器上也有两套解释器**，而同一个 `python3` 名字解析到哪一套取决于当时的 `PATH`）。
 
-落码：harness 报表第一行恒印 `读数条件: python=… @ … torch=… HEAD=… 未提交改动=…`
-（`reading_conditions()`），并配一条反空转用例 —— **`HEAD=?` 不许悄悄印过去**（我第一版把
+落码：harness 报表第一行恒印 `读数条件: python=… @ … torch=… HEAD=… 未提交改动=…`（实现现在住在 `benchmarks/provenance.py::stamp`，变异 harness 与真机驱动共用同一个定义 —— 一句话留两个副本就会漂），并配一条反空转用例 —— **`HEAD=?` 不许悄悄印过去**（我第一版把
 `git rev-parse` 写成了 `git -rev-parse`，取不到就兜成 `?`，看起来完全像一行正常的 stamp，
 正是 I21 那个「兜底值冒充读数」的形状）；另一处自我纠正是：这条 stamp 的注释第一版拿
 **986 与 974** 当解释器之差，那其实是**两个不同 commit** 的读数 —— 又一次把并排的两个数
