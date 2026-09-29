@@ -29,7 +29,9 @@
 
 ## 错误信息
 
-以下代码在编译 (L1) 或功能 (L2) 验证中失败:
+以下代码未通过验证。本轮报失败的阶段: {{failure_stage}}
+
+{{stage_directive}}
 
 {{error_details}}
 

@@ -91,6 +91,45 @@ def prescribe(err_text: str) -> Optional[tuple[str, str]]:
     return None
 
 
+# ── 修复取向按「哪一级报的失败」分支 (docs/research/55, CUDA-Harness §4.3.1) ──
+#
+# 原文 (arXiv:2609.00058v1, 一手核过):
+#   "The refinement branches based on which validation stage reports the failure.
+#    If the generated kernel fails to compile, the agent is steered towards a
+#    specific repair based on the error details provided by the compilation tool.
+#    When the kernel fails functional validation, the agent is instructed to
+#    retreat to a more conservative implementation, prioritizing correctness
+#    above all else."
+#   理由那一句才是重点: "When optimization is built on a kernel that looks
+#   high-performance but is functionally flawed, subsequent refinement typically
+#   remains trapped in the same faulty pattern."
+#
+# 我方此前的形状: 一个模板、一句话 («在编译 (L1) 或功能 (L2) 验证中失败»),
+# 取向只有一条「修好它」, 从来没有许可过「退回去」。而 `conductor.py:779` 把
+# **所有**未通过的验证结果都交给 Fixer —— 其中可以包含 L3 性能失败, 于是同一份
+# prompt 里同时有「误差超标」和「还不够快」, 后一条正好把模型推回原文说的那个
+# 陷阱 (带着数值错误继续叠优化)。分支不能消掉这条证据, 但它规定了**本轮谁优先**。
+
+_L2_RETREAT = (
+    "本轮报失败的是**数值检查器** (L2): 这一版能编译、能跑, 但输出与参考实现不一致。"
+    "取向: **correctness 优先于性能, 允许这一版比上一版慢**。做法是撤销可疑的激进改动"
+    "(累加精度、向量化/tl.dot 的 input_precision、mask 与 other= 的取值、stride), "
+    "回到最保守的正确写法, 而不是在同一个错误模式上再叠一个补丁。"
+    "若错误信息里同时出现性能未达标 —— 本轮**不要**为此优化。"
+)
+
+_L1_INPLACE = (
+    "本轮报失败的是**编译器 / 预检** (L1): 这一版还没有跑到能被判数值的地步。"
+    "取向: **就地修这一处结构或 API 误用, 保持既有的优化策略不变**。"
+    "编译失败不代表策略错, 退回保守写法只会丢掉已经有效的加速。"
+)
+
+
+def stage_directive(levels: set) -> str:
+    """由「哪些级别报了失败」得出本轮修复取向。L2 优先于 L1。"""
+    return _L2_RETREAT if "L2" in levels else _L1_INPLACE
+
+
 class FixerAgent:
     """
     Fixer Agent (错误修复)
@@ -143,6 +182,10 @@ class FixerAgent:
         )
         dsl = task.target.dsl
 
+        # 先算级别: 它既进模板 (告诉模型本轮是谁报的失败), 也决定取向 (stage_directive)
+        levels = ", ".join(r.level.value for r in failed_results)
+        level_set = {r.level.value for r in failed_results}
+
         base_prompt = self.pm.render(
             "fixer_repair",
             _agent_role=self._agent_role,
@@ -151,12 +194,13 @@ class FixerAgent:
             hardware=task.target.hardware,
             dsl=dsl,
             precision=task.constraints.precision.value,
+            failure_stage=levels or "未知",
+            stage_directive=stage_directive(level_set),
             error_details=error_details,
             history_cases=history_cases or "无",
             code=code,
         )
 
-        levels = ", ".join(r.level.value for r in failed_results)
         feedback = ""
         fixed = ""
         succeeded = False
