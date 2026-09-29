@@ -122,6 +122,9 @@ class _LLMCallRecord:
     cached_prompt_tokens: int = 0
     cache_semantics: str = "absent"   # inclusive | exclusive | absent
     cost_basis: str = "list_price"    # list_price | upper_bound_cache_unpriced
+    # 端点**自报**的模型标识 (响应里的 `model` 字段), 与请求的那个并排存 (doc 58 §2.4 / #89)。
+    # None = 响应里根本没有这个字段 —— 那是「不知道」而不是「一致」。
+    reported_model: Optional[str] = None
 
 
 class CostTracker:
@@ -133,7 +136,8 @@ class CostTracker:
     # ----- 写入 -----
     def record(self, *, model: str, prompt_tokens: int, completion_tokens: int,
                usage_source: str, caller_tag: str = "Unknown",
-               cached_prompt_tokens: int = 0, cache_semantics: str = "absent") -> None:
+               cached_prompt_tokens: int = 0, cache_semantics: str = "absent",
+               reported_model: Optional[str] = None) -> None:
         total = prompt_tokens + completion_tokens
         # 查价格表: 小写匹配 model 前缀
         key_lower = model.lower()
@@ -167,6 +171,7 @@ class CostTracker:
             cached_prompt_tokens=cached_prompt_tokens,
             cache_semantics=cache_semantics,
             cost_basis=cost_basis,
+            reported_model=reported_model,
         ))
 
     def reset(self) -> None:
@@ -210,8 +215,20 @@ class CostTracker:
 
     def _summarize(self, records) -> dict:
         semantics: dict = {}
+        # 端点自报的模型标识 vs 请求的那个 (doc 58 §2.4 / #89)。刻意**不做归一化**:
+        # 外部那篇按日期快照归一 (`model-2026-08-01` 与 `model` 视为同一个), 那是它自己
+        # 端点上的规则 —— 本仓不抄没核过的映射表, 所以这里连「同族不同日期」也算不同。
+        # 与之配套的是 `n_reported_model_absent`: 响应里没这个字段是**不知道**,
+        # 不是「一致」—— 缺证据不许算进「对上了」那一侧。
+        mismatches: dict = {}
+        absent = 0
         for r in records:
             semantics[r.cache_semantics] = semantics.get(r.cache_semantics, 0) + 1
+            if not r.reported_model:
+                absent += 1
+            elif r.reported_model != r.model:
+                key = f"{r.model} -> {r.reported_model}"
+                mismatches[key] = mismatches.get(key, 0) + 1
         return {
             "total_calls": len(records),
             "total_prompt_tokens": sum(r.prompt_tokens for r in records),
@@ -221,6 +238,9 @@ class CostTracker:
             "cache_semantics": semantics,
             "n_cache_unpriced_calls": sum(1 for r in records
                                           if r.cost_basis == "list_price_cache_unpriced"),
+            "model_mismatches": mismatches,
+            "n_model_mismatch_calls": sum(mismatches.values()),
+            "n_reported_model_absent": absent,
             "total_cost_usd": round(sum(r.cost_usd for r in records), 6),
             "breakdown_by_caller": self.breakdown_by_caller(records),
             "n_estimated_usage": sum(1 for r in records if r.usage_source == "estimated"),
@@ -259,6 +279,15 @@ class CostTracker:
                 f"  * 其中 {s['n_cache_unpriced_calls']} 次的输入含缓存命中 "
                 f"({s['total_cached_prompt_tokens']} tokens, 约定 {s['cache_semantics']}), "
                 f"价格表没有缓存价 ⇒ 这个钱是**按全价算的**, 不是账单")
+        if s["n_model_mismatch_calls"]:
+            lines.append(f"  ⚠️ {s['n_model_mismatch_calls']} 次调用里端点**自报**的模型与请求的不同"
+                         f" (逐族计数, 不做同族归一):")
+            for pair, n in sorted(s["model_mismatches"].items(), key=lambda kv: -kv[1]):
+                lines.append(f"    - {pair}: {n} 次")
+            lines.append("    自报只作参考 —— 它可能答的是路由器后面的另一条线路 (doc 58 §2.4)")
+        if s["n_reported_model_absent"]:
+            lines.append(f"  * {s['n_reported_model_absent']} 次的响应里没有 model 字段 "
+                         f"⇒ 记为「不知道」, 不算「对上了」")
         if s["breakdown_by_caller"]:
             lines.append("  按调用方分解:")
             for caller, b in sorted(s["breakdown_by_caller"].items(), key=lambda kv: -kv[1]["cost_usd"]):
@@ -432,6 +461,9 @@ class LLMClient:
             caller_tag=caller_tag,
             cached_prompt_tokens=norm["cached_prompt_tokens"],
             cache_semantics=norm["cache_semantics"],
+            # 端点自报的标识 (OpenAI 兼容层通常都会带 `model`)。取**原始值**, 不裁剪、不映射:
+            # 观测阶段要的是「它今天说自己是谁」, 归一化规则没核过就不写 (doc 58 §2.4 / #89)
+            reported_model=(result.get("model") or None),
         )
 
         if content is None or (isinstance(content, str) and content.strip() == ""):
