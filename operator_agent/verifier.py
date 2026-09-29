@@ -29,6 +29,10 @@ _REMOTE_L2_METRIC_KEYS = (
     "max_error", "max_rel_error", "matched_ratio", "bad_elements",
     "atol", "rtol", "required_matched_ratio",
     "compared_elements", "coverage", "reference_type", "device",
+    # 第一个坏元素的展平下标 (LeetCUDA book/tests 的 book_check() 同款)。
+    # Fixer 拿它定位坏 tile, 比只有 max_error 有用一个量级 ——
+    # 「哪错了」和「错了多少」是两个问题。
+    "first_bad_index", "first_bad_actual", "first_bad_expected",
 )
 
 
@@ -396,6 +400,7 @@ class Verifier:
             remote_verify = self.backend.verify_function(
                 kernel_code, inputs, task.source.kernel_type, max_allowed,
                 precision=task.constraints.precision.value,
+                reference_source=task.source.reference_source or "",
             )
             # 声明了 REMOTE_VERIFY 就必须给出载荷。「内层没这个方法」已经由 Backend
             # 基类那个一调就抛的存根拦掉了, 走到这里的 None 只能是「声明了却没数据」——
@@ -491,6 +496,14 @@ class Verifier:
             "atol": atol, "rtol": rtol, "required_matched_ratio": rho,
             "compared_elements": size, "coverage": 1.0,
         }
+        # first_bad_*: 第一个坏元素的展平下标与两侧取值 (LeetCUDA book_check 同款)。
+        # 展平下标够 Fixer 定位坏 tile; 顺带带上 actual/expected 才分得清
+        # 「整体 scale 错」(符号同、比值恒定) 与「局部炸」(个别点)。
+        if size and int(bad.sum()) > 0:
+            fb = int(np.argmax(bad))
+            metrics["first_bad_index"] = fb
+            metrics["first_bad_actual"] = float(actual_f.reshape(-1)[fb])
+            metrics["first_bad_expected"] = float(expected.reshape(-1)[fb])
         if passed:
             return VerificationResult(
                 level=VerificationLevel.L2_FUNCTION, passed=True,
@@ -499,6 +512,10 @@ class Verifier:
                 metrics=metrics)
         reason = ("输出含 NaN/Inf" if has_nonfinite else
                   f"{metrics['bad_elements']}/{size} 个元素同时超 atol={atol:.1e} 与 rtol={rtol:.1e}")
+        if "first_bad_index" in metrics:
+            reason += (f", first_bad@{metrics['first_bad_index']}"
+                       f" (got {metrics['first_bad_actual']:.6g},"
+                       f" want {metrics['first_bad_expected']:.6g})")
         return VerificationResult(
             level=VerificationLevel.L2_FUNCTION, passed=False,
             message=f"功能验证失败: {reason}, 最大误差={metrics['max_error']:.2e}",
@@ -518,6 +535,7 @@ class Verifier:
                 precision=task.constraints.precision.value,
                 baseline_priority=baseline_plan(task.source.kernel_type,
                                                 task.constraints.precision.value),
+                reference_source=task.source.reference_source or "",
             )
         bench = self.backend.benchmark(kernel_code, bench_inputs, warmup=2, repeat=5) if remote_bench is None else remote_bench
 
@@ -643,6 +661,8 @@ class Verifier:
                     "baseline_display": display_name,
                     "baseline_time_ms": round(baseline_ms, 6),
                     "speedup_vs_baseline": round(speedup, 4),
+                    # 三元组原文, 落盘可直接比 (LeetCUDA bench 的 "%.1f/%.1f (%.2fx)")
+                    "ratio_triple": f"{kernel_min_ms:.4g}/{baseline_ms:.4g} ({speedup:.2f}x)",
                     "min_speedup_required": min_required,
                     "measurement_scope": "same_remote_device",
                     "candidate_median_time_ms": candidate_metrics.get("median_time_ms"),
@@ -665,7 +685,11 @@ class Verifier:
                     "baseline_attempts": bench.get("baseline_attempts") or [],
                 })
                 passed = speedup >= min_required
-                msg = (f"加速比 {speedup:.2f}x vs {display_name} "
+                # 三元组 (LeetCUDA bench 同款): 候选/基线 (倍率)。只报一个 1.04x
+                # 时读者看不见两边的绝对量级 —— 「0.01/0.0096 (1.04x)」与
+                # 「10.4/10.0 (1.04x)」是两回事, 前者可能整个被 launch 地板吞掉。
+                ratio_triple = (f"{kernel_min_ms:.4g}/{baseline_ms:.4g} ({speedup:.2f}x)")
+                msg = (f"加速比 {ratio_triple} vs {display_name} "
                        f"(同机同卡 median, 要求 >= {min_required:.2f}x, {bound}-bound)")
                 _cp = metrics["candidate_peak_memory_bytes"]
                 _bp = metrics["baseline_peak_memory_bytes"]
@@ -715,7 +739,9 @@ class Verifier:
                 "min_speedup_required": min_required,
             })
             passed = speedup >= min_required
-            msg = (f"加速比 {speedup:.2f}x vs {baseline['baseline_type']} "
+            base_ms = baseline["baseline_time_ms"]
+            ratio_triple = f"{kernel_min_ms:.4g}/{base_ms:.4g} ({speedup:.2f}x)"
+            msg = (f"加速比 {ratio_triple} vs {baseline['baseline_type']} "
                    f"(要求 >= {min_required:.2f}x, {bound}-bound)")
             msg, assessment = self._assess_measurement(
                 metrics, msg, kernel_min_ms, task=task,
@@ -1037,7 +1063,21 @@ class Verifier:
         """
         构建 PyTorch 参考实现 (可调用); torch 不可用时回退 NumPy
         返回 (callable, baseline_type) 或 (None, None)
+
+        **外挂参考优先**: `source.reference_source` 非空时不再查内建表。
+        新架构算子没有内建参考, 没有这一层时 L3 会「无可用基线」、L2 会
+        「无参考仅验证可执行性」—— 整条闭环不存在 (见 reference.py)。
         """
+        from operator_agent.reference import ReferenceSourceError, resolve_reference
+        try:
+            ext = resolve_reference(task)
+        except ReferenceSourceError as exc:
+            # 加载失败是任务定义错误, 不是「没有参考」—— 后者会静默放行 L2
+            raise ValueError(f"外挂 reference_source 不可用: {exc}") from exc
+        if ext is not None:
+            # 与内建参考同一约定: 闭包捕获当前 inputs, 零参可调
+            return (lambda fn=ext, xs=inputs: fn(**xs)), "reference_source"
+
         kernel_type = task.source.kernel_type.lower()
         precision = task.constraints.precision
         dtype_np = {Precision.FP32: np.float32, Precision.FP16: np.float16,

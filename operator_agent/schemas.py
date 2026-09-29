@@ -160,6 +160,11 @@ class SourceSpec:
     kernel_type: str = ""
     fused_ops: list = field(default_factory=list)
     complexity: TaskComplexity = TaskComplexity.MEDIUM
+    #: 可外挂参考实现的 Python 源码 (须定义 `def reference(**inputs)`)。
+    #: 非空时 L2/L3 的参考与 eager 基线**都用它**, 不再按 kernel_type 查内建表。
+    #: 新架构算子 (CSA/HCA/MLA…) 没有库对手, 参考只能由任务侧带来 ——
+    #: 见 `operator_agent/reference.py` 与 `operator_agent/ops/csa_compress.py`。
+    reference_source: Optional[str] = None
 
     # 已在项目中实现 / 被 KernelDB 收录的算子类型, 用于 Designer/Verifier 中做合法值范围校验
     _KNOWN_KERNEL_TYPES = frozenset({
@@ -169,6 +174,8 @@ class SourceSpec:
         "attention", "flash_attention", "flash_attention_v2",
         "add", "relu", "gelu", "silu",
         "conv2d",
+        # 新架构算子 (带 reference_source 才有意义; 不带时内建参考表查不到)
+        "csa_compress", "csa_kv_compress",
     })
 
     def validate(self) -> list[str]:

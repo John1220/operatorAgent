@@ -80,15 +80,19 @@ class DeclaredFakeBackend(Backend):
         return self._call("benchmark", kernel_code, inputs, warmup, repeat)
 
     # ── 可选方法: 有实现就用, 没有就落到基类那个一调就抛的存根 ──
-    def verify_function(self, kernel_code, inputs, kernel_type, max_error, precision=""):
+    def verify_function(self, kernel_code, inputs, kernel_type, max_error, precision="",
+                        reference_source=""):
         return self._optional("verify_function", kernel_code, inputs, kernel_type,
-                              max_error, precision=precision)
+                              max_error, precision=precision,
+                              reference_source=reference_source)
 
     def benchmark_with_baselines(self, kernel_code, inputs, kernel_type, warmup=10,
-                                 repeat=30, precision="", baseline_priority=None):
+                                 repeat=30, precision="", baseline_priority=None,
+                                 reference_source=""):
         return self._optional("benchmark_with_baselines", kernel_code, inputs, kernel_type,
                               warmup, repeat, precision=precision,
-                              baseline_priority=baseline_priority)
+                              baseline_priority=baseline_priority,
+                              reference_source=reference_source)
 
     def ensure_environment(self, required_pips=None):
         return self._optional("ensure_environment", required_pips=required_pips)

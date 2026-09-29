@@ -403,6 +403,38 @@ def run_execute(code: str, inputs: dict) -> dict:
     return _execute_torch_numpy(code, real_inputs, lang)
 
 
+def _load_reference_from_source(source: str, inputs: dict):
+    """Compile a traveler reference (`def reference(**inputs)`) sent by the control side.
+
+    Used when the task carries `reference_source` (novel ops with no built-in
+    reference). Same trust boundary as exec'ing the candidate kernel.
+    Returns (callable, reference_type) or (None, None).
+    """
+    if not source or not str(source).strip():
+        return None, None
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    values = {}
+    for k, v in inputs.items():
+        if isinstance(v, np.ndarray):
+            values[k] = torch.from_numpy(np.asarray(v)).to(device)
+        else:
+            values[k] = v
+    ns = {}
+    try:
+        exec(source, ns, ns)  # noqa: S102
+    except Exception as e:
+        return None, f"reference_source_error:{type(e).__name__}"
+    fn = ns.get("reference")
+    if not callable(fn):
+        return None, "reference_source_error:missing_reference"
+
+    def _call(fn=fn, values=values):
+        return fn(**values)
+
+    return _call, "reference_source"
+
+
 def _reference_torch(kernel_type: str, inputs: dict):
     """Build the reference on the remote GPU, never on the controller host."""
     import torch
@@ -499,12 +531,14 @@ def _reference_torch(kernel_type: str, inputs: dict):
 
 
 def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
-              precision: str = "") -> dict:
+              precision: str = "", reference_source: str = "") -> dict:
     """Run candidate and reference on one device; return only verification summary."""
     try:
         import torch
         real_inputs = _deserialize_inputs(inputs)
-        reference, reference_type = _reference_torch(kernel_type, real_inputs)
+        reference, reference_type = _load_reference_from_source(reference_source, real_inputs)
+        if reference is None:
+            reference, reference_type = _reference_torch(kernel_type, real_inputs)
         if reference is None:
             return {"success": False, "error": f"No remote reference for {kernel_type}"}
 
@@ -561,8 +595,19 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             max_abs_error = float(abs_error.max().item())
             max_rel_error = float(rel_error.max().item())
             has_nonfinite = bool((~torch.isfinite(actual_f)).any().item())
+            # 第一个坏元素: 展平下标 + 两侧取值 (LeetCUDA book_check 同款)。
+            # 展平下标够 Fixer 定位坏 tile; 两侧取值分得清 scale 错 vs 局部炸。
+            first_bad_index = None
+            first_bad_actual = None
+            first_bad_expected = None
+            if n_bad:
+                fb = int(torch.argmax(bad.reshape(-1).to(torch.int8)).item())
+                first_bad_index = fb
+                first_bad_actual = float(actual_f.reshape(-1)[fb].item())
+                first_bad_expected = float(expected_f.reshape(-1)[fb].item())
         else:
             n_bad, max_abs_error, max_rel_error, has_nonfinite = 0, 0.0, 0.0, False
+            first_bad_index = first_bad_actual = first_bad_expected = None
 
         passed, matched_ratio = tolerance.evaluate(n_bad, total, has_nonfinite, rho)
         if has_nonfinite:
@@ -571,6 +616,9 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             reason = (f"matched_ratio {matched_ratio:.6f} < {rho} "
                       f"({n_bad}/{total} 个元素同时超 atol={atol:.1e} 与 rtol={rtol:.1e}; "
                       f"max_abs={max_abs_error:.2e}, max_rel={max_rel_error:.2e})")
+            if first_bad_index is not None:
+                reason += (f"; first_bad@{first_bad_index}"
+                           f" (got {first_bad_actual:.6g}, want {first_bad_expected:.6g})")
         else:
             reason = ""
         return {
@@ -586,6 +634,9 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             "rtol": rtol,
             "required_matched_ratio": rho,
             "bad_elements": n_bad,
+            "first_bad_index": first_bad_index,
+            "first_bad_actual": first_bad_actual,
+            "first_bad_expected": first_bad_expected,
             "error": reason,
             "device": str(device),
         }
@@ -1065,7 +1116,8 @@ def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
 def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                                  warmup: int = 10, repeat: int = 30,
                                  precision: str = "",
-                                 baseline_priority=None) -> dict:
+                                 baseline_priority=None,
+                                 reference_source: str = "") -> dict:
     """Time the candidate against exactly one baseline, interleaved, on device.
 
     `baseline_priority` is the control side's ordered preference; the first
@@ -1075,7 +1127,9 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
     try:
         import torch
         real_inputs = _deserialize_inputs(inputs)
-        reference, reference_type = _reference_torch(kernel_type, real_inputs)
+        reference, reference_type = _load_reference_from_source(reference_source, real_inputs)
+        if reference is None:
+            reference, reference_type = _reference_torch(kernel_type, real_inputs)
         if reference is None:
             return {"success": False, "error": f"No remote reference for {kernel_type}"}
         module = _load_module(code)
@@ -1426,7 +1480,8 @@ if __name__ == "__main__":
         result = run_verify(payload.get("code", ""), payload.get("inputs", {}),
                             payload.get("kernel_type", ""),
                             float(payload.get("max_error", 1e-5)),
-                            precision=payload.get("precision", ""))
+                            precision=payload.get("precision", ""),
+                            reference_source=payload.get("reference_source", ""))
     elif action in ("benchmark", "benchmark_with_baselines"):
         # 共享机器: 只在测量前采卡上占用情况 (间隔 1.2 s 采两次, 见 _sample_gpu_idle)。
         # 被其他租户占用会让加速比失真, 把实测占用与两次原始读数随结果返回, 由控制端
@@ -1442,6 +1497,7 @@ if __name__ == "__main__":
                 payload.get("warmup", 10), payload.get("repeat", 30),
                 precision=payload.get("precision", ""),
                 baseline_priority=payload.get("baseline_priority") or None,
+                reference_source=payload.get("reference_source", ""),
             )
         # D2: 窗口之后的时钟/throttle 读数。窗口之前那次由 _sample_gpu_idle 顺路带回,
         # 所以整个 L3 只多付一次 nvidia-smi 调用 (~130 ms), 不是三次。

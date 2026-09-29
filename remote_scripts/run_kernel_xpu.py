@@ -239,6 +239,33 @@ def _compute_metrics(inputs: dict, elapsed: float) -> tuple:
     return 0.0, 0.0
 
 
+def _load_reference_from_source(source: str, inputs: dict):
+    """Compile a traveler reference (`def reference(**inputs)`). See run_kernel.py."""
+    if not source or not str(source).strip():
+        return None, None
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    values = {}
+    for k, v in inputs.items():
+        if isinstance(v, np.ndarray):
+            values[k] = torch.from_numpy(np.asarray(v)).to(device)
+        else:
+            values[k] = v
+    ns = {}
+    try:
+        exec(source, ns, ns)  # noqa: S102
+    except Exception as e:
+        return None, f"reference_source_error:{type(e).__name__}"
+    fn = ns.get("reference")
+    if not callable(fn):
+        return None, "reference_source_error:missing_reference"
+
+    def _call(fn=fn, values=values):
+        return fn(**values)
+
+    return _call, "reference_source"
+
+
 def _reference_torch(kernel_type: str, inputs: dict):
     import torch
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -353,7 +380,7 @@ def run_execute(code: str, inputs: dict) -> dict:
 
 
 def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
-               precision: str = "") -> dict:
+               precision: str = "", reference_source: str = "") -> dict:
     lang = _detect_language(code)
     if lang == "triton":
         return {"success": False, "error": "Triton not supported on Kunlunxin P800"}
@@ -363,7 +390,9 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
     try:
         import torch
         real_inputs = _deserialize_inputs(inputs)
-        reference, reference_type = _reference_torch(kernel_type, real_inputs)
+        reference, reference_type = _load_reference_from_source(reference_source, real_inputs)
+        if reference is None:
+            reference, reference_type = _reference_torch(kernel_type, real_inputs)
         if reference is None:
             return {"success": False, "error": f"No remote reference for {kernel_type}"}
         module = _load_module(code)
@@ -454,7 +483,8 @@ def run_benchmark(code: str, inputs: dict, warmup: int = 3, repeat: int = 10) ->
 
 def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                                  warmup: int = 10, repeat: int = 30,
-                                 precision: str = "", baseline_priority=None) -> dict:
+                                 precision: str = "", baseline_priority=None,
+                                 reference_source: str = "") -> dict:
     """候选 vs **一个**基线, 基线由控制端的有序偏好决定。
 
     控制端只排序、远端取第一个能跑的并回报 `baseline_selected` (verifier.baseline_plan)。
@@ -468,7 +498,9 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
     try:
         import torch
         real_inputs = _deserialize_inputs(inputs)
-        reference, reference_type = _reference_torch(kernel_type, real_inputs)
+        reference, reference_type = _load_reference_from_source(reference_source, real_inputs)
+        if reference is None:
+            reference, reference_type = _reference_torch(kernel_type, real_inputs)
         if reference is None:
             return {"success": False, "error": f"No remote reference for {kernel_type}"}
         module = _load_module(code)
@@ -557,7 +589,8 @@ def main():
         "verify": lambda: run_verify(args.get("code", ""), args.get("inputs", {}),
                                      args.get("kernel_type", ""),
                                      args.get("max_error", 1e-3),
-                                     precision=args.get("precision", "")),
+                                     precision=args.get("precision", ""),
+                                     reference_source=args.get("reference_source", "")),
         "benchmark": lambda: run_benchmark(args.get("code", ""), args.get("inputs", {}),
                                            warmup=args.get("warmup", 3),
                                            repeat=args.get("repeat", 10)),
@@ -566,7 +599,8 @@ def main():
             args.get("kernel_type", ""),
             warmup=args.get("warmup", 10), repeat=args.get("repeat", 30),
             precision=args.get("precision", ""),
-            baseline_priority=args.get("baseline_priority") or None),
+            baseline_priority=args.get("baseline_priority") or None,
+            reference_source=args.get("reference_source", "")),
     }
     fn = dispatch.get(action)
     if fn is None:

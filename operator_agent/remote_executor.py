@@ -761,8 +761,13 @@ class SSHExecutor(Backend):
             return {"success": False, "error": str(e)}
 
     def verify_function(self, kernel_code: str, inputs: dict, kernel_type: str,
-                        max_error: float, precision: str = "") -> dict:
-        """Compare candidate/reference on the remote GPU and return a compact summary."""
+                        max_error: float, precision: str = "",
+                        reference_source: str = "") -> dict:
+        """Compare candidate/reference on the remote GPU and return a compact summary.
+
+        `reference_source` 非空时, 远端用它做参考 (新架构算子), 不再按 kernel_type
+        查内建表。空串 = 保持旧行为。
+        """
         try:
             if not self._deployed:
                 self.deploy()
@@ -770,6 +775,7 @@ class SSHExecutor(Backend):
                 "action": "verify", "code": kernel_code,
                 "inputs": self._serialize_inputs(inputs), "kernel_type": kernel_type,
                 "max_error": max_error, "precision": precision,
+                "reference_source": reference_source or "",
             })
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -777,11 +783,13 @@ class SSHExecutor(Backend):
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,
                                  repeat: int = 30, precision: str = "",
-                                 baseline_priority=None) -> dict:
+                                 baseline_priority=None,
+                                 reference_source: str = "") -> dict:
         """Time candidate vs one interleaved baseline on the same remote device.
 
         `baseline_priority` 是控制端的有序偏好, 远端只测第一个能跑的基线 —— 谁公平
         是个策略问题 (fp16 候选该比 cuBLAS fp16), 但「能不能跑」只有远端知道。
+        `reference_source` 同 `verify_function`。
         """
         try:
             if not self._deployed:
@@ -791,6 +799,7 @@ class SSHExecutor(Backend):
                 "inputs": self._serialize_inputs(inputs), "kernel_type": kernel_type,
                 "warmup": warmup, "repeat": repeat, "precision": precision,
                 "baseline_priority": list(baseline_priority or []),
+                "reference_source": reference_source or "",
             })
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -1233,7 +1242,8 @@ class RemoteExecutor(Backend):
             return self.backend.benchmark(kernel_code, inputs, warmup, repeat)
 
     def verify_function(self, kernel_code: str, inputs: dict, kernel_type: str,
-                        max_error: float, precision: str = "") -> Optional[dict]:
+                        max_error: float, precision: str = "",
+                        reference_source: str = "") -> Optional[dict]:
         """远端紧凑比对协议。**只转发, 不判断内层有没有这个方法**
 
         旧写法是 `fn = getattr(self.backend, "verify_function", None); return fn(...) if fn else None`,
@@ -1243,17 +1253,20 @@ class RemoteExecutor(Backend):
         """
         with _get_exec_lock(self._lock_key()):
             return self.backend.verify_function(kernel_code, inputs, kernel_type, max_error,
-                                                precision=precision)
+                                                precision=precision,
+                                                reference_source=reference_source)
 
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,
                                  repeat: int = 30, precision: str = "",
-                                 baseline_priority=None) -> Optional[dict]:
+                                 baseline_priority=None,
+                                 reference_source: str = "") -> Optional[dict]:
         """同机同卡基准协议。同上: 只转发"""
         with _get_exec_lock(self._lock_key()):
             return self.backend.benchmark_with_baselines(
                 kernel_code, inputs, kernel_type, warmup, repeat,
-                precision=precision, baseline_priority=baseline_priority)
+                precision=precision, baseline_priority=baseline_priority,
+                reference_source=reference_source)
 
     def analyze_dependencies(self, kernel_code: str) -> list:
         """解析源码里缺失的 import (L1 编译失败后的按需补装要用)
