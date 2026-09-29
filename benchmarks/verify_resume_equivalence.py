@@ -47,6 +47,14 @@ from operator_agent.schemas import (  # noqa: E402
     TaskType,
 )
 
+# 跑动窗口内的代码指纹 (doc 50 §7.5: 那次五臂跑完才发现窗口里有人改了同一条路径的 5 个文件,
+# 而一次真机跑没法「重跑一遍就好」)。依赖名单是**算出来的**, 不是手抄的。
+# 按模块限定调用 (`provenance.stamp(...)`) 而不是 import 名字: `main()` 里那个局部变量就叫 `stamp`。
+from benchmarks import provenance  # noqa: E402
+
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+DRIVER_REL = "benchmarks/verify_resume_equivalence.py"
+
 SNAP = "execution_snapshot.json"
 # 达不到的门槛: 循环必须真的转到第 2 轮, 否则「恢复第 1 轮」这件事根本没有第 2 轮可续
 MIN_SPEEDUP = 10.0
@@ -302,6 +310,12 @@ def main() -> int:
     out_root = work / "artifacts"
     out_root.mkdir(parents=True, exist_ok=True)
     print(f"探针工作目录: {work}" + ("   [DRY: MockGPU + 无 LLM, 只标定量具]" if DRY else ""))
+    # 读数条件 + 开跑前的代码指纹。指纹由**子进程**读盘算 (doc 56: "the remedy is another
+    # writer, not richer logging"), 取不到就返回 None —— 后面据此拒绝打印结论行。
+    print("  " + provenance.stamp(REPO_ROOT))
+    deps = provenance.closure(DRIVER_REL, REPO_ROOT,
+                              extra_entries=["remote_scripts/run_kernel.py"])
+    prov_before = provenance.snapshot_via_subprocess(deps, REPO_ROOT)
 
     backend = make_backend()
     caps = getattr(backend, "capabilities", frozenset())
@@ -428,6 +442,20 @@ def main() -> int:
           st_d.get("reason") == "JSONDecodeError",
           f"reason={st_d.get('reason')!r}")
 
+    # ── 归属: 跑动窗口内这些文件变过吗? 变过就**不印结论行** ─────────────────
+    prov_after = provenance.snapshot_via_subprocess(
+        provenance.closure(DRIVER_REL, REPO_ROOT,
+                           extra_entries=["remote_scripts/run_kernel.py"]), REPO_ROOT)
+    prov_ok = provenance.report(prov_before, prov_after, DRIVER_REL, REPO_ROOT)
+
+    for proc in KIDS:
+        if proc.poll() is None:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    if not prov_ok:
+        print(f"\n  ❌ 拒绝打印汇总: 上面这些文件在本次跑的窗口内被改 ⇒ 五臂不是同一份代码, "
+              f"读数不能归给任何 commit (产物仍在 {work}, 可离线复盘但不能当证据)")
+        return 3
+
     # ── 汇总 ────────────────────────────────────────────────────────
     bad = [j for j in J if j[2] is False]
     na = [j for j in J if j[2] is None]
@@ -444,9 +472,6 @@ def main() -> int:
     print(f"  ⚠️ 这些数字各臂独立取自各自的 LLMClient, 不许相加当成总量")
     print(f"  ⚠️ 有鉴别力的判据: B2/C1/K3/K4/D1 (把 #59 的修复改回旧写法会红); "
           f"A1/A2/B1/B3/K1/K2/D2 里有些在旧代码上同样绿, 它们是前提与反向对照")
-    for proc in KIDS:
-        if proc.poll() is None:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     print(f"\n  产物留在 {work} (可离线复盘)")
     return 1 if bad else 0
 

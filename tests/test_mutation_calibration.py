@@ -29,7 +29,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
 from benchmarks.mutation_calibrate import (  # noqa: E402
-    Row, calibrate, check_shape, load_spec, main, reading_conditions, summarize,
+    Row, calibrate, check_shape, load_spec, main, summarize,
 )
 
 SPEC = os.path.join(_ROOT, "benchmarks", "mut_specs", "fixer_stage_branch.py")
@@ -154,23 +154,6 @@ class TestHarnessSeesItsOwnFailures(unittest.TestCase):
         """0 条结构行也要显式印出来 —— 否则有人删掉整类结构行时, 报表看起来更像「全守住」"""
         self.assertIn("行为分母", summarize([]))
         self.assertIn("结构分母", summarize([]))
-
-    def test_the_report_stamps_its_own_reading_conditions(self):
-        """「N/N 拦住」要带着它是哪台解释器读的 —— 同一台机上有两套 python, 装不装 torch 不一样
-
-        2026-09-30 实撞: 同一份 HEAD 在这台控制机上用 `~/opt/miniconda3/bin/python3` (3.9.12,
-        有 torch) 读是 **986 passed / 1 skipped**, 用 `/usr/bin/python3` (3.9.6, 无 torch) 读是
-        **981 passed / 1 failed / 5 skipped** —— 两边总数都是 987, 差的 5 条全是 I5 那一族
-        (用例判定随本机装不装 torch 翻转), 没有一行代码不同。这张 21 行表的红名单我在两套解释器
-        下各跑一遍, **逐行相同** —— 所以印条件不是为了说「数会变」, 是为了让下一轮能分辨
-        「这是条件差还是回归」。
-        """
-        line = reading_conditions(_ROOT)
-        for key in ("python=", "torch=", "HEAD=", "未提交改动="):
-            self.assertIn(key, line, line)
-        self.assertIn(sys.executable, line, "解释器路径必须是当前这个, 不是硬编码")
-        # 反空转: HEAD 取不到时不许悄悄印成 "?" —— 那等于这条_stamp_自己不再能归因
-        self.assertNotIn("HEAD=?", line, line)
 
     def test_main_exits_nonzero_on_an_escape(self):
         """退出码是判据的**出口**: 有逃逸却退 0, 前面印的 ❌ 会被 CI 读成通过"""
