@@ -11,10 +11,17 @@ Benchmark Oracles》, 行号取自本文抽出的那份带行号文本):
            一样地压低, 而对任何协议都不提供任何信息」
 
 我方 L2 有**两条**比对路径, 而 `tolerance.py` 的 docstring 自称「判定式只有一份」:
-  · `verifier.py:509-517` (声明了 `Cap.FULL_OUTPUT_TENSOR` 的那路) 走 `effective_atol`
-    = 容差表与任务 max_error **取 min**, 再加相对项的 AND 形式;
-  · `verifier.py:498` (没有那个 Cap 的那路 —— `LocalExecutor` 声明的是**空集**) 判的是
+  · `_verify_single_set` 里 `Cap.FULL_OUTPUT_TENSOR in caps` 那路 (本探针用 MockGPU 走它)
+    走 `effective_atol` = 容差表与任务 max_error **取 min**, 再加相对项的 AND 形式;
+  · 没有那个 Cap 的那路 —— `LocalExecutor` 声明的是**空集** —— 判的是
     `max_error <= task.constraints.max_error`: 纯绝对、不查表、没有相对项。
+
+⚠️ 这里**不写 `verifier.py:NNN`**: 上一版有八处这样的行号 (分布在七行: 两条路各一处、判别键说明
+三处、两条返回值各一处、臂 0b 标题一处), 而 `verifier.py` 是并发会话会改的文件 —— 引入本探针的
+那个提交上 `:509` 确实落在 `effective_atol` 那一段里, 今天同一句已经在 572 行 (+64), 而 `:509`
+落到两条路分叉**之前**的公共段。指错的坐标比没有坐标更糟 —— 读的人会把「采样那条」当成 AND 那条
+去改。锚点用符号名 (`_verify_single_set` / `Cap.FULL_OUTPUT_TENSOR`), 它们改名字时会响,
+挪位置时不会 (doc 58 §4.2 / CHECKLOG I30)。
 
 姿势 (先标定再读数):
   臂 0  两条已知答案的对照 (正确核必须 PASS、0.97 缩放必须 FAIL) + 前提守卫
@@ -27,9 +34,13 @@ Benchmark Oracles》, 行号取自本文抽出的那份带行号文本):
   臂 4  常数偏移候选: 相对项在不在, 差别就在这一臂
   臂 5  高精度参考 (float64 同一份参考) 那把尺与本级判决对照: 印出「L2 判通过而那把尺反对」的处数
         (读数规则来自 KernelOPT `2609.30059v1` 行 372-389, 我方只观测不判定, 阈未标定 ⇒ #82)
+  臂 6  坏的是**参考**而不是候选: 同一份候选在「参考干净 / 参考含 NaN / 含 Inf / 全 NaN」四种
+        参考下的 compared / reference_nonfinite / max_error / coverage 读数
+        (起因是 KernelZero `2609.33074v1` 行 143-148 那句任务侧的数值稳定预检 ⇒ #94)
 
 运行: python3 -B benchmarks/probe_l2_sampling_gate.py
 """
+import contextlib
 import os
 import sys
 
@@ -75,15 +86,15 @@ def make_inputs(scale: float) -> dict:
 def branch_of(res) -> str:
     """走的是哪条比对路径。
 
-    ⚠️ 判别键**不能用 `coverage`**: 两条路都上报它 (`:497` 采样那条与 `:526` AND 那条各写各的,
-    后者恒 1.0), 而通过那一侧的聚合还会用 `m.get("coverage", 1.0)` 再兜一次。第一版就是拿它
-    当标记, 于是表里一半的行被印成错的那条路。`atol` 只有 AND 那条会算 (`:525` 与聚合处
-    的 `gate_params`), 所以用它。
+    ⚠️ 判别键**不能用 `coverage`**: 两条路都上报它 (采样那条与 AND 那条各写各的, 后者在参考
+    干净时恒 1.0), 而通过那一侧的聚合还会用 `m.get("coverage", 1.0)` 再兜一次。第一版就是拿它
+    当标记, 于是表里一半的行被印成错的那条路。`atol` 只有 AND 那条会算 (它才是查了容差表的那条),
+    所以用它。
     """
     if "atol" in res.metrics:
-        return "AND 形式 :509"
+        return "AND 形式"
     if "max_error" in res.metrics:
-        return "纯绝对 :498"
+        return "纯绝对"
     return "❓认不出哪条路"
 
 
@@ -126,7 +137,7 @@ def main() -> int:
         print(f"❌ 前提变了: 两个在册后端走的是同一条路 ({branches[0]}) ⇒ 本探针的分叉读数过期")
         return 2
 
-    print("\n== 臂 0b · 默认值审计 (通过那一侧的聚合 metrics, `verifier.py:380-384`) ==")
+    print("\n== 臂 0b · 默认值审计 (`_verify_function` 通过侧聚合里那句 `m.get(..., 默认)`) ==")
     for (label, be), br in zip(backends, branches):
         r, _ = verdict(be, CORRECT, 1.0, 5e-1)
         invented = [k for k in AND_ONLY_KEYS if k in r.metrics and br.startswith("纯绝对")]
@@ -200,6 +211,35 @@ def main() -> int:
     print(f"\n  ⇒ L2 判通过而那把尺反对的读数: {len(disagreements)} 处 {disagreements}")
     print("     这些正是臂 1/2 拍到的盲区 (AND 那条的 atol 是绝对条带); 那把尺的分母是参考自身")
     print("     到 float64 真值的距离, 因此条带随幅值缩放。定阈要我方自己的标定 ⇒ #82。")
+
+    # 臂 6: 坏的是**参考**而不是候选 (arXiv:2609.33074v1 行 143-148 —— KernelZero 在**任务侧**
+    # 先验数值稳定性, "Any sample that produces invalid values such as NaN or Inf is filtered
+    # out"；我方原来只在候选侧查)。这一臂比的是「同一个候选, 参考坏 1/64 vs 参考干净」,
+    # 要看的是**分母与 max_error 会不会撒谎**, 而不是候选对不对。
+    print("\n== 臂 6 · 参考自己产 NaN/Inf: 分母与误差读数 (#94) ==")
+    v6 = Verifier(backend=MockGPU())
+    t6 = make_task(5e-1)
+    in6 = make_inputs(1.0)
+    truth6 = np.asarray(v6._generate_reference(t6, in6))
+    row0_6 = np.indices(truth6.shape)[0] == 0
+    refs6 = [("干净", truth6),
+             ("含 NaN", np.where(row0_6, np.float32(np.nan), truth6)),
+             ("含 Inf", np.where(row0_6, np.float32(np.inf), truth6)),
+             ("全 NaN", np.full_like(truth6, np.nan))]
+    print(f"  参考      候选        判    compared  ref_nonfinite  max_error  matched   coverage   走的路")
+    for rname, ref in refs6:
+        for cname, code in (("正确核", CORRECT), ("全零核", ZEROS)):
+            with contextlib.redirect_stdout(open(os.devnull, "w")):
+                r = v6._verify_single_set(code, in6, ref, t6)
+            m = r.metrics
+            print(f"  {rname:<7} {cname:<9} {'过' if r.passed else '不过':4s}  "
+                  f"{fmt(r, 'compared_elements'):>9}  {fmt(r, 'reference_nonfinite'):>12}  "
+                  f"{fmt(r, 'max_error'):>9}  {fmt(r, 'matched_ratio'):>8}  "
+                  f"{fmt(r, 'coverage'):>9}   {branch_of(r)}")
+    print("     ⇒ 要看的三件事: (1) 参考坏 64 个时 compared 应当是 4032 而不是 4096,")
+    print("       max_error 应当是个数而不是 nan;  (2) 全 NaN 参考 ⇒ compared 0 且**判不过** ——")
+    print("       而那句理由说的是「本级判不出、不是候选错」(归属), 不是「候选超容差」;")
+    print("       (3) 正确核在坏参考下今天**仍然过**: 判决侧要等 #94 第 2 片 (失败归属路由)。")
     return 0
 
 

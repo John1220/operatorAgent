@@ -370,6 +370,9 @@ class Verifier:
         gates: list[dict] = []
         # 逐组的高精度读数; 聚合规则见 `_aggregate_oracles` (那里记了第一版漏搬的现场)
         oracles: list[dict] = []
+        # 逐组报上来的「参考自己非有限」的个数。聚合规则与上面那份同一条: **没人报过就不写这个键**,
+        # 写 0 会被读成「查过了、干净的」, 而远程那一路今天还不报这个数 (见 #94 第 2 片)。
+        ref_nonfinite: list[int] = []
         has_reference = False
         reference_types = set()
         execution_devices = set()
@@ -397,6 +400,8 @@ class Verifier:
                     gates.append(g)
                 oracles.append({k: v for k, v in m.items()
                                 if k == "ref_oracle" or k.startswith("oracle_")})
+                if "reference_nonfinite" in m:
+                    ref_nonfinite.append(int(m["reference_nonfinite"]))
                 if m.get("reference_type"):
                     reference_types.add(m["reference_type"])
                 if m.get("device"):
@@ -409,6 +414,10 @@ class Verifier:
                    f"matched_ratio={min_matched_ratio:.6f}")
             if min_coverage < 1.0:
                 msg += f", 覆盖率={min_coverage * 100:.1f}%"
+            if ref_nonfinite and sum(ref_nonfinite):
+                # 「覆盖率」说的是比了多大比例, 这一句说的是**为什么**没比上 —— 两个都要有,
+                # 否则读者只能去猜是分片取样的锅还是参考自己炸了
+                msg += f" (参考另有 {sum(ref_nonfinite)} 个非有限值, 已从分母剔除)"
             if gate_conflicts:
                 msg += (f" ⚠️ 这几组用的**不是同一把尺** {sorted(gate_conflicts)}, "
                         f"聚合值因此不发布单值 (见 metrics.gate_params_conflict)")
@@ -430,6 +439,10 @@ class Verifier:
                 # 摊开成 {键: {组下标: 那一组实际用的值}} —— 读的人不必重跑就能看出
                 # 是哪几组、哪一把尺不一致
                 metrics["gate_params_conflict"] = gate_conflicts
+            if ref_nonfinite:
+                # 有人报过才写: 一组都没报 (全走远程那条旧载荷) 时这个键**缺席**, 而不是 0 ——
+                # 0 会被读成「查过了, 参考是干净的」(本仓那一族: 把没检查当检查过)
+                metrics["reference_nonfinite"] = sum(ref_nonfinite)
             if reference_types:
                 metrics["reference_type"] = ",".join(sorted(reference_types))
             if execution_devices:
@@ -516,12 +529,38 @@ class Verifier:
                 return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message="执行侧未返回输出样本，无法比对")
 
             compared = int(sample.size)
-            coverage = compared / ref_flat.size if ref_flat.size else 1.0
-            max_error = float(np.max(np.abs(sample - ref_flat[:compared])))
-            metrics = {"max_error": max_error, "compared_elements": compared, "coverage": coverage}
+            # 同一条纪律的第二处 (全量那条在 `effective_atol` 那一段): 「比得上」要显式算,
+            # 不能靠 NaN 的比较性质。这条路上候选自己产 NaN/Inf 时**照旧判死** —— 那是候选的
+            # 错, 与参考侧非有限是两件事, 归属不能混 (`cand_bad`)。
+            ref_window = ref_flat[:compared]
+            ref_ok = np.isfinite(ref_window)
+            n_compared = int(ref_ok.sum())
+            cand_bad = int((~np.isfinite(sample)).sum())
+            max_error = float(np.abs(sample[ref_ok] - ref_window[ref_ok]).max()) if n_compared else 0.0
+            coverage = n_compared / ref_flat.size if ref_flat.size else 1.0
+            metrics = {"max_error": max_error, "compared_elements": n_compared,
+                       "coverage": coverage,
+                       "reference_nonfinite": compared - n_compared}
+            if n_compared == 0:
+                return VerificationResult(
+                    level=VerificationLevel.L2_FUNCTION, passed=False,
+                    message=(f"采样窗口内参考没有可比的元素 ({compared} 个全是 NaN/Inf) —— "
+                             f"本级判不出, 这不是候选错; 该查 reference_source / 内建参考"),
+                    metrics=metrics)
+            if cand_bad:
+                return VerificationResult(
+                    level=VerificationLevel.L2_FUNCTION, passed=False,
+                    message=f"执行失败: 候选输出含 {cand_bad} 个非有限值 (NaN/Inf)",
+                    metrics=metrics)
             if max_error <= max_allowed:
-                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True, message=f"采样比对通过 ({compared}/{ref_flat.size} 元素), 最大误差={max_error:.2e}", metrics=metrics)
-            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"功能验证失败: 误差 {max_error:.2e}", metrics=metrics)
+                extra = (f", 另有 {compared - n_compared} 个元素参考非有限已剔除"
+                         if compared - n_compared else "")
+                return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True,
+                                          message=(f"采样比对通过 ({n_compared}/{ref_flat.size} 元素可比), "
+                                                   f"最大误差={max_error:.2e}" + extra),
+                                          metrics=metrics)
+            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False,
+                                      message=f"功能验证失败: 误差 {max_error:.2e}", metrics=metrics)
 
         actual = result.output
         expected = np.asarray(expected_output, dtype=np.float32)
@@ -533,21 +572,45 @@ class Verifier:
         atol, rtol, rho = tolerance.effective_atol(
             task.constraints.precision.value, max_allowed)
         actual_f = np.asarray(actual, dtype=np.float32)
-        abs_error = np.abs(actual_f - expected)
-        rel_error = abs_error / (np.abs(expected) + tolerance.EPS)
-        bad = (abs_error > atol) & (rel_error > rtol)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            # 非有限的那几行会在这里发出 "invalid value encountered in divide" 的 RuntimeWarning。
+            # 屏蔽它是安全的、也是有条件的: 它们随后就被 `comparable` 掩码挡在分子与分母之外。
+            # 不屏蔽的话这条信号会成倍刷屏 (每个坏元素一次), 而它要说的事已经由
+            # `reference_nonfinite` 那个**计数**说清了 —— 一次说清, 而不是刷 256 行。
+            abs_error = np.abs(actual_f - expected)
+            rel_error = abs_error / (np.abs(expected) + tolerance.EPS)
+        # 参考自己也可能不是数。外部一手 (arXiv:2609.33074v1 行 147, 逐字):
+        #     "Any sample that produces invalid values such as NaN or Inf is filtered out."
+        # 他们在**任务侧**做这一步, 我方原来只在候选侧查 (`has_nonfinite` 看的是 `actual_f`)。
+        # 漏掉的后果不是「错核被放行」那么轻: 参考含 NaN 时 `NaN > atol` 为假, 含 Inf 时
+        # `inf/inf = NaN` 让相对项为假 —— AND 形式下**任一侧出非有限值就一票否决坏点**, 于是
+        # 那 16 个元素既不算坏点又留在分母里, `compared_elements` 报的是「比了 256 个」而实际
+        # 只比上了 240 个。所以这里把「比得上」显式成一侧掩码, 而不是继续靠 NaN 的比较性质。
+        comparable = np.isfinite(expected)
+        n_compared = int(comparable.sum())
+        n_ref_nonfinite = int(expected.size) - n_compared
+        # ⚠️ 分子上那句 `& comparable` **今天是个恒等操作**, 所以变异 R1 撞不红任何用例:
+        # AND 要置坏点需两条同时为真, 而参考非有限时 `abs_error` 或 `rel_error` 必有一个是
+        # NaN、比较恒假 —— 那些元素在加掩码之前就已经不是坏点了。牙齿在分母与上报那三处
+        # (变异 R2/R3/R5/R6 全部拦下)。留着它的理由: 判据形状一改 (AND→任一侧超标) 它立刻
+        # 变成承重墙, 而那一步今天由 `tests/test_l2_tolerance.py` 的行为用例把守。
+        bad = (abs_error > atol) & (rel_error > rtol) & comparable
         has_nonfinite = bool((~np.isfinite(actual_f)).any())
         passed, matched_ratio = tolerance.evaluate(
-            int(bad.sum()), int(abs_error.size), has_nonfinite, rho)
+            int(bad.sum()), n_compared, has_nonfinite, rho)
 
         size = int(expected.size)
         metrics = {
-            "max_error": float(abs_error.max()) if size else 0.0,
-            "max_rel_error": float(rel_error.max()) if size else 0.0,
+            "max_error": float(abs_error[comparable].max()) if n_compared else 0.0,
+            "max_rel_error": float(rel_error[comparable].max()) if n_compared else 0.0,
             "matched_ratio": matched_ratio,
             "bad_elements": int(bad.sum()),
             "atol": atol, "rtol": rtol, "required_matched_ratio": rho,
-            "compared_elements": size, "coverage": 1.0,
+            # `compared_elements` 从此只数**比得上的**那些, `coverage` 跟着它一起变小 ——
+            # 与采样那条路的 `coverage` 同一个意思 (比了多大比例), 不是「形状对不对」。
+            "compared_elements": n_compared,
+            "coverage": (n_compared / size) if size else 1.0,
+            "reference_nonfinite": n_ref_nonfinite,
         }
         # 高精度参考 (float64) 那把尺的读数。**不参与判定**，只跟着上报 —— 理由与阈值来源
         # 写在 `tolerance.error_ratio` 的注释里 (一句话: 那三个阈是别人语料上的数)。
@@ -561,20 +624,35 @@ class Verifier:
             metrics["first_bad_actual"] = float(actual_f.reshape(-1)[fb])
             metrics["first_bad_expected"] = float(expected.reshape(-1)[fb])
         if passed:
+            extra = (f" (参考另有 {n_ref_nonfinite} 个非有限值, 已从分母剔除)"
+                     if n_ref_nonfinite else "")
             return VerificationResult(
                 level=VerificationLevel.L2_FUNCTION, passed=True,
-                message=(f"全量比对通过 ({size} 元素), 最大误差={metrics['max_error']:.2e}, "
-                         f"matched_ratio={matched_ratio:.6f}" + self._oracle_note(metrics)),
+                message=(f"全量比对通过 ({n_compared}/{size} 元素可比), "
+                         f"最大误差={metrics['max_error']:.2e}, "
+                         f"matched_ratio={matched_ratio:.6f}" + extra
+                         + self._oracle_note(metrics)),
                 metrics=metrics)
-        reason = ("输出含 NaN/Inf" if has_nonfinite else
-                  f"{metrics['bad_elements']}/{size} 个元素同时超 atol={atol:.1e} 与 rtol={rtol:.1e}")
+        # 归属要说清: 一个可比元素都没有时, 「没过」不是候选的错, 而是本级**没有对象**。
+        # 这句话是给 Fixer 与失败语料看的 (它们都按「哪一级报的失败」分支, `fixer.py:99`),
+        # 而把坏参考记成坏候选会发出一份指向错误对象的处方 —— 那是 #85/#76① 那一族在避免的。
+        if n_compared == 0:
+            reason = (f"参考自身没有可比的元素 ({size} 个全是 NaN/Inf) —— "
+                      f"本级判不出, 这不是候选错; 该查的是 reference_source / 内建参考的算法")
+        else:
+            reason = ("输出含 NaN/Inf" if has_nonfinite else
+                      f"{metrics['bad_elements']}/{n_compared} 个可比元素同时超 "
+                      f"atol={atol:.1e} 与 rtol={rtol:.1e}")
+            if n_ref_nonfinite:
+                reason += f" (另有 {n_ref_nonfinite} 个元素参考非有限, 已从分母剔除)"
         if "first_bad_index" in metrics:
             reason += (f", first_bad@{metrics['first_bad_index']}"
                        f" (got {metrics['first_bad_actual']:.6g},"
                        f" want {metrics['first_bad_expected']:.6g})")
         return VerificationResult(
             level=VerificationLevel.L2_FUNCTION, passed=False,
-            message=f"功能验证失败: {reason}, 最大误差={metrics['max_error']:.2e}",
+            message=(f"功能验证失败: {reason}"
+                     + (f", 最大误差={metrics['max_error']:.2e}" if n_compared else "")),
             metrics=metrics)
 
     def _oracle_reading(self, task: TaskSchema, inputs: dict,
