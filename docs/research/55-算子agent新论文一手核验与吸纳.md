@@ -179,6 +179,23 @@ guided 的翻译阶段成功率从 **33/40 变成 32/40**。
 verify_results if not r.passed]`）。本轮把「取向」按阶段分支（§六）是这三路里最省钱的一片；
 完整的「redesign / code repair / interface repair」归 #76 第 ①项。
 
+**【2026-09-29 第 2 片：第三路 interface repair 已接上】** 分流键不再是「只看级别」：
+`fixer.failure_class(failed_results)` 用**负样本库那一个分类器**给本轮失败归类（入参口径与
+`conductor._record_failure` 逐字一致，所以 prompt 里的取向、复发门、检索读的是同一个桶），
+归类为 `interface_mismatch` 时走 `_L1_INTERFACE`。这一路的增量不是「改哪一行」—— 那道门自己的
+文案（`interface_contract.py:184-197`）已经把缺哪几个、多哪几个和「改 `def kernel` 的参数名」
+讲清楚了；它补的是门讲不了的那一半：**本轮的改动范围**（函数体、`BLOCK_*` 取值、已应用配方
+一律不动）与不动的理由（这一版的写法还没被验证过一次，整段重写等于用一次已知签名错误换一轮
+未知失败）。级别在前还是归类在前是有讲究的：接口契约那一类必然落在 L1 里，只看级别就会把它
+并进「就地修一处 API 误用」那条通用取向，而那条恰恰不限制范围。
+
+⚠️ 这一片落地时**自己就是死的**：第一版写成 `signature == "interface_mismatch"`，而
+`failure_signature()` 返回三段 `层级|类名|最内层帧`（实测 `"L1|interface_mismatch|-"`），
+那条比较永远为假。取向照样非空、模板照样有读者、现有用例照样全绿 —— 是变异标定
+（M12/M17）把它撞出来的。doc 49 §八 第 28 条 / CHECKLOG I18。
+
+**还差的两路**：`redesign`（结构性失败退回重画）与「按 bound 类型分流」都未做，仍在 #76①。
+
 > ⚠️ 这句「今天就会发生」**错了两次**，留在这里当反面：① `verifier.verify()` 是
 > fail-fast（`:233-249` 每级失败就 `return`），一份 `verify_results` 里最多只有一个未通过
 > 级别 ⇒ 同轮不可能并存；② 我随后改口说「L3 会经 `history_cases` 跨轮进来」，而那也没有
@@ -327,9 +344,23 @@ trapped in the same faulty pattern."
 | `operator_agent/fixer.py` | `_L2_RETREAT` / `_L1_INPLACE` 两段取向 + `stage_directive(levels)`（**只有 L2** 触发退让；L1+L3 不触发） |
 | `operator_agent/fixer.py` | `run()` 先算 `levels`/`level_set`，向模板传 `failure_stage` 与 `stage_directive` |
 | `operator_agent/prompts/fixer_repair.md` | 合写那句换成 `本轮报失败的阶段: {{failure_stage}}` + `{{stage_directive}}` |
-| `tests/test_fixer_stage_branch.py` | 11 条用例 + 13 行变异表（原 7 条 / 8 行，#76③ 之后长成这样） |
+| `tests/test_fixer_stage_branch.py` | 22 条用例 + 21 行变异表（第 1 片 7 条 / 8 行，#76③ 之后 11 条 / 13 行，#76① 第 2 片 +11 例 / +10 行） |
 
-**变异标定 13/13 拦住，0 逃逸**（逐条见测试文件 docstring）。其中 M8（删掉「本轮**不要**为此
+**变异标定：⚠️ 这句原来写的「13/13 拦住、0 逃逸」不可复现，已按 2026-09-29 的一次合并重跑
+改成 21/21**（那 13 行里 M10a/M10b 两行的**锚点在任何文件里都查不到** —— 表只在 doc 里数过、
+没把「改哪一处」落到能重建脚本的地方。这正是我自己记过的那族：计数要连着产它的锚点一起写）。
+重跑把两张表合成一张：第 1 片的 M1–M8 + M9a/M9b + M11（conductor 那道门放宽到 L3）+ 本片的
+M12–M21 = **21 行，21/21 拦住、0 逃逸**，每行锚点现在写在
+`tests/test_fixer_stage_branch.py` 的模块 docstring 里。其中三条值得单独点出：
+
+- **M12/M17 抓的是本片自己那只 bug**（分流拿整条签名去比裸类名 ⇒ 第三路恒假），见 §3.3；
+- **M20 是重跑前唯一一条真逃逸**：那条「三路互斥」用例只朝一个方向查缺席，删掉第三路自己
+  那句范围锁时全体成立。补成在场 + 缺席双向才红 —— CHECKLOG I19；
+- **M21 我原本设计成「应当全绿的对照组」，它红了**：桶名已经写进已入库记录的 id
+  （`cx-{task_id}:{signature}`），改名不是自由重构 ⇒ 「预期全绿的变异」这个设计从这张表里
+  删掉了，没有预期全绿的变异，只有没数到的读者 —— CHECKLOG I20。
+
+其中 M8（删掉「本轮**不要**为此
 优化」那句）只有 1 条用例红，而那条是**明标的防御性优先级**用例 —— 它钉的是「分支条件不许是
 L3」，不是「今天会发生 L2+L3 同框」。上面那句「这与 §六 的先决事实对齐」原本是错的：
 §六 那条先决事实后来被**纠正了两次**（同轮被 `verify()` 的 fail-fast 排除；跨轮那条通道也没有
@@ -364,9 +395,9 @@ rounds-to-compilable / rounds-to-correct 而不是单次通过率 —— 归 #76
 | 项 | 结论 |
 |---|---|
 | CUDA-Harness §4.1/§4.2/§4.3 | 4 条里 2 条已有、1 条潜伏（#76②）、1 条落码（§六）；**§4.1.2 那第 3 条已落第 1 片**（#76③ → doc 41 §七，生成前广播） |
-| Fabrica II-B / III-D / V-C / V-D / V-E | preserve/discard/build 进 #61/#65 的口径；「记录不买通过率」进 #51 的宣称口径；三路分流进 #76①；acceptance 分母进 #51 |
+| Fabrica II-B / III-D / V-C / V-D / V-E | preserve/discard/build 进 #61/#65 的口径；「记录不买通过率」进 #51 的宣称口径；三路分流 **V-C 已落第 2 片**（interface repair 接上，`ce11d4e`），剩 redesign 一路在 #76①；acceptance 分母进 #51 |
 | MaxKernel | provenance 进 #57 前置；路径纪律升级 #69 的依据；数值不吸纳 |
 | 不吸纳（含 SWE-Serve 的训练/基准构造与我们不对应的部分、AMDKernelVault 的 SFT+RL 配方） | FABRICA Eq. 3（用途不同）、RLVR Eq. 4（无可更新参数，我方是 prompt 回路）、MCP 外壳、bandit/beam 常数 |
-| 未验 | §六 的真机效果；#76③ 第 1 片（doc 41 §七）的真机效果 —— 对照基线已有：**16 轮里契约门拦下 4 轮**（doc 48 §六B），广播能不能把这 4 轮压下去由 #48 重跑回答 |
+| 未验 | §六 的真机效果；#76③ 第 1 片（doc 41 §七）的真机效果 —— 对照基线已有：**16 轮里契约门拦下 4 轮**（doc 48 §六B），广播能不能把这 4 轮压下去由 #48 重跑回答；#76① 第 2 片（第三路取向）**效果断言为 0**，它改的是那 4 轮之后 Fixer 拿到的一句话，同一批 4 轮就是它的对照数 |
 | 后补 | 两篇取到字节后的结论（§五）：SWE-Serve ⇒ #77（双记分口径），AMDKernelVault ⇒ CHECKLOG H4 第三源 |
 | 下一步（本文这**五篇**都已一手核过，下一轮不要重新调研） | #76 的三项、#77 的双记分口径；#48/#65/#71/#72/#74 的机时活 |
