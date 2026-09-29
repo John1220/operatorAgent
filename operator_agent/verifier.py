@@ -290,6 +290,35 @@ class Verifier:
                 metrics={"compile_status": "interface_mismatch",
                          "backend": str(self.backend)},
             )
+        # 资源可行性预检 (LeetCUDA bench/utils.cu 的 smem 预检同款):
+        # 这套 BLOCK 放不下时, 真启动只会给一句 `out of resource`, 看不出是哪个
+        # BLOCK_*; 一次 SSH 往返 ~2.6s, 而这里只是正则。宁可漏拦 (超限 20% 内放行)
+        # 也不误拦 —— 但拦下来的反馈必须带上 BLOCK 形状。
+        try:
+            from .resource_check import check_resource_feasibility
+            caps = getattr(self, "_l1_caps", "unset")
+            if caps == "unset":
+                try:
+                    caps = detect_hardware_caps(self.backend.get_hardware_info())
+                except Exception:  # noqa: BLE001
+                    caps = None
+                self._l1_caps = caps
+            if caps is not None:
+                rep = check_resource_feasibility(kernel_code, caps, "")
+                if not rep.feasible:
+                    msg = rep.as_message()
+                    print(f"  [Verifier] L1 FAILED: {msg}")
+                    return VerificationResult(
+                        level=VerificationLevel.L1_COMPILE, passed=False,
+                        message=f"编译失败: {msg}",
+                        error_log=msg,
+                        metrics={"compile_status": "resource_infeasible",
+                                 "backend": str(self.backend),
+                                 "estimated_smem_bytes": rep.estimated_smem_bytes,
+                                 "smem_limit_bytes": rep.limit_bytes},
+                    )
+        except Exception:  # noqa: BLE001 — 预检自身出错不挡主流程
+            pass
         import hashlib
         cache_key = hashlib.sha256(kernel_code.encode("utf-8")).hexdigest()
         if cache_key in self._compile_cache:

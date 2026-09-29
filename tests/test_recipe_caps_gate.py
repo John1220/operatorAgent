@@ -386,7 +386,8 @@ class TestRecipeFileStructureIntact(unittest.TestCase):
     EXPECTED_SECTIONS = [
         "Matmul / GEMM 优化配方", "通用 (算子无关) 优化配方",
         "Softmax 优化配方", "LayerNorm 优化配方",
-        "Element-wise 优化配方", "Reduction 优化配方", "新硬件适配指南",
+        "Element-wise 优化配方", "Reduction 优化配方",
+        "优化阶梯 (Curriculum)", "新硬件适配指南",
     ]
 
     def test_all_top_level_sections_present_and_ordered(self):

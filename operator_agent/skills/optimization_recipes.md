@@ -1435,6 +1435,63 @@ __device__ float block_reduce_sum(float val) {
 
 ---
 
+## 优化阶梯 (Curriculum)
+
+> 形制借自 LeetCUDA `kernels/hgemm/{naive,wmma,mma/basic,mma/swizzle,...}` 的
+> **同一算子渐进实现**：每一级只差一个技术点，从 naive 爬到 cuBLAS 的 98–100%。
+> 我方把那条阶梯映射到 `R-*` 配方 ID，供 SearchAgent / CoderPipeline 当**升级路径**用：
+>
+> - **按序升级**：先确认上一级 L2/L3 都稳，再加下一级的一个点；
+> - **失败停在原级**：下一级 L2 挂或 L3 变慢就回退，不要叠着改；
+> - **一次只动一级**（doc 00「单变量」纪律）—— 阶梯的价值就是把「改哪」变成选择题。
+>
+> LeetCUDA 侧对照（教学源码在 `kernels/interview/` 的 `sgemm.cuh` / `hgemm.cuh` /
+> `base.cuh`）：`sgemm.cuh:10-15` 自己就写着 Level 1 tiling → 2 thread-tile →
+> 3 vec4 → 4 MMA → 5 WS+TMA，每级注了 AI 估值。
+
+### GEMM / Matmul 阶梯
+
+| 级 | 技术点 | 配方 | 退出条件 (哪一项变好) |
+|---|---|---|---|
+| L0 | 直译三重循环 / 单层 tile | — | 能过 L2 即可 |
+| L1 | Block tile + K 循环 + 指针推进 | `R-MATMUL-05` `R-MATMUL-08` `R-MATMUL-07` | GFLOPS / 利用率 ↑ |
+| L2 | 向量化读写 (vec4) + 连续假设 | `R-UNIV-02` | 带宽利用率 ↑ (memory-bound 时) |
+| L3 | SMEM tile + 消 bank conflict | `R-MATMUL-01` | L2 命中 / 带宽 ↑ |
+| L4 | 多级流水 / 双缓冲 | `R-MATMUL-04` | 计算与访存重叠, GFLOPS ↑ |
+| L5 | Tensor Core (`tl.dot` / MMA) | `R-MATMUL-03` `R-MATMUL-09` | GFLOPS 数量级跳变 |
+| L6 | Block/Warp swizzle + L2 分组 | `R-MATMUL-01` `R-MATMUL-06` | 大 shape 上利用率 ↑ |
+| L7 | TMA + Warp Specialization | `R-MATMUL-13` `R-MATMUL-14` | Hopper+ 上逼近峰值 |
+
+⚠️ LeetCUDA 的 `R-MATMUL-02` autotune 配置表与 `R-MATMUL-14` autoWS 的
+`num_warps==4` 硬门槛冲突（12 组里 8 组是 `num_warps=8`）—— **进 L7 前先改表**，
+否则 autoWS 静默失效。见 CHECKLOG / doc 15。
+
+### Softmax / Reduce 阶梯
+
+| 级 | 技术点 | 配方 | 备注 |
+|---|---|---|---|
+| L0 | 两趟 (max 再 sum) | — | 正确但慢 |
+| L1 | 数值稳定 (减 max) | `R-SOFTMAX-01` | 不减 max 会在大值上炸 |
+| L2 | Online softmax (m,d 联合归约) | `R-SOFTMAX-01` `R-SOFTMAX-02` | LeetCUDA `softmax.cu:21-40` |
+| L3 | 融合 scale/mask/attention | `R-SOFTMAX-03` | 少一次读写 |
+
+### LayerNorm / Elementwise 阶梯
+
+| 级 | 技术点 | 配方 |
+|---|---|---|
+| L0 | 分趟算 mean/var/norm | — |
+| L1 | 单趟融合 | `R-LN-01` |
+| L2 | 向量化 load/store | `R-LN-02` `R-UNIV-02` |
+| L3 | SMEM/warp 归约 | `R-LN-03` `R-LN-04` |
+
+### 用法（给 SearchAgent 的硬约定）
+
+1. 先按 `applies_when` / roofline 判 bound，再选**当前级的下一级**，不许多级同改。
+2. 一级生效（L3 判 FAST/SAME 且 L2 稳）才允许升下一级；SLOW 则回退并禁用该配方。
+3. 阶梯是**搜索顺序**不是穷举表——L5 之后的项按 `requires_caps` 过滤，硬件不支持就停。
+
+---
+
 ## 新硬件适配指南
 
 为新 GPU (如昆仑芯) 添加支持时，只需以下步骤:
