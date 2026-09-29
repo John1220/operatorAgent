@@ -54,7 +54,8 @@ from operator_agent.conductor import Conductor  # noqa: E402
 from operator_agent.llm_client import (  # noqa: E402
     LLMClient, format_sampling_configs)
 from operator_agent.measurement import (LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,  # noqa: E402
-                                        PERF_GATE_PARAM_KEYS, Validity,
+                                        PERF_GATE_PARAM_KEYS, TRANSPORT_ANSWERED,
+                                        TRANSPORT_KEY, TRANSPORT_UNKNOWN, Validity,
                                         correctness_verified_levels,
                                         cross_round_ruler, persist_decision)
 from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
@@ -667,6 +668,15 @@ def aggregate(runs):
     decision_grade = [r for r in graded
                       if r.get("measurement_validity") == Validity.VALID.value]
 
+    # 执行侧「没听到回答」那一格 (#102 第 1 片, **只观测**): 逐格数, 不折成一个数 ——
+    # 「报了 answered」「报了 outcome_unknown」「这一轮压根没报」是三件事, 折起来就又是
+    # 把没检查当检查过 (本仓那一族)。
+    transport_counts = {}
+    for r in rounds:
+        t = r.get(TRANSPORT_KEY)
+        if t is not None:
+            transport_counts[t] = transport_counts.get(t, 0) + 1
+
     # 加速比分两套口径给, 不合并: 混在一起就是把「不可信的读数」当成成绩
     sp_all = [r["speedup"] for r in rounds if isinstance(r.get("speedup"), (int, float))]
     sp_grade = [r["speedup"] for r in decision_grade
@@ -708,6 +718,8 @@ def aggregate(runs):
         "runs_crashed": len(crashed),
         "crash_reasons": [r.get("error") for r in crashed],
         "rounds": len(rounds),
+        "transport_counts": dict(transport_counts),
+        "transport_reported": sum(transport_counts.values()),
         "level_rates": {"L1": l1, "L2": l2, "L3": l3},
         "level_pcts": {"L1": _pct(*l1), "L2": _pct(*l2), "L3": _pct(*l3)},
         "task_success": (len(passed_runs), len(ok_runs)),
@@ -873,6 +885,21 @@ def format_report(agg):
         lines.append(f"  某一轮内部就不是同一把尺的轮数: {agg[f'{_prefix}_conflict_rounds']}"
                      + _conflict_note)
         lines.append("  ⚠️ 只观测不判决: 跨轮换尺今天没有阈可判, 现场通常是远端脚本中途换过版本")
+
+    # 执行侧「没听到回答」那一格 (#102 第 1 片)。**三格并排、分母各带各的** —— 把「报了 answered」
+    # 与「这一轮压根没报」折成一格, 就是把没检查当检查过 (本仓那一族, 与【候选重复率】同形)。
+    _tc = agg["transport_counts"]
+    _unknown = _tc.get(TRANSPORT_UNKNOWN, 0)
+    _answered = _tc.get(TRANSPORT_ANSWERED, 0)
+    _reported = agg["transport_reported"]
+    _silent = agg["rounds"] - _reported
+    lines.append(f"\n【执行侧「没听到回答」】outcome_unknown {_unknown} · answered {_answered}"
+                 f" · 报了这一格的轮 {_reported}/{agg['rounds']}")
+    if _silent:
+        lines.append(f"  另有 {_silent} 轮这一格是空的 —— 那不是「听到回答了」, 是这一级没走到"
+                     "远程执行 (L1 就死了 / 本地执行 / 重复候选不烧远端)")
+    lines.append("  ⚠️ 只观测不改判决: 这些轮今天照样判 L2 失败。它的用处是让「这次远端可能已经"
+                 "跑过一遍」在血缘里第一次有名字 (doc 60 §四 / #102 第 1 片)")
 
     for label, key in (("全部轮次", "speedup_all"), ("仅 decision-grade", "speedup_decision_grade")):
         q = agg[key]

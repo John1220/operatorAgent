@@ -38,7 +38,7 @@ from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
 from .measurement import (LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
                           PERF_GATE_PARAM_KEYS, ROOFLINE_CONVERGED_PCT,
                           RULER_LABEL_CORRECTNESS,
-                          RULER_LABEL_PERFORMANCE, Validity,
+                          RULER_LABEL_PERFORMANCE, TRANSPORT_KEY, Validity,
                           Verdict, binding_attainment, cross_round_ruler,
                           correctness_verified_levels, l2_ruler_reading,
                           l3_ruler_reading, roofline_converged, ruler_note, verdict)
@@ -215,6 +215,22 @@ def _round_perf_ruler(verify_results: list) -> dict:
     l3 = next((r for r in verify_results
                if getattr(r, "level", None) == VerificationLevel.L3_PERFORMANCE), None)
     return l3_ruler_reading(getattr(l3, "metrics", None) if l3 else None)
+
+
+def _round_transport(verify_results: list):
+    """本轮 L2 有没有「听到回答」—— 没有则这一轮的执行结果**不能**被读成「核跑错了」
+
+    依据 Limbo `2609.29095v1` 行 226-232: 一次超时在 absent / committed(回执丢了) / late
+    (还在飞) 三种世界里对客户端同形, 所以恢复策略不能直接按结果态分支 —— 它要么把这一格
+    单独记下来, 要么选一个在三种世界里都安全的动作。我方此前两样都没做 (doc 60 §四)。
+
+    返回 `None` 表示**这一轮没报** (L1 就死了、或本地执行没走远程那条 except) —— 「没报」与
+    「报了 answered」在报表里是两栏, 不许折叠 (缺的键不填默认值, 与 `aggregated_over` 同一纪律)。
+    """
+    l2 = next((r for r in verify_results
+               if getattr(r, "level", None) == VerificationLevel.L2_FUNCTION), None)
+    metrics = getattr(l2, "metrics", None) if l2 else None
+    return (metrics or {}).get(TRANSPORT_KEY)
 
 
 _PERF_ADVICE = ("门槛或判据换了去查部署; 只有绑定轴换了通常是候选自己变了形状")
@@ -711,6 +727,10 @@ class Conductor:
                 # 性能那一半的兄弟格 (#87 第 3 片)。外部那句 𝒮 说的是 "correctness **and**
                 # performance criteria fixed across attempts", 只落 L2 那一格等于只问了一半。
                 LINEAGE_PERF_RULER_KEY: _round_perf_ruler(verify_results),
+                # 执行侧那一格 (#102 第 1 片, **只观测不改判决**): 这一轮的 L2 失败到底是
+                # 「远端答了失败」还是「没听到回答」。后者在血缘里第一次有了名字, 于是
+                # 「这次远端可能已经跑过一遍」这个问题离线可查, 而不是只活在终端那一行。
+                TRANSPORT_KEY: _round_transport(verify_results),
                 # 重复率的原料: 签名进 result.json 之后, 「模型重新生成时有多少轮是同一份
                 # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
                 "candidate_signature": sig,

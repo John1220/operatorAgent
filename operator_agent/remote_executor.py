@@ -40,6 +40,7 @@ from typing import Optional
 from .environment import EnvironmentChecker, DependencyAnalyzer, EnvironmentReport, CheckItem
 from .backend_caps import Backend, Cap
 from .hardware_caps import detect_hardware_caps
+from .measurement import (TRANSPORT_ANSWERED, TRANSPORT_KEY, transport_outcome)
 
 
 # 按执行目标串行化 execute/benchmark, 防止并发任务共用同一 GPU 互相污染 benchmark
@@ -50,6 +51,22 @@ _EXEC_LOCKS_GUARD = threading.Lock()
 def _get_exec_lock(key: str) -> threading.Lock:
     with _EXEC_LOCKS_GUARD:
         return _EXEC_LOCKS.setdefault(key, threading.Lock())
+
+
+def _transport_outcome_of(exc) -> str:
+    """一次调用失败时, 归到「听到回答」/「没听到回答」那一格 (单一实现, 四个出口共用)
+
+    `ssh_rc` 是 `_ssh_exec` 挂在异常上的那个码: 255 是 ssh 自己失败的保留码, 正落在
+    「命令没跑 / 跑了但回执丢了 / 还在飞」这三种对客户端同形的世界里 (#102 第 1 片,
+    依据 Limbo `2609.29095v1` 行 226-232)。判据放在 `measurement.transport_outcome` 里,
+    因为读它的报表与写它的执行侧必须共用一套词表 (I22 那一族)。
+    """
+    return transport_outcome(exc, remote_rc=getattr(exc, "ssh_rc", None))
+
+
+def _transport_failure(exc) -> dict:
+    """三个「返回 dict」的远程出口共用的失败载荷形状"""
+    return {"success": False, "error": str(exc), TRANSPORT_KEY: _transport_outcome_of(exc)}
 
 
 @dataclass
@@ -63,6 +80,10 @@ class RemoteExecutionResult:
     memory_bandwidth_gbs: float = 0.0
     error: str = ""
     device: str = ""
+    #: 「听到回答」/「没听到回答」那一格 (#102 第 1 片, 依据 Limbo `2609.29095v1` 行 226-232)。
+    #: 默认 `answered` 不是猜的 —— 能构造出这个对象就说明手里有一份远端返回; 只有 except 分支
+    #: 会把它改成 `outcome_unknown`。默认选**不报警**那一侧, 因为下游拿它做的是幂等清点。
+    transport_outcome: str = TRANSPORT_ANSWERED
 
 
 @dataclass
@@ -273,9 +294,15 @@ class SSHExecutor(Backend):
                 tail = stderr_out[-3000:] if len(stderr_out) > 3000 else stderr_out
                 combined.append(f"[stderr ({len(stderr_out)} chars, tail shown)]\n{tail}")
             detail = ("\n\n".join(combined) if combined else "(no output captured)")
-            raise RuntimeError(
+            err = RuntimeError(
                 f"SSH exec failed [rc={proc.returncode}]: {detail}"
             )
+            # rc 挂在异常上而不是换异常类型: 文件里有三处 `except RuntimeError` 靠这个类型
+            # 走探测分支, 换类型会静默改掉它们的行为。而 rc=255 是 ssh **自己**失败的保留码
+            # (远端命令的返回码不会被它覆盖) —— 那一格恰恰是「命令可能没跑、也可能跑完了
+            # 但回执丢了」, 所以 `transport_outcome` 要能看见它 (#102 第 1 片)。
+            err.ssh_rc = proc.returncode
+            raise err
         # stdout 非空时，把 stderr 以 "warning:" 前缀附加到 stdout 末尾，
         # 方便 _ssh_exec_json 或调用方在 JSON 解析失败后诊断真正原因。
         if stderr_out:
@@ -743,7 +770,8 @@ class SSHExecutor(Backend):
                 device=result.get("device", ""),
             )
         except Exception as e:
-            return RemoteExecutionResult(success=False, error=str(e))
+            return RemoteExecutionResult(success=False, error=str(e),
+                                   transport_outcome=_transport_outcome_of(e))
 
     def benchmark(self, kernel_code: str, inputs: dict, warmup: int = 3, repeat: int = 10) -> dict:
         try:
@@ -758,7 +786,7 @@ class SSHExecutor(Backend):
             }
             return self._ssh_exec_json(payload)
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return _transport_failure(e)   # 带「有没有听到回答」那一格 (见 _transport_failure)
 
     def verify_function(self, kernel_code: str, inputs: dict, kernel_type: str,
                         max_error: float, precision: str = "",
@@ -778,7 +806,7 @@ class SSHExecutor(Backend):
                 "reference_source": reference_source or "",
             })
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return _transport_failure(e)   # 带「有没有听到回答」那一格 (见 _transport_failure)
 
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,
@@ -802,7 +830,7 @@ class SSHExecutor(Backend):
                 "reference_source": reference_source or "",
             })
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return _transport_failure(e)   # 带「有没有听到回答」那一格 (见 _transport_failure)
 
     @staticmethod
     def _serialize_inputs(inputs: dict) -> dict:

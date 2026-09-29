@@ -198,6 +198,67 @@ LINEAGE_PERF_RULER_KEY = "l3_ruler"
 RULER_LABEL_CORRECTNESS = "正确性那把尺"
 RULER_LABEL_PERFORMANCE = "性能那把尺"
 
+# ── 执行侧那一格: 「没听到回答」不等于「对方答了失败」 (缺口 1 的执行侧, #102 第 1 片) ──
+#: 一手依据: Limbo `2609.29095v1` 行 226-232 —— Definition 1 (观测等价) 之后那句
+#: "A timeout is observation-equivalent under absent, committed (response lost) and late
+#: (request still in flight). A recovery policy therefore cannot condition on the outcome
+#: state directly"。**一次超时在「没执行 / 执行了但回执丢了 / 还在飞」三种世界里对客户端
+#: 完全同形**, 所以客户端只有两条路: 把它单独记成一格「不知道」, 或者选一个在所有等价世界
+#: 里都安全的动作。我方此前两条都没走 —— `SSHExecutor.execute` 的 `except Exception` 把它
+#: 收成 `success=False`, `Verifier._verify_single_set` 再收成 `message="执行失败: …"`,
+#: 于是「未知」与「跑完了但输出不对」在判决层同形, Fixer 会对着前者给候选开处方 (doc 60 §四)。
+TRANSPORT_KEY = "transport_outcome"
+TRANSPORT_ANSWERED = "answered"          #: 听到了回答 —— 哪怕回答的内容是「失败」
+TRANSPORT_UNKNOWN = "outcome_unknown"    #: 没听到回答 —— 远端那次执行可能已经发生
+TRANSPORT_STATES: tuple = (TRANSPORT_ANSWERED, TRANSPORT_UNKNOWN)
+
+#: SSH 保留给「ssh 自己失败」的退出码 (远端命令的返回码不会被它覆盖): 255 意味着命令
+#: 可能根本没跑, 也可能跑完了但连接断了 —— 正落在上面那三种等价世界里。
+SSH_TRANSPORT_EXIT_CODE = 255
+
+#: 只列「**确定**没听到回答」的那一族。方向刻意保守: 误报一次 unknown 只是多问一句,
+#: 漏报一次是把「这张卡可能已经跑过一遍」擦掉 —— 而 #102 第 2/3 片要拿它做幂等清点。
+_NO_RESPONSE_EXCEPTIONS: tuple = (
+    "TimeoutExpired",         # `subprocess.run(timeout=…)` 打的正是这一格
+    "timeout",                # socket.timeout (py3.10+ 起是 TimeoutError 的别名)
+    "TimeoutError",
+    "ConnectionError", "ConnectionResetError", "ConnectionAbortedError",
+    "BrokenPipeError", "BrokenResourceError",
+    "RemoteDisconnected", "IncompleteRead",   # 回答断在半路 = 没听到完整的回答
+    "URLError",               # urllib: 连不上与中途断都算, 请求也可能已经发出去了
+)
+
+
+def transport_outcome(exc, remote_rc=None) -> str:
+    """把一次远程调用的异常归到「听到回答」/「没听到回答」这一格。
+
+    按 **MRO 上的类名**匹配而不是 `isinstance`: 本模块的纪律是不做 I/O、不 import 传输层
+    (见模块头), 而 `subprocess` / `http.client` / `socket` 全都是传输层。名字匹配的代价是
+    「别人仿了一个同名异常也会被判 unknown」—— 这里接受, 因为 unknown 是**不报警**的那一侧。
+
+    `remote_rc` 由调用方从自己的传输层带上 (SSH 的 255): 那个码本身不是异常类型的区分,
+    而是「命令没跑 / 跑了但回执丢了」的区分。
+    """
+    if remote_rc == SSH_TRANSPORT_EXIT_CODE:
+        return TRANSPORT_UNKNOWN
+    for klass in type(exc).__mro__:
+        if klass.__name__ in _NO_RESPONSE_EXCEPTIONS:
+            return TRANSPORT_UNKNOWN
+    return TRANSPORT_ANSWERED
+
+
+def transport_outcome_of_result(result) -> str:
+    """从一份**执行结果对象**里读那一格。
+
+    没有这一格的结果按 `answered` 读, 这不是兜一个像样的默认值, 而是一条推理: 手里既然
+    有一份 result 对象, 传输层就**给回了东西** —— 它落在 Limbo `2609.29095v1` 行 220-225
+    那三种等价世界之外, 因为「没答话」那一侧从来不表现为一份结果, 只表现为异常。
+    `MockGPU` 的 `ExecutionResult` 与测试里的假后端都不带这个字段, 而它们能走到这里只
+    有一种方式 (本机执行失败) —— 直接 `result.transport_outcome` 会把「候选算错了」
+    这个判决路径换成一个 `AttributeError`。
+    """
+    return getattr(result, TRANSPORT_KEY, TRANSPORT_ANSWERED)
+
 RULER_REPORTED = "reported"            #: 这一轮各组同一把尺, 值照抄
 RULER_CONFLICT = "self_conflict"       #: 这一轮自己就不是同一把尺
 RULER_UNREPORTED = "unreported"        #: 一个尺键都没报 (没走到 L2 / 没做参考比对)

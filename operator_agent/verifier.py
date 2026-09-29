@@ -19,8 +19,8 @@ from .interface_contract import check_kernel_interface, input_key_sets
 from . import tolerance
 from . import measurement
 from .measurement import (GATE_PARAM_KEYS, PERF_CRITERION_ABSOLUTE_GFLOPS,
-                          PERF_CRITERION_SPEEDUP, aggregate_l2_readings,
-                          aggregate_note, single_ruler)
+                          PERF_CRITERION_SPEEDUP, TRANSPORT_KEY, aggregate_l2_readings,
+                          aggregate_note, single_ruler, transport_outcome_of_result)
 from .hardware_caps import detect_hardware_caps
 from .backend_caps import Backend, Cap, CapabilityMissing
 
@@ -525,7 +525,11 @@ class Verifier:
                 return VerificationResult(
                     level=VerificationLevel.L2_FUNCTION, passed=False,
                     message=f"远程执行失败: {head}",
-                    error_log=full)
+                    error_log=full,
+                    # 「没听到回答」与「听到了失败」要分开带着走 (#102 第 1 片) —— 只在载荷
+                    # 真报了这一格时发布, 缺的键不填默认值 (与 aggregated_over 同一纪律)
+                    metrics=({TRANSPORT_KEY: remote_verify[TRANSPORT_KEY]}
+                             if TRANSPORT_KEY in remote_verify else {}))
             return VerificationResult(
                 level=VerificationLevel.L2_FUNCTION, passed=True,
                 message=(f"远程全量比对通过 ({remote_verify.get('compared_elements', 0)} 元素), "
@@ -538,7 +542,9 @@ class Verifier:
         result = self.backend.execute(kernel_code, inputs)
         if not result.success:
             head, full = failure_pair(result.error)
-            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"执行失败: {head}", error_log=full)
+            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False,
+                                      message=f"执行失败: {head}", error_log=full,
+                                      metrics={TRANSPORT_KEY: transport_outcome_of_result(result)})
         if expected_output is None:
             expected_output = self._generate_reference(task, inputs)
         if expected_output is None:
