@@ -793,12 +793,15 @@ AMBIGUOUS   没有可比值，或档位是 uninformative（带宽比信号本身
 |------|------|---------|
 | L1 | 编译验证 | 先过**接口契约门**（静态，参数名与 `kernel(**输入)` 的调用约定一致，不占 GPU），再语法检查、远程编译 |
 | L2 | 功能验证 | 输出与参考实现比对，用**绝对 + 相对两项 AND** 的容差、按精度分档（见 5.4）；同时执行**反作弊**两层（见 6.8） |
-| L3 | 性能验证 | 与**远端选定的基线**做块交错的 A/B 计时，判据是**加速比** `speedup_vs_baseline ≥ min_speedup`，并给出 Roofline 达成率；同时产出峰值显存、逐块比值序列、时钟旁证 |
+| L3 | 性能验证 | 与**选定的基线**做块交错的 A/B 计时，判据是**加速比** `speedup_vs_baseline ≥ min_speedup`，并给出 Roofline 达成率；同时产出峰值显存、逐块比值序列、时钟旁证。⚠️ 这说的是三条比对路里的**两条**：既拿不到远端基线、本机又没有可用参考实现时，第三条（legacy）判的是**绝对 GFLOPS 目标** `gflops ≥ target_gflops × min_speedup` —— 同一个 `min_speedup` 在那里是系数不是地板。哪一条由 `metrics.perf_criterion` 逐轮声明 |
 
 ⚠️ 三个常见误解：
 
-- **GFLOPS 不是 L3 的通过判据**。它是 Roofline 报告的输入之一；跨运行经验库的分数用
-  `speedup_vs_baseline`，因为对 memory-bound 算子 GFLOPS 整个失真（缺口 4）。
+- **GFLOPS 通常不是 L3 的通过判据，但有一条路上它是**。有基线时它是 Roofline 报告的输入之一，
+  跨运行经验库的分数用 `speedup_vs_baseline`，因为对 memory-bound 算子 GFLOPS 整个失真（缺口 4）；
+  而 legacy 那条（无基线、无参考实现）判的正是它。这就是 `perf_criterion` 存在的理由：
+  `min_speedup=1.5` 这个数在两条路上**同值不同义**，只比数值会把一次换了量纲的漂移读成
+  「尺没变」（#87 第 3 片 / doc 58 §3.4）。
 - **L3 的数字先分档再决定用途**。`uninformative` 档的读数只作诊断，不参与任何闭环决定（6.3）。
 - **「通过」不等于「入库」**。不可信、被抢占、或没真加速的运行会被入库门拒收（6.5）。
 

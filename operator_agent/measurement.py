@@ -151,10 +151,52 @@ def correctness_verified_levels(levels: dict) -> bool:
 # 判定」, 搬到这里才配被轮级与运行级两个读者共用。
 GATE_PARAM_KEYS: tuple = ("atol", "rtol", "required_matched_ratio")
 
+# ── 性能那一半 (#87 第 3 片) ─────────────────────────────────────────────────
+# 上面那三键只覆盖 correctness。外部那句话问的是**整个** 𝒮 ("It keeps correctness and
+# performance criteria fixed across attempts"), 所以「一次运行里换没换尺」这个问题今天只
+# 问了一半: L3 的通过门 (`speedup >= min_speedup`) 跨轮是不是同一把, 之前**没有读数**。
+#
+# 这三个键都是 L3 判决真正读到的量, 而且都是**今天就会漂**的那种漂:
+#   * `min_speedup_required` —— 门槛本身。它来自 `task.constraints`, 一场运行里通常不动,
+#     但配方热重载 / 意图解析重跑都会动它。
+#   * `perf_criterion` —— **判的是哪个量**。`verifier._verify_performance` 有三条比对路,
+#     前两条比 `speedup >= min_speedup`, 第三条 (legacy 无基线) 比的是
+#     `gflops >= target_gflops * min_speedup` —— 同一个 `min_speedup=1.5` 在前者是
+#     「快 1.5 倍」的地板, 在后者是「把绝对目标乘 1.5」的系数。所以只看数值会把一次
+#     **换了量纲**的漂移读成「尺没变」。这一键就是为了让那种情况变成「尺变了」。
+#   * `bound_type` —— roofline 的绑定轴。收敛出口那条 (`roofline_converged`) 比的是
+#     「这条轴上达到上界的百分比」, 轴从 compute 翻到 memory 时, 同一个 90% 意思是两件事
+#     (本机两条轴的可达性实测不对称: compute 轴最好 94.7% 打得开口, memory 轴最好 84%
+#     永不开, 见上面 `ROOFLINE_CONVERGED_PCT` 那段)。
+#: 绑定轴那个键的名字与它的占位值。**这里定义一次**, 因为「`unknown` 不算一个读数」这条
+#: 规则必须和键名待在一起 —— 抄两份字符串, 将来改键名时那条规则会安静地失去作用。
+#: ⚠️ 本模块因此成为 `bound_type` 的一个**读者** (tests/test_bound_axis_gate.py 那张读者
+#: 清单会因此报红, 那是它该做的); 这里拿它做什么 = **只把它当尺的身份比较, 不据此选轴**,
+#: 而 `"unknown"` 正是它必须认识的那个第三态 (见 `l3_ruler_reading`)。
+BOUND_AXIS_KEY = "bound_type"
+BOUND_AXIS_UNKNOWN = "unknown"
+
+PERF_GATE_PARAM_KEYS: tuple = ("min_speedup_required", "perf_criterion", BOUND_AXIS_KEY)
+
+#: 三条比对路的**身份**。产它的 (`verifier`) 与读它的 (跨轮判定、报表、用例) 都从这里取
+#: 字符串, 否则就是两套口径 (CHECKLOG I22/H4 那一族)。
+PERF_CRITERION_SPEEDUP = "speedup_vs_baseline>=min_speedup"
+PERF_CRITERION_ABSOLUTE_GFLOPS = "gflops>=target_gflops*min_speedup"
+
+
 #: 每轮的尺读数写进 `iteration_history` 时用的键。**产它的 (conductor) 与读它的
 #: (conductor 的跨轮判定、端到端报表) 都从这里取名字**, 免得两处字符串飘开之后就只剩
 #: 「报表那一栏永远是空的」这种静默失效。
 LINEAGE_RULER_KEY = "l2_ruler"
+
+#: 性能那一半在血缘里的兄弟键。**产它的 (conductor) 与读它的 (跨轮判定、端到端报表) 同样
+#: 都从这里取名字** —— 上一格断在「血缘一直在写但没人读」上, 这一格不能重犯 (doc 43 第三节)。
+LINEAGE_PERF_RULER_KEY = "l3_ruler"
+
+#: 两份读数各自印出来的标签。**只放名字**: 键集合从各自的 `*_GATE_PARAM_KEYS` 读, 抄进
+#: 标签字符串里就等于加一个键要有第二处记着改 (I20 那一族)。
+RULER_LABEL_CORRECTNESS = "正确性那把尺"
+RULER_LABEL_PERFORMANCE = "性能那把尺"
 
 RULER_REPORTED = "reported"            #: 这一轮各组同一把尺, 值照抄
 RULER_CONFLICT = "self_conflict"       #: 这一轮自己就不是同一把尺
@@ -199,6 +241,33 @@ def single_ruler(gates: list[dict]) -> tuple[dict, dict]:
     return single, conflict
 
 
+def _ruler_reading(metrics, keys: tuple, *,
+                   not_a_value: Optional[dict] = None) -> dict:
+    """`l2_ruler_reading` / `l3_ruler_reading` 的共同实现 —— 口径只有一份。
+
+    分成两个薄壳而不是给 `l2_ruler_reading` 加参数: 那两个名字的**键集合不同义** (一把是
+    数值容差, 一把是性能门槛与判的是哪个量), 混在一个带默认值的签名上, 调用方漏传 keys 就
+    会静默拿 L2 的键集合去读 L3 的 metrics —— 那正好制造本函数要避免的那种错。
+
+    `not_a_value` 是 `{键: 一组「不是读数的值」}`。这一族最阴的一种错法是**两个都没有数被
+    读成「两轮一致」**: `bound_type` 的 `"unknown"` 就是一个占位值 (`verifier._roofline_analysis`
+    在既推不出脊点、也认不出算子名时报它), 连续两轮都 `unknown` 时跨轮判据会给该键 `same`,
+    于是「这把尺说的是哪条轴」这件谁都不知道的事被印成已确认。所以这类值在收读数时就被
+    剔掉 —— 该键随后进不了 `vals_by_key`, 与「这一轮没报」同处, 而不是与「报了且相同」同处。
+    """
+    m = metrics if isinstance(metrics, dict) else {}
+    values = {k: m[k] for k in keys
+              if k in m and m[k] not in (not_a_value or {}).get(k, ())}
+    conflict = m.get("gate_params_conflict")
+    if conflict:
+        # 打架的键名也带上: 读者要能分清「atol 说不清但 rtol 说得清」和「全都说不清」
+        return {"state": RULER_CONFLICT,
+                "conflicted_keys": sorted(str(k) for k in conflict), **values}
+    if values:
+        return {"state": RULER_REPORTED, **values}
+    return {"state": RULER_UNREPORTED}
+
+
 def l2_ruler_reading(l2_metrics) -> dict:
     """把一轮 L2 的 metrics 收成「这一轮用的哪把尺」那一份读数, 供血缘与跨轮判定用
 
@@ -212,23 +281,49 @@ def l2_ruler_reading(l2_metrics) -> dict:
     「没有读数」与「读数说尺变了」必须分开 —— 后者是证据, 前者只是缺陷信号 (本仓 #53 那一族:
     把 `speedup=None` 印成「没有加速」)。
     """
-    m = l2_metrics if isinstance(l2_metrics, dict) else {}
-    values = {k: m[k] for k in GATE_PARAM_KEYS if k in m}
-    conflict = m.get("gate_params_conflict")
-    if conflict:
-        # 打架的键名也带上: 读者要能分清「atol 说不清但 rtol 说得清」和「全都说不清」
-        return {"state": RULER_CONFLICT,
-                "conflicted_keys": sorted(str(k) for k in conflict), **values}
-    if values:
-        return {"state": RULER_REPORTED, **values}
-    return {"state": RULER_UNREPORTED}
+    return _ruler_reading(l2_metrics, GATE_PARAM_KEYS)
 
 
-def cross_round_ruler(iteration_history: list) -> dict:
+def l3_ruler_reading(l3_metrics) -> dict:
+    """一轮 L3 的「性能那一半用的是哪把尺」—— 与 `l2_ruler_reading` 同一个口径、另一组键。
+
+    键集合见 `PERF_GATE_PARAM_KEYS`。这一侧**今天只有两态** (`reported` / `unreported`),
+    第三态 `self_conflict` 结构上到不了: 那一态的意思是「一场之内的几组输入各用一把尺」,
+    而 L3 按 `verifier._verify_performance` 的写法**只拿第一组输入做基准** (源码里那句注释:
+    「多组输入套件时，性能基准使用第一组输入」), 没有跨组的东西可打架。
+    这不是「暂时没实现」, 是这一级今天的形状 —— 所以跨轮那侧印 `0 轮内部就不一致` 时,
+    那句是**真话**, 不是一格没接上的空位。
+
+    ⚠️ **`bound_type` 的 `"unknown"` 不算一个读数**: 那条轴推不出来时 Verifier 报的就是这个
+    占位值, 而连续两轮都 `unknown` 会被逐键判据读成「这一键各轮同值 ⇒ 尺没变」—— 那是把
+    「谁都不知道是哪条轴」印成「已确认是同一把尺」, 与本仓 #53 / I10 那一族同形。所以这种
+    值在收读数时就被剔掉, 该键随后进不了可比对, 与「这一轮没报」同处。
+
+    ⚠️ 一个已知盲区, 与 #89 同一条纪律: 这一侧测得出「这一轮没报尺」, 测不出「这一轮
+    走的其实是三条比对路之外的第四条」—— 因为 `perf_criterion` 是**各条路自己声明**的。
+    新增一条比对路而忘了声明, 那一轮就退成 `unreported` (看得见), 但如果它**照抄了别人的
+    字符串** 就看不见。所以那几个字符串住在本模块、由用例逐条钉住 (不放在 verifier 里就地
+    写), 而 `tests/test_perf_ruler_across_rounds.py` 里有一条 AST 守卫: `_verify_performance`
+    里**凡报 `min_speedup_required` 的那个字面量**都必须同时报 `perf_criterion`, 且值必须是
+    `PERF_CRITERION_*` 常量 (查字面量而不是查 `return` 是因为三条路都在 `metrics.update`
+    里填名字, `return` 那一段里根本没有它 —— 第一版按 return 查, 五个 L3 出口一个都不命中)。
+    """
+    return _ruler_reading(l3_metrics, PERF_GATE_PARAM_KEYS,
+                          not_a_value={BOUND_AXIS_KEY: (BOUND_AXIS_UNKNOWN,)})
+
+
+def cross_round_ruler(iteration_history: list, *,
+                      keys: tuple = GATE_PARAM_KEYS,
+                      lineage_key: str = LINEAGE_RULER_KEY) -> dict:
     """一次运行之内, 各轮的数值门用的是不是同一把尺。
 
+    `keys` / `lineage_key` 让同一套判据服务两半 (#87 第 3 片): 默认值是 correctness 那一半
+    (`GATE_PARAM_KEYS` + `l2_ruler`), 传 `PERF_GATE_PARAM_KEYS` + `LINEAGE_PERF_RULER_KEY`
+    就是性能那一半。**判据只有一份**是这个函数存在的理由 —— 复制一份去判 L3, 就会有两套
+    「什么算同值」的口径 (本仓 I22/H4 那一族)。
+
     入参是 `artifact.iteration_history` (或报表里那份原样搬运的 `rounds`), 每轮取
-    `LINEAGE_RULER_KEY` 那一项。**没有那一项**与「有, 但是 `unreported`」一起算「这一轮
+    `lineage_key` 那一项。**没有那一项**与「有, 但是 `unreported`」一起算「这一轮
     没报」—— 前者是这次运行跑在写这个键之前的代码上 (续跑旧快照就会遇到), 血缘里没有原料,
     所以只能如实计入分母, 不能倒推成「没漂移」。
 
@@ -246,7 +341,7 @@ def cross_round_ruler(iteration_history: list) -> dict:
     for idx, h in enumerate(rounds):
         if not isinstance(h, dict):
             continue
-        reading = h.get(LINEAGE_RULER_KEY)
+        reading = h.get(lineage_key)
         if not isinstance(reading, dict):
             continue
         label = h.get("round", idx + 1)
@@ -254,7 +349,7 @@ def cross_round_ruler(iteration_history: list) -> dict:
 
     states = [r.get("state") for _, r in readings]
     vals_by_key: dict = {}
-    for key in GATE_PARAM_KEYS:
+    for key in keys:
         per_round = {label: r[key] for label, r in readings if key in r}
         if per_round:
             vals_by_key[key] = per_round
@@ -284,8 +379,16 @@ def cross_round_ruler(iteration_history: list) -> dict:
     }
 
 
-def ruler_note(agg: dict) -> str:
+def ruler_note(agg: dict, label: str = "", advice: str = "去查部署是否中途换过版本") -> str:
     """把 `cross_round_ruler` 的结果写成给人读的一行 —— **只报不判**
+
+    `label` / `advice` 是给第 3 片那两半用的: 现在有两份这样的读数 (correctness 的
+    `atol/rtol/ρ` 与 performance 的 `min_speedup/判的是哪个量/绑定轴`), 两行都印在同一份
+    日志里。不带标签时「各轮的尺一致」这句**读不出说的是哪一把** —— 那正是本仓反复登记的
+    那一族: 一条正确的观测被写成两句一模一样的话, 读者只能猜。
+    而且那两半的**修法不同**: 数值尺换了几乎一定是部署中途换过版本, 性能尺里的 `bound_type`
+    换了通常只是候选自己换了形状 (那是事实, 不是待查的漂移)。所以连那句建议都参数化,
+    默认值与两片之前逐字相同 —— 既有读者 (与钉它们的用例、报表那一栏) 一个字节都不动。
 
     与 `verifier._oracle_note` 同定位: 这一句不改任何判决。它存在的理由是「跨轮换了尺」
     今天**没有阈值可判** —— 按本项目「观测先于判定」的处置 (同一位置上的另一条是环境漂移
@@ -306,12 +409,12 @@ def ruler_note(agg: dict) -> str:
     elif same is False:
         head = ("⚠️ 各轮的尺**不一致**: 变了的是 "
                 f"{dict(agg['ruler_changed'])} —— 不据此判核失败, "
-                f"去查部署是否中途换过版本")
+                f"{advice}")
     else:
         head = "各轮的尺**无从比对** (可比键不到两轮报过)"
     if agg.get("ruler_keys_partial") and same is not False:
         head += f" (只被部分轮报过: {list(agg['ruler_keys_partial'])})"
-    return head + "; " + counts
+    return (f"{label}: " if label else "") + head + "; " + counts
 
 
 # ── 跨组聚合: 只 fold「报了这个键」的那些组 ────────────────────────────────

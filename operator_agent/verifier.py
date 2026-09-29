@@ -18,8 +18,9 @@ from .anticheat import static_audit
 from .interface_contract import check_kernel_interface, input_key_sets
 from . import tolerance
 from . import measurement
-from .measurement import (GATE_PARAM_KEYS, aggregate_l2_readings, aggregate_note,
-                          single_ruler)
+from .measurement import (GATE_PARAM_KEYS, PERF_CRITERION_ABSOLUTE_GFLOPS,
+                          PERF_CRITERION_SPEEDUP, aggregate_l2_readings,
+                          aggregate_note, single_ruler)
 from .hardware_caps import detect_hardware_caps
 from .backend_caps import Backend, Cap, CapabilityMissing
 
@@ -974,6 +975,10 @@ class Verifier:
                     # 三元组原文, 落盘可直接比 (LeetCUDA bench 的 "%.1f/%.1f (%.2fx)")
                     "ratio_triple": f"{kernel_min_ms:.4g}/{baseline_ms:.4g} ({speedup:.2f}x)",
                     "min_speedup_required": min_required,
+                    # 这一轮**判的是哪个量** (#87 第 3 片)。三条比对路共用 `min_speedup`
+                    # 这一个旋钮, 但前两条拿它当「快多少倍」的地板、第三条拿它乘在绝对目标上
+                    # 当系数 —— 只比数值会把一次换了量纲的漂移读成「尺没变」。
+                    "perf_criterion": PERF_CRITERION_SPEEDUP,
                     "measurement_scope": "same_remote_device",
                     "candidate_median_time_ms": candidate_metrics.get("median_time_ms"),
                     "baseline_metrics": baselines,
@@ -1047,6 +1052,7 @@ class Verifier:
                 "baseline_time_ms": round(baseline["baseline_time_ms"], 4),
                 "speedup_vs_baseline": round(speedup, 4),
                 "min_speedup_required": min_required,
+                "perf_criterion": PERF_CRITERION_SPEEDUP,
             })
             passed = speedup >= min_required
             base_ms = baseline["baseline_time_ms"]
@@ -1063,7 +1069,14 @@ class Verifier:
 
         # 回退判定: 无参考实现的算子使用绝对 GFLOPS 目标 (legacy)
         achieve = actual_gflops / target_gflops if target_gflops > 0 else 0.0
-        metrics.update({"target_gflops": target_gflops, "achieve_ratio": round(achieve, 4)})
+        metrics.update({"target_gflops": target_gflops, "achieve_ratio": round(achieve, 4),
+                        # 第三条比对路。这里也发布 `min_speedup_required` —— 那个旋钮在这一条
+                        # 路上**确实被用了**, 不报它就是「把没报当没用到」。但它在这里的角色是
+                        # **乘在绝对目标上的系数**, 不是前两条路那个「快多少倍的地板」; 两者数值
+                        # 相同而含义不同, 所以必须有 `perf_criterion` 一起在场, 否则跨轮读数会
+                        # 把「从比加速比改成比 GFLOPS」读成「尺没变」(#87 第 3 片)。
+                        "min_speedup_required": min_required,
+                        "perf_criterion": PERF_CRITERION_ABSOLUTE_GFLOPS})
         passed = target_gflops <= 0 or actual_gflops >= target_gflops * min_required
         msg = (f"无 baseline 参考, 按绝对目标判定: {actual_gflops:.2f} GFLOPS "
                f"(目标 {target_gflops * min_required:.2f})")

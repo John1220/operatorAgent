@@ -35,10 +35,13 @@ from .llm_client import LLMClient
 from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
-from .measurement import (LINEAGE_RULER_KEY, ROOFLINE_CONVERGED_PCT, Validity,
+from .measurement import (LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
+                          PERF_GATE_PARAM_KEYS, ROOFLINE_CONVERGED_PCT,
+                          RULER_LABEL_CORRECTNESS,
+                          RULER_LABEL_PERFORMANCE, Validity,
                           Verdict, binding_attainment, cross_round_ruler,
                           correctness_verified_levels, l2_ruler_reading,
-                          roofline_converged, ruler_note, verdict)
+                          l3_ruler_reading, roofline_converged, ruler_note, verdict)
 from .agent_logger import capture_execution
 from .optimization_planner import OptimizationPlanner
 
@@ -199,6 +202,22 @@ def _round_ruler(verify_results: list) -> dict:
     l2 = next((r for r in verify_results
                if getattr(r, "level", None) == VerificationLevel.L2_FUNCTION), None)
     return l2_ruler_reading(getattr(l2, "metrics", None) if l2 else None)
+
+
+def _round_perf_ruler(verify_results: list) -> dict:
+    """本轮 L3 报的那把性能尺 (#87 第 3 片) —— 与上面那条同形, 只是取的是另一半
+
+    这一侧 `unreported` 的**发生率比 L2 高得多, 而且大多数时候不是缺陷**: 层级门是
+    fail-fast (L1/L2 没过就根本没有 L3 那一格), 而重复候选根本不烧 L3 (#41 那条能力)。
+    所以「10 轮里只有 3 轮报了性能尺」今天是一句正常的话 —— 正因为这样, 这一格绝不能
+    被读者折成「其余 7 轮的尺与第 3 轮相同」: 那才是本仓那一族 (把没检查当检查过)。
+    """
+    l3 = next((r for r in verify_results
+               if getattr(r, "level", None) == VerificationLevel.L3_PERFORMANCE), None)
+    return l3_ruler_reading(getattr(l3, "metrics", None) if l3 else None)
+
+
+_PERF_ADVICE = ("门槛或判据换了去查部署; 只有绑定轴换了通常是候选自己变了形状")
 
 
 class Conductor:
@@ -689,6 +708,9 @@ class Conductor:
                 # 「跨轮的尺是不是同一把」这个问句的原料只能在这里落下 —— 循环之外只剩
                 # 最后一轮的 metrics。
                 LINEAGE_RULER_KEY: _round_ruler(verify_results),
+                # 性能那一半的兄弟格 (#87 第 3 片)。外部那句 𝒮 说的是 "correctness **and**
+                # performance criteria fixed across attempts", 只落 L2 那一格等于只问了一半。
+                LINEAGE_PERF_RULER_KEY: _round_perf_ruler(verify_results),
                 # 重复率的原料: 签名进 result.json 之后, 「模型重新生成时有多少轮是同一份
                 # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
                 "candidate_signature": sig,
@@ -706,10 +728,21 @@ class Conductor:
             # 默认前提, 不是成果; 要露出来的只有「变了」与「某一轮自己说不清用了哪把」。
             # 这一句不改任何判决 —— 跨轮换尺今天没有阈可判, 处置与环境漂移同一条
             # (观测先于判定, 见 `measurement.ruler_note`)。
+            #
+            # 两半各一行, 而且**两句的修法不同** ⇒ 建议也各一条: 数值尺换了几乎一定是部署
+            # 中途换过版本, 而 `bound_type` 换了通常只是候选自己换了形状 (那是事实, 不是
+            # 待查的漂移)。标签必须带上 —— 不带的话日志里会有两行「各轮的尺一致」而读者
+            # 分不清说的是哪一把 (本仓「同一句话有多个副本」那一族的反面: 这里是两个副本
+            # 各说不同的事, 却长得一模一样)。
             _ruler_agg = cross_round_ruler(artifact.iteration_history)
             if (_ruler_agg["ruler_same"] is False
                     or _ruler_agg["ruler_rounds_self_conflict"]):
-                print(f"\n[Ruler] {ruler_note(_ruler_agg)}")
+                print(f"\n[Ruler] {ruler_note(_ruler_agg, RULER_LABEL_CORRECTNESS)}")
+            _perf_agg = cross_round_ruler(artifact.iteration_history,
+                                          keys=PERF_GATE_PARAM_KEYS,
+                                          lineage_key=LINEAGE_PERF_RULER_KEY)
+            if _perf_agg["ruler_same"] is False:
+                print(f"\n[Ruler] {ruler_note(_perf_agg, RULER_LABEL_PERFORMANCE, _PERF_ADVICE)}")
 
             def _snap() -> str:
                 """把当前循环状态写进 execution_snapshot.json

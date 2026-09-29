@@ -338,6 +338,32 @@ class TestThroughARealRun(unittest.TestCase):
                          {k: first[k] for k in GATE_PARAM_KEYS},
                          "血缘里的尺必须是这一轮真的用来判 L2 的那一把")
 
+    def test_the_same_round_also_writes_the_performance_reading(self):
+        """#87 第 3 片: 同一条落盘路径必须把**两半**都写进血缘 —— 这一条是 P7 的证人。
+
+        为什么单独一条: 上一那条只查 L2 那一格, 于是「conductor 忘了写 `l3_ruler`」这件事
+        在整张测试网里是**不可见的** (变异 P7 第一版 0 红就是它)。而这一格一丢, 报表那一栏
+        只会退成「测不到」—— 一个听起来已经尽职的词, 所以它必须有一条从**产它的那一侧**
+        出发的用例, 而不是从读它的那一侧。
+        """
+        from operator_agent.measurement import (LINEAGE_PERF_RULER_KEY,
+                                                PERF_CRITERION_SPEEDUP,
+                                                PERF_GATE_PARAM_KEYS)
+        history, _, _ = self._run()
+        self.assertTrue(all(LINEAGE_PERF_RULER_KEY in r for r in history),
+                        "每一轮都要有性能那一半的格子, 缺一个就不是「每轮都量过」")
+        states = [r[LINEAGE_PERF_RULER_KEY]["state"] for r in history]
+        self.assertTrue(set(states) <= {RULER_REPORTED, RULER_UNREPORTED},
+                        f"性能那半结构上没有 self_conflict (L3 只拿第一组输入): {states}")
+        reported = [r[LINEAGE_PERF_RULER_KEY] for r in history
+                    if r[LINEAGE_PERF_RULER_KEY]["state"] == RULER_REPORTED]
+        self.assertTrue(reported, "这几次运行应当至少有一轮真的走到过 L3, 否则这一条是空转")
+        for r in reported:
+            self.assertIn(r["perf_criterion"], (PERF_CRITERION_SPEEDUP,),
+                          "mock_gpu 走的是加速比那条 (没有远端载荷, 也不该掉进 legacy 那条)")
+            self.assertEqual(set(PERF_GATE_PARAM_KEYS) - {  # 三个键都该在场才叫"报了尺"
+                k for k in PERF_GATE_PARAM_KEYS if k in r}, set(), r)
+
     def test_two_rounds_of_the_same_deployed_table_are_reported_as_agreeing(self):
         """正向对照（不发放）：守卫不许把今天的主路径判成漂移
 
@@ -426,7 +452,10 @@ class TestTheReportHasAReader(unittest.TestCase):
 
     def test_the_report_prints_the_column_with_its_denominator(self):
         text = format_report(self.agg)
-        self.assertIn("【跨轮的尺】", text)
+        # 第 3 片之后报表里有**两栏**「跨轮的尺」(correctness / performance 各一)。
+        # 针必须落在**本半那半的标题**上, 而不是那个两栏共用的前缀 —— 只查共用的前缀时,
+        # L2 那一整栏被删掉也照样绿 (I32 那一族: 词在哪都会印, 分辨不出来自哪一栏)。
+        self.assertIn("【跨轮的尺 · 各轮 L2 报的 atol", text)
         self.assertIn("可比运行 (≥2 轮报了尺) 2 · 尺变过 1", text)
         self.assertIn("a-drift", text)
         self.assertIn("凑不出可比对", text)

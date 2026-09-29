@@ -620,6 +620,26 @@
   与 I30 是一对：那次是坐标指向已不存在的行号，这次是坐标指向**尚未发生的时刻**
 - **类别**：S/I · **状态**：✅ 已修（改成今日事实 + 两棵净树 diff 实证「判决未变」那句）
 
+### I35 · 那张「读者清单」把 `X = "bound_type"` 当成 docstring 剔掉了 —— 集中键名的那一侧正失明
+- **原话**：`tests/test_bound_axis_gate.py` 用 tokenize 剔注释与 docstring 后，按
+  `\b(bound_type|roofline_bound|name_bound)\b` 数谁在读这三个键；判定「这是一段 docstring」的
+  条件是 `STRING 之后紧跟 NEWLINE`。`BOUND_AXIS_KEY = "bound_type"` 同样满足这一条
+  （`NAME OP STRING NEWLINE`），于是整行被剔掉
+- **实证**：#87 第 3 片把 `bound_type` 收进 `measurement.PERF_GATE_PARAM_KEYS` 时，这条守卫
+  **先报红（新增读者 measurement.py）后又报「已消失」** —— 两次都是它自己不稳：第一次它说得对
+  （measurement.py 确实成了第 5 个读者，登记进 REGISTERED 是正解，而它同时逼我确认
+  `unknown` 那一态，于是「两轮都 unknown 被读成同一把尺」这个真缺陷在落地前就被拦下）；
+  第二次它错了 —— 我把字面量换成常量之后它不再认为这里读这个键。**清单的用处恰恰是
+  「它说读的地方都在」，而它对「把键名收成常量」这种写法永久看不见**，也就是对本仓
+  鼓励的那个方向（单点定义）系统性失明
+- **出处**：`tests/test_bound_axis_gate.py::_code_text`（注释里写了这次的两步）＋
+  `TestBoundReadersAreRegistered::test_the_stripper_sees_an_assigned_key_name_but_not_a_docstring`
+  （双向证人：`X = "bound_type"` 必须留着、docstring 必须剔掉）
+- **后果**：凡是「按文本形状数读者」的守卫都要问一句 —— 我把名字集中成一个常量时，它还看得见吗？
+  与 I20（收成单点只覆盖产它的那一半）、I33（键的性质是今天的产物）同族：那两条讲的是**被读的一侧**，
+  这一条讲的是**负责数读者的那只眼**
+- **类别**：S/I · **状态**：✅ 已修（docstring 判定加一条「必须是本行第一个非空白 token」＋双向用例）
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -779,6 +799,7 @@
 | I32 | 断言的 needle 出现在**被测代码自己的文案/别行**里 ⇒ 变异假绿；第 3、4 次还多出「那行账每次都印 ⇒ 永真断言」这个成员 | S/I | ✅ 已修 |
 | I33 | 拿「某个键只有一条路会报」当分类依据 —— 那是今天的产物，不是契约（同一只键腐烂两次） | S/I | ✅ 已修 |
 | I34 | 量具输出里那句「要等第 2 片」是对未来的断言，而未来到了（且与它自己同一函数打印的表矛盾） | S/I | ✅ 已修 |
+| I35 | 「读者清单」把 `X = "bound_type"` 当 docstring 剔掉 —— 它对「把键名收成常量」那一侧系统性失明 | S/I | ✅ 已修 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

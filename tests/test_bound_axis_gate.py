@@ -292,7 +292,13 @@ def _code_text(path):
             prev = cuts.get(t.start[0])
             cuts[t.start[0]] = t.start[1] if prev is None else min(prev, t.start[1])
         elif (t.type == tokenize.STRING and i + 1 < len(toks)
-              and toks[i + 1].type == tokenize.NEWLINE):
+              and toks[i + 1].type == tokenize.NEWLINE
+              # ⚠️ 「后面跟着 NEWLINE」不足以认出 docstring: `BOUND_AXIS_KEY = "bound_type"`
+              # 也满足这一条, 而它是**真在读这个键**的一处代码。#87 第 3 片把键名收成常量之后
+              # 就正好撞上这个形状 —— 只按后一个 token 判, 全仓就会对「键名被集中到常量里」
+              # 的那些读者永久失明 (登记 CHECKLOG I35)。所以再加一条: 这个字符串必须是
+              # **它所在那一行的第一个非空白 token**。
+              and not lines[t.start[0] - 1][:t.start[1]].strip()):
             doc_lines.update(range(t.start[0], t.end[0] + 1))
     out = []
     for n, ln in enumerate(lines, 1):
@@ -318,6 +324,10 @@ class TestBoundReadersAreRegistered(unittest.TestCase):
         "agents.py": "search_optimize prompt 与 _rule_optimize 的 tiling 选择 (缺省 unknown)",
         "triton_opt_rules.py": "normalize_bound_type + 按轴推荐 tiling (unknown 落 mixed)",
         "conductor.py": "血缘与 result.json 的落盘搬运",
+        # #87 第 3 片新增的第 5 个消费端: 「这一轮的尺说的是哪条轴」这件事实。
+        "measurement.py": "只当**尺的身份**比较, 不据此选轴; 认得 unknown —— "
+                          "`l3_ruler_reading` 明确把 `unknown` 剔出读数 (两轮都 unknown "
+                          "不许被读成「同一把尺」, 见那里的 docstring)",
     }
 
     def test_reader_set_matches_the_registry(self):
@@ -334,6 +344,27 @@ class TestBoundReadersAreRegistered(unittest.TestCase):
                          f"已消失: {set(self.REGISTERED) - set(found)}。"
                          "新增的那个必须在 REGISTERED 里写明「拿这个值做什么」, "
                          "并确认它认识 \"unknown\" 这个第三态。")
+
+    def test_the_stripper_sees_an_assigned_key_name_but_not_a_docstring(self):
+        """`_code_text` 那条「去掉裸字符串」的规则, 两个方向都要有证人 (I35)。
+
+        只查「后一个 token 是不是 NEWLINE」时, `BOUND_AXIS_KEY = "bound_type"` 会被当成
+        docstring 整行丢掉 ⇒ 清单对「键名被收成常量」的那些读者永久失明。这一条就是那次
+        失明的最小复现; 反向那一半 (docstring 里提一句不算读者) 是它原本的用处, 也要钉住,
+        否则把规则放宽成「什么都不剔」同样全绿 (I19: 互斥判据要双向)。
+        """
+        import tempfile
+        assigned = ('"""doc 里提一下 bound_type, 这句话不是代码。"""\n'
+                    'BOUND_AXIS_KEY = "bound_type"\n')
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "s.py")
+            with io.open(p, "w", encoding="utf-8") as fh:
+                fh.write(assigned)
+            stripped = _code_text(p)
+        self.assertIn("bound_type", stripped,
+                      "键名被收成常量 ⇒ 这个文件是读者, 不能被当成 docstring 剔掉")
+        self.assertNotIn("这句话不是代码", stripped,
+                         "docstring 那一行必须被剔掉, 不然清单会收进根本不读它的文件")
 
     def test_no_consumer_defaults_to_a_real_axis(self):
         """§八 第 17 条那个非对称默认今天**只存在于 planner 一处**, 这条断言就是那句结论
