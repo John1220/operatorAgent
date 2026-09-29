@@ -73,6 +73,32 @@
 - **后果**：负样本签名无信息
 - **类别**：I · **状态**：✅ 已修
 
+### I4 · 文本子串判据把「名字还在」当成「还在用」
+- **原话**：`tests/test_shared_host_scratch_paths.py` 一条守卫写作
+  `assertIn("stop_interferer", text)`，注释说它盯住「驱动不许退回裸 terminate()」
+- **实证**：变异标定 M12 把调用整段删成 `interferer.terminate()` 后 **15 条用例全绿** ——
+  那行 `from _scratch import … stop_interferer …` 本身就带着这个词，文本判据恒真
+- **出处**：doc 52 §三（16 条变异表、首轮 1 条逃逸）；`_called_names()` 是修法
+- **后果**：这类守卫删掉生产调用后不响，且**看起来正在保护**——比没有守卫更糟。
+  通则：**清点「有没有在用」必须走 AST 的调用位，不能走文本**；
+  同理注释里提一句 `chmod 600` 不算做过（M15），helper 还在 import 但绕开它自己干也不算
+  （M16）
+- **类别**：I · **状态**：✅ 已修（改 AST 判据后 M12/M15/M16 三条都响）
+
+### I5 · 一条已提交用例的判定随控制机装不装 torch 翻转
+- **原话**：`test_absent_external_reference_still_uses_builtin` 断言没有外挂参考时
+  参考侧是 `pytorch_eager`
+- **实证**：`operator_agent/verifier.py:1099` 在 `import torch` 成功时返回 `pytorch_eager`，
+  `:1102` 的 except 分支返回 `numpy_reference`；这台控制机
+  `importlib.util.find_spec('torch') is None` ⇒ 本机**稳定红**，装了 torch 的机器稳定绿
+- **出处**：doc 52 §五；doc 49 §八 第 20 条；commit `ac2f497`
+- **后果**：两层。① 这条用例绿不绿说明的是这台机器的依赖表，不是代码对不对 ——
+  与「非确定性期望值不许写死」同族，新形态是依赖 availability 而非随机数，
+  所以它**不会偶发**，会在一类机器上恒红、另一类上恒绿；
+  ② 它照出的生产语义更该担心：L2 的参考在没有 torch 的机器上**静默换成 NumPy**
+  （没有 TF32/fp16 那条路径），「L2 通过」的对比对象跟着控制机变 ——
+  缺口 5 那四道门全在管后端与分母，**参考侧没有门**
+- **类别**：I/S · **状态**：⚠️ 已知，未修（`verifier.py` 等是并发会话的在途文件）
 ---
 
 ## M — 公式 / 口径
@@ -178,6 +204,8 @@
 | I1 | 固定 id 注释 vs uuid | I | ✅ |
 | I2 | 签名拼接顺序不稳 | I | ✅ |
 | I3 | 远端 L1 无类名 | I | ✅ |
+| I4 | 文本判据把「名字还在」当「还在用」 | I | ✅ |
+| I5 | 用例判定随本机有无 torch 翻转 | I/S | ⚠️ |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
