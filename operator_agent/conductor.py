@@ -131,9 +131,13 @@ class Conductor:
         failure_db: Optional[FailureDatabase] = None,
         use_coder_pipeline: bool = False,
     ):
-        self.backend = backend or MockGPU()
-        self.kernel_db = kernel_db or KernelDatabase()
-        self.failure_db = failure_db or FailureDatabase()
+        # `is None` 而不是 `or`: `FailureDatabase` 定义了 `__len__`, 于是**一条记录都没有的
+        # 注入实例是假的**, `failure_db or FailureDatabase()` 会把它丢掉换成一个默认实例 ——
+        # 调用方拿不到自己注入的那个库, 而失败记录被写进了默认路径。真机探针 (doc 49 §7.17)
+        # 就是这么把 7 条探针记录写进 `output/failure_db.jsonl` 的: 它给的是临时目录。
+        self.backend = backend if backend is not None else MockGPU()
+        self.kernel_db = kernel_db if kernel_db is not None else KernelDatabase()
+        self.failure_db = failure_db if failure_db is not None else FailureDatabase()
         self.llm = llm
         self.pm = prompt_manager or PromptManager()
         self.store = ArtifactStore()

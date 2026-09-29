@@ -569,6 +569,12 @@ _FAILURE_CLASS_MARKERS = (
     ("最大误差", "numeric_tolerance"),
     ("No usable remote baseline", "infra_no_baseline"),
     ("Missing 'kernel' function", "no_kernel_entry"),
+    # 真机探针 (doc 49 §7.17) 撞出来的过度合并: 接口契约那条处方文案里写着
+    # 「真跑起来必然抛 `TypeError: kernel() got an unexpected keyword argument …`」,
+    # 于是**它自己举的那个假设异常名**把这条静态检查归成了 TypeError —— 与一条真的
+    # 模块级 `TypeError: can only concatenate str` 同名同层级, 两条不同根因拿到同一个
+    # 内容派生 id, 后者直接覆盖前者 (语料里少了一条, 而复发门把两者当同一类)。
+    ("签名与之对不上", "interface_mismatch"),
 )
 _INFRA_CLASSES = ("infra_no_baseline",)
 

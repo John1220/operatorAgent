@@ -264,5 +264,64 @@ class TestHermetic(unittest.TestCase):
             self.assertTrue((Path(saved) / "result.json").exists())
 
 
+class TestInjectedCorpusIsTheOneWritten(unittest.TestCase):
+    """注入的语料必须**就是**被写的那一个 (doc 49 §7.17, 真机探针撞出来的)
+
+    `FailureDatabase` 定义了 `__len__` ⇒ 一个刚建好、还没有记录的实例是 **falsy** 的,
+    于是 `Conductor.__init__` 里的 `failure_db or FailureDatabase()` 把调用方给的实例
+    换成一个新默认实例: 内存里两份, 落盘写到仓库的 `output/failure_db.jsonl`, 而调用方
+    读的那个临时文件永远是空的。真机上这个探针往仓库语料里写了 7 条探针记录, 而它自己的
+    所有记账判据**全绿** —— 因为它读的就是那个被换上去的实例。
+
+    ⚠️ 观察面按上面那条 hermetic 用例的教训写全: 既查身份 (`is`), 也查落点 (临时文件
+    有行 / 仓库文件字节数不变)。只查身份会漏掉「写对了实例但写到别的路径」, 只查落点会
+    漏掉「探针读的是另一个对象所以看不见」。
+    """
+
+    def _record(self, conductor, task_id="t-inject"):
+        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+                                             TargetSpec, TaskComplexity, TaskSchema,
+                                             TaskType, VerificationLevel, VerificationResult)
+        task = TaskSchema(
+            task_type=TaskType.OPERATOR_GENERATION,
+            source=SourceSpec(kernel_type="matmul", complexity=TaskComplexity.LOW),
+            target=TargetSpec(hardware="mock_gpu", dsl="triton"),
+            constraints=ConstraintSpec(precision=Precision.FP32))
+        failed = VerificationResult(level=VerificationLevel.L1_COMPILE, passed=False,
+                                    message="编译失败: NameError: name 'x' is not defined",
+                                    error_log="NameError: name 'x' is not defined")
+        conductor._record_failure(task, [failed], "用例: 只测落点", fixed=False)
+        return task_id
+
+    def test_empty_injected_failure_db_survives_conductor(self):
+        from operator_agent.conductor import Conductor
+        from operator_agent.kernel_db import FailureDatabase
+        repo_db = Path(__file__).resolve().parent.parent / "output" / "failure_db.jsonl"
+        repo_before = repo_db.stat().st_size if repo_db.exists() else None
+        with tempfile.TemporaryDirectory() as d:
+            fpath = str(Path(d) / "f.jsonl")
+            db = FailureDatabase(jsonl_path=fpath)
+            self.assertEqual(0, len(db))
+            self.assertFalse(bool(db), "前提: 空语料因为 __len__ 而是 falsy 的")
+            conductor = Conductor(kernel_db=KernelDatabase(jsonl_path=str(Path(d) / "k.jsonl")),
+                                  failure_db=db, llm=None)
+            self.assertIs(db, conductor.failure_db, "注入的实例被 `or` 换成默认实例了")
+            self._record(conductor)
+            self.assertEqual(1, len(db), "写进了另一个对象 —— 注入的语料一条都没收到")
+            self.assertTrue(Path(fpath).exists(), "落点不在调用方给的路径上")
+            self.assertEqual(1, len(Path(fpath).read_text(encoding="utf-8").splitlines()))
+        repo_after = repo_db.stat().st_size if repo_db.exists() else None
+        self.assertEqual(repo_before, repo_after, "仓库里的 output/failure_db.jsonl 被写动了")
+
+    def test_passing_none_still_gets_a_working_default(self):
+        """对照: 不注入时仍然要有一个可用的默认实例, 否则这条修复改坏了默认分支"""
+        from operator_agent.conductor import Conductor
+        with mock.patch.dict(os.environ, {"OPERATOR_AGENT_FAILURE_DB": "off"}):
+            conductor = Conductor(kernel_db=KernelDatabase(jsonl_path="none"), llm=None)
+            self._record(conductor)
+            self.assertEqual(1, len(conductor.failure_db))
+            self.assertIn("持久化关闭", conductor.failure_db.summary())
+
+
 if __name__ == "__main__":
     unittest.main()

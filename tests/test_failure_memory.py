@@ -94,6 +94,27 @@ class TestFailureSignature(unittest.TestCase):
         self.assertEqual("L2|numeric_tolerance|-",
                          failure_signature("L2", "执行失败: 数值不一致, 最大误差=3.10e-03"))
 
+    def test_contract_prescription_is_not_classified_by_the_exception_it_predicts(self):
+        """真机探针 (doc 49 §7.17) 撞出来的**过度合并**, 与碎分相反的另一个方向
+
+        接口契约那条处方文案自己写着「真跑起来必然抛 `TypeError: kernel() got an
+        unexpected keyword argument …`」—— 那是**对未来的预言**, 不是本次失败的诊断,
+        可 `_ERROR_CLASS_RE` 分不清, 于是静态契约检查与一条真的模块级 TypeError 拿到
+        同一个签名。因为 id 是内容派生的, 同任务下这两条不同根因**共用一个 id**,
+        后者把前者直接覆盖掉: 语料少了一条, 复发门还把两者数成同一类。
+
+        期望值取 `check_kernel_interface` **自己的输出**, 不抄文案 —— 处方文案改了措辞
+        时这条会红, 而那正是该重新看一次归类的时候。
+        """
+        from operator_agent.interface_contract import check_kernel_interface
+        text = check_kernel_interface("def kernel(X, weight):\n    return X\n",
+                                      {"X", "weight", "bias"})
+        self.assertIsNotNone(text, "前提: 这份代码确实与调用契约不符")
+        self.assertEqual("L1|interface_mismatch|-", failure_signature("L1", text))
+        self.assertNotEqual(
+            failure_signature("L1", text),
+            failure_signature("L1", "Compile error: TypeError: can only concatenate str"))
+
     def test_unrecognised_text_is_an_explicit_unknown_bucket(self):
         """兜底桶必须是**看得见**的, 不是静默归到某个类里: 语料里 unknown 占比高
         就说明关键词表该补了 (这张表只收仓库里能找到的字面量)"""
