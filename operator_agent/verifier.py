@@ -35,6 +35,45 @@ _REMOTE_L2_METRIC_KEYS = (
     "first_bad_index", "first_bad_actual", "first_bad_expected",
 )
 
+# 数值门「这次到底用的哪把尺」的那几个键。它们必须**逐组**收集后统一判定, 不许哪一组先出现
+# 就代表全部 (见 `_single_ruler`)。
+GATE_PARAM_KEYS = ("atol", "rtol", "required_matched_ratio")
+
+
+def _single_ruler(gates: list[dict]) -> tuple[dict, dict]:
+    """只有「每一组参考比对都用同一把尺」时, 聚合值才配发布一个单值
+
+    外部一手 (arXiv:2609.35140v1 行 150, 逐字):
+        "𝒮 is the **immutable** evaluation specification ... It keeps correctness and
+         performance criteria fixed across attempts."
+    这条纪律问的不是「算得对不对」, 是**整条判据里是不是同一把尺**。
+
+    旧写法是 `if not gate_params: gate_params = ...` —— 第一组赢, 而它下面聚合的是跨组的量
+    (`max_error` 取 max、`matched_ratio` 取 min)。于是产物里会印着「atol=1e-3」, 而那个混合值
+    其实是几把不同的尺各自判过之后再混起来的 —— 读它的人 (含 `benchmarks/probe_l2_sampling_gate.py`,
+    它正是拿这几个键核「绝对+相对」那条门的) 会把一个不存在的统一口径当成前提。
+
+    冲突时那个键**直接不发布**, 而不是挑一个: 与 #64「分母不可信时 `bound_type` 不许替它判」
+    同形。一组**缺**这个键同样算冲突 (不能假设它与别的组同值), 所以这里的判据是
+    「每一组都在场且每一组同值」。
+    """
+    if not gates:
+        return {}, {}
+    single: dict = {}
+    conflict: dict = {}
+    for key in GATE_PARAM_KEYS:
+        vals = {i: g[key] for i, g in enumerate(gates) if key in g}
+        if not vals:
+            # 没有任何一组报过这个键 ⇒ 既不发布, 也**不谎报冲突**。写漏这一支时冲突表里
+            # 会出现 `{"rtol": {}}` 这种空证人, 而 message 会照着念「这几组用的不是同一把尺
+            # ['rtol']」—— 拿一个谁都没报过的键去报警, 与本仓「缺证据不是否定证据」同族。
+            continue
+        if len(vals) == len(gates) and len({repr(v) for v in vals.values()}) == 1:
+            single[key] = next(iter(vals.values()))
+        else:
+            conflict[key] = vals
+    return single, conflict
+
 
 # 常见 GPU 硬件 **dense 规格峰值** (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
 # 格式: (FP32_TFLOPS, TF32_TFLOPS, FP16_TFLOPS, BF16_TFLOPS, memory_bandwidth_GBs)
@@ -360,7 +399,9 @@ class Verifier:
         total_bad = 0
         min_matched_ratio = 1.0
         min_coverage = 1.0
-        gate_params = {}
+        # 每组输入各自上报它**实际用的那把尺**; 是否合成一个单值, 由循环后的
+        # `_single_ruler` 判 (见那里的注释 —— 这一块的旧写法是「第一组赢」)
+        gates: list[dict] = []
         has_reference = False
         reference_types = set()
         execution_devices = set()
@@ -383,19 +424,23 @@ class Verifier:
                 # 多组输入取最差的一组: 任一组掉到 rho 以下就不该算通过
                 min_matched_ratio = min(min_matched_ratio, m.get("matched_ratio", 1.0))
                 min_coverage = min(min_coverage, m.get("coverage", 1.0))
-                if not gate_params:
-                    gate_params = {k: m[k] for k in
-                                   ("atol", "rtol", "required_matched_ratio") if k in m}
+                g = {k: m[k] for k in GATE_PARAM_KEYS if k in m}
+                if g:
+                    gates.append(g)
                 if m.get("reference_type"):
                     reference_types.add(m["reference_type"])
                 if m.get("device"):
                     execution_devices.add(m["device"])
 
+        gate_params, gate_conflicts = _single_ruler(gates)
         if has_reference:
             msg = (f"功能验证通过 ({len(input_sets)} 组输入), 最大误差={max_error_overall:.2e}, "
                    f"matched_ratio={min_matched_ratio:.6f}")
             if min_coverage < 1.0:
                 msg += f", 覆盖率={min_coverage * 100:.1f}%"
+            if gate_conflicts:
+                msg += (f" ⚠️ 这几组用的**不是同一把尺** {sorted(gate_conflicts)}, "
+                        f"聚合值因此不发布单值 (见 metrics.gate_params_conflict)")
             metrics = {
                 "max_error": max_error_overall,
                 "max_rel_error": max_rel_error_overall,
@@ -406,6 +451,10 @@ class Verifier:
                 "coverage": min_coverage,
                 **gate_params,
             }
+            if gate_conflicts:
+                # 摊开成 {键: {组下标: 那一组实际用的值}} —— 读的人不必重跑就能看出
+                # 是哪几组、哪一把尺不一致
+                metrics["gate_params_conflict"] = gate_conflicts
             if reference_types:
                 metrics["reference_type"] = ",".join(sorted(reference_types))
             if execution_devices:
