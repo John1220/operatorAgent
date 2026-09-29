@@ -10,8 +10,8 @@
 运行 (需在目标 GPU 机上, 用项目的 uv 环境):
   CUDA_VISIBLE_DEVICES=<空闲卡> ~/.local/bin/uv run python benchmarks/measure_launch_floor.py
 本机通过 SSH 跑:
-  scp benchmarks/measure_launch_floor.py <ssh别名>:/tmp/ && \
-    ssh <ssh别名> "cd ~/operator_agent && CUDA_VISIBLE_DEVICES=2 ~/.local/bin/uv run python /tmp/measure_launch_floor.py"
+  scp benchmarks/measure_launch_floor.py <ssh别名>:~/ && \
+    ssh <ssh别名> "cd ~/operator_agent && CUDA_VISIBLE_DEVICES=2 ~/.local/bin/uv run python ~/measure_launch_floor.py"
 
 2026-09-24 于 algorithm-h20 (NVIDIA H20, GPU 2, 全机 0% util) 的结果见
 docs/research/01-launch开销与shape充分性实测.md

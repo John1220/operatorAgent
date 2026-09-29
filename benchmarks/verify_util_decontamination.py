@@ -290,18 +290,31 @@ def probe_only(ssh, gpu):
     所以「连跑 N 次 L3, 污染触发率 0%」这个零结果本身没有判别力, 必须把量具挪到
     能看见的地方: 同一个进程里, 核刚停就采。
     """
+    import shlex
     import subprocess
+    import sys
     from pathlib import Path
+
+    from _scratch import private_dir, remote_scratch_path, write_private
+
     alias = ssh._ssh_target()
-    Path("/tmp/_util_probe.py").write_text(PROBE, encoding="utf-8")
-    subprocess.run(["scp", "-q", "/tmp/_util_probe.py", f"{alias}:/tmp/_util_probe.py"],
-                   check=True)
+    # 固定名 (`/tmp/_util_probe.py`) 换成随机名: 那台机是多用户的, 而这个名字既被我们
+    # 写又被我们执行 —— 详见 `benchmarks/_scratch.py` 的模块 docstring。
+    local = private_dir("utilprobe-")
+    remote = remote_scratch_path("_util_probe.py")
+    local_file = write_private(local, "_util_probe.py", PROBE)
+    subprocess.run(["scp", "-q", str(local_file), f"{alias}:{remote}"], check=True)
+    subprocess.run(["ssh", alias, f"chmod 600 {shlex.quote(remote)}"], check=True)
     cmd = (f"cd {ssh.work_dir} && CUDA_VISIBLE_DEVICES={gpu} "
-           f"~/.local/bin/uv run --no-project python /tmp/_util_probe.py {gpu} "
+           f"~/.local/bin/uv run --no-project python {shlex.quote(remote)} {gpu} "
            f"{CONTAMINATION_UTIL_PCT}")
     print("=== 远端进程内 util 采样探针 ===")
-    p = subprocess.run(["ssh", alias, cmd], capture_output=True, text=True)
-    print(p.stdout.strip() or p.stderr.strip()[:600])
+    try:
+        p = subprocess.run(["ssh", alias, cmd], capture_output=True, text=True)
+        print(p.stdout.strip() or p.stderr.strip()[:600])
+    finally:
+        # 那份可执行文件是**在共享机上**的, 不收了它就等于留一个公开路径给别人。
+        subprocess.run(["ssh", alias, f"rm -f {shlex.quote(remote)}"], check=False)
 
 
 def main():

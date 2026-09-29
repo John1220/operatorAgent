@@ -2,9 +2,9 @@
 
 在**远端 GPU 机**上跑（自包含，只用 numpy/torch/triton）：
 
-    scp benchmarks/probe_interleaved_ab.py <ssh别名>:/tmp/ && \\
+    scp benchmarks/probe_interleaved_ab.py <ssh别名>:~/ && \\
       ssh <ssh别名> "cd ~/operator_agent && CUDA_VISIBLE_DEVICES=2 \\
-        ~/.local/bin/uv run python /tmp/probe_interleaved_ab.py"
+        ~/.local/bin/uv run python ~/probe_interleaved_ab.py"
 
 为什么先做实验再改代码
 --------------------

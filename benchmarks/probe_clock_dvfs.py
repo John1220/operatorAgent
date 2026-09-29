@@ -2,9 +2,9 @@
 
 在**远端 GPU 机**上跑（自包含，只用 torch + 标准库）：
 
-    scp benchmarks/probe_clock_dvfs.py <ssh别名>:/tmp/ && \\
+    scp benchmarks/probe_clock_dvfs.py <ssh别名>:~/ && \\
       ssh <ssh别名> "cd ~/operator_agent && CUDA_VISIBLE_DEVICES=2 \\
-        ~/.local/bin/uv run python /tmp/probe_clock_dvfs.py"
+        ~/.local/bin/uv run python ~/probe_clock_dvfs.py"
 
 要判的问题
 ----------

@@ -4,9 +4,9 @@
 
     scp remote_scripts/run_kernel.py remote_scripts/tolerance.py operator_agent/anticheat.py \\
         <ssh别名>:~/operator_agent/ 2>/dev/null; \\
-    scp benchmarks/probe_block_series.py <ssh别名>:/tmp/ && \\
+    scp benchmarks/probe_block_series.py <ssh别名>:~/ && \\
       ssh <ssh别名> "cd ~/operator_agent && CUDA_VISIBLE_DEVICES=2 \\
-        ~/.local/bin/uv run python /tmp/probe_block_series.py"
+        ~/.local/bin/uv run python ~/probe_block_series.py"
 
 要判的两个问题
 --------------

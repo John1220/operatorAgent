@@ -18,6 +18,7 @@
   3. 加速比在**有邻居抢卡时**离安静值有多远 —— 交错那一半的全部意义。
 """
 import argparse
+import shlex
 import statistics
 import subprocess
 import sys
@@ -28,7 +29,9 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _scratch import private_dir, remote_scratch_path, stop_interferer, write_private
 from operator_agent.remote_executor import RemoteExecutor
 from operator_agent.verifier import baseline_plan
 
@@ -117,14 +120,23 @@ def main():
                               "HEAD:remote_scripts/run_kernel.py"],
                              capture_output=True, text=True).stdout
     assert len(old_src) > 1000, "git show 取不到 HEAD 版 runner"
-    Path("/tmp/run_kernel_prev.py").write_text(old_src, encoding="utf-8")
-    subprocess.run(["scp", "-q", "/tmp/run_kernel_prev.py",
+    # 落点全部走 `_scratch`: 私有目录 + 不可预测的远端名。以前这里写的是
+    # `Path("/tmp/run_kernel_prev.py")` 和 `/tmp/_contender.py` —— 固定名写在世界可写的
+    # /tmp 上、然后被 scp 到**共享 GPU 机**上执行, 详见 `benchmarks/_scratch.py` 的模块 docstring。
+    local = private_dir("iab-")
+    prev_local = write_private(local, "run_kernel_prev.py", old_src)
+    contender_remote = remote_scratch_path("_contender.py")
+    contender_local = write_private(local, "_contender.py", CONTENDER)
+    subprocess.run(["scp", "-q", str(prev_local),
                     f"{alias}:{runner_dir}/run_kernel_prev.py"], check=True)
-    Path("/tmp/_contender.py").write_text(CONTENDER, encoding="utf-8")
-    subprocess.run(["scp", "-q", "/tmp/_contender.py", f"{alias}:/tmp/_contender.py"],
+    subprocess.run(["scp", "-q", str(contender_local), f"{alias}:{contender_remote}"],
                    check=True)
+    # 上传之后**在远端**收成 0600: scp 保留的是源文件的 mode, 而 mode 由 umask 决定,
+    # 不显式 chmod 的话「私有」这件事其实取决于操作者的 shell 设置。
+    subprocess.run(["ssh", alias, f"chmod 600 {shlex.quote(contender_remote)}"], check=True)
     print(f"对照 runner: {runner_dir}/run_kernel_prev.py "
           f"({len(old_src.splitlines())} 行, 取自 HEAD)")
+    print(f"干扰脚本远端落点: {contender_remote} (随机后缀, 0600)")
 
     # 干扰流必须落在**同一张卡**上, 否则抢的不是同一份资源, 测出来的是空气。
     # _pinned_gpu() 是懒选定的, 这里先逼它定下来。
@@ -134,7 +146,7 @@ def main():
     interferer = None
     if args.interfere:
         cmd = (f"cd {work} && {pin}~/.local/bin/uv run --no-project python "
-               f"/tmp/_contender.py {time.time() + 300}")
+               f"{contender_remote} {time.time() + 300}")
         interferer = subprocess.Popen(["ssh", alias, cmd],
                                       stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL)
@@ -183,8 +195,17 @@ def main():
             summary[(rows, cols)] = (mn, mp, rn, rp)
 
     if interferer:
-        interferer.terminate()
-        print("\n(干扰流已终止)")
+        evidence = stop_interferer(interferer,
+                                   lambda c: subprocess.run(["ssh", alias, c],
+                                                            capture_output=True,
+                                                            text=True).stdout,
+                                   contender_remote)
+        print(f"\n(干扰流拆除: 本地 {evidence.get('local_wait')} "
+              f"rc={evidence.get('local_returncode')}, "
+              f"远端残留 {evidence.get('remote_still_running')} 个)")
+        if not evidence.get("quiescent"):
+            # 这条不是提示而是**结论的边界**: 卡没干净时下面那些数字不能被当安静值读。
+            print("  ❗ 这张卡在本次运行结束后仍不干净 —— 后续跑在它上面的读数不可比")
     print("\n注: 墙钟里含一次 SSH 往返 + 依赖检查, 不只是 GPU 时间;"
           " 真正的对比口径是「每次测得基线数」。")
 
