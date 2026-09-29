@@ -567,9 +567,23 @@ _FRAME_RE = re.compile(r'File "[^"]*", line \d+, in (\S+)')
 # 而那正是本项目记过的那族「算了没人读」。
 FAILURE_CLASS_INTERFACE = "interface_mismatch"
 
+# 「本级判不出」这一类: L2 跑到了, 但**这一级没有对象可比** —— 参考自己产 NaN/Inf,
+# 于是一个可比元素都没有。类名同样是单点出处: Fixer 的第四路取向与 Conductor 的入库
+# 决定比的都是这个值 (两处各写一份字面量就是上面那条注释要挡的那一族)。
+# 它与 `interface_mismatch` 的区别在归因方向: 那条仍然在判候选 (签名错了),
+# 这条**什么都没判** —— 把它当候选失败会发出一份指向错误对象的处方 (doc 58 §4.2)。
+FAILURE_CLASS_REFERENCE = "reference_uninformative"
+
 # 没有 `*Error` 词元时用的关键词表。只收**本仓库里能找到的字面量** (doc 45 第二节):
 # 臆造一个「常见错误关键词」清单正是本项目记过的那类死判据 —— 它永远不会命中。
 _FAILURE_CLASS_MARKERS = (
+    # **排在最前**是刻意的优先级: 这条说的是「本级没有对象可比」, 即一次判定没有发生。
+    # 一轮里若同时有别的失败 (兜底入库那次拿的是**所有轮次**的未通过结果拼起来的文本),
+    # 「这一轮什么都没证明」要盖过「这一轮判出了坏结果」—— 后者的处方建立在一次并不
+    # 存在的观测上。产这句话的只有 `verifier.py` 那两处 L2 分支 (`_l2_*` 的采样路径与
+    # 全量路径), 两处都在 `n_compared == 0` 时返回, 且都不带「最大误差」那半句
+    # (`if n_compared` 把它挡掉了), 所以它与下面的数值那条按构造互斥。
+    ("本级判不出", FAILURE_CLASS_REFERENCE),
     ("反作弊", "cheat_detected"),
     ("最大误差", "numeric_tolerance"),
     ("No usable remote baseline", "infra_no_baseline"),
@@ -581,7 +595,12 @@ _FAILURE_CLASS_MARKERS = (
     # 内容派生 id, 后者直接覆盖前者 (语料里少了一条, 而复发门把两者当同一类)。
     ("签名与之对不上", FAILURE_CLASS_INTERFACE),
 )
-_INFRA_CLASSES = ("infra_no_baseline",)
+# 这一组类名的共同点不是「基础设施」, 而是**这次失败不指向那张核**: 远端当时没有可用
+# 基线, 或本级根本没有可比的对象。`is_promotable_failure` 把它们与数值容差类一起挡在
+# 可复用教训之外 (两条理由各写在它的 docstring 里, 都不是成本考虑)。
+# 名字从 `_INFRA_CLASSES` 改过来的: 第二条进来之后「infra」不再描述这个集合的共同性质,
+# 而留一个只装得下一半成员的名字, 下一次加进来的人就会以为这里是按硬件分的。
+_NOT_KERNEL_CLASSES = ("infra_no_baseline", FAILURE_CLASS_REFERENCE)
 
 
 def failure_signature(level: str, error_text: str) -> str:
@@ -630,7 +649,7 @@ def failure_class_of(level: str, error_text: str) -> str:
 def is_promotable_failure(record: "FailureRecord") -> bool:
     """这条失败有没有资格被当成**跨运行**的教训复用。
 
-    排除两类, 都不是成本考虑:
+    排除三类, 都不是成本考虑:
     ① **数值容差类** (L2 + 「最大误差」)。吸纳 AdaExplore 的 `filter_max_difference`
        (✅ 读过它的 `agent_entry.py:156` 调用点): 它把带 max_difference 的日志整条丢掉。
        我们的理由更硬 —— 从「误差 3.1e-3 > 门限 2e-3」里提炼出的教训, 唯一自然的落点是
@@ -638,13 +657,18 @@ def is_promotable_failure(record: "FailureRecord") -> bool:
        检查, 是在给 reward hacking 建库。
     ② **基础设施类** (远端没有可用基线)。这不是核的错, 记进教训库会变成「上次这个算子
        失败过」的假先验。
+    ③ **本级判不出** (参考自己产 NaN/Inf, 一个可比元素都没有)。同 ② 的理由, 但更硬一层:
+       那一条至少观测到了「这次跑没有基线可比」, 而这一条**什么也没观测到** —— 把它当
+       候选的失败沉淀, 检索侧 (同任务后面的轮次) 就会拿一份指向错误对象的教训去改代码。
+       断掉的「这个参考是坏的」这一信号不从这里找: 语料是用来教模型的, 查坏参考是 #95
+       (任务准入要参考解自证可达) 的活。
     """
     lv = record.level or ""
     text = record.error_summary or ""
     if "L2" in lv and ("最大误差" in text or "max_error" in text):
         return False
     sig = record.signature or failure_signature(lv, text)
-    return sig.split("|")[1] not in _INFRA_CLASSES
+    return sig.split("|")[1] not in _NOT_KERNEL_CLASSES
 
 
 @dataclass

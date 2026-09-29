@@ -140,7 +140,7 @@ def _early_returns(src: str) -> list:
 
 from operator_agent.fixer import (  # noqa: E402
     FixerAgent, stage_directive, failure_class,
-    _L1_INPLACE, _L1_INTERFACE, _L2_RETREAT,
+    _L1_INPLACE, _L1_INTERFACE, _L2_RETREAT, _REFERENCE_HOLD,
 )
 from operator_agent.kernel_db import (  # noqa: E402
     FAILURE_CLASS_INTERFACE, failure_class_of, failure_signature,
@@ -317,8 +317,8 @@ class TestThirdRouteInterfaceRepair(unittest.TestCase):
         self.assertEqual(["interface_contract.py", "kernel_db.py"], holders,
                          "产这条错误原文的只有 interface_contract, 认它的只有归类词表")
 
-    def test_three_directives_do_not_share_their_scope_sentences(self):
-        """三路各自那句「本轮改什么」要**只在自己那段里** —— 而且双向都要查
+    def test_the_directives_do_not_share_their_scope_sentences(self):
+        """每一路各自那句「本轮改什么」要**只在自己那段里** —— 而且双向都要查
 
         单向 (只查「别人的段落里没有这句」) 看不见内容被删: 标定时的 M20 把第三路那句
         范围锁删掉, 缺席断言于是全体成立, 整张表只有这一条逃逸。在场 + 缺席合起来才是
@@ -328,8 +328,13 @@ class TestThirdRouteInterfaceRepair(unittest.TestCase):
             "interface": ("入口契约门", "本轮只改 `def kernel` 那一行的参数名"),
             "numeric": ("数值检查器", "correctness 优先于性能"),
             "compile": ("编译器 / 预检", "保持既有的优化策略不变"),
+            # 第四路 (#94 第 2 片)。措辞是**先查过另外三段**才定下来的: 用它最自然的说法
+            # 「数值检查器报了失败」会撞进 numeric 那段自己的措辞里, 于是这两条缺席断言
+            # 当场红 —— 那是 I32 那族在文案侧的一次应用, 不是测试写得太严。
+            "hold": ("没有一个元素可比", "本轮不改你的核"),
         }
-        texts = {"interface": _L1_INTERFACE, "numeric": _L2_RETREAT, "compile": _L1_INPLACE}
+        texts = {"interface": _L1_INTERFACE, "numeric": _L2_RETREAT,
+                 "compile": _L1_INPLACE, "hold": _REFERENCE_HOLD}
         for own, phrases in uniq.items():
             for phrase in phrases:
                 self.assertIn(phrase, texts[own], f"{own} 那段丢了它自己的取向句")

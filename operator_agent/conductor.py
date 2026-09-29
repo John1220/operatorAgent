@@ -21,9 +21,12 @@ from .schemas import (
     UnifiedSketch, KernelArtifact,
 )
 from .agents import DesignerAgent, CoderAgent, SearchAgent
-from .fixer import FixerAgent
+from .fixer import FixerAgent, failure_class
 from .verifier import Verifier
-from .kernel_db import KernelDatabase, FailureDatabase, FailureRecord, failure_signature
+from .kernel_db import (
+    KernelDatabase, FailureDatabase, FailureRecord, FAILURE_CLASS_REFERENCE,
+    failure_signature,
+)
 from .novelty import signature_of
 from .backend_caps import Cap
 from .mock_gpu import MockGPU
@@ -233,6 +236,10 @@ class Conductor:
         #: 本次运行开始时账本的长度, 每次进 `execute` 重新取。
         #: 写侧用它把口径从「这个进程到现在」换成「这一次」。
         self._cost_watermark = 0
+        #: 本次运行里「本级判不出」的轮数 —— 那些轮既不入库也不产 Reflexion,
+        #: 计数只在日志里活一次 (见 `_record_failure` 与结尾那行 `[FailureDB]`)。
+        #: 不打印就等于没生效: 门挡掉的东西必须能被读者看见 (缺口 2 的失效方式)。
+        self._reference_hold_rounds = 0
 
         # 初始化 Agent (注入 LLM + PromptManager)
         self.designer = DesignerAgent(self.kernel_db, llm=llm, prompt_manager=self.pm)
@@ -306,6 +313,9 @@ class Conductor:
         self._cost_watermark = (
             self.llm.cost_tracker.watermark()
             if self.llm is not None and hasattr(self.llm, "cost_tracker") else 0)
+        # 与水位线同一个理由: 一个 Conductor 实例可以跑多个任务, 落盘与打印的必须是
+        # **本次**那一份, 不是「这个进程到现在为止」。
+        self._reference_hold_rounds = 0
         with capture_execution(
             task_id=task.task_id,
             operator=operator_name,
@@ -867,6 +877,14 @@ class Conductor:
                                 self.backend.ensure_environment(required_pips=deps)
 
                     failed_results = [r for r in verify_results if not r.passed]
+                    # 「本级判不出」的那一轮对这张核没有作出任何判定 (参考自己产 NaN/Inf)。
+                    # 它仍然走 Fixer —— 控制流这一片不动, 省一轮 LLM 是另一次要带 A/B 的改动
+                    # (doc 58 §4.2 剩下的那半)。这里先接的是**写入侧**: 那一轮的 Reflexion
+                    # 会写出一份指向错误对象的教训, 而那份教训在同任务的后续轮次里被检索到。
+                    reference_hold = failure_class(failed_results) == FAILURE_CLASS_REFERENCE
+                    if reference_hold:
+                        print("\n[Conductor] 本轮失败归为「本级判不出」(参考侧没有可比对象): "
+                              "不沉淀教训、不进负样本库")
                     print(f"\n[Fixer] L1/L2 验证失败，启动错误修复...")
                     # 修订起点 (arXiv:2609.35140v1 行 214)。有已验证的祖先就不从这一版出发:
                     # 它没通过正确性验证, 在它上面继续叠就是「在坏的后代上盖一层」—— 那正是
@@ -911,7 +929,11 @@ class Conductor:
                     # ---- Reflexion: 修复后让 Fixer 产出结构化教训并沉淀 ----
                     reflexion = None
                     try:
-                        reflexion = self.fixer.produce_reflexion()
+                        # 判不出那一轮不产 Reflexion: 那一步是让模型回答「这次失败的根因
+                        # 是什么、下次怎么避免」, 而这一轮根本没有失败可归因 —— 让它回答就是
+                        # 让它编一个候选侧的根因, 再把那份编出来的教训 `add()` 进语料。
+                        if not reference_hold:
+                            reflexion = self.fixer.produce_reflexion()
                         if reflexion is not None:
                             self.failure_db.add(reflexion)
                             reflexion_pending.append(reflexion)
@@ -1128,7 +1150,8 @@ class Conductor:
         # 起作用, 不看这一句就只能靠读代码相信它存在 (doc 45 第二节的失效方式)。
         print(f"[FailureDB] {self.failure_db.summary()} "
               f"本次被复发门挡住 {len(self.failure_db.suppressed_by_gate)} 条"
-              f"·被类别门挡住 {len(self.failure_db.suppressed_by_kind)} 条")
+              f"·被类别门挡住 {len(self.failure_db.suppressed_by_kind)} 条"
+              f"·参考侧判不出 {self._reference_hold_rounds} 轮 (没入库)")
         # 候选新颖度: 现在只有「重复了几轮」这一个数, 它的读者是 doc 47 里那条基率 ——
         # 在拿签名去省 GPU 时间之前, 先得知道重复到底常不常见。
         n_rounds = len(artifact.iteration_history)
@@ -1426,7 +1449,11 @@ class Conductor:
 
     def _record_failure(self, task: TaskSchema, failed_results: list[VerificationResult],
                         fix_note: str, fixed: bool):
-        """将验证失败/修复记录写入失败案例库 (负样本)"""
+        """将验证失败/修复记录写入失败案例库 (负样本)
+
+        「本级判不出」那一类在这里直接返回, 不写 —— 理由与那段注释都在函数体里
+        (第 2 片: doc 58 §4.2 的判决侧)。
+        """
         # 层级必须**排序去重**后再拼: 原先的 "+".join(r.level.value for r in ...) 跟着
         # failed_results 的顺序走, 同一份失败可以写成 "L1+L2" 也可以写成 "L2+L1",
         # 于是签名碎成两个桶 —— 而复发门要数的就是同一个桶里的任务数 (fixer 那边
@@ -1437,6 +1464,14 @@ class Conductor:
             for r in failed_results
         )
         signature = failure_signature(levels, error_summary)
+        # 「本级判不出」不入库。`is_promotable_failure` 那道类别门只管**从文件重放回来**的
+        # 记录 (复发门同理, `usable()` 只挡 `_replayed`), 本次进程内新产生的一条一定放行 ——
+        # 所以「不入库」必须由写的一侧自己做, 否则同一句话在两个读者那里得到相反的处理。
+        if failure_class(failed_results) == FAILURE_CLASS_REFERENCE:
+            self._reference_hold_rounds += 1
+            print(f"[Conductor] 参考侧判不出, 未入负样本库 "
+                  f"(本次运行累计 {self._reference_hold_rounds} 轮, 签名={signature})")
+            return
         self.failure_db.add(FailureRecord(
             # id 由内容决定, 不再用 `task_id_{库里现有条数}`: 后者是**插入顺序**的函数,
             # 一旦语料跨运行重放, 同一个任务的同一类失败每次都会拿到新 id, 于是

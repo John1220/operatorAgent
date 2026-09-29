@@ -83,12 +83,14 @@ operators, or pre-specified optimization targets"，行 78）—— 两处我都
 > excluded rather than assigned a score."（行 173）
 
 这句话正是 #94 那一片停在门口没迈出去的那一步。第 1 片把测量洗诚实了（`compared_elements` 只数
-真比上的那些、新报 `reference_nonfinite`、全非有限参考 ⇒ 判不过并把归因写对），但**判决侧仍然
+真比上的那些、新报 `reference_nonfinite`、全非有限参考 ⇒ 判不过并把归因写对），但**判决侧当时仍然
 把「本级判不出」当成一次候选失败**去走 Fixer 那条路 —— 而 Fixer 的处方表按「哪一级报的失败 +
 错误文本」分支，一句「参考另有 4096 个非有限值」在它眼里就是数值失败，开出来的是一张指向候选的
 处方。它的处置与我方推理一致：**证据坏了就撤证据本身**（revise or exclude the task），
 不 assign a score。⇒ #94 第 2 片的依据从「我方觉得应该这样」升级成「外部把它写成了规程」，
-这一条现在有了出处。挂号内容不变（归属路由 + 远程 `run_kernel.py` 同一个形状）。
+这一条现在有了出处。**第 2 片已落**（2026-09-30，doc 58「§4.2 之第 2 片」：独立签名类 + 第四路
+取向「本轮不改你的核」+ 两条写库路径跳过 + 结尾那行账多一栏轮数）；挂号剩下的只有远程那一路
+（`remote_scripts/run_kernel.py` 同一个形状）与「那一轮省一次 LLM 调用」的前后对照。
 
 ### 3.3 配对聚合：它判 median-of-ratios，我方判 ratio-of-medians —— 而**两条读数我方都已上报**（行 181-186）
 

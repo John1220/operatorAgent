@@ -18,6 +18,7 @@ from .schemas import TaskSchema, VerificationResult
 from .prompt_manager import PromptManager
 from .kernel_db import (  # 用于回写 Reflexion 教训 + 本轮取向的归类
     FAILURE_CLASS_INTERFACE,
+    FAILURE_CLASS_REFERENCE,
     FailureRecord,
     failure_class_of,
     failure_signature,
@@ -47,6 +48,14 @@ _ATTRIBUTION = (
     "下面每一条都是编译器、GPU 或数值检查器在执行时实测到的现象, 与上一版是谁写的无关。"
     "Wait —— 动手改之前, 先按输出要求用 `根因:` 一行说明每条错误的直接原因, "
     "再照「要求 / 该改哪里」修。"
+)
+
+# 「本级判不出」那一轮 `_ATTRIBUTION` 与处方都不出现, 但错误段不能空着 —— 空着会让模型
+# 自己去补一个「要求」, 而它补出来的方向只能是改代码。这一行顶掉那两条, 并把「没有判定」
+# 这件事本身当成读到的东西。
+_HOLD_NOTE = (
+    "   本轮不给处方: 上面那句不是这一版的症状, 这一级没有对这段代码作出任何判定。"
+    "要动的是参考那一侧 —— 范围见上一段取向。"
 )
 
 _PRESCRIPTIONS: list[tuple[str, str, str]] = [
@@ -167,6 +176,25 @@ _L1_INTERFACE = (
 )
 
 
+# KernelZero (arXiv:2609.33074v1, 行 147) 那条「先验 Spec」在本项目落成了两片的第 1 片
+# (doc 58 §4.2): L2 现在显式算「比得上几个元素」, 参考自己产 NaN/Inf 时报「本级判不出」。
+# 第 1 片只把**归因**写对了, 判决那一侧原样不变 —— 这句话仍然作为一条候选失败送进 Fixer,
+# 于是拿到的是「比对报了不一致 ⇒ correctness 优先于性能, 撤销激进改动退回保守写法」,
+# 而这一轮**对这张核没有作出任何判定**。一份指向错误对象的处方比沉默更坏: 模型照它改完,
+# 下一轮仍然判不出, 而那一次改动已经把唯一一份还没被否证过的实现丢掉了。
+_REFERENCE_HOLD = (
+    "本轮停在 L2 那道比对上, 但报的原因不是「输出与参考不一致」: 参考自身在这批输入上"
+    "没有一个元素可比 (全是 NaN/Inf) —— **本级没有可比对象**, 这一轮对这张核既没说它错、"
+    "也没说它对。"
+    "取向: **本轮不改你的核**。撤销激进改动、退回保守写法、换累加精度或 mask 与 other= "
+    "的取值在这里都没有依据 —— 那些动作修的是「判出来的不一致」, 而这一轮没有不一致可修; "
+    "把一份还没被否证过的实现换掉, 只是用一次未知替换掉一次已知。"
+    "该查的是参考那一侧 (`reference_source` 或内建参考在这批输入上的算法), 那不是你能改、"
+    "也不是本轮该改的东西。只有当下面的错误原文里另有与你代码直接相关的一条 (语法、缺 "
+    "import、签名) 时, 才就地修那一条。"
+)
+
+
 def failure_class(failed_results) -> str:
     """本轮失败属于哪一类 —— 用**负样本库那一个分类器**, 不看文案措辞
 
@@ -186,11 +214,17 @@ def failure_class(failed_results) -> str:
 def stage_directive(levels: set, failure_cls: str = "") -> str:
     """由「哪些级别报了失败」+「库里那个分类器怎么归类这次失败」得出本轮修复取向。
 
-    三路 = Fabrica 的 interface repair / code repair / 保守退让。归类排在级别之前:
-    接口契约那一类必然落在 L1 里, 只看级别会把它并进「就地修一处 API 误用」那条通用取向,
-    而那条恰恰不限制改动范围。不认识的归类 (含 `unknown`、真异常名) 一律退到级别那条老
-    路径, 所以取向永不为空。
+    四路 = Fabrica 的 interface repair / code repair / 保守退让 (arXiv:2608.25124v1
+    行 521-522), 加第四路「本级没有判定」—— 那一路 Fabrica 没有, 因为它的 reviewer 假设
+    被审的那一次运行是**一次观测**; 我方第 1 片 (#94) 之后 L2 会报「没有可比对象」,
+    那一条不是候选的症状, 不该领任何针对候选的动作。
+    归类排在级别之前: 接口契约那一类必然落在 L1 里, 只看级别会把它并进「就地修一处 API
+    误用」那条通用取向, 而那条恰恰不限制改动范围。「本级判不出」又排在归类之前: 它同样是
+    L2 里的一条, 只看级别 (甚至只看类名之外的文案) 都会把它并进「退回保守写法」那条。
+    不认识的归类 (含 `unknown`、真异常名) 一律退到级别那条老路径, 所以取向永不为空。
     """
+    if failure_cls == FAILURE_CLASS_REFERENCE:
+        return _REFERENCE_HOLD
     if failure_cls == FAILURE_CLASS_INTERFACE:
         return _L1_INTERFACE
     return _L2_RETREAT if "L2" in levels else _L1_INPLACE
@@ -516,10 +550,17 @@ class FixerAgent:
         让沉淀的教训变成抄我们的模板; 而且这段文本直接喂给 `failure_signature()`,
         固定归因前言会让不同错误的签名互相靠拢 —— 签名要分的是「哪一类失败」,
         不是「我们的 prompt 长什么样」。
+
+        「本级判不出」那一类同样不走归因前言 (`_ATTRIBUTION`) 与处方 (`_prescribe_lines`):
+        前言断言「下面每一条都是…实测到的现象」, 而这一轮的现象是**没有发生任何一次判定**;
+        处方那条兜底文案 («只依据上面的执行侧原话定位根因») 更直接 —— 它要模型在自己的
+        代码里找一个并不存在的根因。归类在这里重算而不是由调用方传标志: 同一个纯函数、
+        同样入参, 多传一个标志只多出一个「两处的标志可能不一致」的面。
         """
         if not failed_results:
             return _ATTRIBUTION if prescriptive else "无详细错误信息"
 
+        hold = failure_class(failed_results) == FAILURE_CLASS_REFERENCE
         parts = []
         for r in failed_results:
             lines = [f"[{r.level.value}] {r.message}"]
@@ -527,12 +568,16 @@ class FixerAgent:
                 lines.append("   执行侧原话:" if prescriptive else "错误日志:")
                 lines.append(self._truncate_error(r.error_log))
             if prescriptive:
-                lines.extend(self._prescribe_lines(r))
+                if hold:
+                    lines.append(_HOLD_NOTE)
+                else:
+                    lines.extend(self._prescribe_lines(r))
             parts.append("\n".join(lines))
 
         if not prescriptive:
             return "\n\n".join(parts)
-        return "\n\n".join([_ATTRIBUTION] + ["── " + p for p in parts])
+        head = [_ATTRIBUTION] if not hold else []
+        return "\n\n".join(head + ["── " + p for p in parts])
 
     @staticmethod
     def _prescribe_lines(r: VerificationResult) -> list[str]:
