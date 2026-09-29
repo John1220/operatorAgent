@@ -229,8 +229,13 @@ class CoderAgent:
 
         hot = sketch.hot_hints()
         optimization_hints = "\n".join(f"- {h}" for h in hot) if hot else "无"
-        if optimization_recipes:
-            optimization_hints = f"[Planner选中的优化配方]\n{optimization_recipes}\n\n[Designer优化建议]\n{optimization_hints}"
+        # 配方**不再折进 hints**。以前 `optimization_recipes` 这个值算出来了却没传给
+        # render, 而 `coder_generate_triton.md` 的「## 优化配方 (CRITICAL - MUST APPLY ALL)」
+        # 那一段底下写的就是 `{{optimization_recipes}}` ⇒ 每一条 Triton 生成的 prompt 里,
+        # 那个位置发给模型的是字面量 `{{optimization_recipes}}`。折进 hints 是绕过, 不是修:
+        # 同一个模板一边说"这里放配方"一边什么都不放, 而 hints 那一块从此装两种东西。
+        # (与 `schemas.py` 里 `to_prompt_dict` 那条"hint 只留一个通道"是同一条纪律。)
+        recipes_text = optimization_recipes or "（本轮没有新增配方，按上述提示优化即可）"
 
         prompt = self.pm.render(
             template_name,
@@ -243,10 +248,10 @@ class CoderAgent:
             sketch=json.dumps(sketch.to_prompt_dict(), ensure_ascii=False, indent=2),
             ref_code=ref_code or "无",
             optimization_hints=optimization_hints,
-            block_m=sketch.tiling.block_m,
-            block_n=sketch.tiling.block_n,
-            block_k=sketch.tiling.block_k,
+            optimization_recipes=recipes_text,
         )
+        # tiling 的三个数不单独传: `{{sketch}}` 那份 JSON 里就带 `tiling.block_m/n/k`
+        # (`UnifiedSketch.to_dict`), 单独传第二遍是同一份内容的第二个注入点。
 
         # 生成 -> 预检 -> 带反馈重试: 拦截输出截断/语法错误, 避免必然失败的编译轮
         feedback = ""
@@ -567,9 +572,7 @@ class SearchAgent:
             speedup=f"{speedup:.2f}",
             target_speedup=f"{target_speedup:.2f}",
             achieve_ratio=f"{achieve_pct:.1f}",
-            bound_type=perf_data.get("bound_type", "unknown"),
             current_gflops=f"{perf_data.get('gflops', 0):.2f}",
-            avg_time_ms=f"{perf_data.get('avg_time_ms', 0):.4f}",
             memory_bandwidth_gbs=f"{perf_data.get('memory_bandwidth_gbs', 0):.2f}",
             # ---- Roofline 数据 ----
             hw_peak_gflops=f"{hw_peak_gflops:.1f}",
