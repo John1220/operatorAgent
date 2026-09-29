@@ -70,6 +70,12 @@ class _FakeLLM:
         def summary(self):
             return {}
 
+        def watermark(self):
+            return 0
+
+        def summary_since(self, n):
+            return self.summary()
+
         def pretty(self):
             return "LLM: fake"
 

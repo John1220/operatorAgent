@@ -250,6 +250,12 @@ class _FixedCodeMockLLM:
                     "total_cost_usd": 0.0,
                     "breakdown_by_caller": {}, "n_estimated_usage": 0,
                 }
+
+            def watermark(self):
+                return 0
+
+            def summary_since(self, n):
+                return self.summary()
             def pretty(self):
                 return "LLM 账单摘要: 0 次调用, $0.0000"
         self.cost_tracker = _EmptyTracker()

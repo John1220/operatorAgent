@@ -175,6 +175,9 @@ class Conductor:
         self.store = ArtifactStore()
         self.router = Router()
         self.max_optimize_rounds = max_optimize_rounds
+        #: 本次运行开始时账本的长度, 每次进 `execute` 重新取。
+        #: 写侧用它把口径从「这个进程到现在」换成「这一次」。
+        self._cost_watermark = 0
 
         # 初始化 Agent (注入 LLM + PromptManager)
         self.designer = DesignerAgent(self.kernel_db, llm=llm, prompt_manager=self.pm)
@@ -221,6 +224,13 @@ class Conductor:
         """
         operator_name = task.source.kernel_type or "operator"
         hardware_name = task.target.hardware or "unknown"
+        # 账本水位线: `CostTracker` 挂在 client 上**累加**, 而 `reset()` 全仓没人调
+        # (`harness_pass_rate.run_one` 的 docstring 记过一次真事故: 六次运行的 token 被当成
+        # 六份独立样本求和, 总量高估 3.25 倍)。一个 client 跑多个任务时, 后一个任务的
+        # `summary()` 含着前一个任务的量 —— 落盘的必须是**本次**那份, 所以在这里记下水位线。
+        self._cost_watermark = (
+            self.llm.cost_tracker.watermark()
+            if self.llm is not None and hasattr(self.llm, "cost_tracker") else 0)
         with capture_execution(
             task_id=task.task_id,
             operator=operator_name,
@@ -920,10 +930,18 @@ class Conductor:
 
         # ── 成本监控 Harness: 汇总 LLM 账单, 写入 artifact.metadata ──
         if self.llm and hasattr(self.llm, 'cost_tracker'):
-            cost_summary = self.llm.cost_tracker.summary()
-            if artifact.metadata is None:
-                artifact.metadata = {}
-            artifact.metadata["llm_cost"] = cost_summary
+            tracker = self.llm.cost_tracker
+            cost_summary = tracker.summary_since(self._cost_watermark)
+            # 口径随行: 这份是**本次运行**的量, 不是这个进程到现在的累计。落盘与报表将来
+            # 都要按它判事, 没有这行标注, 累计值与本次值在产物里长得一模一样。
+            # `if cost_summary` 不是防御空账本 —— 假件/无账本的 LLM 返回 `{}`，给它补上
+            # `scope` 会把「没有账本」伪装成「有一份只写了口径的账单」(把像样的值塞进失败里)。
+            if cost_summary:
+                cost_summary["scope"] = "this_run"
+                cost_summary["process_total_calls"] = tracker.total_calls
+                if artifact.metadata is None:
+                    artifact.metadata = {}
+                artifact.metadata["llm_cost"] = cost_summary
 
         # 保存产物到文件系统
         saved_dir = self.store.save(artifact, task)

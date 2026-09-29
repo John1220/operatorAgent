@@ -120,10 +120,10 @@ class CostTracker:
     def total_cost_usd(self) -> float:
         return round(sum(r.cost_usd for r in self.records), 6)
 
-    def breakdown_by_caller(self) -> dict:
+    def breakdown_by_caller(self, records=None) -> dict:
         """按 caller 分组汇总 {caller: {calls, prompt, completion, total, cost_usd}}"""
         out = {}
-        for r in self.records:
+        for r in self.records if records is None else records:
             bucket = out.setdefault(r.caller_tag, {
                 "calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
                 "total_tokens": 0, "cost_usd": 0.0,
@@ -135,17 +135,35 @@ class CostTracker:
             bucket["cost_usd"] = round(bucket["cost_usd"] + r.cost_usd, 6)
         return out
 
-    def summary(self) -> dict:
-        """返回结构化账单摘要 (供 Conductor 日志输出)"""
+    def _summarize(self, records) -> dict:
         return {
-            "total_calls": self.total_calls,
-            "total_prompt_tokens": self.total_prompt_tokens,
-            "total_completion_tokens": self.total_completion_tokens,
-            "total_tokens": self.total_tokens,
-            "total_cost_usd": self.total_cost_usd,
-            "breakdown_by_caller": self.breakdown_by_caller(),
-            "n_estimated_usage": sum(1 for r in self.records if r.usage_source == "estimated"),
+            "total_calls": len(records),
+            "total_prompt_tokens": sum(r.prompt_tokens for r in records),
+            "total_completion_tokens": sum(r.completion_tokens for r in records),
+            "total_tokens": sum(r.total_tokens for r in records),
+            "total_cost_usd": round(sum(r.cost_usd for r in records), 6),
+            "breakdown_by_caller": self.breakdown_by_caller(records),
+            "n_estimated_usage": sum(1 for r in records if r.usage_source == "estimated"),
         }
+
+    def summary(self) -> dict:
+        """返回结构化账单摘要 (供 Conductor 日志输出)
+
+        ⚠️ 这是**整个账本**的累计值。账本挂在 client 上、`reset()` 全仓没人调，所以一个
+        client 跑多个任务时，第二个任务的 `summary()` 里含着第一个任务的量
+        (`harness_pass_rate.run_one` 的 docstring 记过一次真实事故：六次运行的 token
+        被当成六份独立样本再求和，总量高估 3.25 倍)。要「这一次运行花的」用
+        `summary_since(watermark())`。
+        """
+        return self._summarize(self.records)
+
+    def watermark(self) -> int:
+        """本次运行开始时的账本长度；配 `summary_since` 用。"""
+        return len(self.records)
+
+    def summary_since(self, n: int) -> dict:
+        """只汇总第 `n` 条之后的记录 —— 即「这一次运行花的」，不是「这个进程到现在花的」。"""
+        return self._summarize(self.records[n:])
 
     def pretty(self) -> str:
         """人可读的账单摘要 (终端 print 用)"""
