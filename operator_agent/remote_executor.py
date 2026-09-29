@@ -106,6 +106,34 @@ class BackendUnavailable(RuntimeError):
             f"要显式跑本机 CPU 请写 mode=\"local\", 要允许降级请写 mode=\"auto\"。")
 
 
+class HardwareProbeFailed(RuntimeError):
+    """硬件信息**探测不到**, 而且这里没有「退一步给个保守值」这种退路 (doc 49 §3.3 S1/S2)。
+
+    旧写法在失败路径上返回一整套 A100 量级的虚构字典 (128 SM / 40GB / 2TB/s /
+    128KB/SM / 19TB/s), 而它唯一的读者是 Designer 的 tiling 约束
+    (`agents.py` 读 `memory.local.size`) —— 于是「没探测过硬件」在产物里长得和
+    「这是一台 A100」一模一样, 而 H20 的共享内存是 228KB/SM: 编造的**更小**,
+    所以 tiling 会朝保守方向收缩, 不会报错, 只会一直不快。
+
+    与 `BackendUnavailable` 的分工: 那个回答「执行侧连不上」(mode 承诺兑现不了),
+    这个回答「连上了, 但问不到它是谁」。合用一个类会让日志里「SSH 不通」和
+    「SSH 通了但 runner 输出不是 JSON」看不出区别 —— 这正是 postmortem 0004 的形状。
+    """
+
+    def __init__(self, backend_label: str, reason: str, endpoint_hint: str = ""):
+        self.backend_label = backend_label
+        self.reason = reason
+        msg = (f"后端 {backend_label} 探测不到硬件信息 ({reason}) —— "
+               f"不返回虚构规格: 编造一台 A100 会把「不知道这台卡是什么」变成"
+               f"一个能被 Designer 当约束用的假分母。")
+        if endpoint_hint:
+            msg += endpoint_hint
+        else:
+            msg += ("先跑一次 `probe_connection()` 看传输层是否可达, "
+                    "再看远端 runner 的 `gpu_info` 为什么没返回字段。")
+        super().__init__(msg)
+
+
 class SSHExecutor(Backend):
     """
     通过 SSH 在远程 GPU 服务器上执行 kernel 代码。
@@ -186,10 +214,12 @@ class SSHExecutor(Backend):
     def capabilities(self) -> frozenset:
         """真卡 + 全套远端协议能力
 
-        ⚠️ 词汇表里刻意**还没有**「硬件信息是真探测的」这一项, 所以这里也无从声明:
-        `get_gpu_info()` 的 `except` 分支会返回一整套虚构硬件字典
-        (128 SM / 40GB / 2TB/s / 128KB/SM), 也就是 doc 49 §3.3 的 S1。
-        等第 3 片把那个分支改成「要么真探测、要么抛」之后再往 `Cap` 里加它。
+        ⚠️ 词汇表里刻意**没有**「硬件信息是真探测的」这一项, 而且 S1 修好之后仍然不加。
+        doc 49 §3.3 原本写的是「等 S1 改成『要么真探测、要么抛』再加」—— 那个条件
+        现在满足了, 但满足了不等于该加: 加一项能力必须有**读者**按它分支, 而这里没有
+        任何调用方会写 `if Cap.HARDWARE_PROBED in capabilities` —— `conductor` 无论
+        如何都必须拿到硬件信息, 拿不到就该抛。一个没有读者的 Cap 就是「算了没人读」
+        的又一个副本, 而 `raise` 已经让坏状态**不可表达**, 不需要再多一层声明。
         """
         caps = {Cap.REAL_DEVICE, Cap.REMOTE_VERIFY, Cap.SAME_DEVICE_BASELINE,
                 Cap.ENV_PROVISION, Cap.DEPLOY, Cap.DEP_ANALYSIS}
@@ -343,9 +373,14 @@ class SSHExecutor(Backend):
                 self._uv_setup = True
                 return True
             except Exception as e:
-                print(f"  [SSHExecutor] {self.platform} 环境配置警告: {e}")
-                self._uv_setup = True
-                return True
+                # 旧写法在这里 print 一行「警告」然后 `_uv_setup = True; return True`
+                # (doc 49 §3.3 S7): 工作目录建不起来 = 后面每一次 scp 都会失败, 而
+                # `deploy()` 读的是本函数的返回值, 于是它先被告知「环境就绪」。
+                # 更糟的是 `_uv_setup = True` 会把这句谎话**缓存住** —— 第二次调用在
+                # 函数第一行就 return True, 连再试一次都没有。
+                # `fix_cmd` 以 `; true` 收尾, 它自己不会失败; 走到这里就是传输层坏了。
+                print(f"  [SSHExecutor] {self.platform} 环境配置失败, 不报成功: {e}")
+                return False
 
         print(f"  [SSHExecutor] 开始配置远程 uv 环境: {self.work_dir}")
 
@@ -395,7 +430,13 @@ class SSHExecutor(Backend):
             )
             print(f"  [SSHExecutor] 固定 .python-version = {pyver} (与远端解释器一致)")
         except Exception as e:
-            print(f"  [SSHExecutor] 创建配置文件失败: {e}")
+            # 同 S7 的第 5 处: 这一段的**全部意义**是把 `.python-version` 对齐到远端
+            # 解释器 (上一段注释记着残留错误 pin 会让 `uv add` 全盘失败)。写不进去却
+            # 继续往下走、最后 `return True`, 等于「防某个已知失败的步骤没做成, 而
+            # 调用方被告知环境已就绪」。这里没有「保守值」可用 —— 不知道 uv 实际用了
+            # 哪个解释器, 就是不知道。
+            print(f"  [SSHExecutor] 固定 .python-version 失败, 不继续装依赖: {e}")
+            return False
 
         try:
             self._ssh_exec(
@@ -628,7 +669,12 @@ class SSHExecutor(Backend):
                         },
                         "local": {
                             "size": f"{smem_kb}KB/SM" if smem_kb else "unknown",
-                            "bandwidth": "19TB/s",
+                            # L1/共享内存带宽在**两个真源里都没有字段**: runner 的 gpu_info 不报,
+                            # HardwareCaps 只有 `shared_mem_bank_count`。以前这里写死 "19TB/s"
+                            # (doc 49 §3.3 第 4 处, 就在「取不到就标 unknown, 不再编造数字」
+                            # 那行注释的下面两行) —— 编造值唯一的读者本来没有, 它的作用只是让
+                            # 日志看起来像探测过。
+                            "bandwidth": "unknown",
                         },
                     },
                     "device": result.get("device", "unknown"),
@@ -646,18 +692,8 @@ class SSHExecutor(Backend):
                     print(f"  [SSHExecutor] {line}")
             return self._gpu_info_cache
         except Exception as e:
-            print(f"  [SSHExecutor] 获取 GPU 信息失败: {e}")
-            return {
-                "name": f"NVIDIA GPU (Remote {self.host})",
-                "host": self.host,
-                "compute_units": 128,
-                "warp_size": 32,
-                "vector_width": 128,
-                "memory": {
-                    "global": {"size": "40GB", "bandwidth": "2TB/s"},
-                    "local": {"size": "128KB/SM", "bandwidth": "19TB/s"},
-                },
-            }
+            print(f"  [SSHExecutor] 获取 GPU 信息失败, 抛出而不是编造规格: {e}")
+            raise HardwareProbeFailed(self.label, f"{type(e).__name__}: {e}") from e
 
     def get_hardware_info(self) -> dict:
         """返回硬件信息供 Designer Agent 使用（兼容 MockGPU 接口）"""
@@ -790,12 +826,17 @@ class HTTPExecutor(Backend):
     def capabilities(self) -> frozenset:
         """**空集**, 而且是故意的
 
-        它确实能在远端执行代码, 但: ① `get_hardware_info()` 是**无条件编造**的一整套
-        A100 量级数字 (doc 49 §3.3 S2), 所以连「对面是不是加速卡」都不知道;
+        它确实能在远端执行代码, 但: ① 问不到对面是谁 —— `get_hardware_info()` 抛
+        `HardwareProbeFailed` (S2 已改成「要么真探测、要么抛」里的「抛」, 因为服务端没有
+        硬件端点), 所以连「对面是不是加速卡」都没有凭据;
         ② 没有 `verify_function` / `benchmark_with_baselines` / `ensure_environment` /
         `deploy`, 基类那几个存根会把调用**抛出来**而不是返回 None。
         空集意味着任何 `require(Cap.REAL_DEVICE, …)` 的消费方都会在构造时就拒绝它 ——
-        这正是想要的方向: 宁可响, 不要静默降级。等 S2 修掉再声明 `REAL_DEVICE`。
+        这正是想要的方向: 宁可响, 不要静默降级。
+
+        ⚠️ 修掉 S2 **不等于**可以声明 `REAL_DEVICE`: 能力要跟着凭据走, 而现在唯一的
+        凭据是「编译/执行都成功」, 它既可能来自 GPU 也可能来自 CPU。要加这一项,
+        先加服务端的 `gpu_info` 端点。
         """
         return frozenset()
 
@@ -816,17 +857,22 @@ class HTTPExecutor(Backend):
         return f"http:{self.base_url}"
 
     def get_hardware_info(self) -> dict:
-        return {
-            "name": "NVIDIA GPU (Remote HTTP)",
-            "host": self.base_url,
-            "compute_units": 128,
-            "warp_size": 32,
-            "vector_width": 128,
-            "memory": {
-                "global": {"size": "40GB", "bandwidth": "2TB/s"},
-                "local": {"size": "128KB/SM", "bandwidth": "19TB/s"},
-            },
-        }
+        """**抛** `HardwareProbeFailed` —— 这个协议上问不到对面是谁 (doc 49 §3.3 S2)。
+
+        旧写法无条件返回一整套 A100 量级的虚构字典。它比 S1 更彻底: S1 至少先试了探测,
+        这里连探测都没有, 所以任何读到它的地方 (Designer 的 tiling 约束、环境指纹)
+        拿到的都是凭据为零的数。
+
+        这一版**不**改成真探测, 因为服务端根本没有硬件端点 —— 这个类只讲得出
+        `/health`、`/api/compile`、`/api/execute`、`/api/benchmark` 四件事,
+        「对面是什么卡」不在其中。真探测需要先在服务端加一个 `gpu_info` 端点,
+        那是协议改动, 不在本片的范围里。宁可抛, 不给一个能当分母用的假数。
+        """
+        raise HardwareProbeFailed(
+            self.label,
+            "HTTP 协议没有硬件端点 (只有 /health, /api/compile, /api/execute, /api/benchmark)",
+            endpoint_hint="要在这个传输上拿到硬件信息, 先在远端服务加一个 gpu_info 端点;"
+                          " 只是要跑真机请改用 mode=\"ssh\"。")
 
     def compile(self, kernel_code: str) -> bool:
         try:

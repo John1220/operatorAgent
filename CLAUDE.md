@@ -100,8 +100,8 @@ toward passing when it cannot tell (`**kwargs`, defaulted params, no `def kernel
 - **Fixer**: repairs L1/L2 failures using error logs + `FailureDatabase` (negative samples)
 
 **Execution backends** (`operator_agent/remote_executor.py`):
-- `SSHExecutor` — deploys `remote_scripts/run_kernel.py` to a remote GPU server, sends JSON over SSH stdin, receives JSON on stdout. Uses `uv` for environment management.
-- `HTTPExecutor` — talks to a remote HTTP API
+- `SSHExecutor` — deploys `remote_scripts/run_kernel.py` to a remote GPU server, sends JSON over SSH stdin, receives JSON on stdout. Uses `uv` for environment management. `get_gpu_info()` values are **derived from the probe or from `hardware_caps`**; if the probe fails it **raises `HardwareProbeFailed`** rather than returning a spec dict, and any field with no source in either is reported as `"unknown"`.
+- `HTTPExecutor` — talks to a remote HTTP API. That protocol has **no hardware endpoint**, so `get_hardware_info()` raises and `capabilities` is the **empty set** (it cannot be `require()`d by real-device consumers).
 - `LocalExecutor` — runs kernels locally on CPU
 - `RemoteExecutor` — unified facade that auto-selects SSH → HTTP → Local
 - `MockGPU` — local simulation backend (no GPU needed); falls back to NumPy reference implementations when CUDA is unavailable
