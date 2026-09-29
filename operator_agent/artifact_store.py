@@ -76,6 +76,11 @@ class ArtifactStore:
             result_data["environment_fingerprint"] = artifact.environment_fingerprint
         if artifact.environment_drift is not None:
             result_data["environment_drift"] = artifact.environment_drift
+        # 续跑状态 (doc 50)。同上一条的理由: 「这次到底续上了没有」的读者在下一次运行与
+        # 事后复盘里, 只在内存里等于没记。`resume_from` 被请求而没续上时, 这条是唯一
+        # 留下「为什么」的地方 —— 以前那件事只发生在 stdout 上的一行 print。
+        if artifact.resume_status is not None:
+            result_data["resume"] = artifact.resume_status
         result_path = artifact_dir / "result.json"
         result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -563,6 +563,12 @@ class KernelArtifact:
     #: None = 本次没做比较 (无从比较时也写一个 comparable=False 的字典, 不写 None)。
     environment_drift: Optional[dict] = None
     metadata: Optional[dict] = None    # 存放成本监控账单 / 执行快照路径 等外挂字段 (可 JSON 化)
+    #: 续跑的实际结果 (`resumed` / `no_snapshot` / `unreadable_snapshot` / `task_mismatch`
+    #: / `not_requested`, 带候选数与原因)。
+    #: ⚠️ **刻意不塞进 `metadata`**: `metadata` 整个不进 `result.json`
+    #: (`artifact_store.py:73` 的注释), 挂在那儿就是下一份「算了没人读」—— 而这一项的
+    #: 读者正是「这次续跑到底续上了没有」这件事本身 (doc 50)。
+    resume_status: Optional[dict] = None
     saved_dir: str = ""                # ArtifactStore.save 落盘目录 (由 Conductor 赋值, 便于引用)
     created_at: float = field(default_factory=time.time)
 

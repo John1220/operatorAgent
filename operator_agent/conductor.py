@@ -14,6 +14,7 @@
 
 import json
 import os
+from pathlib import Path
 from typing import Optional, Union
 from .schemas import (
     TaskSchema, RouteType, VerificationLevel, VerificationResult,
@@ -321,34 +322,62 @@ class Conductor:
         snapshot_target_dir: Optional[str] = None  # 快照写入目录 (由 ArtifactStore 确定, 或 resume_from)
 
         # ── 可复现性 Harness: 若提供 resume_from 则加载快照恢复状态 ──
-        snap_path = self._resolve_snapshot_path(resume_from)
+        snap_path, snap_scan = self._resolve_snapshot_path(resume_from)
         snap_fingerprint: Optional[dict] = None
-        if snap_path:
-            try:
-                snap = self._load_snapshot(snap_path)
-            except Exception as e:
-                print(f"\n[Conductor] ⚠️ 快照加载失败，改为从头开始: {e}")
-                snap = None
-            if snap:
-                # 基本一致性校验 (task id 必须匹配)
-                if snap.get("task_id") and snap["task_id"] != task.task_id:
-                    print(f"[Conductor] ⚠️ 快照 task_id={snap['task_id']} 与当前 task.task_id={task.task_id} 不一致，"
-                          f"视为快照无效，从头开始。")
-                else:
-                    (start_round, current_sketch, current_code,
-                     pending_fix, artifact.iteration_history,
-                     best_gflops, rounds_without_improvement,
-                     optimization_history, applied_recipes, disabled_recipes,
-                     all_verification_results) = self._restore_state_from_snapshot(snap, task)
-                    # 快照目录就是续跑写入目录
-                    snapshot_target_dir = os.path.dirname(snap_path)
-                    snap_fingerprint = snap.get("environment_fingerprint") or None
-                    print(f"\n[Conductor] 🔄 断点续跑: 已恢复到完成 {start_round-1} 轮, "
-                          f"best_gflops={best_gflops:.2f}, 当前从轮次 {start_round} 开始")
-                    if pending_fix:
-                        print(f"  有 pending_fix ({len(pending_fix)} chars), 下一轮直接用修复代码")
-                    if current_sketch:
-                        artifact.sketch = current_sketch
+        # 续跑的结局要是一条**能落盘的账**, 不是一行 print。「请求了续跑但没续上」与
+        # 「压根没请求」在 stdout 消失之后长得一样, 而代价差着好几轮 LLM 与 GPU。
+        # (2026-09-29 实测: 一份写到一半崩的快照让一次续跑从 1 次 LLM 调用变成 4 次。)
+        resume_status = {"requested": bool(resume_from), "status": "not_requested",
+                         "root": snap_scan["root"], "candidates": snap_scan["candidates"],
+                         "unreadable": snap_scan["unreadable"]}
+        if resume_from:
+            if not snap_path:
+                # 「找不到」与「找到但读不动」分开写: 前者是缺证据, 后者是有一条坏记录在那儿,
+                # 处置方式完全不同 (前者可以问用户要目录, 后者该去查是谁把文件写坏的)。
+                resume_status["status"] = "no_snapshot"
+                print(f"\n[Conductor] ⚠️ 请求续跑 (resume_from={resume_from}), 但在 {snap_scan['root']} "
+                      f"下没有 task_id 匹配的完整快照 (候选 {snap_scan['candidates']} 个, "
+                      f"其中 {snap_scan['unreadable']} 个读不动) —— 本次从头开始")
+            else:
+                resume_status["path"] = os.path.basename(snap_path)
+                try:
+                    snap = self._load_snapshot(snap_path)
+                except Exception as e:
+                    # 只存异常类名与文件大小: `str(e)` 可能带路径, 而 result.json 会被搬走
+                    resume_status.update(status="unreadable_snapshot",
+                                         reason=type(e).__name__,
+                                         size_bytes=os.path.getsize(snap_path)
+                                         if os.path.exists(snap_path) else None)
+                    print(f"\n[Conductor] ⚠️ 快照加载失败，改为从头开始: "
+                          f"{type(e).__name__}: {e}")
+                    snap = None
+                if snap:
+                    # 基本一致性校验 (task id 必须匹配)
+                    if snap.get("task_id") and snap["task_id"] != task.task_id:
+                        resume_status["status"] = "task_mismatch"
+                        resume_status["snapshot_task_id"] = snap["task_id"]
+                        print(f"[Conductor] ⚠️ 快照 task_id={snap['task_id']} 与当前 task.task_id={task.task_id} 不一致，"
+                              f"视为快照无效，从头开始。")
+                    else:
+                        (start_round, current_sketch, current_code,
+                         pending_fix, artifact.iteration_history,
+                         best_gflops, rounds_without_improvement,
+                         optimization_history, applied_recipes, disabled_recipes,
+                         all_verification_results) = self._restore_state_from_snapshot(snap, task)
+                        # 快照目录就是续跑写入目录
+                        snapshot_target_dir = os.path.dirname(snap_path)
+                        snap_fingerprint = snap.get("environment_fingerprint") or None
+                        resume_status.update(status="resumed",
+                                             round_restored=start_round - 1,
+                                             dir_name=os.path.basename(
+                                                 os.path.dirname(snap_path)))
+                        print(f"\n[Conductor] 🔄 断点续跑: 已恢复到完成 {start_round-1} 轮, "
+                              f"best_gflops={best_gflops:.2f}, 当前从轮次 {start_round} 开始")
+                        if pending_fix:
+                            print(f"  有 pending_fix ({len(pending_fix)} chars), 下一轮直接用修复代码")
+                        if current_sketch:
+                            artifact.sketch = current_sketch
+        artifact.resume_status = resume_status
 
         # ── 环境漂移自检 (doc 49 §3.5 第 1 处) ────────────────────────────────
         # 「上一次」优先取续跑快照: 那条路径上 `best_gflops` / `iteration_history` /
@@ -954,31 +983,51 @@ class Conductor:
 
     # ─── 可复现性 Harness: 快照读写辅助 ────────────────────────────────────────────
 
-    @staticmethod
-    def _resolve_snapshot_path(resume_from: Optional[str]) -> Optional[str]:
-        """把 resume_from (artifact_dir / task_id) 解析成 execution_snapshot.json 的绝对路径"""
+    SNAPSHOT_NAME = "execution_snapshot.json"
+
+    def _resolve_snapshot_path(self, resume_from: Optional[str]) -> tuple:
+        """把 `resume_from` (快照文件 / artifact 目录 / task_id) 解析成快照路径。
+
+        返回 `(path, scan)` —— `scan` 是给人和机器一起看的账: 在哪个根目录下找、看到几个
+        同 task_id 的候选、其中几个读不动。**以前不返回这些**，于是「按 task_id 续跑」这件事
+        的失效形态只剩一行 print (doc 50)。
+
+        两处口径是这轮改的:
+        ① 搜索根取 `self.store.output_dir` 而不是写死的 `"output"` —— 后者不认
+           `OPERATOR_AGENT_OUTPUT_DIR`，设了重定向的运行会在 CWD 找一个根本没写过的目录，
+           结果要么找不到 (静默从头跑)，要么捡到**别的配置**留下的快照。
+        ② 多个候选时取 `(round_done, mtime)` 最大的**可解析**那个 —— 以前是 `os.walk` 的
+           第一个命中，而 walk 顺序既不是时间序也没人规定过；实测两个候选 (round 1 与 3)
+           永远选中 round 1，即续跑会把已完成的轮次扔掉重来。
+        """
+        scan = {"root": str(self.store.output_dir), "candidates": 0, "unreadable": 0}
         if not resume_from:
-            return None
+            return None, scan
         # 1) 直接就是快照文件
         if os.path.isfile(resume_from):
-            return resume_from
+            return resume_from, scan
         # 2) artifact 目录
-        candidate = os.path.join(resume_from, "execution_snapshot.json")
+        candidate = os.path.join(resume_from, self.SNAPSHOT_NAME)
         if os.path.isfile(candidate):
-            return candidate
-        # 3) 也许是某个绝对/相对路径, 让 ArtifactStore output 下找 (按 task_id 后缀模糊匹配)
-        if os.path.isdir("output"):
-            for root, _dirs, files in os.walk("output"):
-                if "execution_snapshot.json" in files:
-                    cand = os.path.join(root, "execution_snapshot.json")
-                    try:
-                        with open(cand, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                        if data.get("task_id") == resume_from:
-                            return cand
-                    except Exception:
-                        pass
-        return None
+            return candidate, scan
+        # 3) 也许是 task_id: 在**本次配置真正写产物**的那棵树下按 id 找
+        root = Path(self.store.output_dir)
+        if not root.is_dir():
+            return None, scan
+        best_key, best_path = None, None
+        for path in sorted(root.rglob(self.SNAPSHOT_NAME)):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                scan["unreadable"] += 1
+                continue
+            if not isinstance(data, dict) or data.get("task_id") != resume_from:
+                continue
+            scan["candidates"] += 1
+            key = (int(data.get("round_done") or 0), path.stat().st_mtime)
+            if best_key is None or key > best_key:
+                best_key, best_path = key, str(path)
+        return best_path, scan
 
     @staticmethod
     def _build_snapshot_dict(*, task: TaskSchema, round_done: int,
@@ -1056,25 +1105,37 @@ class Conductor:
             environment=self._environment,
         )
         target_dir = artifact_dir
-        # 若没有 artifact_dir (第 1 轮还没走 save), 就预创建一个 "staging" 快照目录
+        # 若没有 artifact_dir (第 1 轮还没走 save), 就预创建一个 "staging" 快照目录。
+        # 根目录取 `self.store.output_dir` 而不是写死 "output": 后者绕开
+        # `OPERATOR_AGENT_OUTPUT_DIR`, 于是设了重定向的运行会把快照落进仓库的 output/ ——
+        # 那个环境变量存在的全部理由就是别让旁路产物混进真实语料 (doc 43 第三节)。
         if not target_dir:
             import time as _t
             ts = _t.strftime("%Y%m%d_%H%M%S")
-            target_dir = os.path.join(
-                "output",
-                task.source.kernel_type or "operator",
-                task.target.hardware or "unknown",
-                f"snap_{ts}_{task.task_id}",
-            )
+            target_dir = str(self.store.output_dir /
+                             (task.source.kernel_type or "operator") /
+                             (task.target.hardware or "unknown") /
+                             f"snap_{ts}_{task.task_id}")
         try:
             os.makedirs(target_dir, exist_ok=True)
             path = os.path.join(target_dir, "execution_snapshot.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(snap, f, ensure_ascii=False, indent=2)
+            # **先写临时文件再 `os.replace`**。原先是 `open(path,"w")` 直接覆写: 那个 open
+            # 当场把文件截成 0 字节, 于是一次崩溃/磁盘满就留下一份截断 JSON, 而下一次的
+            # 读取侧把「读不出」当成「没有快照」从头重跑 (真机量测: 一次续跑从 1 次 LLM
+            # 调用变成 4 次)。同目录内的 rename 是原子的, 所以读者要么看到旧的完整版本,
+            # 要么看到新的完整版本, 永远不会看到半个。
+            tmp = path + ".tmp"
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(snap, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, path)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
             return target_dir
         except Exception as e:
             # 快照写入失败绝不能打断主任务 — Harness 是旁路
-            print(f"  [Snapshot] ⚠️ 快照写入失败, 忽略: {e}")
+            print(f"  [Snapshot] ⚠️ 快照写入失败, 忽略: {type(e).__name__}: {e}")
             return artifact_dir
 
     @staticmethod
