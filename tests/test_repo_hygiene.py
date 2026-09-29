@@ -39,6 +39,18 @@ FORBIDDEN_LITERAL_PATTERNS = [
     r"zhanghan",                     # 真实用户名, 包括出现在路径里的
     r"tokenhub",                     # 泄露 key 所属服务的标识词
     r"tencentmaas",
+    # macOS 家目录下的**真实用户名**。这条补的是上面那类「按具体值列黑名单」的洞：
+    # 名单里有 `zhanghan`，而这台机器的用户名是 `zh` ⇒ `file:///Users/zh/...` 在
+    # `docs/user_guide.md` 里活了很久都没被抓到（2026-09-29 才在 #73 的附带核查里撞出 6 处）。
+    # 形状规则要能容纳「换一台机、换一个用户名」，所以按 `[A-Za-z0-9_-]+` 抓。
+    # 后面的 `+` 不含 `.`/`…` 是**故意的**：文档里的占位写法 `/Users/...`、`/Users/…`
+    # 不该命中（见 `test_placeholder_forms_do_not_fire`）。
+    #
+    # ⚠️ 为什么只加 `/Users/` 不加 `/home/`：合成 fixture 里有 `/home/other/deploy/...`
+    # 这种**假**用户名（`tests/test_failure_memory.py:33`），宽的 `/home/` 规则会在自己的
+    # 测试上开火，于是要么天天红、要么加一张例外名单 —— 名单会把未来的真泄漏一起放过。
+    # Linux 侧的真实用户名已由 `zhanghan` 显式覆盖，这里不假装对称。
+    r"/Users/[A-Za-z0-9_-]+",
 ]
 # 真实 IP 与端口: 单独一组, 因为 minified JS 里会有巧合的数字串。
 FORBIDDEN_ADDRESS_PATTERNS = [
@@ -128,7 +140,9 @@ class TestNoCredentialsInTrackedFiles(unittest.TestCase):
         没这条的话, 一个把文件列表写错的测试会永远绿着 —— 而它的「绿」正是全部
         安全感的来源。
         """
-        probe = {"fake.py": "key = 'sk-abcdefghij0123456789'\n# zhanghan@host\n"}
+        probe = {"fake.py": "key = 'sk-abcdefghij0123456789'\n"
+                            "# zhanghan@host\n"
+                            "cd /Users/someone/repos/x\n"}
         found = set()
         for pat in FORBIDDEN_LITERAL_PATTERNS:
             for rel, body in probe.items():
@@ -136,6 +150,22 @@ class TestNoCredentialsInTrackedFiles(unittest.TestCase):
                     found.add(pat)
         self.assertIn(r"sk-[A-Za-z0-9]{20,}", found)
         self.assertIn("zhanghan", found)
+        # 新加的这条也要有开火的证据, 否则它就是一条永远不会响的死规则
+        # （本仓为这类规则专门留过一条守卫, 见 #58）。
+        self.assertIn(r"/Users/[A-Za-z0-9_-]+", found,
+                      "家目录形状的规则对真实用户名不敏感 —— 它凭什么拦得住 `/Users/zh`?")
+
+    def test_placeholder_forms_do_not_fire(self):
+        """形状规则不许把文档里的**占位写法**也算成命中。
+
+        `docs/research/54` 与 `tests/golden_regression.py` 都要描述「以前存的是绝对路径」
+        这件事, 用的是 `/Users/…` 与 `/Users/...`。一条会连占位一起红的美化规则, 结局
+        通常是被下一次真需要它的人整个删掉 —— 所以这条负向断言和规则本身一起要。
+        """
+        pat = r"/Users/[A-Za-z0-9_-]+"
+        for ok in ("/Users/…/output/matmul", "/Users/.../output/x", "~/repos/operatorAgent",
+                   "cd ~/repos/x && python tests/golden_regression.py list"):
+            self.assertIsNone(re.search(pat, ok), f"占位写法被判成泄漏: {ok}")
 
 
 class TestLocalConfigStaysUntracked(unittest.TestCase):

@@ -134,7 +134,7 @@ operatorAgent/
 #### 方式一：运行预定义测试脚本
 
 ```bash
-cd /Users/zh/repos/operatorAgent
+cd ~/repos/operatorAgent
 python test_nvidia_matmul.py
 ```
 
@@ -369,7 +369,7 @@ LLMClient(
 
 ### 4.5 日志自动清理配置
 
-日志自动清理在 [agent_logger.py](file:///Users/zh/repos/operatorAgent/operator_agent/agent_logger.py#L188) 中配置：
+日志自动清理在 [agent_logger.py](../operator_agent/agent_logger.py#L188) 中配置：
 
 ```python
 def cleanup_old_logs(log_dir=None, keep_count=10):
@@ -738,10 +738,10 @@ AMBIGUOUS   没有可比值，或档位是 uninformative（带宽比信号本身
 
 | Agent | 职责 | 文件 |
 |-------|------|------|
-| DesignerAgent | 生成设计草图（算法选择、tiling策略） | [agents.py](file:///Users/zh/repos/operatorAgent/operator_agent/agents.py) |
-| CoderAgent | 根据 Sketch 生成代码 | [agents.py](file:///Users/zh/repos/operatorAgent/operator_agent/agents.py) |
-| SearchAgent | 分析性能瓶颈并优化 | [agents.py](file:///Users/zh/repos/operatorAgent/operator_agent/agents.py) |
-| FixerAgent | 修复代码错误 | [fixer.py](file:///Users/zh/repos/operatorAgent/operator_agent/fixer.py) |
+| DesignerAgent | 生成设计草图（算法选择、tiling策略） | [agents.py](../operator_agent/agents.py) |
+| CoderAgent | 根据 Sketch 生成代码 | [agents.py](../operator_agent/agents.py) |
+| SearchAgent | 分析性能瓶颈并优化 | [agents.py](../operator_agent/agents.py) |
+| FixerAgent | 修复代码错误 | [fixer.py](../operator_agent/fixer.py) |
 
 ### A.2 验证等级
 
