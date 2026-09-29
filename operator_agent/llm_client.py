@@ -37,6 +37,67 @@ _MODEL_PRICING = {
 }
 
 
+def parse_usage(usage: dict) -> dict:
+    """把两种 usage 约定归一成同一个口径, 并把约定本身记下来
+
+    外部一手 (arXiv:2609.11987v1 行 78 与行 1108-1111, 逐字):
+        "input-token fields are cache-inclusive on some SDKs and cache-exclusive on others,
+         and a normalizer that assumes one convention doubles the other."
+    那篇为这件事付过一次代价: 它八月版的**全部成本结论**与 stop-loss 用的钱都被这个归一器
+    污染了 (§5.1 与行 1073), 而**没有影响任何判定** —— 所以「钱算错而结果不变」是可以整篇
+    存在的失效形态。我方 #71 的预算出口正要拿这份账单当货币, 因此这里先把约定本身记进账本。
+
+    两种形状:
+      · inclusive (OpenAI chat/completions 与 Responses、LangChain UsageMetadata):
+        输入总量**已含**缓存命中, 缓存数在 `prompt_tokens_details.cached_tokens`
+        或 `input_tokens_details.cached_tokens`;
+      · exclusive (Anthropic Messages): `input_tokens` **不含** `cache_read_input_tokens`
+        与 `cache_creation_input_tokens`, 三者相加才是这次送进去的输入。
+
+    ⚠️ 判别信号是**哪个字段出现了**, 不是键名 —— `input_tokens` 这一个键在 OpenAI Responses 上
+    是包含、在 Anthropic 上是排除 (外部那篇行 1108-1111 把三家并列就在这儿)。第一版我按
+    「有 `input_tokens` 就走 exclusive」判, 于是 Responses 的缓存被读成 0 —— 恰好是那句
+    "a normalizer that assumes one convention doubles the other" 的镜像: 假设错了方向,
+    不是翻倍就是漏掉, 而两种都表现为「一个像样的数字」。
+
+    Returns:
+        {"prompt_tokens", "completion_tokens", "cached_prompt_tokens", "cache_semantics"}
+        cache_semantics ∈ {"inclusive", "exclusive", "absent"} (没有 usage 时 "absent")
+    """
+    usage = usage or {}
+    total_in = usage.get("prompt_tokens")
+    if total_in is None:
+        total_in = usage.get("input_tokens")
+    completion = usage.get("completion_tokens")
+    if completion is None:
+        completion = usage.get("output_tokens")
+    total_in, completion = int(total_in or 0), int(completion or 0)
+
+    read = int(usage.get("cache_read_input_tokens") or 0)
+    write = int(usage.get("cache_creation_input_tokens") or 0)
+
+    details_cached = 0
+    # 只认这两种 details 键 (OpenAI chat / Responses)。LangChain 的 `input_token_details`
+    # 本仓不跑那个栈, 真接进来时这里会退成 absent —— 少报缓存不会把钱算成两倍, 方向是安全的
+    for holder in ("prompt_tokens_details", "input_tokens_details"):
+        d = usage.get(holder) or {}
+        if isinstance(d, dict) and d.get("cached_tokens"):
+            details_cached = int(d["cached_tokens"])
+            break
+
+    if details_cached:
+        # inclusive: 缓存已经在总量里, **不许再加一次** (那就是那句 doubles)
+        return {"prompt_tokens": total_in, "completion_tokens": completion,
+                "cached_prompt_tokens": min(details_cached, total_in),
+                "cache_semantics": "inclusive"}
+    if read or write:
+        # exclusive: 读/写缓存要加进总量, 否则账单会少掉一整段
+        return {"prompt_tokens": total_in + read + write, "completion_tokens": completion,
+                "cached_prompt_tokens": read, "cache_semantics": "exclusive"}
+    return {"prompt_tokens": total_in, "completion_tokens": completion,
+            "cached_prompt_tokens": 0, "cache_semantics": "absent"}
+
+
 def _estimate_tokens_from_text(text: str) -> int:
     """当 API 没有返回 usage 时, 用 4 chars ≈ 1 token 做保守估算 (中文字符按 1 char=1.7 tokens 修正)"""
     if not text:
@@ -58,6 +119,9 @@ class _LLMCallRecord:
     cost_usd: float
     caller_tag: str           # 调用方标签, 如 "Designer" / "Coder"
     usage_source: str         # "api_usage" | "estimated"
+    cached_prompt_tokens: int = 0
+    cache_semantics: str = "absent"   # inclusive | exclusive | absent
+    cost_basis: str = "list_price"    # list_price | upper_bound_cache_unpriced
 
 
 class CostTracker:
@@ -68,7 +132,8 @@ class CostTracker:
 
     # ----- 写入 -----
     def record(self, *, model: str, prompt_tokens: int, completion_tokens: int,
-               usage_source: str, caller_tag: str = "Unknown") -> None:
+               usage_source: str, caller_tag: str = "Unknown",
+               cached_prompt_tokens: int = 0, cache_semantics: str = "absent") -> None:
         total = prompt_tokens + completion_tokens
         # 查价格表: 小写匹配 model 前缀
         key_lower = model.lower()
@@ -85,6 +150,11 @@ class CostTracker:
             prompt_tokens * pricing["input_per_m"] / 1_000_000
             + completion_tokens * pricing["output_per_m"] / 1_000_000
         )
+        # 价格表里没有缓存输入的折扣价 —— 这不是疏忽, 是本仓不抄没核过的数。
+        # 于是「有缓存命中的那些调用」这条记录只能标成**按全价算的**, 不能标成账单:
+        # 若供应商按折扣计 (外部那篇给 Anthropic ~0.1x 读、OpenAI ~50% 缓存折扣, 行 1100-1101),
+        # 这份数就是上界; 方向不明时也只说「没单独计价」, 不说它是上界还是下界。
+        cost_basis = "list_price_cache_unpriced" if cached_prompt_tokens > 0 else "list_price"
         self.records.append(_LLMCallRecord(
             ts=time.time(),
             model=model,
@@ -94,6 +164,9 @@ class CostTracker:
             cost_usd=round(cost_usd, 6),
             caller_tag=caller_tag,
             usage_source=usage_source,
+            cached_prompt_tokens=cached_prompt_tokens,
+            cache_semantics=cache_semantics,
+            cost_basis=cost_basis,
         ))
 
     def reset(self) -> None:
@@ -136,11 +209,18 @@ class CostTracker:
         return out
 
     def _summarize(self, records) -> dict:
+        semantics: dict = {}
+        for r in records:
+            semantics[r.cache_semantics] = semantics.get(r.cache_semantics, 0) + 1
         return {
             "total_calls": len(records),
             "total_prompt_tokens": sum(r.prompt_tokens for r in records),
             "total_completion_tokens": sum(r.completion_tokens for r in records),
             "total_tokens": sum(r.total_tokens for r in records),
+            "total_cached_prompt_tokens": sum(r.cached_prompt_tokens for r in records),
+            "cache_semantics": semantics,
+            "n_cache_unpriced_calls": sum(1 for r in records
+                                          if r.cost_basis == "list_price_cache_unpriced"),
             "total_cost_usd": round(sum(r.cost_usd for r in records), 6),
             "breakdown_by_caller": self.breakdown_by_caller(records),
             "n_estimated_usage": sum(1 for r in records if r.usage_source == "estimated"),
@@ -174,6 +254,11 @@ class CostTracker:
                      f"(合计 {s['total_tokens']}), 估算≈${s['total_cost_usd']:.4f}")
         if s["n_estimated_usage"]:
             lines.append(f"  * 其中 {s['n_estimated_usage']} 次 API 未返回 usage, 使用字符估算")
+        if s.get("n_cache_unpriced_calls"):
+            lines.append(
+                f"  * 其中 {s['n_cache_unpriced_calls']} 次的输入含缓存命中 "
+                f"({s['total_cached_prompt_tokens']} tokens, 约定 {s['cache_semantics']}), "
+                f"价格表没有缓存价 ⇒ 这个钱是**按全价算的**, 不是账单")
         if s["breakdown_by_caller"]:
             lines.append("  按调用方分解:")
             for caller, b in sorted(s["breakdown_by_caller"].items(), key=lambda kv: -kv[1]["cost_usd"]):
@@ -325,8 +410,9 @@ class LLMClient:
 
         # ── 成本监控 Harness: 从响应里取 usage, 没有则回退估算 ──
         usage = result.get("usage") or {}
-        prompt_tokens = int(usage.get("prompt_tokens") or 0)
-        completion_tokens = int(usage.get("completion_tokens") or 0)
+        norm = parse_usage(usage)
+        prompt_tokens = norm["prompt_tokens"]
+        completion_tokens = norm["completion_tokens"]
         usage_source = "api_usage"
         if prompt_tokens <= 0 and completion_tokens <= 0:
             # API 未返回 usage, 基于请求/响应文本做字符级估算
@@ -344,6 +430,8 @@ class LLMClient:
             completion_tokens=completion_tokens,
             usage_source=usage_source,
             caller_tag=caller_tag,
+            cached_prompt_tokens=norm["cached_prompt_tokens"],
+            cache_semantics=norm["cache_semantics"],
         )
 
         if content is None or (isinstance(content, str) and content.strip() == ""):
