@@ -85,9 +85,13 @@ def broken_code(p: Problem) -> str:
 
 
 def evaluate_one(p: Problem, code: str, verifier: Verifier | None = None) -> dict:
-    """本地 L2: 用 p.reference 直接比, 不依赖远端。返回可落盘的记录。"""
+    """本地 L2: 用 p.reference 直接比, 不依赖远端。返回可落盘的记录。
+
+    输入介质: 生产路径 (`run_kernel.py`) 喂的是 **torch.Tensor**; 本评分器先用
+    numpy (MockGPU 原生), 若错误像是「torch API 打在 numpy 上」(`.to` / `clamp` /
+    `mean(dim=`) 就换成 torch 重试 —— 否则评到的是「框架选错」而不是算子能力。
+    """
     v = verifier or Verifier(MockGPU())
-    xs = make_inputs(p, seed=0)
     rec = {
         "pid": p.pid, "title": p.title, "difficulty": p.difficulty,
         "family": p.family, "split": p.split, "passed": False,
@@ -95,19 +99,70 @@ def evaluate_one(p: Problem, code: str, verifier: Verifier | None = None) -> dic
         "wall_s": 0.0,
     }
     t0 = time.time()
+    xs = make_inputs(p, seed=0)
+    expected = p.reference(**xs)
     try:
-        # 走 Verifier._verify_function, 但 expected 用 p.reference 现算 ——
-        # 保证「评分器的参考」与「题目定义」是同一份, 不经过 _build_reference_fn。
-        expected = p.reference(**xs)
         r = v._verify_function(code, xs, expected, task_for(p))
+        rec["message"] = r.message
+        if (not r.passed) and _looks_like_torch_on_numpy(r.message) and _torch_ok():
+            r = v._verify_function(code, _to_torch(xs), expected, task_for(p))
+            rec["message"] = r.message + "  [arm=torch inputs]"
         rec["passed"] = bool(r.passed)
         rec["max_error"] = r.metrics.get("max_error")
         rec["first_bad_index"] = r.metrics.get("first_bad_index")
-        rec["message"] = r.message
     except Exception as exc:  # noqa: BLE001
         rec["message"] = f"{type(exc).__name__}: {exc}"
+    rec["fail_kind"] = classify_failure(rec)
     rec["wall_s"] = round(time.time() - t0, 4)
     return rec
+
+
+def _looks_like_torch_on_numpy(msg: str) -> bool:
+    return any(s in (msg or "") for s in (
+        "'numpy.ndarray' object has no attribute 'to'",
+        "clamp() received an invalid combination",
+        "mean() received an invalid combination",
+        "numpy.ndarray' object has no attribute",
+    ))
+
+
+def _torch_ok() -> bool:
+    try:
+        import torch  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _to_torch(xs: dict) -> dict:
+    import torch
+    out = {}
+    for k, v in xs.items():
+        if np.asarray(v).dtype.kind in "iu":
+            out[k] = torch.from_numpy(np.asarray(v).astype(np.int64))
+        else:
+            out[k] = torch.from_numpy(np.asarray(v, dtype=np.float32))
+    return out
+
+
+def classify_failure(rec: dict) -> str | None:
+    """失败分类: interface (签名/契约) vs numeric (算错) vs crash (崩了) vs None (过了)。
+
+    LeetCUDA pilot 首跑抓到的形态: GEMM (A,B) 全过, 单输入 `X` 的题 100% 挂在
+    `kernel() got an unexpected keyword argument 'X'` —— 那不是算术问题是**契约**
+    问题, 混在一条曲线里会把「easy 0%」读成「连 relu 都不会」。
+    """
+    if rec.get("passed"):
+        return None
+    msg = rec.get("message") or ""
+    if ("unexpected keyword" in msg or "missing" in msg and "argument" in msg
+            or "interface" in msg.lower() or "契约" in msg):
+        return "interface"
+    if "执行失败" in msg or "Error" in msg or "Exception" in msg or "SyntaxError" in msg:
+        return "crash"
+    if "误差" in msg or "max_error" in msg or "个元素" in msg:
+        return "numeric"
+    return "other"
 
 
 def run_suite(codes: dict[str, str], problems=None) -> list:
@@ -147,6 +202,12 @@ def aggregate(runs: list) -> dict:
                 for k, v in sorted(table.items())]
 
     passed = sum(1 for r in runs if r.get("passed"))
+    by_kind = defaultdict(lambda: [0, 0])
+    for r in runs:
+        k = r.get("fail_kind") or "pass"
+        by_kind[k][1] += 1
+        if r.get("passed"):
+            by_kind[k][0] += 1
     return {
         "n": len(runs),
         "passed": passed,
@@ -154,7 +215,9 @@ def aggregate(runs: list) -> dict:
         "by_difficulty": _rows(by_diff),
         "by_family": _rows(by_family),
         "by_split": _rows(by_split),
+        "by_fail_kind": {k: v[1] for k, v in sorted(by_kind.items())},
         "failures": [{"pid": r.get("pid"), "difficulty": r.get("difficulty"),
+                      "fail_kind": r.get("fail_kind"),
                       "message": (r.get("message") or "")[:120],
                       "first_bad_index": r.get("first_bad_index")}
                      for r in runs if not r.get("passed")],
@@ -176,11 +239,16 @@ def format_curve(agg: dict) -> str:
     for row in agg["by_split"]:
         lines.append(f"  {row['key']:8s}  {row['passed']}/{row['total']}"
                      + (f" = {row['pct']}%" if row["pct"] is not None else ""))
+    if agg.get("by_fail_kind"):
+        lines.append("\n【失败分类】interface=签名/契约  numeric=算错  crash=崩  other")
+        for k, n in agg["by_fail_kind"].items():
+            lines.append(f"  {k:10s}  {n}")
     if agg["failures"]:
         lines.append("\n【失败】")
         for f in agg["failures"][:12]:
             fb = f["first_bad_index"]
-            lines.append(f"  {f['pid']} [{f['difficulty']}] {f['message']}"
+            lines.append(f"  {f['pid']} [{f['difficulty']}/{f.get('fail_kind')}] "
+                         f"{f['message']}"
                          + (f"  first_bad@{fb}" if fb is not None else ""))
     lines.append("\n⚠️ holdout (split=test) 的分数才是泛化能力; "
                  "dev 分数可以靠 few-shot 灌出来。")

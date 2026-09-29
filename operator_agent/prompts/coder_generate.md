@@ -24,7 +24,10 @@
 4. 利用硬件特性进行并行化
 
 ## 严格要求 (违反任意一条都会导致失败)
-1. 函数签名: def kernel(A, B):
+1. 函数签名: `def kernel(**输入名):` —— **参数名必须与调用方传入的关键字逐一相同**
+   (见下方「输入契约」)。不要写死 `def kernel(A, B)`：那是 GEMM 的输入名,
+   换成 softmax/relu/norm 就会 `unexpected keyword argument`。
+   若契约给出 `X`，就是 `def kernel(X):` 或 `def kernel(**inputs):`。
 2. 关键逻辑必须写中文注释：kernel 作用/参数、tile 加载、累加/归约、边界 mask、指针推进、softmax/因果 mask、wrapper 的 grid 与 strides 传递
 3. 允许并鼓励 kernel 顶部的 docstring，说明算法 (Flash Attention / 分块 matmul / 分块归约等)、输入尺寸、精度策略
 4. 不要使用 ``` 标记
