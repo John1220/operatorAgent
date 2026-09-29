@@ -16,7 +16,12 @@ import textwrap
 from typing import Optional
 from .schemas import TaskSchema, VerificationResult
 from .prompt_manager import PromptManager
-from .kernel_db import FailureRecord, failure_signature  # 用于回写 Reflexion 教训
+from .kernel_db import (  # 用于回写 Reflexion 教训 + 本轮取向的归类
+    FAILURE_CLASS_INTERFACE,
+    FailureRecord,
+    failure_class_of,
+    failure_signature,
+)
 
 
 # ── 处方式错误反馈 (docs/research/20 C1) ─────────────────────────
@@ -91,7 +96,8 @@ def prescribe(err_text: str) -> Optional[tuple[str, str]]:
     return None
 
 
-# ── 修复取向按「哪一级报的失败」分支 (docs/research/55, CUDA-Harness §4.3.1) ──
+# ── 修复取向按「哪一级报的失败 + 库里怎么归类」分支 (docs/research/55,
+#    CUDA-Harness §4.3.1 的两路 + Fabrica 行 521-522 的第三路 interface repair) ──
 #
 # 原文 (arXiv:2609.00058v1, 一手核过):
 #   "The refinement branches based on which validation stage reports the failure.
@@ -137,9 +143,56 @@ _L1_INPLACE = (
     "编译失败不代表策略错, 退回保守写法只会丢掉已经有效的加速。"
 )
 
+# Fabrica (arXiv:2608.25124v1, 行 521-522) 的三路分流里第三路是 interface repair:
+#   "The reviewer then routes architectural, implementation, and host/layout failures
+#    to redesign, code repair, or interface repair, respectively."
+# 我方今天这两路 (退让 / 就地修) 都是按**级别**分的, 而接口契约那一类失败在 L1 里
+# 是最特殊的: 它不看代码内容, 只看 `def kernel(...)` 的名字与调用方要传的那几个。
+# 按「就地修一处 API 误用」的口径去处理它, 模型常见两种走偏: 反过来改输入名 (那是任务侧
+# 给的, 远端 `kernel(**输入)` 不会跟着改), 或整段重写 —— 把一份还没被任何检查器看过的
+# 结构丢掉, 等于用一次签名错误换一轮新的未知失败。
+# 基率 (doc 48 §六B): 16 轮里 4 轮死在这道门上, 且全部 L1 失败都归它 —— 这不是边角。
+#
+# 与那道门自己的文案的关系 (写之前核过 `interface_contract.py:184-197`): 门已经把
+# 「缺哪几个、多哪几个」和「改 `def kernel` 的参数名」讲清楚了, 所以这段**不复述那份清单**;
+# 它补的是门不知道的那一半 —— 本轮的**改动范围** (函数体/取值/配方一律不动) 和不动的理由。
+_L1_INTERFACE = (
+    "本轮报失败的是**入口契约门**: L1 里唯一只看名字、不看代码内容的一道, 由 harness 在动 "
+    "GPU 之前拦下。函数体还没有被任何检查器看过, 不匹配的只有 `def kernel(...)` 的参数名 "
+    "(缺哪几个、多哪几个, 见下面错误原文里「本次会传入的输入名」与「不匹配」那两行)。"
+    "取向: **本轮只改 `def kernel` 那一行的参数名**。函数体、BLOCK_* 取值与已应用的优化配方"
+    "一律不动 —— 签名错误不代表策略错, 而这一版的写法还没被验证过一次, 整段重写等于用一次"
+    "已知的签名错误换一轮未知的失败。"
+    "输入名不是你那一侧: 远端固定以 `kernel(**输入)` 全关键字调用, 输入名由任务给定。"
+)
 
-def stage_directive(levels: set) -> str:
-    """由「哪些级别报了失败」得出本轮修复取向。L2 优先于 L1。"""
+
+def failure_class(failed_results) -> str:
+    """本轮失败属于哪一类 —— 用**负样本库那一个分类器**, 不看文案措辞
+
+    为什么不让取向自己判正则: 取向与库里的归类一旦用两套口径, 就会出现「prompt 说是接口
+    问题、库里记成 TypeError」这种分裂 —— 而复发门、检索与本轮取向读的是同一个桶。
+    入参口径与 `conductor._record_failure` 逐字一致: 排序去重的级别 + 每条
+    `_truncate_error(…, 300)` 用 " | " 拼起来的文本。取的是签名三段里的**类名**那一段,
+    整条签名拿去向 `"interface_mismatch"` 永远不相等 (层级与最内层帧也在里面) ——
+    那会是一条写了走不到的路。
+    """
+    levels = "+".join(sorted({r.level.value for r in failed_results}))
+    text = " | ".join(FixerAgent._truncate_error(r.error_log or r.message, 300)
+                      for r in failed_results)
+    return failure_class_of(levels, text)
+
+
+def stage_directive(levels: set, failure_cls: str = "") -> str:
+    """由「哪些级别报了失败」+「库里那个分类器怎么归类这次失败」得出本轮修复取向。
+
+    三路 = Fabrica 的 interface repair / code repair / 保守退让。归类排在级别之前:
+    接口契约那一类必然落在 L1 里, 只看级别会把它并进「就地修一处 API 误用」那条通用取向,
+    而那条恰恰不限制改动范围。不认识的归类 (含 `unknown`、真异常名) 一律退到级别那条老
+    路径, 所以取向永不为空。
+    """
+    if failure_cls == FAILURE_CLASS_INTERFACE:
+        return _L1_INTERFACE
     return _L2_RETREAT if "L2" in levels else _L1_INPLACE
 
 
@@ -195,9 +248,13 @@ class FixerAgent:
         )
         dsl = task.target.dsl
 
-        # 先算级别: 它既进模板 (告诉模型本轮是谁报的失败), 也决定取向 (stage_directive)
+        # 渲染前两样都要算好: 级别进模板当「本轮是谁报的失败」, 归类当第三路的分流键,
+        # 取向由这两者一起决定。归类在这里算而不是让 `stage_directive` 自己去看文案:
+        # 它走的是 `conductor._record_failure` 那一个分类器, 于是 prompt 里的取向与负样本
+        # 库里的归类必然是同一个桶。
         levels = ", ".join(r.level.value for r in failed_results)
         level_set = {r.level.value for r in failed_results}
+        failure_cls = failure_class(failed_results)
 
         base_prompt = self.pm.render(
             "fixer_repair",
@@ -208,7 +265,7 @@ class FixerAgent:
             dsl=dsl,
             precision=task.constraints.precision.value,
             failure_stage=levels or "未知",
-            stage_directive=stage_directive(level_set),
+            stage_directive=stage_directive(level_set, failure_cls),
             error_details=error_details,
             history_cases=history_cases or "无",
             code=code,

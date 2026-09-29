@@ -562,6 +562,11 @@ class KernelDatabase:
 _ERROR_CLASS_RE = re.compile(r"\b([A-Z][A-Za-z0-9_]*(?:Error|Exception))\b")
 _FRAME_RE = re.compile(r'File "[^"]*", line \d+, in (\S+)')
 
+# 「接口契约不符」这一类失败**类名**的唯一出处。Fixer 的第三路取向 (`stage_directive`)
+# 比的就是这个值 —— 字面量在两个文件里各写一份, 改一处就会让另一处变成永不命中的死分支,
+# 而那正是本项目记过的那族「算了没人读」。
+FAILURE_CLASS_INTERFACE = "interface_mismatch"
+
 # 没有 `*Error` 词元时用的关键词表。只收**本仓库里能找到的字面量** (doc 45 第二节):
 # 臆造一个「常见错误关键词」清单正是本项目记过的那类死判据 —— 它永远不会命中。
 _FAILURE_CLASS_MARKERS = (
@@ -574,7 +579,7 @@ _FAILURE_CLASS_MARKERS = (
     # 于是**它自己举的那个假设异常名**把这条静态检查归成了 TypeError —— 与一条真的
     # 模块级 `TypeError: can only concatenate str` 同名同层级, 两条不同根因拿到同一个
     # 内容派生 id, 后者直接覆盖前者 (语料里少了一条, 而复发门把两者当同一类)。
-    ("签名与之对不上", "interface_mismatch"),
+    ("签名与之对不上", FAILURE_CLASS_INTERFACE),
 )
 _INFRA_CLASSES = ("infra_no_baseline",)
 
@@ -609,6 +614,17 @@ def failure_signature(level: str, error_text: str) -> str:
     # 最内层帧 = 真正抛出的那个函数 (traceback 是自上而下排的)
     frame = frames[-1] if frames else "-"
     return f"{lv}|{cls}|{frame}"
+
+
+def failure_class_of(level: str, error_text: str) -> str:
+    """`failure_signature` 三段里**失败类名**那一段 (`lv|cls|frame` 的 `cls`)。
+
+    为什么单开一个函数而不是让调用方去 split: 签名的形状 (三段、以 `|` 分隔) 是本模块的
+    私产, 改形状必须和产它的地方一起改; 而且调用方要比的是「这一类失败」, 不是整条签名 ——
+    拿整条去比 `"interface_mismatch"` 永远不相等 (层级和最内层帧必然也在里面), 那条分支
+    就成了写了走不到的死路。分流与库归类仍走同一个分类器, 只是取的粒度不同。
+    """
+    return failure_signature(level, error_text).split("|", 2)[1]
 
 
 def is_promotable_failure(record: "FailureRecord") -> bool:
