@@ -140,6 +140,17 @@ CITATIONS = [
     ("2609.30059v1", 1351, 1351, "correct TF32 kernels yield"),
     ("2609.30059v1", 363, 364, "The four gates are applied sequentially"),
     ("2609.30059v1", 418, 421, "marginal improvements"),
+    # ↓ 2026-09-30 补读 KernelZero 方法节 §2 (行 115-198, doc 58 §四)。这六条是那一段的
+    #   全部引用点 —— 上一轮那句「方法节未读」就是没有这些锚点时的样子 (I28: 声明「可重建」
+    #   的东西必须真重跑一次, 而引文本身也是被引的东西)。
+    ("2609.33074v1", 144, 144, "matches the sampled API set"),
+    ("2609.33074v1", 145, 145, "following the format of KernelBench"),
+    ("2609.33074v1", 147, 147, "NaN or Inf is filtered out"),
+    ("2609.33074v1", 158, 158, "approximately half of the sampled kernels are correct"),
+    ("2609.33074v1", 158, 158, "neither trivial nor impossible"),
+    ("2609.33074v1", 117, 117, "explicitly defined interfaces"),
+    ("2609.33074v1", 181, 181, "performance optimization is activated only when correctness becomes sufficiently reliable"),
+    ("2609.33074v1", 191, 191, "their normalized speedup scores are set to zero"),
 ]
 
 
