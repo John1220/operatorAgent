@@ -224,6 +224,25 @@ class TestFixerAgent(unittest.TestCase):
 
 # ─── 4. Conductor 修复闭环 (端到端) ─────────────────────────
 
+def _counting_fixer_runs(conductor: Conductor) -> list:
+    """数 `fixer.run` 被**调用**了几次 (包住真实现, 不换行为)
+
+    「不无限循环」是一件关于调用次数的事, 不是关于 prompt 条数的事: Fixer 内部还有
+    `MAX_FIX_ATTEMPTS` 次预检重试, 一次 run 会烧掉好几条 prompt。原先这两条用例断言的是
+    prompt 总数 (5 / 1), 于是 P1-1 的重试、Designer 的那次调用都会把它撞红 —— 红的时候
+    分不清是循环失控还是管线多了一个正常环节。
+    """
+    counter: list = []
+    real = conductor.fixer.run
+
+    def wrapper(*args, **kwargs):
+        counter.append(1)
+        return real(*args, **kwargs)
+
+    conductor.fixer.run = wrapper
+    return counter
+
+
 class TestConductorRepairLoop(unittest.TestCase):
 
     def _make_conductor(self, llm, max_rounds=3) -> Conductor:
@@ -259,14 +278,18 @@ class TestConductorRepairLoop(unittest.TestCase):
         """修复持续失败 -> 达到最大轮次后终止，不无限循环"""
         llm = MockLLM(chat_handler=lambda p: BROKEN_KERNEL)
         conductor = self._make_conductor(llm, max_rounds=3)
+        runs = _counting_fixer_runs(conductor)
         artifact = conductor.execute(
             _make_task(), _make_inputs(), target_gflops=0.0,
         )
 
         self.assertFalse(artifact.all_passed)
-        # Coder 预检重试 3 次 (P1-1) + Fixer 2 次 (末轮不再修复)
-        self.assertEqual(len(llm.chat_calls), 5)
-        self.assertEqual(len(llm.fixer_prompts()), 2)   # 末轮不再修复
+        # 每轮各修一次, **末轮不再修** (修完也没有下一轮去验证它)。界取自轮次配置本身,
+        # 不是抄进来的魔数 —— 把 max_rounds 改成 5 时这条应跟着变成 4。
+        self.assertEqual(len(runs), conductor.max_optimize_rounds - 1)
+        # 内层预检重试是 Fixer 自己的常数, 这里核对的是**两层预算相乘**这个关系
+        self.assertEqual(len(llm.fixer_prompts()),
+                         len(runs) * FixerAgent.MAX_FIX_ATTEMPTS)
         # 最终验证结果停留在 L1 失败
         l1 = artifact.verification_results[0]
         self.assertEqual(l1.level, VerificationLevel.L1_COMPILE)
@@ -281,11 +304,16 @@ class TestConductorRepairLoop(unittest.TestCase):
 
         llm = MockLLM(chat_handler=handler)
         conductor = self._make_conductor(llm)
+        runs = _counting_fixer_runs(conductor)
         artifact = conductor.execute(
             _make_task(), _make_inputs(), target_gflops=0.0,
         )
         self.assertFalse(artifact.all_passed)
-        self.assertEqual(len(llm.fixer_prompts()), 1)   # 修复失败后即终止
+        # 终止的是**轮次循环**, 不是「一次都不许多问」: Fixer 内部先把 MAX_FIX_ATTEMPTS
+        # 次预检重试烧完才抛, 所以 prompt 是 3 而 run 只有 1 —— 旧断言写成 prompt==1
+        # 是把这两层混在了一件事上。
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(len(llm.fixer_prompts()), FixerAgent.MAX_FIX_ATTEMPTS)
 
 
 if __name__ == "__main__":

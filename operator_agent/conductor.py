@@ -300,7 +300,11 @@ class Conductor:
         current_sketch = None
         current_code = ""
         pending_fix: Optional[str] = None  # Fixer 修复后的代码，下一轮优先于重新生成
-        fix_attempts: list[tuple] = []     # (失败结果, 修复说明)，任务结束时入失败案例库
+        fix_attempts: list[tuple] = []     # (失败结果, 修复说明, 那条失败的 Reflexion 记录或 None)
+        # Reflexion 记录创建那一刻**还不知道**这次修复成没成 (下一轮验证才有答案), 所以先按
+        # fixed=False 落盘 (崩溃也不丢教训), 任务结束时若产物通过再补写一次。这里存的是
+        # 「欠着一次补写」的那几条。
+        reflexion_pending: list = []
         best_gflops: float = 0.0           # 历史最优 GFLOPS
         rounds_without_improvement: int = 0  # 连续无改善轮数
         max_stagnant_rounds: int = 2       # 连续无改善上限，超过则提前终止
@@ -691,20 +695,28 @@ class Conductor:
                         )
                         break
                     print(f"  修复说明: {fix_note}")
-                    fix_attempts.append((failed_results, fix_note, True))
                     pending_fix = fixed_code
 
-                    # ---- Reflexion: 修复成功后让 Fixer 产出结构化教训并沉淀 ----
+                    # ---- Reflexion: 修复后让 Fixer 产出结构化教训并沉淀 ----
+                    reflexion = None
                     try:
-                        record = self.fixer.produce_reflexion()
-                        if record is not None:
-                            self.failure_db.add(record)
-                            lessons_cnt = len(record.lessons)
-                            cause = record.root_cause or "N/A"
+                        reflexion = self.fixer.produce_reflexion()
+                        if reflexion is not None:
+                            self.failure_db.add(reflexion)
+                            reflexion_pending.append(reflexion)
+                            lessons_cnt = len(reflexion.lessons)
+                            cause = reflexion.root_cause or "N/A"
                             print(f"  [Reflexion] 已入库: 根因={cause[:60]}, lessons={lessons_cnt}条")
                     except Exception as _rx_err:
                         # Reflexion 失败不影响主流程, 只记录不中断
+                        reflexion = None
                         print(f"  [Reflexion] 跳过沉淀: {_rx_err}")
+
+                    # 第三个位置带的是**那条记录本身或 None**, 不是「已经沉淀过了」这个
+                    # 声称。原先写死 True, 而唯一的循环内沉淀是 produce_reflexion() ——
+                    # 它只在修好时返回记录, 于是「修不好的那类失败」被 815-821 的兜底
+                    # 当成「已经记过了」跳过, 永远进不了负样本库 (doc 49 §7.14 / #56)。
+                    fix_attempts.append((failed_results, fix_note, reflexion))
 
                     # ── 可复现性 Harness: Fixer 修复后走 continue 前也要落快照 (否则 crash 就丢了修复代码) ──
                     snapshot_target_dir = self._flush_snapshot(
@@ -810,20 +822,31 @@ class Conductor:
                 artifact.compile_info.update(task.target.triton_config.to_dict())
 
         # 失败案例入库: 修复记录与最终失败均沉淀为负样本 (供后续 Fixer 检索)
-        # Reflexion 增强: 修复成功时已在循环内实时写入 FailureDB (带 lessons 结构化教训)
-        # 这里只处理 "修复未走 Fixer" 或 "完全修复失败" 的兜底入库
+        # 循环内只沉淀 Reflexion 那一条 (带 lessons 结构化教训), 且当时 `fixed` 只能是
+        # 「还没验证过」; 这里补齐两件事: 没有 Reflexion 记录的修复走兜底入库,
+        # 有 Reflexion 记录的在结果已知后补写一次。
         if fix_attempts:
-            for entry in fix_attempts:
-                # 兼容旧 2-tuple 与新 3-tuple (第 3 项 True=已走 Fixer 且已实时沉淀)
-                if len(entry) >= 3 and entry[2]:
-                    continue
-                failed_results, fix_note = entry[0], entry[1]
+            for failed_results, fix_note, reflexion in fix_attempts:
+                if reflexion is not None:
+                    continue      # 这条失败已经有它自己的记录 (下面那次补写会更新它)
                 self._record_failure(task, failed_results, fix_note, fixed=artifact.all_passed)
         elif all_verification_results and not artifact.all_passed:
             failed = [r for r in all_verification_results if not r.passed]
             if any(r.level in (VerificationLevel.L1_COMPILE, VerificationLevel.L2_FUNCTION)
                    for r in failed):
                 self._record_failure(task, failed, "", fixed=False)
+
+        if artifact.all_passed:
+            # `fixed` 的字段注释是「该失败**最终**是否被修复」, 而 produce_reflexion() 被调用的
+            # 那一刻下一轮验证还没跑 —— 原先它无条件写 True, 于是每条反思都在结果未知时替结果
+            # 写了答案, 且修的到底是哪一次也没人核对过。现在创建时留默认 False, 到这里才补写。
+            # 追加式日志里同一条 id 的 fixed=False → fixed=True 演进是**设计支持的**
+            # (kernel_db.py:806-812: 重放按后写覆盖先写), 所以这不是新增机制, 是用它本来的用法。
+            for reflexion in reflexion_pending:
+                reflexion.fixed = True
+                self.failure_db.add(reflexion)
+            if reflexion_pending:
+                print(f"\n[Conductor] Reflexion 记录补写 fixed=True ({len(reflexion_pending)} 条)")
 
         # ── 成本监控 Harness: 汇总 LLM 账单, 写入 artifact.metadata ──
         if self.llm and hasattr(self.llm, 'cost_tracker'):

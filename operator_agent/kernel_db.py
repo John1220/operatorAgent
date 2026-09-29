@@ -866,7 +866,12 @@ class FailureDatabase:
                 continue
             jaccard = len(error_tokens & r_tokens) / len(error_tokens | r_tokens)
             scored.append((jaccard, r))
-        scored.sort(key=lambda t: (t[0], not t[1].fixed, -t[1].created_at), reverse=True)
+        # 排序方向必须与 `search_by_context` (:838) 那条一致: 相似度优先, 然后**已修复优先**,
+        # 然后新的优先。原先这里写的是 `(jaccard, not fixed, -created_at)` 配 `reverse=True`,
+        # 于是两个 tie-break 全反 —— 相似度相同的两份候选里, 未修复的排在已修复前面、
+        # 最旧的排在新的一次性通过的最前面。同一个字段在同一个文件里的两处排序里含义相反,
+        # 而 prompt 只看得见排在前面的那几条。
+        scored.sort(key=lambda t: (t[0], t[1].fixed, t[1].created_at), reverse=True)
         return [r for _, r in scored if _ > 0][:limit] or candidates[:limit]
 
     def list_all(self) -> list[FailureRecord]:

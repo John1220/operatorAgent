@@ -321,6 +321,122 @@ class TestConductorFailureRecording(unittest.TestCase):
         self.assertEqual(artifact.iteration_history[1]["all_passed"], True)
 
 
+class TestFailureCorpusNeverClaimsWhatItHasNotVerified(unittest.TestCase):
+    """缺口 2 的语料诚实性: `fixed` 只能在结果知道之后写, 每条失败都必须进库 (doc 49 §7.14)。
+
+    三处同族缺陷原来同时在生效:
+      F1 `fix_attempts.append((…, True))` 把「已在循环内沉淀」写死 True, 而唯一的循环内
+         沉淀是 `produce_reflexion()` (修好时才有) ⇒ **修不好的那类失败被兜底当成
+         「已经记过了」跳过**, 负样本库系统性缺最该记的那一类。
+      F2 `produce_reflexion()` 无条件 `fixed=True`, 而那一刻下一轮验证还没跑 ——
+         字段注释自己写着「该失败**最终**是否被修复」。
+      F3 (下面那个类) 检索侧两处排序方向相反。
+    """
+
+    def _conductor(self, handler, max_rounds=3):
+        llm = MockLLM(chat_handler=handler)
+        conductor = Conductor(backend=MockGPU(), kernel_db=KernelDatabase(),
+                              llm=llm, max_optimize_rounds=max_rounds)
+        self.added = []
+        real_add = conductor.failure_db.add
+
+        def spy(record):
+            # 记录是可变 dataclass, 存引用会跟着后面的补写一起变 —— 那样就看不见
+            # 「创建时那一刻它声称了什么」, 而 F2 的病根正是这个时刻的过度承诺。
+            self.added.append((record.failure_id, record.fixed))
+            return real_add(record)
+
+        conductor.failure_db.add = spy
+        return conductor
+
+    def test_unfixable_failure_still_lands_in_the_corpus(self):
+        """F1: 一次都没修好 ≠ 什么都不用记 —— 旧写法下这条一轮都没记 (那条长期红就是它)"""
+        conductor = self._conductor(lambda p: BROKEN_MATMUL)
+        artifact = conductor.execute(_make_task(), _make_inputs(), target_gflops=0.0)
+        self.assertFalse(artifact.all_passed)
+        records = conductor.failure_db.list_all()
+        self.assertTrue(records, "修复失败的这轮没有留下任何负样本")
+        self.assertTrue(all(not r.fixed for r in records),
+                        "一轮没修好, 却有记录写着 fixed=True")
+
+    def test_a_reflexion_is_not_claimed_fixed_before_the_next_verification(self):
+        """F2: 修出「语法对但数值错」的码时 reflexion 是会产出的, 而那件事还没被验证过"""
+        wrong = "```python\nimport numpy as np\n\ndef kernel(A, B):\n" \
+                "    return (A @ B) * 2.0\n```"
+        conductor = self._conductor(
+            lambda p: wrong if FIXER_MARKER in p else BROKEN_MATMUL)
+        artifact = conductor.execute(_make_task(), _make_inputs(), target_gflops=0.0)
+        self.assertFalse(artifact.all_passed)
+        self.assertTrue(self.added, "这条失败压根没进库")
+        self.assertTrue(all(fixed is False for _, fixed in self.added),
+                        f"结果还没验证就先写的答案: {self.added}")
+        # `cx-` 是兜底入库那条路的 id 前缀。有 Reflexion 记录的失败**不该再被兜底记一遍** ——
+        # 同一件事在库里留下两个 id, 而「这算是老问题还是新问题」就又没有答案了。
+        self.assertEqual([], [fid for fid, _ in self.added if fid.startswith("cx-")],
+                         "Reflexion 已记过的那条失败被兜底又记了一遍 (两个 id 记同一件事)")
+
+    def test_the_record_is_written_twice_so_the_evolution_survives(self):
+        """修好时: 先以 fixed=False 落一次 (崩溃也不丢教训), 结果知道后再补一次 True。
+
+        追加式日志的「后写覆盖先写」(kernel_db.py:806-812) 是为此设计的用法, 不是新机制。
+        """
+        conductor = self._conductor(
+            lambda p: FENCED_VALID if FIXER_MARKER in p else BROKEN_MATMUL)
+        artifact = conductor.execute(_make_task(), _make_inputs(), target_gflops=0.0)
+        self.assertTrue(artifact.all_passed)
+        seq = [(fid, fixed) for fid, fixed in self.added]
+        self.assertEqual([s for s in seq if s[1] is False][-1][0],
+                         seq[-1][0], "最后那次补写没有落在同一条 id 上")
+        self.assertIs(seq[-1][1], True, "任务修好了, 语料里却还是 fixed=False")
+        records = conductor.failure_db.list_all()
+        self.assertTrue(any(r.fixed for r in records))
+
+
+class TestFailureRetrievalPrefersFixed(unittest.TestCase):
+    """F3: 同一个字段在同一个文件的两处排序里含义相反 —— prompt 只看得见排前面的几条"""
+
+    def _db(self):
+        db = FailureDatabase()
+        # 两条相似度必然相同的记录 (词元集合逐字相同), 而「已修复」与「更新」互相冲突:
+        # 未修复的那条**更新** —— 于是排序方向写反时它会赢, 这正是要看的分歧。
+        db.add(FailureRecord(
+            failure_id="old-fixed", kernel_type="matmul", hardware="nvidia_gpu",
+            dsl="triton", level="L2", error_summary="name tl is not defined",
+            error_keywords=["tl", "nameerror"], fixed=True, created_at=100.0))
+        db.add(FailureRecord(
+            failure_id="new-unfixed", kernel_type="matmul", hardware="nvidia_gpu",
+            dsl="triton", level="L2", error_summary="name tl is not defined",
+            error_keywords=["tl", "nameerror"], fixed=False, created_at=900.0))
+        return db
+
+    def test_both_retrieval_entries_agree_on_the_fixed_preference(self):
+        """差分守卫: 两条检索路径给同一对候选必须排同一个序"""
+        db = self._db()
+        by_context = [r.failure_id for r in
+                      db.search_by_context(kernel_type="matmul", dsl="triton", limit=2)]
+        by_error = [r.failure_id for r in
+                    db.search_by_error("name tl is not defined", kernel_type="matmul",
+                                       dsl="triton", limit=2)]
+        self.assertEqual(by_context, by_error,
+                         f"两条检索路径排序相反: context={by_context} error={by_error}")
+        self.assertEqual("old-fixed", by_context[0], "「已修复优先」这条口径没生效")
+
+    def test_the_control_is_not_vacuous(self):
+        """两条候选若相似度不同, 排序就该先按相似度 —— 否则上面那条在测一个恒等式"""
+        db = self._db()
+        db.add(FailureRecord(
+            failure_id="exact-match-unfixed", kernel_type="matmul", hardware="nvidia_gpu",
+            dsl="triton", level="L2",
+            error_summary="name tl is not defined before import triton.language as tl",
+            error_keywords=["tl", "nameerror", "import", "triton"], fixed=False,
+            created_at=50.0))
+        hits = [r.failure_id for r in db.search_by_error(
+            "name tl is not defined before import triton.language as tl",
+            kernel_type="matmul", dsl="triton", limit=3)]
+        self.assertEqual("exact-match-unfixed", hits[0],
+                         "相似度最高的一条没排第一 —— tie-break 越权成了主排序")
+
+
 # ─── P1-3: 编译缓存 ──────────────────────────────────────────
 
 class CountingMockGPU(MockGPU):
@@ -381,9 +497,23 @@ class TestRouter(unittest.TestCase):
         task = _make_task(complexity=TaskComplexity.MEDIUM, fused=["matmul", "relu"])
         self.assertEqual(self.router.route(task, self.db), RouteType.AGENT_GENERATION)
 
-    def test_low_complexity_translation(self):
-        task = _make_task(complexity=TaskComplexity.LOW)
-        self.assertEqual(self.router.route(task, self.db), RouteType.CODE_TRANSLATION)
+    def test_low_complexity_reuses_history_or_generates(self):
+        """LOW 复杂度: 库里有同类案例就复用 (compiler_backend), 没有就让 LLM 从头设计。
+
+        这条用例原先断言 `RouteType.CODE_TRANSLATION` —— 而 `Router.route()` 从来
+        不返回那个值 (整个函数只有 COMPILER_BACKEND / AGENT_GENERATION 两种出口),
+        路由里也早有成文注释「LOW 复杂度也走编译器后端」。所以红的是**断言**, 不是代码:
+        那个枚举成员是「声明了却没有任何生产者」, 已随本次一并删掉 (doc 49 §7.14)。
+        两个分支各测一次, 不按函数计覆盖。
+        """
+        with_history = _make_task(complexity=TaskComplexity.LOW)
+        self.assertEqual(self.router.route(with_history, self.db),
+                         RouteType.COMPILER_BACKEND,
+                         "库里有 matmul/mock_gpu/python 的案例, 却不去复用")
+        no_history = _make_task(complexity=TaskComplexity.LOW, kernel="exotic_op_xyz")
+        self.assertEqual(self.router.route(no_history, self.db),
+                         RouteType.AGENT_GENERATION,
+                         "没有同类案例时不该复用别人的核")
 
     def test_medium_with_history_uses_backend(self):
         task = _make_task(dsl="triton", hw="nvidia_gpu", kernel="matmul",

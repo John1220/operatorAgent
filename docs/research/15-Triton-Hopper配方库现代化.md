@@ -246,16 +246,27 @@ A 和 H 是**第一版测试漏掉的**，两处都因为同一个原因：断�
 
 ## 五、遗留缺陷（本次未修，已记录）
 
-1. **H200 会被误认成 H20。** `detect_hardware_caps` 按「键名长者优先」匹配 `_KNOWN_HARDWARE`，但表里没有 `h200` 条目，于是 `"nvidia h200"` 命中 `"h20"`。`sm_count` 会被 `hw_info` 覆盖成 132，但带宽仍用 H20 的 3680 GB/s（H200 实际 4800），roofline 会算错。当前环境用不到 H200，未修。
+1. ~~**H200 会被误认成 H20。**~~ **✅ 已修（2026-09-28，doc 49 §7.5）**：匹配加了**数字边界**
+   （`(?<![0-9])key(?![0-9])`），`"nvidia h200"` 不再命中 `"h20"`；口径实测 H200 由 19 条承诺
+   降到 8 条、认不出硬件由 16 降到 8，H20/A100/MockGPU 不变。补 h200 条目这件事仍开着
+   （缺实测 launch 地板，不臆造）。
 2. **`R-MATMUL-02` 的 autotune 配置表与 autoWS 冲突未解。** 12 组 config 里 8 组是 `num_warps=8`，会让 R-MATMUL-14 静默失效。`benchmarks/triton_autotune_matmul.py` 是同一份表的拷贝，要同步改。
-3. **5 个测试是长期红的，且早于本次所有工作**（在 `a5ad7e0` 上同样失败，已用 worktree 核实）：
-   - `test_fixer.py::TestConductorRepairLoop::test_budget_exhausted_stops_with_failure`（LLM 调用数 9 ≠ 5）
-   - `test_fixer.py::TestConductorRepairLoop::test_fixer_exception_breaks_gracefully`
-   - `test_p1.py::TestConductorFailureRecording::test_budget_exhausted_recorded_as_unfixed`（`records` 为空）
-   - `test_p1.py::TestRouter::test_low_complexity_translation`（路由到 `compiler_backend` 而非 `code_translation`）
-   - `test_p0_3.py::TestSameDeviceRemoteBenchmark::test_remote_uses_returned_same_device_baseline`（`baseline_type` 拿到 `pytorch_eager` 而非 `torch_compile`）
-
-   前三个像是同一根因（修复循环的轮次/记账），后两个各自独立。按用户「代码问题差不多就行，后续有时间再细致优化」的指示暂缓，但**不能把它们误读成本次改动引入的回归** —— 本次改动后全量测试 244 passed / 5 failed，改动前 217 passed / 6 failed（第 6 个是 `test_anticheat_bypass`，本次一并修好）。
+3. ~~**5 个测试是长期红的，且早于本次所有工作**（在 `a5ad7e0` 上同样失败，已用 worktree 核实）~~
+   **✅ 已全部定性并清掉（2026-09-29，doc 49 §7.14）**。当时写的那句归因——「前三个像是同一根因
+   （修复循环的轮次/记账），后两个各自独立」——**取证后是一半对一半错**：五条里
+   **两条是过期断言**（拿 LLM prompt 条数当「不无限循环」的代理，而 Fixer 内层还有
+   `MAX_FIX_ATTEMPTS=3` 次预检重试；路由那条断言的 `RouteType.CODE_TRANSLATION` 从来没有
+   任何生产者），**三条是真缺陷**，而且三个都在缺口 2 的负样本语料上、都不在「修复循环」上：
+   `fix_attempts` 把「已沉淀」写死 `True` ⇒ 修不好的失败永远不进库；`produce_reflexion()`
+   无条件 `fixed=True` ⇒ 没验过的反思以「已解决」的身份参与检索排序；`search_by_error` 的
+   tie-break 与同文件 `search_by_context` 的「已修复优先」方向相反。
+   ⇒ 这一条自己就值得留一句教训：**「长期红」是一个待办，不是一句结论**。当时按名字归成
+   「同一根因」，如果照着这个假设去修，会去改修复循环的轮次，而真正的账在语料记账上 ——
+   三条真缺陷里没有任何一条在「轮次」里。
+   现在这套测试是 **702 passed / 0 failed / 3 skipped**（上面列的第 5 条
+   `test_remote_uses_returned_same_device_baseline` 更早随 D3 契约变更转正 —— 基线选择权移到
+   远端、控制端只信 `baseline_selected`，见 doc 20 §五那两行）。留下的新账是 `Router.route()`
+   的返回值全仓只有一个读者（一行 print），即「复用历史成功核」这条路从未被执行（doc 49 §八 第 11 条）。
 
 ---
 

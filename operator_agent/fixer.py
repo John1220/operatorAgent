@@ -205,11 +205,15 @@ class FixerAgent:
         return fixed, summary
 
     def produce_reflexion(self) -> Optional[FailureRecord]:
-        """Reflexion: 修复成功后, 让 LLM 生成结构化自我反思并封装为 FailureRecord。
+        """Reflexion: 修复后让 LLM 生成结构化自我反思并封装为 FailureRecord。
 
-        返回 FailureRecord (fixed=True, 带 lessons/error_keywords/root_cause)
-        供上游 Conductor 写入 FailureDatabase 沉淀经验。
-        若无 last_* 上下文或 LLM 未配置则返回 None。
+        返回 FailureRecord (带 lessons/error_keywords/root_cause) 供上游 Conductor 写入
+        FailureDatabase 沉淀经验。若无 last_* 上下文或 LLM 未配置则返回 None。
+
+        ⚠️ `fixed` 这里**不填** (留 dataclass 默认的 False): 被调用的那一刻下一轮验证还没跑,
+        而字段的意思是「该失败**最终**是否被修复」。原先它无条件写 True —— 于是每条反思都在
+        结果未知时替结果写了答案, 而检索侧 (kernel_db 的两处排序) 就按「已修复」优先用它。
+        补写由 Conductor 在任务结束时做 (那时才知道结果)。
         """
         if not hasattr(self, '_last_fixed_code') or not self._last_fixed_code:
             return None
@@ -277,7 +281,6 @@ class FixerAgent:
             level=levels,
             error_summary=error_details[:500],
             fix_summary=self._last_fix_summary,
-            fixed=True,
             created_at=time.time(),
             root_cause=str(result.get("root_cause", "")).strip()[:300],
             lessons=lessons[:10],

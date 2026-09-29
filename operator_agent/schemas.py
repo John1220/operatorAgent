@@ -80,8 +80,13 @@ class TaskState(Enum):
 
 
 class RouteType(Enum):
-    """适配路线"""
-    CODE_TRANSLATION = "code_translation"
+    """适配路线
+
+    只有两个值是**可到达**的: `Router.route()` 的全部出口就是这两个。原来还有第三个
+    `CODE_TRANSLATION`, 而它没有任何生产者 (tests/test_p1 那条断言因此长期红), 于是
+    「有三条路线」这件事是声明出来的而不是实现的 —— 已删。真正的问题不是少一个枚举值,
+    而是这个决策**没有任何消费者** (只被 print 了一次), 见 doc 49 §7.14。
+    """
     COMPILER_BACKEND = "compiler_backend"
     AGENT_GENERATION = "agent_generation"
 
