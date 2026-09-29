@@ -45,6 +45,19 @@ doc 33 的 `runs`/`max_time_ms`、doc 37 的 `llm_cost`、doc 48 的 `candidate_
     V6b oracle 与参考是同一份 (d_ref 写死 0)              → 2 条红 (第一版是 V6，**逃逸**，见下)
     V7 int8 也去算 float64 参考                          → 1 条红
 
+2026-09-30 第二批 (`_oracle_note` 那处修复, 见 `TestNoteReadsBothShapes`; 基线 22 passed，
+**8 条全部拦住**、每轮逐字节复原):
+    N1 退回「只读聚合那份」= 当初那行 `（None 支）`本身        → 3 条红  ← 本片真正的牙齿
+    N2 反过来一律当逐组那份 (聚合的「最差一组」口径丢了)       → 1 条红
+    N3 去掉「最差一组」那半句                                  → 1 条红
+    N4 分支名缺失时直接印 None (空证人)                        → 1 条红
+    N5 先看幅值再看 ρ (ratio 支被印成幅值倍数)                 → 2 条红
+    N6 两把数都没有时沉默收尾 (印一句什么都没支持的话)          → 1 条红
+    N7 门拆掉: 没测到 (absent / error) 也逢人便反对            → 1 条红  ← I27 要求的反向变异
+    N8 门拆掉: 那把尺不反对时也印反对                          → 2 条红
+N1 的红名单里有**唯一一条走真代码**的那条 (`test_real_per_set_path_names_...`)，另外两条是
+合成形状 —— 合成那两条在 N1 下也红，所以这条修复有两个证人而不是一个。登记 I29。
+
 两条一开始逃逸的变异，学到的不是「用例写松了」而是两条别的规矩：
   · **V5**：我当时断言的是 `assertNotIn("oracle_rho", 聚合 metrics)` —— 而聚合里本来就只有
     `oracle_rho_max` 没有 `oracle_rho`。那是一条**永真断言**，杀不掉任何东西 (I25 那一族，
@@ -269,6 +282,73 @@ class TestAggregateOraclesShape(unittest.TestCase):
         self.assertEqual("partially_measured", agg["ref_oracle"])
         self.assertEqual((1, 2), (agg["oracle_sets_measured"], agg["oracle_sets_total"]))
         self.assertNotIn("oracle_rho_max", agg, "没有任何一组有 ρ 时不许发布这个键")
+
+
+class TestNoteReadsBothShapes(unittest.TestCase):
+    """`_oracle_note` 有两种输入形状: 逐组那份的键名没有 `_max`/`_es` 后缀
+
+    这一组是补的账 —— 第一版这个 formatter 只读聚合那一份的键名, 于是**逐组那一路印出来的
+    是「（None 支）」而且幅值那半句整个消失**: 一句话印了, 却什么都没支持。2026-09-30 做
+    #94 的探针 (`参考自己产 NaN` 那一组读数) 时才看见那行 `None 支`, 而它没被任何用例挡住 ——
+    因为原有那条只核了聚合路径 (`_verify_function` 会重算 message 并丢掉逐组那句)。
+    今天逐组那句只有直接调 `_verify_single_set` 的探针/单测看得见, 但 #94 正要在同一个函数上
+    动参考侧的检查, 留一个「读不到就不说话」的 formatter 等于把这条错句子交接下去。
+    """
+
+    def setUp(self):
+        self.v = Verifier(MockGPU())
+
+    def test_real_per_set_path_names_the_branch_and_the_magnitude(self):
+        """**这一条才是那行 `None 支` 的证人**: 走真代码, 不发一分钱的数据"""
+        task, xs = _task(max_error=1e-1), _inputs(1e-3)
+        ref = self.v._generate_reference(task, xs)
+        self.assertIsNotNone(ref, "构造前提: 内建参考在这个任务上算得出来")
+        with contextlib.redirect_stdout(io.StringIO()):
+            r = self.v._verify_single_set(ZEROS, xs, ref, task)
+        self.assertTrue(r.passed, "前提: AND 那条在这个幅值上仍放行全零核")
+        self.assertIn("exact 支", r.message, r.message)
+        self.assertNotIn("None 支", r.message)
+        self.assertIn("误差是参考幅值的", r.message)
+        self.assertNotIn("最差一组", r.message,
+                         "逐组那一路只有这一组, 加「最差一组」会读成还有更差的组")
+
+    def test_aggregate_shape_keeps_the_worst_set_qualifier(self):
+        note = self.v._oracle_note({
+            "ref_oracle": "measured", "oracle_objects": True,
+            "oracle_branches": "ratio", "oracle_rho_max": 400.0,
+            "oracle_scale_relative_max": 1e-9})
+        self.assertIn("ratio 支", note)
+        self.assertIn("最差一组ρ=400", note)
+        self.assertNotIn("None", note)
+
+    def test_per_set_shape_reports_rho_without_the_aggregate_wording(self):
+        note = self.v._oracle_note({
+            "ref_oracle": "measured", "oracle_objects": True,
+            "oracle_branch": "ratio", "oracle_rho": 38.0,
+            "oracle_scale_relative": 1e-9})
+        self.assertIn("ratio 支", note)
+        self.assertIn("ρ=38", note)
+        self.assertNotIn("最差一组", note)
+
+    def test_no_magnitude_available_says_so_instead_of_trailing_off(self):
+        """两把数都拿不到时那句得自己承认, 不是印一句像结论的话 (缺证据不当证据)"""
+        note = self.v._oracle_note({"ref_oracle": "measured", "oracle_objects": True,
+                                    "oracle_branch": "exact"})
+        self.assertIn("exact 支", note)
+        self.assertIn("没给出可比的数", note)
+
+    def test_branch_name_missing_does_not_print_a_bare_none(self):
+        note = self.v._oracle_note({"ref_oracle": "measured", "oracle_objects": True,
+                                    "oracle_rho": 12.0})
+        self.assertIn("分支未知", note)
+        self.assertNotIn("None", note)
+
+    def test_absent_or_unobjecting_readings_print_nothing(self):
+        """成对的那一侧: 这两类不许印句子, 否则「反对」与「没测」在日志里长得一样"""
+        for m in ({"ref_oracle": "absent", "oracle_objects": True},
+                  {"ref_oracle": "error:ZeroDivisionError", "oracle_objects": True},
+                  {"ref_oracle": "measured", "oracle_objects": False, "oracle_rho": 3.0}):
+            self.assertEqual("", self.v._oracle_note(m), m)
 
 
 if __name__ == "__main__":

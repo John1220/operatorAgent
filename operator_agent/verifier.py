@@ -663,21 +663,35 @@ class Verifier:
 
         这一句是给**读日志的人**的: 「本级判通过，而按参考自身误差缩放的那把尺它不该过」
         是 #82 那条盲区的现场。今天只报不判，因为阈是抄来的。
+
+        ⚠️ 两个形状都要读得出来: 聚合那一份的键名带 `_max`/`_es` 后缀 (`oracle_branches`),
+        逐组那一份没有 (`oracle_branch`)。第一版只读聚合那份, 于是**逐组那一路印出来的是
+        「（None 支）」而且幅值那半句整个消失** —— 一个印了却什么都没说的句子。今天那条路径
+        只有直接调 `_verify_single_set` 的探针/单测会看到 (聚合处会重算 message), 但 #94 正要在
+        同一个函数上动参考侧的检查, 与其留一个「读不到就不说话」的 formatter, 不如现在就接上。
         """
         if metrics.get("ref_oracle") not in ("measured", "partially_measured"):
             return ""
         if not metrics.get("oracle_objects"):
             return ""
-        rho = metrics.get("oracle_rho_max")
-        note = (f" ⚠️ 高精度参考那把尺反对这个判决（{metrics.get('oracle_branches')} 支；"
+        # 先认「手里拿的是哪一份」: 聚合那份的键名带 `_max`/`_es`，逐组那份没有。两个形状共用
+        # 一个 formatter 时**口径也要跟着分** —— 「最差一组」这个限定只在聚合那份上成立，
+        # 加到逐组那一路就读成「还有更差的组」。
+        agg = any(k in metrics for k in ("oracle_rho_max", "oracle_scale_relative_max",
+                                         "oracle_branches"))
+        branch = (metrics.get("oracle_branches") if agg else metrics.get("oracle_branch"))
+        rho = metrics.get("oracle_rho_max" if agg else "oracle_rho")
+        scale = metrics.get("oracle_scale_relative_max" if agg else "oracle_scale_relative")
+        where = ("（" + branch + " 支" if branch else "（分支未知")
+        note = (f" ⚠️ 高精度参考那把尺反对这个判决{where}；"
                 f"阈取自 KernelOPT、我方未标定，仅观测）")
+        lead = "，最差一组" if agg else "，"
         if isinstance(rho, (int, float)):
-            return note + f"，最差一组 ρ={rho:.3g}"
-        scale = metrics.get("oracle_scale_relative_max")
+            return note + lead + f"ρ={rho:.3g}"
         if isinstance(scale, (int, float)):
             # exact 支没有 ρ (分母不可信时不许除) —— 说「参考幅值的多少倍」是同一件事的另一种说法
-            return note + f"，最差一组的误差是参考幅值的 {scale:.3g} 倍"
-        return note
+            return note + lead + f"误差是参考幅值的 {scale:.3g} 倍"
+        return note + "，而这把尺没给出可比的数"
 
     def _verify_performance(self, kernel_code: str, test_inputs, target_gflops: float,
                             task: TaskSchema,
