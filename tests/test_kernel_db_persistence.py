@@ -108,10 +108,36 @@ class TestPersistence(unittest.TestCase):
         self.assertEqual(["quiet", "loud"], [r.kernel_id for r in hits])
         self.assertAlmostEqual(0.0, _perf_weight(_rec("z", performance=0.0, score=0.0)))
 
-    def test_seed_records_still_rank_by_gflops(self):
-        """回退分支也要有用例: 6 条手写 seed 没有同机基线, score=0 时必须按 gflops 排"""
-        lo, hi = _rec("lo", performance=5.0, score=0.0), _rec("hi", performance=80.0, score=0.0)
+    def test_measured_records_without_a_baseline_still_rank_by_gflops(self):
+        """回退分支留给**实测过但没有同机基线**的那类: gflops 是这台卡上量出来的"""
+        lo = _rec("lo", performance=5.0, score=0.0, validity="valid")
+        hi = _rec("hi", performance=80.0, score=0.0, validity="valid")
         self.assertGreater(_perf_weight(hi), _perf_weight(lo))
+
+    def test_a_never_measured_prior_gets_no_bonus(self):
+        """缺口 4 剩下的那一半: 6 条手写 seed 的 performance 是抄进来的先验数, 没测过
+
+        旧写法把它们换算成 0.05–0.85 的加分, 于是**全库权重最高的一条是
+        `seed_triton_001` 的 0.85**, 而真机跑出来、带 valid 档位的 8 条只有 0.35–0.44 ——
+        没测过的数字在同一条轴上赢了测过的数字 (2026-09-29 实测的这两个数, 不是假想)。
+        """
+        prior = _rec("prior", performance=90.0, score=0.0, validity="")
+        self.assertAlmostEqual(0.0, _perf_weight(prior))
+        # 差分守卫: 期望值取**模块自己的种子**, 不抄数字 —— 以后给 seed 补实测值时这条会跟着动
+        seeded = KernelDatabase(jsonl_path=None)
+        weights = [_perf_weight(r) for r in seeded._records.values()]
+        self.assertTrue(weights, "种子库是空的, 这条断言在空转")
+        self.assertEqual(0.0, max(weights),
+                         "手写种子又拿到加分了 —— 先验数不许和测量数排在同一条轴上")
+
+    def test_an_unmeasured_prior_cannot_be_preferred_over_a_measurement(self):
+        """消费方视角: 同等相关性下, 实测 1.05× 的那条必须排在先验 gflops=90 的那条前面"""
+        db = KernelDatabase(jsonl_path=None)
+        db.add(_rec("prior", algorithm="rankprobe2", performance=90.0, score=0.0,
+                    validity=""))
+        db.add(_rec("measured", algorithm="rankprobe2", performance=1.0, score=1.05))
+        hits = db.search(algorithm="rankprobe2", hardware="nvidia_gpu", dsl="triton")
+        self.assertEqual(["measured", "prior"], [r.kernel_id for r in hits])
 
 
 class TestGate(unittest.TestCase):

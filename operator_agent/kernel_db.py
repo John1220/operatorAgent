@@ -25,13 +25,27 @@ def _tokenize(text: str) -> set:
 def _perf_weight(record: "KernelRecord") -> float:
     """历史高性能案例的排序加分 (沿用旧口径的量级: 最多加 1.0)
 
-    有可信加速比 (score) 时用 score, 没有时才回退 gflops。回退不是偷懒: 6 条手写 seed
-    本来就没有同机基线可测, 而**旧排序只看 gflops 正是缺口 4 记过的那件事** —— 对
-    memory-bound 算子, gflops 高的核可能恰恰是错的示范。score 上限截在 3.0×,
-    因为加速比再高也不该盖过相关性本身。
+    三条口径, 按证据强度排:
+      1. 有可信同机加速比 (`score`) 就用它, 上限截在 3.0× —— 加速比再高也不该盖过相关性本身。
+      2. 没有 score 但**这台卡上实测过** (`measurement_validity` 非空) 的, 才回退到 gflops。
+      3. 两者皆无 ⇒ **不加分**。这一条是本函数唯一的行为变化: 6 条手写 seed 的
+         `performance` (8.5 / 5.2 / 85.0 / 30.0 / 60.0 / 35.0) 是我抄进来的**先验数**,
+         从来没有在哪台卡上测过, 而旧写法把它们换算成 0.05–0.85 的加分 —— 实测一下就知道
+         后果: 全库权重最高的那条是 `seed_triton_001` 的 0.85, 而真机跑出来、带 valid 档位的
+         那 8 条只有 0.35–0.44。**没测过的数字在同一条轴上赢了测过的数字。**
+         (缺口 1 的那句老话在这里的形态: 缺证据不等于零证据, 但更不能当成正证据。)
+
+    ⚠️ 仍然没有解决的 (记在 doc 49 §八 第 14 条, 不在这里顺手改): 第 2 条那个 gflops 回退
+    对 memory-bound 算子依旧失真 —— gflops 高的访存核可能是错的示范 (缺口 4 的原始证据)。
+    要换的口径是「离这台卡的可达上界还有多远」, 而它需要两个今天不存在的东西:
+    ① `KernelRecord` 里没有 `bound_type` 的**写者**; ② doc 42 已量出可达上界是**按 shape
+    索引的曲线**, 标量分母装不下, 且 `peak_trusted=False` 时那个百分比本身不可信。
+    先加字段再加排序 = 造一份新的「算了没人读」。
     """
     if record.score > 0:
         return min(record.score, 3.0) / 3.0
+    if not record.measurement_validity:
+        return 0.0
     return min(record.performance, 100.0) / 100.0
 
 
