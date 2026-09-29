@@ -374,6 +374,12 @@ class Verifier:
         # 逐组报上来的「参考自己非有限」的个数。聚合规则与上面那份同一条: **没人报过就不写这个键**,
         # 写 0 会被读成「查过了、干净的」, 而远程那一路今天还不报这个数 (见 #94 第 2 片)。
         ref_nonfinite: list[int] = []
+        # 逐组的「这一窗按纯绝对判过, 而同一条 AND 判据判不过」的组号。聚合那支的 message 是
+        # **重算**的 (每组自己那句被丢掉), 所以这份分歧必须在轮级这里接上, 否则最危险的那个
+        # 方向 (放行) 永远只有逐组那一行读得到 —— 与 `_oracle_note` 那次同一处教训。
+        alt_rejected: list[int] = []
+        # 走「纯绝对」那把尺的组号 (认它的标志是 `and_form_atol` 在场 —— 只有那条路会算第二个读数)
+        abs_only_sets: list[int] = []
         has_reference = False
         reference_types = set()
         execution_devices = set()
@@ -397,6 +403,13 @@ class Verifier:
                                 if k == "ref_oracle" or k.startswith("oracle_")})
                 if "reference_nonfinite" in m:
                     ref_nonfinite.append(int(m["reference_nonfinite"]))
+                if "and_form_atol" in m:
+                    abs_only_sets.append(idx + 1)
+                # 走到这里说明这一组按本轮那把尺**判过了**; `and_form_passed is False` 就是
+                # 「同一条 AND 判据会拦下它」。用 `is False` 而不是 falsy —— 全量那条根本不报
+                # 这个键, 缺席是「没做这个观测」, 与「观测说不会拦」是两件事。
+                if m.get("and_form_passed") is False:
+                    alt_rejected.append(idx + 1)
                 if m.get("reference_type"):
                     reference_types.add(m["reference_type"])
                 if m.get("device"):
@@ -420,6 +433,15 @@ class Verifier:
                 # 否则读者只能去猜是分片取样的锅还是参考自己炸了
                 msg += f" (参考另有 {sum(ref_nonfinite)} 个非有限值, 已从分母剔除)"
             msg += agg_note
+            if abs_only_sets:
+                # 「这一轮用的是哪把尺」今天必须说出来: 采样那条只报 `atol`, 而全量那条报
+                # `atol`+`rtol`+`ρ` —— 少报那两个键在 `single_ruler` 眼里与「同值」不同,
+                # 但读聚合结果的人看不出少了什么。
+                msg += (f" ⚠️ {len(abs_only_sets)}/{len(sets_with_reference)} 组比的是采样窗口那把"
+                        f"**纯绝对**尺 (无相对项、无 ρ), 组 {abs_only_sets}")
+            if alt_rejected:
+                msg += (f" ⚠️ 其中 {len(alt_rejected)} 组按那把尺**判过**、而同一条 AND 判据会拦下, "
+                        f"组 {alt_rejected} (判决未换尺, 这一句是观测)")
             if gate_conflicts:
                 msg += (f" ⚠️ 这几组用的**不是同一把尺** {sorted(gate_conflicts)}, "
                         f"聚合值因此不发布单值 (见 metrics.gate_params_conflict)")
@@ -440,6 +462,11 @@ class Verifier:
                 # 摊开成 {键: {组下标: 那一组实际用的值}} —— 读的人不必重跑就能看出
                 # 是哪几组、哪一把尺不一致
                 metrics["gate_params_conflict"] = gate_conflicts
+            if abs_only_sets:
+                # 两个键都是**组号列表**而不是一个计数: 读数要能回到那一组去核
+                metrics["absolute_only_sets"] = abs_only_sets
+            if alt_rejected:
+                metrics["and_form_would_reject_sets"] = alt_rejected
             if ref_nonfinite:
                 # 有人报过才写: 一组都没报 (全走远程那条旧载荷) 时这个键**缺席**, 而不是 0 ——
                 # 0 会被读成「查过了, 参考是干净的」(本仓那一族: 把没检查当检查过)
@@ -553,15 +580,47 @@ class Verifier:
                     level=VerificationLevel.L2_FUNCTION, passed=False,
                     message=f"执行失败: 候选输出含 {cand_bad} 个非有限值 (NaN/Inf)",
                     metrics=metrics)
-            if max_error <= max_allowed:
+            # #80 的观测半边 —— 这一条路用的**不是**全量那条与真机那条的尺: 它是纯绝对
+            # (`max_error <= task.constraints.max_error`), 不查容差表、没有相对项、也没有 ρ。
+            # 因为 `effective_atol` 取的是 `min(表, 任务自带值)`, 这把尺只会**同松或更松**,
+            # 所以「整体缩放一点点」那一类候选 (doc 12 / tolerance.py docstring 立的案) 能从
+            # 这里放过去, 而 AND 那条会拦。更糟的是它以前一个尺键都不报 ⇒ 混用两条路时
+            # `single_ruler` (轮级) 与 `l2_ruler_reading` / `cross_round_ruler` (运行级)
+            # 只能读成「这一轮没报尺」, 看不见「这几组用的不是同一把尺」。
+            # 这一片**不改判决**, 只做两件事: ① 如实发布这一窗真正用过的绝对阈 (`atol`),
+            # 让那三个已有的读者第一次能报警; ② 把同一条 AND 判据套在同一窗上的第二个读数
+            # 发布成 `and_form_*` 旁证键 —— 判定规则仍只有 `tolerance` 那一份, 这里不调形状。
+            passed_abs = max_error <= max_allowed
+            alt_atol, alt_rtol, alt_rho = tolerance.effective_atol(
+                task.constraints.precision.value, max_allowed)
+            alt_diff = np.abs(sample[ref_ok] - ref_window[ref_ok])
+            alt_bad = int(((alt_diff > alt_atol) &
+                           (alt_diff / (np.abs(ref_window[ref_ok]) + tolerance.EPS) > alt_rtol)).sum())
+            alt_passed, alt_matched = tolerance.evaluate(alt_bad, n_compared, False, alt_rho)
+            metrics.update({
+                "atol": max_allowed,
+                "and_form_atol": alt_atol, "and_form_rtol": alt_rtol,
+                "and_form_required_matched_ratio": alt_rho,
+                "and_form_bad_elements": alt_bad,
+                "and_form_matched_ratio": alt_matched,
+                "and_form_passed": alt_passed,
+            })
+            both = ("两把尺判得一致" if alt_passed == passed_abs else
+                    f"⚠️ 分歧: 纯绝对判{'过' if passed_abs else '不过'} 而 AND 判"
+                    f"{'过' if alt_passed else '不过'} ({alt_bad}/{n_compared} 个可比元素同时超 "
+                    f"atol={alt_atol:.1e} 与 rtol={alt_rtol:.1e})")
+            note = (f" —— 这一窗用的尺是纯绝对 atol={max_allowed:.1e} (无相对项、无 ρ); {both}"
+                    f"。判决没换尺, 这一句是观测")
+            if passed_abs:
                 extra = (f", 另有 {compared - n_compared} 个元素参考非有限已剔除"
                          if compared - n_compared else "")
                 return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True,
                                           message=(f"采样比对通过 ({n_compared}/{ref_flat.size} 元素可比), "
-                                                   f"最大误差={max_error:.2e}" + extra),
+                                                   f"最大误差={max_error:.2e}" + extra + note),
                                           metrics=metrics)
             return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False,
-                                      message=f"功能验证失败: 误差 {max_error:.2e}", metrics=metrics)
+                                      message=f"功能验证失败: 误差 {max_error:.2e}" + note,
+                                      metrics=metrics)
 
         actual = result.output
         expected = np.asarray(expected_output, dtype=np.float32)

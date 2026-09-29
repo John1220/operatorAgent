@@ -63,7 +63,11 @@ SHIFT = "import numpy as np\n\ndef kernel(A=None, B=None, **kw):\n    return (A 
 
 K = 64
 # 只有 AND 那条路会算这几个键; 纯绝对那条一个都不算 (它只报 max_error/coverage)。
-AND_ONLY_KEYS = ("matched_ratio", "bad_elements", "atol", "rtol", "required_matched_ratio")
+# ⚠️ `atol` 曾经在这个名单里, #80 第 1 片把它挪出去了: 采样那条现在**如实发布自己用过的绝对阈**
+# (以前它一个尺键都不报, 于是三个读者读成「没测」)。这个名单的语义因此从「报了尺」变成
+# 「算了 AND 那套的元素级量」—— 判别路别的那件事交给 `branch_of`, 别拿这个名单当标记 (I33)。
+NOT_COMPUTED_BY_ABSOLUTE_ONLY = ("matched_ratio", "bad_elements", "rtol",
+                                 "required_matched_ratio")
 
 
 def make_task(max_error: float, precision: Precision = Precision.FP32) -> TaskSchema:
@@ -86,15 +90,25 @@ def make_inputs(scale: float) -> dict:
 def branch_of(res) -> str:
     """走的是哪条比对路径。
 
-    ⚠️ 判别键**不能用 `coverage`**: 两条路都上报它 (采样那条与 AND 那条各写各的, 后者在参考
-    干净时恒 1.0), 而通过那一侧的聚合还会用 `m.get("coverage", 1.0)` 再兜一次。第一版就是拿它
-    当标记, 于是表里一半的行被印成错的那条路。`atol` 只有 AND 那条会算 (它才是查了容差表的那条),
-    所以用它。
+    ⚠️ 这个判别键**第二次腐烂**了, 两次都是「拿一个只有一条路会报的键当标记」:
+      · 第一版用 `coverage` —— 两条路都上报它 (后者在参考干净时恒 1.0), 而通过那一侧的聚合
+        还会用 `m.get("coverage", 1.0)` 再兜一次 ⇒ 表里一半的行被印成错的那条路;
+      · 第二版用 `atol` —— 那时它只有 AND 那条会算。#80 第 1 片 (2026-09-30) 让采样那条**如实
+        发布自己用过的绝对阈** (这正是那一片存在的理由: 以前它一个尺键都不报, 三个读者读成
+        「没测」), 于是 `atol` 不再是唯一标记。
+      · 第三版顺手改成 `and_form_atol` 也不对 —— 那是**逐组**的键, 而探针拿的是聚合后的那份
+        (`metrics = {**agg_values, **gate_params}` 不带逐组的 `and_form_*`), 于是表里每一行都
+        被印成「认不出哪条路」。聚合这一层唯一的标记是本轮新加的 `absolute_only_sets`。
+    现在: 聚合层认 `absolute_only_sets` (采样那条用过的尺), 逐组层认 `and_form_atol`; 两者都
+    没有时再看 `rtol` (只有 AND 那条会算)。顺序不能反。
     """
-    if "atol" in res.metrics:
-        return "AND 形式"
-    if "max_error" in res.metrics:
+    m = res.metrics
+    if "absolute_only_sets" in m or "and_form_atol" in m:
         return "纯绝对"
+    if "rtol" in m:
+        return "AND 形式"
+    if "max_error" in m:
+        return "❓报了误差但没有尺"
     return "❓认不出哪条路"
 
 
@@ -148,11 +162,11 @@ def main() -> int:
         print(f"  {label}: atol={fmt(r, 'atol')} matched_ratio={fmt(r, 'matched_ratio')} "
               f"max_rel={fmt(r, 'max_rel_error')} bad={fmt(r, 'bad_elements')} "
               f"aggregated_over={r.metrics.get('aggregated_over', '— 没这个键')}")
-        present = [k for k in AND_ONLY_KEYS if k in r.metrics]
+        present = [k for k in NOT_COMPUTED_BY_ABSOLUTE_ONLY if k in r.metrics]
         if br.startswith("纯绝对"):
             if present:
                 arm_bad += 1
-                print(f"    ❗#81 又回来了: 这条路不算 {AND_ONLY_KEYS}, 而聚合发布了 "
+                print(f"    ❗#81 又回来了: 这条路不算 {NOT_COMPUTED_BY_ABSOLUTE_ONLY}, 而聚合发布了 "
                       f"{present} —— 缺证据被写成了「全部元素匹配、零坏点、无相对误差」")
             elif r.metrics.get("aggregated_over") is None:
                 arm_bad += 1
@@ -161,9 +175,9 @@ def main() -> int:
             else:
                 print("    ✔ 这条路没算的量在聚合里也不出现, 且出处标明它们 0/n 组")
         else:
-            if len(present) != len(AND_ONLY_KEYS):
+            if len(present) != len(NOT_COMPUTED_BY_ABSOLUTE_ONLY):
                 arm_bad += 1
-                print(f"    ❗AND 那条本该自己算出 {AND_ONLY_KEYS}, 缺了 {set(AND_ONLY_KEYS) - set(present)}")
+                print(f"    ❗AND 那条本该自己算出 {NOT_COMPUTED_BY_ABSOLUTE_ONLY}, 缺了 {set(NOT_COMPUTED_BY_ABSOLUTE_ONLY) - set(present)}")
             elif "aggregated_over" in r.metrics:
                 arm_bad += 1
                 print("    ❗全都报过时不必发布 aggregated_over (它此时不携带信息)")

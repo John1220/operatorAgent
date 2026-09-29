@@ -456,6 +456,21 @@ except Exception as e:
 
 AND 是关键：近零参考处相对误差会爆，但只要绝对误差在 `atol` 内就不算坏点。
 
+**⚠️ 但 L2 其实有三条比对路，只有两条走上面那把尺**（2026-09-30 核实的，见
+[`docs/research/12`](research/12-正确性验证与reward-hacking防护.md) §八）：
+
+| 路 | 什么时候走 | 判据 | 报的尺键 |
+|---|---|---|---|
+| 全量 | 后端声明 `FULL_OUTPUT_TENSOR`（本地 numpy / MockGPU） | 绝对 + 相对 AND + ρ | `atol` `rtol` `required_matched_ratio` |
+| 真机 | 后端声明 `REMOTE_VERIFY`（SSH 上 `run_kernel.py`） | 同一个 `tolerance` 模块 | 同上三键（逐键透传） |
+| **采样窗口** | 执行侧只回样本（两个能力都没声明） | **纯绝对** `max_error <= 任务自带值` | 只有 `atol`（= 那个任务值） |
+
+`effective_atol` 取的是 `min(表, 任务值)`，所以第三条那把尺**只会同松或更松**：探针臂 4 里一份
+常数偏移 3e-3 的候选配大幅值参考，纯绝对 `atol=5.00e-01` 判过、AND 那条 `atol=1.00e-04` 拦下。
+2026-09-30 那一步做的是**观测**（不改判决）：这条路现在如实发布自己用过的 `atol`，并把同一条
+AND 判据在同一窗上的第二个读数发布成 `and_form_*`，日志与 `metrics` 里都能看出哪几组用的不是
+同一把尺（`absolute_only_sets` / `and_form_would_reject_sets`）。换成同一把尺要带真机 A/B（#80 第 2 片）。
+
 **⚠️ 「调大 `max_error`」这条路现在是无效的**，别再按它排查。任务自带的 `max_error` 与容差表
 合并时取的是 **min**（`effective_atol()`）——**任务只能收紧，不能放宽**。历史上三个 driver 都传过
 `max_error=5e-1`，那不是疏忽：在只有绝对项的门禁下，输出幅值到 3.35 时确实需要很大的 `atol`
