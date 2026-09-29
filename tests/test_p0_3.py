@@ -14,6 +14,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -89,7 +90,15 @@ class TestSpeedupVerdict(unittest.TestCase):
 
     def test_equal_impl_passes_with_speedup_metrics(self):
         r = _l3(self.verifier, PYTHON_MATMUL, _matmul_inputs(), _make_task())
-        self.assertTrue(r.passed, r.message)
+        # 不断言 `r.passed`: 同实现的真实比值本来就随负载在 0.3–3.0 之间漂
+        # (`test_speedup_sanity_for_equal_impl` 守这个区间), 而邻居进程一挤, 判据就不该
+        # 只凭「通过了」变红 —— 那是机器的状态, 不是代码的回归 (doc 49 §7.7 / #50)。
+        # 「判定读的是这个比值」由下面 `TestSpeedupGateIsAFunctionOfTheRatio` 用固定计时确定性地测;
+        # 这里只要求**通过了就不许自相矛盾**。
+        if r.passed:
+            self.assertGreaterEqual(
+                r.metrics["speedup_vs_baseline"], r.metrics["min_speedup_required"],
+                f"通过了, 但它自己报出来的比值不支持这个结论: {r.message}")
         self.assertIn("speedup_vs_baseline", r.metrics)
         self.assertIn("baseline_time_ms", r.metrics)
         self.assertIn(r.metrics["baseline_type"], ("pytorch_eager", "numpy_reference"))
@@ -138,12 +147,73 @@ class TestBoundClassification(unittest.TestCase):
         self.assertEqual(Verifier._bound_type("exotic_op"), "unknown")
 
     def test_softmax_uses_memory_bound_metrics(self):
+        """访存型算子走 memory 轴, 判定读的是加速比 —— **但不断言这台机器有多快**
+
+        原先这里断言 `r.passed`, 而 passed 要求实测加速比 ≥ `min_speedup=0.5`:
+        32×32 / 1024 元素 / warmup=2 repeat=5 是在**控制机 CPU**上量的, 邻居进程一挤就掉到
+        0.40 ⇒ 红的时候分不清是这个核变慢了还是这台机器在忙 (doc 49 §7.7 记的定量结果:
+        并发时约 3/24 次多出一条红, 机器安静时两边各 12 次全绿)。
+        判定本身由下面那条**固定计时**的用例来断言 —— 那才是这条用例真正要看的东西。
+        """
         verifier = Verifier(MockGPU())
         inputs = {"X": np.random.default_rng(0).standard_normal((32, 32)).astype(np.float32)}
         r = _l3(verifier, PYTHON_SOFTMAX, inputs, _make_task("softmax"))
-        self.assertTrue(r.passed, r.message)
         self.assertEqual(r.metrics["bound_type"], "memory")
-        self.assertIn("speedup_vs_baseline", r.metrics)  # 访存型也用加速比判定
+        self.assertIn("speedup_vs_baseline", r.metrics)   # 访存型也用加速比判定
+        self.assertGreater(r.metrics["speedup_vs_baseline"], 0.0,
+                           f"没量出加速比: {r.message}")
+        # 阈值确实传到了判定处 (而不是被某处悄悄换成绝对目标)
+        self.assertEqual(0.5, r.metrics["min_speedup_required"])
+
+
+class _FixedTiming(MockGPU):
+    """把「量到几毫秒」变成已知答案 —— 被测的是**判定读哪个数**, 不是这台机器的速度"""
+
+    def __init__(self, median_ms: float):
+        super().__init__()
+        self._median_ms = float(median_ms)
+
+    def benchmark(self, kernel_code, inputs, warmup=3, repeat=10):
+        bench = dict(super().benchmark(kernel_code, inputs, warmup=warmup, repeat=repeat))
+        for key in ("median_time_ms", "min_time_ms", "avg_time_ms"):
+            bench[key] = self._median_ms
+        return bench
+
+
+class TestSpeedupGateIsAFunctionOfTheRatio(unittest.TestCase):
+    """#50: 「墙钟加速比 ≥ 阈值」这条判据要可判定, 就得和机器当前忙不忙解耦
+
+    候选固定 2.0 ms、基线固定 3.0 ms ⇒ 加速比是**算出来的已知量 1.50x**, 于是阈值放在
+    它两侧各跑一次都必须给出确定的答案。这也是量具自身的标定: 报出来的比值必须等于
+    我注入的幅度, 否则「判定读的是这个数」这句话就没有可验的内容。
+    """
+
+    CANDIDATE_MS = 2.0
+    BASELINE_MS = 3.0
+
+    def _run(self, min_speedup):
+        verifier = Verifier(_FixedTiming(self.CANDIDATE_MS))
+        task = _make_task("softmax", min_speedup=min_speedup)
+        inputs = {"X": np.random.default_rng(0).standard_normal((32, 32)).astype(np.float32)}
+        with mock.patch.object(verifier, "_measure_baseline",
+                              return_value={"baseline_type": "numpy_eager",
+                                            "baseline_time_ms": self.BASELINE_MS}):
+            return _l3(verifier, PYTHON_SOFTMAX, inputs, task)
+
+    def test_the_ratio_is_the_one_that_was_injected(self):
+        """先标定量具本身: 报出来的加速比必须等于注入的 3.0/2.0"""
+        r = self._run(min_speedup=0.5)
+        self.assertAlmostEqual(1.5, r.metrics["speedup_vs_baseline"], places=4)
+
+    def test_passes_when_the_threshold_is_below_the_ratio(self):
+        self.assertTrue(self._run(min_speedup=1.4).passed)
+
+    def test_refuses_when_the_threshold_is_above_the_ratio(self):
+        """阈值只挪一位小数, 结论就必须翻 —— 判定确实读的是这个数"""
+        r = self._run(min_speedup=1.6)
+        self.assertFalse(r.passed)
+        self.assertIn("加速比", r.message, f"拒了但没说是加速比不够: {r.message}")
+        self.assertIn("1.50x", r.message, "报出来的比值不是我注入的那个")
 
 
 # ─── baseline 缓存 ───────────────────────────────────────────
