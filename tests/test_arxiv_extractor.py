@@ -58,7 +58,8 @@ class TestProvenanceOfLineNumbers(unittest.TestCase):
 
     def test_a_newline_in_the_source_is_also_a_line_break(self) -> None:
         # 行号由**两种**东西决定：块级标签 *和* 源文件里本来就有的换行。
-        # 所以「3,344 行」只在同一批字节上可重建 —— 这就是为什么报表把字节数和行数一起印
+        # 所以「3,470 行」只在同一批字节上可重建 —— 这就是为什么报表把字节数和行数一起印
+        # （2026-09-30: 这一句写完的第二天真被重跑了, KernelOPT 那两个数对不上, 见 doc 58 §1.1）
         self.assertEqual(["one", "two"], to_lines("<p>one\ntwo</p>"))
 
 
