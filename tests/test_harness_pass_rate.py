@@ -45,7 +45,7 @@ def _round(n, l1=True, l2=None, l3=None, validity=None, speedup=None, action="op
 
 
 def _run(rounds, final=None, admitted=False, reason="", tokens=100, usd=0.01,
-         wall=10.0, ok=True, error=None, calls=7):
+         wall=10.0, ok=True, error=None, calls=7, sampling=None):
     if final is None:
         final = bool(rounds) and any(r["all_passed"] for r in rounds)
     rtp, via = first_pass_round(rounds) if final else (None, None)
@@ -53,7 +53,9 @@ def _run(rounds, final=None, admitted=False, reason="", tokens=100, usd=0.01,
             "ok": ok, "error": error, "rounds": rounds,
             "final_all_passed": final, "rounds_to_pass": rtp, "passed_via": via,
             "admitted": admitted, "admit_reason": reason,
-            "tokens": tokens, "cost_usd": usd, "llm_calls": calls, "wall_s": wall}
+            "tokens": tokens, "cost_usd": usd, "llm_calls": calls,
+            # 少这个键就会红 (上面那条白名单守卫) —— None 表示「这次运行没产出账本」
+            "llm_sampling": sampling, "wall_s": wall}
 
 
 def _n_passing(n):

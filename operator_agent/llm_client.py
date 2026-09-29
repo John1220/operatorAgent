@@ -125,6 +125,41 @@ class _LLMCallRecord:
     # 端点**自报**的模型标识 (响应里的 `model` 字段), 与请求的那个并排存 (doc 58 §2.4 / #89)。
     # None = 响应里根本没有这个字段 —— 那是「不知道」而不是「一致」。
     reported_model: Optional[str] = None
+    # 本次**真发出去**的采样配置 (#98 / doc 59 §四)。三个值必须在造 body 的那一处一次性取好
+    # 再分给 body 与账本两个读者 —— 让报表另读一遍构造参数会印成 `client.temperature` (0.3),
+    # 而逐调用覆盖在这里是常态 (Designer 0.3 / Coder 0.1 / Fixer 0.1 / planner 0.2 …),
+    # 那就是 #52「记录与事实不同源」的同一条。
+    # None = 这条记录没带采样配置 (假账本、或写这三个字段之前的记录), **不是**「值为 0」
+    # 也不是「取默认」。
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    enable_thinking: Optional[bool] = None
+
+
+def _or_dash(value):
+    """`None` 印成 `—` —— 「这一项没记到」不是一个取值"""
+    return "—" if value is None else value
+
+
+def format_sampling_configs(sampling: dict) -> list:
+    """把 `CostTracker.sampling_configs` 的结果印成行 (#98 / doc 59 §四)
+
+    `pretty()` 与 `benchmarks/harness_pass_rate.py` 两个读者共用这一份渲染: 各印一遍就会
+    各漂移各的, 而这张表的用途是让两个人对同一批数字得出同一个读数条件。
+    """
+    out: list = []
+    for caller, configs in (sampling.get("by_caller") or {}).items():
+        for c in configs:
+            out.append(
+                f"{caller}: model={_or_dash(c['model'])} "
+                f"temperature={_or_dash(c['temperature'])} "
+                f"max_tokens={_or_dash(c['max_tokens'])} "
+                f"enable_thinking={_or_dash(c['enable_thinking'])} ×{c['calls']} 次")
+    missing = sampling.get("n_records_without_sampling") or 0
+    if missing:
+        out.append(f"⚠️ 另有 {missing} 条调用没记采样配置 ⇒ 上面这张表不全, "
+                   f"「没记」不等于「用了默认值」")
+    return out
 
 
 class CostTracker:
@@ -137,7 +172,9 @@ class CostTracker:
     def record(self, *, model: str, prompt_tokens: int, completion_tokens: int,
                usage_source: str, caller_tag: str = "Unknown",
                cached_prompt_tokens: int = 0, cache_semantics: str = "absent",
-               reported_model: Optional[str] = None) -> None:
+               reported_model: Optional[str] = None,
+               temperature: Optional[float] = None, max_tokens: Optional[int] = None,
+               enable_thinking: Optional[bool] = None) -> None:
         total = prompt_tokens + completion_tokens
         # 查价格表: 小写匹配 model 前缀
         key_lower = model.lower()
@@ -172,6 +209,9 @@ class CostTracker:
             cache_semantics=cache_semantics,
             cost_basis=cost_basis,
             reported_model=reported_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            enable_thinking=enable_thinking,
         ))
 
     def reset(self) -> None:
@@ -213,6 +253,43 @@ class CostTracker:
             bucket["cost_usd"] = round(bucket["cost_usd"] + r.cost_usd, 6)
         return out
 
+    def sampling_configs(self, records=None) -> dict:
+        """把「真发出去的采样配置」按 caller 归并成**组合**计数 (#98 / doc 59 §四)
+
+        三条规则，各对应一种已经犯过的读法：
+
+        1. 逐调用覆盖在这里是常态（Designer 0.3 / Coder 0.1+40960 / Fixer 0.1+1024 /
+           planner 0.2），一个标量代表不了 ⇒ 按 (model, temperature, max_tokens,
+           enable_thinking) 的**组合**计数。把各轴分开取集合会配出四种根本不存在的
+           配置（把「0.1 配 1024」和「0.3 配 40960」混成笛卡尔积）。
+        2. 三项**全缺**的条目单独计数成 `n_records_without_sampling`，不折进任何组合：
+           「没记」既不是「温度为 0」也不是「取默认」（#53 那一族：缺证据当否定证据）。
+        3. 只缺其中一两项的条目照常归组，缺的那一格留 None ⇒ 读者印 `—`。
+        """
+        rows = self.records if records is None else records
+        combos: dict = {}
+        without = 0
+        for r in rows:
+            if r.temperature is None and r.max_tokens is None and r.enable_thinking is None:
+                without += 1
+                continue
+            key = (r.caller_tag, r.model, r.temperature, r.max_tokens, r.enable_thinking)
+            combos[key] = combos.get(key, 0) + 1
+        by_caller: dict = {}
+        for (caller, model, temp, mx, think), n in combos.items():
+            by_caller.setdefault(caller, []).append({
+                "model": model, "temperature": temp, "max_tokens": mx,
+                "enable_thinking": think, "calls": n,
+            })
+        for configs in by_caller.values():
+            configs.sort(key=lambda c: (-c["calls"], str(c["temperature"]),
+                                        str(c["max_tokens"])))
+        return {
+            "n_records_with_sampling": sum(combos.values()),
+            "n_records_without_sampling": without,
+            "by_caller": dict(sorted(by_caller.items())),
+        }
+
     def _summarize(self, records) -> dict:
         semantics: dict = {}
         # 端点自报的模型标识 vs 请求的那个 (doc 58 §2.4 / #89)。刻意**不做归一化**:
@@ -244,6 +321,9 @@ class CostTracker:
             "total_cost_usd": round(sum(r.cost_usd for r in records), 6),
             "breakdown_by_caller": self.breakdown_by_caller(records),
             "n_estimated_usage": sum(1 for r in records if r.usage_source == "estimated"),
+            # 「这次跑到底是在哪个采样配置下测的」(#98)。报表把它当成读数条件之一,
+            # 所以它必须和 body 同源 —— 见 `_LLMCallRecord.temperature` 那条注释。
+            "sampling": self.sampling_configs(records),
         }
 
     def summary(self) -> dict:
@@ -296,6 +376,12 @@ class CostTracker:
                     f"{b['prompt_tokens']}in / {b['completion_tokens']}out, "
                     f"≈${b['cost_usd']:.4f}"
                 )
+        # #98: 账单旁边印「这次是在什么采样配置下跑的」。放在这里而不是只进报表,
+        # 因为一次普通 run 的读者只有这份日志 —— 只落盘不印出来就又是「算了没人读」。
+        sampling_lines = format_sampling_configs(s["sampling"])
+        if sampling_lines:
+            lines.append("  采样配置 (逐调用覆盖之后, 真发出去的那些):")
+            lines.extend(f"    - {x}" for x in sampling_lines)
         return "\n".join(lines)
 
 
@@ -309,6 +395,7 @@ class LLMClient:
         model: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        enable_thinking: bool = False,
         timeout: int = 120,
         fallback_model: Optional[str] = None,
         fallback_base_url: Optional[str] = None,
@@ -325,6 +412,10 @@ class LLMClient:
         self.model = model or os.environ.get("LLM_MODEL", "Qwen3.8-27B")
         self.temperature = temperature
         self.max_tokens = max_tokens
+        # 之前这条只写在 body 的字面量里 (硬编码 False), 于是「我方所有通过率数字都是在
+        # 关掉思考的配置下测出来的」这件事在报表里没有出处 (#98 / doc 59 §四)。挪到这里
+        # ⇒ 发出去的那个值和报表里印的那个值是同一个属性。
+        self.enable_thinking = enable_thinking
         self.timeout = timeout
         self._chat_url = f"{self.base_url}/chat/completions"
 
@@ -402,13 +493,19 @@ class LLMClient:
     ) -> str:
         """实际发起一次 LLM API 调用的内部方法, 调用结束后写入 usage 账本"""
         chat_url = f"{base_url}/chat/completions"
+        # 逐调用覆盖在这里是常态 (`agents.py` 里 Designer 0.3/2048、Coder 0.1/40960,
+        # `fixer.py` 0.1/1024, `planner.py` 0.2/2048), 所以「本次真发出去的几个值」只能
+        # 在这一处算一次, 再分给 body、错误文案、账本三个读者。报表若另读
+        # `client.temperature` 就会把 0.1 的那一半印成 0.3 —— #52 同一条 (#98)。
+        sent_temperature = temperature or self.temperature
+        sent_max_tokens = max_tokens or self.max_tokens
         body = {
             "model": model,
             "messages": messages,
-            "temperature": temperature or self.temperature,
-            "max_tokens": max_tokens or self.max_tokens,
+            "temperature": sent_temperature,
+            "max_tokens": sent_max_tokens,
             "stream": False,
-            "chat_template_kwargs": {"enable_thinking": False},
+            "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
         }
 
         headers = {"Content-Type": "application/json"}
@@ -464,13 +561,19 @@ class LLMClient:
             # 端点自报的标识 (OpenAI 兼容层通常都会带 `model`)。取**原始值**, 不裁剪、不映射:
             # 观测阶段要的是「它今天说自己是谁」, 归一化规则没核过就不写 (doc 58 §2.4 / #89)
             reported_model=(result.get("model") or None),
+            # 记账用**同一个局部变量**, 不是再算一遍 `temperature or self.temperature`:
+            # 两处各写一遍就是两条会各自漂移的路径 (doc 33 `runs` / doc 37 `llm_cost` /
+            # doc 48 `candidate_signature` 那一族「值算出来死在搬运路上」的反面写法)。
+            temperature=sent_temperature,
+            max_tokens=sent_max_tokens,
+            enable_thinking=self.enable_thinking,
         )
 
         if content is None or (isinstance(content, str) and content.strip() == ""):
             if finish_reason == "length":
                 raise RuntimeError(
                     f"LLM 回复被截断 (finish_reason=length): "
-                    f"思考过程耗尽 max_tokens={max_tokens or self.max_tokens}，"
+                    f"思考过程耗尽 max_tokens={sent_max_tokens}，"
                     f"未产生最终输出。请增大 max_tokens 或简化请求。"
                 )
             reasoning = message.get("reasoning_content", "")

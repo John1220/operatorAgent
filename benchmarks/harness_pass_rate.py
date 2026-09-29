@@ -51,7 +51,8 @@ import numpy as np  # noqa: E402
 
 from operator_agent.backend_caps import Cap  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.llm_client import LLMClient  # noqa: E402
+from operator_agent.llm_client import (  # noqa: E402
+    LLMClient, format_sampling_configs)
 from operator_agent.measurement import (LINEAGE_RULER_KEY, Validity,  # noqa: E402
                                         correctness_verified_levels,
                                         cross_round_ruler, persist_decision)
@@ -198,6 +199,54 @@ def cost_from_metadata(metadata):
     return (int(c.get("total_tokens") or 0),
             float(c.get("total_cost_usd") or 0.0),
             int(c.get("total_calls") or 0))
+
+
+def sampling_from_metadata(metadata):
+    """取本次运行「真发出去的采样配置」; 没有账本时返回 **None** 而不是空表 (#98)
+
+    空表和 None 在两处读者眼里必须不同: 空表读起来像「这次跑没发任何请求」,
+    None 读起来才是「这份报表的产出者没记这件事」。键名 `sampling` 的机械守卫在
+    `tests/test_llm_sampling_knobs.py` —— 与上面那条 `total_cost_usd` 键名守卫同族。
+    """
+    c = (metadata or {}).get("llm_cost") or {}
+    return c.get("sampling") or None
+
+
+def sampling_from_runs(runs):
+    """把各次运行账本里的采样配置并成一份读数条件 (#98 / doc 59 §四)
+
+    三个入口分开计数, 折成一个数就会造出一张「看起来是全的」表:
+      * `n_runs_without_ledger` —— 这次运行没产出账本 (崩溃 / 早退), 它的配置**无从知道**;
+      * `n_records_without_sampling` —— 账本里有调用条目但没带那三个字段 (老账本);
+      * 「没记」既不是「用了默认值」也不是「配置为 None 的一次取值」(#53 那一族)。
+    合并按 (caller, model, temperature, max_tokens, enable_thinking) 组合相加 —— 不是
+    各轴取并集, 那样会把「0.1 配 1024」与「0.3 配 40960」配出四种不存在的配置。
+    """
+    buckets: dict = {}
+    with_ledger = 0
+    without_ledger = 0
+    records_without = 0
+    for rec in runs:
+        sampling = rec.get("llm_sampling")
+        if not sampling:
+            without_ledger += 1
+            continue
+        with_ledger += 1
+        records_without += int(sampling.get("n_records_without_sampling") or 0)
+        for caller, configs in (sampling.get("by_caller") or {}).items():
+            bucket = buckets.setdefault(caller, {})
+            for c in configs:
+                key = (c.get("model"), c.get("temperature"),
+                       c.get("max_tokens"), c.get("enable_thinking"))
+                bucket[key] = bucket.get(key, 0) + int(c.get("calls") or 0)
+    by_caller: dict = {}
+    for caller, bucket in sorted(buckets.items()):
+        rows = [{"model": k[0], "temperature": k[1], "max_tokens": k[2],
+                 "enable_thinking": k[3], "calls": n} for k, n in bucket.items()]
+        rows.sort(key=lambda c: (-c["calls"], str(c["temperature"]), str(c["max_tokens"])))
+        by_caller[caller] = rows
+    return {"n_runs_with_ledger": with_ledger, "n_runs_without_ledger": without_ledger,
+            "n_records_without_sampling": records_without, "by_caller": by_caller}
 
 
 def first_pass_round(rounds):
@@ -478,11 +527,50 @@ def compare_runs(runs_a, runs_b, meta_a=None, meta_b=None, target_delta=0.30):
     }
 
 
+def _knobs_cell(value):
+    """knobs 的一格印成什么: 没记 ⇒ `— 没记`, 而不是空串 (空串读起来像「两边都没值」)"""
+    if value is None:
+        return "— 没记"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def format_knobs_pair(meta_a, meta_b):
+    """把两份报表的 knobs 并排印, 不同的那几项标 ⚠️ (#98 / doc 59 §四)
+
+    这一段的存在理由不是「好看」。报表落盘时自己写着「引用这些数字时必须带上 `git_head` 与
+    `knobs`」, 而 `--compare` 这条路径此前只印 `git_head` —— 那句警告在 A/B 现场**没有读者**,
+    是「算了没人读」的一个实例。两边读数条件不一致时, 那个 Δ 就不是同一次尺下的差。
+    """
+    ka = (meta_a or {}).get("knobs") or {}
+    kb = (meta_b or {}).get("knobs") or {}
+    if not ka and not kb:
+        return ["  读数条件 (knobs): 两份报表都没有 —— 这份对比不判「条件相同」"]
+    lines = ["  读数条件 (knobs):"]
+    n_diff = 0
+    for key in sorted(set(ka) | set(kb)):
+        va, vb = _knobs_cell(ka.get(key)), _knobs_cell(kb.get(key))
+        if va == vb:
+            lines.append(f"     = {key}: {va}")
+        else:
+            n_diff += 1
+            lines.append(f"    ⚠️ {key}: A {va}  →  B {vb}")
+    if n_diff:
+        # ⚠️ 这句里**不许**出现 `— 没记` 那个串本身: 变异标定 H3 第一次就是这么逃掉的 ——
+        # 断言 `assertIn("— 没记", ...)` 被解释文案自己满足了, 于是「格子印成空串」这个缺陷
+        # 在测试面前完全隐形 (CHECKLOG I21 那一族: 文案与判据共用一个串, 读者就分不清是谁)。
+        lines.append(f"    ⚠️ {n_diff} 项读数条件不一致 ⇒ 上面那个 Δ 混进了配置差, "
+                     f"不能只当机制差读 (一侧没记也算不一致)")
+    return lines
+
+
 def format_comparison(cmp):
     lines = ["", "=" * 62, "A/B 判决 (能不能判出变化)", "=" * 62]
     ma, mb = cmp.get("meta", {}).get("a") or {}, cmp.get("meta", {}).get("b") or {}
     if ma.get("git_head") or mb.get("git_head"):
         lines.append(f"  A: {ma.get('git_head', '?')}  →  B: {mb.get('git_head', '?')}")
+    lines.extend(format_knobs_pair(ma, mb))
     ts = cmp["task_success"]
     a_ok, a_n = ts["a"]
     b_ok, b_n = ts["b"]
@@ -854,7 +942,7 @@ def run_one(label, kernel_type, precision, shape, backend, rounds):
            "ok": False, "error": None, "rounds": [], "final_all_passed": False,
            "rounds_to_pass": None, "passed_via": None, "admitted": False,
            "admit_reason": "", "tokens": 0, "cost_usd": 0.0, "llm_calls": 0,
-           "wall_s": 0.0}
+           "llm_sampling": None, "wall_s": 0.0}
     t0 = time.time()
     try:
         conductor = Conductor(backend=backend, llm=llm, max_optimize_rounds=rounds)
@@ -864,6 +952,13 @@ def run_one(label, kernel_type, precision, shape, backend, rounds):
         # 一次 ssh 抖动不该毁掉整场测量: 记成崩溃样本, 继续下一个
         rec["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
         rec["wall_s"] = round(time.time() - t0, 1)
+        # 崩溃的这次也可能已经发过几个请求。它们那侧的配置同样是读数条件, 而产物没有
+        # `metadata` 可读 ⇒ 直接问账本 (`client` 是本次独有的, 不会串到别的运行)。
+        # 读不到就照旧留 None ⇒ 报表会把它算进「无从知道」那一栏，不假装是全的。
+        try:
+            rec["llm_sampling"] = llm.cost_tracker.sampling_configs()
+        except Exception:  # noqa: BLE001
+            pass
         return rec
 
     rec["ok"] = True
@@ -962,12 +1057,27 @@ def main() -> int:
               f"下发给远端。这份报表记录的卡号以 {device['state']} 为准; "
               f"要真的钉住某张卡得改 `_pinned_gpu()` 的选卡策略 (那是行为改动, 另一次对照)。")
 
+    llm_side = sampling_from_runs(runs)
+    print("\n【实际请求的模型侧配置】(逐调用覆盖之后真发出去的那些, 出处=账本 —— #98)")
+    sampling_lines = format_sampling_configs(llm_side)
+    if not sampling_lines:
+        print("  ⚠️ 没有任何一条调用带上了采样配置 ⇒ 这份报表的模型侧条件**无从知道**。"
+              "「无从知道」不是「用了默认值」。")
+    for x in sampling_lines:
+        print(f"  - {x}")
+    if llm_side["n_runs_without_ledger"]:
+        print(f"  ⚠️ 另有 {llm_side['n_runs_without_ledger']}/{len(runs)} 次运行没有账本"
+              f" (崩溃且连 client 也问不到) ⇒ 上面这张表不覆盖它们")
+
     payload = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "git_head": _git_head(),
         "knobs": {"min_speedup": MIN_SPEEDUP, "max_error": MAX_ERROR,
                   "max_optimize_rounds": args.rounds, "repeats": args.repeats,
-                  "min_denom": MIN_DENOM, "cases": [c[0] for c in CASES]},
+                  "min_denom": MIN_DENOM, "cases": [c[0] for c in CASES],
+                  # #98: 这一维之前是空的 —— knobs 里六项没有一项是模型侧的, 而下面这份是
+                  # 逐调用覆盖**之后**真发出去的配置 (来源=账本, 不是构造参数)。
+                  "llm": llm_side},
         "device": device,
         "aggregate": agg,
         "runs": runs,
@@ -980,6 +1090,12 @@ def main() -> int:
     print(f"\n报表已落盘: {path}")
     print("⚠️ 引用这些数字时必须带上 git_head 与 knobs —— 换一次配方/判据/prompt, "
           "上一份报表就只是历史, 不是基线。")
+    # 这句话在 #98 之前是**多报了一口**: knobs 当时六项没有一项是模型侧的, 而所有数字都是在
+    # `enable_thinking=False`、逐调用覆盖过的 temperature 下发出来的。现在 `knobs.llm` 记的是
+    # 账本里真发出去的那些 —— 但「读数的全部条件」仍然是一句**够不到**的声明, 它只覆盖
+    # 判据/采样这两侧, 不覆盖 prompt 装配的每一次改动 (那要靠 git_head 去看代码)。
+    print("   knobs 现在含 `llm` 这一维 (model/temperature/max_tokens/enable_thinking, "
+          "出处=账本而非构造参数, #98)。")
     return 0 if agg["denominator_ok"] else 1
 
 
