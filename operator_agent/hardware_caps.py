@@ -352,8 +352,14 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
     从 backend.get_hardware_info() 返回的 dict 自动推断硬件能力。
 
     策略:
-      1. 如果有已知 vendor + name，直接返回预定义配置
-      2. 否则根据字段逐个推断，未知字段用保守默认值
+      1. 命中 `_KNOWN_HARDWARE` → 返回该条目的**副本**, 只把探测到的 SM 数覆盖上去
+      2. 没命中 → 从 `unknown_caps()` 起步 (什么都不承诺), 只往上加**能从中立事实
+         推出来**的字段; 两个分支都走不到时原样返回那个「不知道」
+
+    ⚠️ 本函数**不碰** dataclass 的默认值。表里 8 个条目里有 5 个从没显式写过
+    `has_warp_primitives`/`has_shared_memory`/`has_fast_math`, 它们对已知卡的承诺
+    就是从默认值继承来的; 把默认改成 False 会静默改掉包括 H20 在内每一张卡的口径
+    (哪些配方还选得上), 那不是本函数的改动范围。
     """
     name = (hw_info.get("name", "") or "").lower()
     vendor = (hw_info.get("vendor", "") or "").lower()
@@ -372,22 +378,39 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
             caps.sm_count = probed
         return caps
 
-    # 未知硬件：根据字段尽力推断
-    caps = HardwareCaps(
-        vendor=vendor or "unknown",
-        device_name=name or "unknown",
-        compute_capability=cc,
-        sm_count=sm_count_from(hw_info) or 0,
-    )
+    # 未知硬件：从「什么都不承诺」起步, 往上只加能从手头的中立事实推出来的东西。
+    #
+    # 这里原本直接是 `HardwareCaps(...)`, 也就是吃 dataclass 的宽松默认: 一张
+    # vendor / device / cc **三者皆空**的卡会拿到 has_block_reduce / has_warp_shuffle /
+    # has_warp_primitives / has_shared_memory / has_atomic_fadd / has_fast_math 全 True,
+    # 外加 supported_dsls={"cuda_c","python"} —— 于是「认不出这台卡」被下游读成
+    # 「这是一台支持 CUDA C、有共享内存和 warp shuffle 的类 NVIDIA 设备」。同一个模块里的
+    # `unknown_caps()` 对这六个字段给的是 False、DSL 集合给空: **两个「不知道」的口径相反**,
+    # 而且推断路径这个是乐观的那一个 —— 与 §3.3 那一族同型 (缺证据被当成肯定证据)。
+    # 方向上的代价也不对称: 取 False 只是少一次优化机会, 取 True 是把配方发到一台
+    # 可能根本没有共享内存的机器上, 失效方式是核编译/启动直接失败。
+    caps = unknown_caps(device_name=name or "unknown")
+    caps.vendor = vendor or "unknown"
+    caps.compute_capability = cc
+    caps.sm_count = sm_count_from(hw_info) or 0
 
     # 根据 device 类型推断
     if "cuda" in device or vendor == "nvidia":
         caps.vendor = "nvidia"
+        # 这一行的**依据**是「已知这是 CUDA 设备」, 不是默认值: 下面这些是 PTX ISA 在
+        # 整个受支持架构区间都保证的东西 (共享内存、warp 级原语与 shuffle、块内同步
+        # 归约、float 原子加、MUFU 近似超越函数), 所以可以声明; 而上一段里那六个
+        # 「认不出」的字段一个都不声明。两者是不同的判断, 不是同一份默认值的两种写法。
         caps.supported_dsls = {"triton", "cuda_c", "python"}
+        caps.has_block_reduce = True
+        caps.has_warp_shuffle = True
+        caps.has_warp_primitives = True
+        caps.has_shared_memory = True
+        caps.has_atomic_fadd = True
+        caps.has_fast_math = True
         major = _nvidia_cc_major(cc)
         caps.has_l2_cache_hint = major >= 8
         caps.has_software_pipelining = major >= 8
-        caps.has_warp_shuffle = True
         caps.sub_group_size = 32
         caps.vector_width_bytes = 16
         caps.has_tensor_core = major >= 7
@@ -403,6 +426,9 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
         caps.has_l2_cache_hint = False
         caps.has_software_pipelining = False
         caps.has_warp_shuffle = False
+        # 那六个 has_* 保持 unknown_caps() 给的 False: CPU 没有 GPU 意义上的共享内存、
+        # warp 与块归约。旧写法在这里**只**显式否认了 warp shuffle, 其余全靠默认值替它
+        # 答应 —— 于是同一个分支一边说「这不是 GPU」一边宣称 has_shared_memory=True。
         caps.supported_dsls = {"python"}
 
     return caps

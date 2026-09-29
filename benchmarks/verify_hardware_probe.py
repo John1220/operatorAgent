@@ -21,17 +21,23 @@
 | 4 | 把 runner 打桩成抛异常 (模拟 runner 坏) | 抛 `HardwareProbeFailed`, 不返回字典 |
 | 5 | host 指向不可达别名 (传输层真的坏) | 同样抛 —— 证明第 4 条不是只有打桩才能触发 |
 | 6 | 真机 `_setup_uv_env()` | True, 且远端 `.python-version` 与远端解释器版本**读回来**一致 |
-| 7 | 报表读的卡号 (#52) | == 远端 runner 自报的 `selected_gpu`; 读它**不**再花一次往返; 本地设 `OPERATOR_AGENT_GPU=2` 时 `conflicts` 必须为真而 `gpu` 仍是实卡 |
+| 7 | 报表读的卡号 (#52) | == 远端 runner 自报的 `selected_gpu`; 读它**不**再花一次往返; 注入一个**必然不等于实卡**的号时 `conflicts` 必须为真而 `gpu` 仍是实卡 |
 | 8 | SM 数被字段名丢掉 (§3.4 第 4 处) | 把真机字典里的 `compute_units` 注入成 99 ⇒ `detect_hardware_caps()` 必须跟着变 99 (旧写法读不到那个键, 会回表里的 78) |
+| 9 | 推断路径的宽松默认 (§八 第 3 条) | 同一份真机字典三种问法: 表命中→与表逐字段相等; 抹掉器件身份→六个 `has_*` 全 False、DSL 空、但 SM 读数保留; 只补 `device="cuda"`→那六项收回 |
 
 ⚠️ 只打印派生值 (布尔、数字、版本号)。远端原文必然带那台机器的工作目录与用户名,
 按项目约定不进仓库、也不进本脚本的输出。
 """
+import dataclasses
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from operator_agent.hardware_caps import detect_hardware_caps  # noqa: E402
+from operator_agent.hardware_caps import (  # noqa: E402
+    HardwareCaps,
+    _KNOWN_HARDWARE,
+    detect_hardware_caps,
+)
 from operator_agent.remote_executor import (  # noqa: E402
     HardwareProbeFailed,
     SSHExecutor,
@@ -58,6 +64,61 @@ def _same_card(size_str, smi_gb, tol=1.0) -> bool:
         return abs(float(str(size_str).rstrip("GBgB ")) - float(smi_gb)) <= tol
     except ValueError:
         return False
+
+
+#: dataclass 里默认为 **True** 的六个 has_*。§八 第 3 条的缺陷本体就是: 推断路径原来
+#: 直接吃这份默认, 于是一台「认不出」的卡也被宣称支持共享内存 / warp shuffle / CUDA C。
+#: 列表从 dataclass 现场算, 不在脚本里抄 —— 抄的那份会漂。
+DEFAULTED_TRUE = tuple(
+    f.name for f in dataclasses.fields(HardwareCaps)
+    if f.name.startswith("has_") and f.default is True)
+
+
+def _table_hit_claims_unchanged(info) -> bool:
+    """生产路径: 真机字典命中查表时, caps 必须与表里那一条**逐字段**相等"""
+    caps = detect_hardware_caps(dict(info))
+    entry = _KNOWN_HARDWARE["h20"]
+    a, b = caps.to_dict(), entry.to_dict()
+    diff = {k: (a[k], b[k]) for k in a if a[k] != b[k]}
+    if diff:
+        print(f"  ❌ 表命中的 caps 与表不等: {diff}")
+        return False
+    if not all(getattr(caps, f) for f in DEFAULTED_TRUE):
+        print(f"  ❌ H20 上 {DEFAULTED_TRUE} 有不是 True 的")
+        return False
+    return True
+
+
+def _unrecognized_claims_nothing(info) -> bool:
+    """抹掉器件身份 = 一台认不出的卡: 六项承诺全收, DSL 空, 但**探测到的 SM 数要留下**"""
+    caps = detect_hardware_caps({"compute_units": info.get("compute_units")})
+    lied = [f for f in DEFAULTED_TRUE if getattr(caps, f)]
+    bad = []
+    if caps.vendor != "unknown":
+        bad.append(f"vendor={caps.vendor!r}")
+    if lied:
+        bad.append(f"仍然宣称 {lied}")
+    if caps.supported_dsls:
+        bad.append(f"仍然宣称支持 DSL {sorted(caps.supported_dsls)}")
+    if bad:
+        print(f"  ❌ 认不出的卡拿到了承诺: {'; '.join(bad)}")
+        return False
+    # 承诺收回不等于读数收回: 78 个计算单元这一件事是探测来的, 与「这是什么卡」无关
+    return caps.sm_count == info.get("compute_units")
+
+
+def _cuda_branch_still_claims(info) -> bool:
+    """反向对照: 只补一句 `device="cuda"` (知道它是 CUDA 设备) 就该把 ISA 保证的收回来。
+
+    没有这一条, 上面那条红也可能是「我把函数改死了」而不是「口径变了」。
+    """
+    caps = detect_hardware_caps({"compute_units": info.get("compute_units"),
+                                 "device": "cuda"})
+    missing = [f for f in DEFAULTED_TRUE if not getattr(caps, f)]
+    if missing:
+        print(f"  ❌ 已知是 CUDA 设备却没宣称 {missing}")
+        return False
+    return "cuda_c" in caps.supported_dsls
 
 
 def main() -> int:
@@ -104,12 +165,17 @@ def main() -> int:
 
     # 检查 7 (#52): 报表读的卡号必须与**远端自报**的卡号同源, 且读它不许再花一次往返
     from benchmarks.harness_pass_rate import device_record
-    rec = device_record(ex, env={"OPERATOR_AGENT_GPU": "2"})
     before = len(ssh_calls)
-    _ = ex.selected_gpu
+    actual = ex.selected_gpu
     no_round_trip = len(ssh_calls) == before
-    print(f"  执行侧 selected_gpu={ex.selected_gpu}  远端自报={probe.get('selected_gpu')}  "
-          f"报表 state={rec['state']!r} conflicts={rec['conflicts']}")
+    # 7c 的冲突要由判据**自己造出来**: 上一版注入的是硬编码 "2", 而实卡是自动选的,
+    # 于是这条绿不绿取决于那一次恰好选到哪张卡 (2026-09-29 真机就撞上: 这次选中的
+    # 正好是 GPU 2, 判据立刻假红)。注入一个必然不等于实卡的号。
+    other = next(str(i) for i in range(8) if str(i) != str(actual))
+    rec = device_record(ex, env={"OPERATOR_AGENT_GPU": other})
+    print(f"  执行侧 selected_gpu={actual}  远端自报={probe.get('selected_gpu')}  "
+          f"报表 state={rec['state']!r} conflicts={rec['conflicts']} "
+          f"(注入的请求卡号={other})")
 
     checks = [
         ("1 探测值与 nvidia-smi 的独立问法一致 (器件名 + 显存)",
@@ -133,9 +199,9 @@ def main() -> int:
         ("7 报表读的卡号与远端自报的卡号同源 (#52)",
          ex.selected_gpu is not None and ex.selected_gpu == probe.get("selected_gpu")),
         ("7b 读 selected_gpu 不再花一次往返", no_round_trip),
-        ("7c 本地设了 OPERATOR_AGENT_GPU=2 时冲突必须响, 而 gpu 仍是实卡",
-         rec["conflicts"] is True and rec["gpu"] == ex.selected_gpu
-         and rec["requested_env"] == "2"),
+        ("7c 请求的卡号与实卡不同时冲突必须响, 而 gpu 仍是实卡",
+         rec["conflicts"] is True and rec["gpu"] == actual
+         and rec["requested_env"] == other),
         # 检查 8 (§3.4 第 4 处): 已知幅度的信号注入 —— 把**真机字典**里的 SM 数改成 99,
         # 派生出的 caps 必须跟着变 99。旧写法读的是 `multiprocessor_count` (字典里没这个键),
         # 于是会返回表里的 78 ⇒ 这一条在旧代码上必然红, 而真机数值恰好 78=78 本身看不出区别。
@@ -143,6 +209,15 @@ def main() -> int:
          detect_hardware_caps(dict(info, compute_units=99)).sm_count == 99),
         ("8b 未注入时真机读数不变 (78, 与载荷逐字相等)",
          detect_hardware_caps(dict(info)).sm_count == 78 == probe.get("multiprocessor_count")),
+        # 检查 9 (§八 第 3 条): 同一份**真机字典**的三种问法。旧写法在「去掉器件名」那一问
+        # 上会照旧宣称六个 has_* 全 True + 支持 CUDA C (吃 dataclass 的宽松默认), 而它此时
+        # 对这台卡一无所知。表命中那一问必须**全字段**不变 —— 那是生产路径。
+        ("9 真机字典原样 (表命中) 时 caps 与表逐字段相等, 六个 has_* 仍全 True (生产路径没动)",
+         _table_hit_claims_unchanged(info)),
+        ("9b 同一份字典抹掉器件身份 (= 一台认不出的卡) 后六个 has_* 全 False 且不宣称 CUDA C",
+         _unrecognized_claims_nothing(info)),
+        ("9c 只补一句 device=cuda 就把 ISA 保证的那六项收回来 (修复不是一律 False)",
+         _cuda_branch_still_claims(info)),
     ]
     print(f"\n{'=' * 66}\n标定判据\n{'=' * 66}")
     bad = 0

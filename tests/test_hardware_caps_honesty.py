@@ -10,13 +10,18 @@
       命中 "h20" —— 表里根本没有 h200 条目, 拿到的却是 H20 的规格。
   S10 判不了的 `requires_caps` 默认通过 ⇒ 配方里一个拼错的字段名让该配方在**任何**
       硬件上都入选, 而 `_caps_failure_note` 只注解失败的要求, 静默通过不留痕。
+  §八3 推断路径吃 dataclass 的宽松默认 ⇒ 「认不出这台卡」被读成「支持 CUDA C、有共享
+      内存与 warp shuffle」, 而同模块 `unknown_caps()` 给的是 False/空: 两个「不知道」
+      口径相反, 且这个是乐观的那一个 (缺证据被当成肯定证据)。
 
 每条断言都做过变异标定: 把修复改回旧写法, 对应用例必须变红。
 """
 
+import ast
 import copy
 import dataclasses
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from operator_agent.hardware_caps import (
@@ -40,6 +45,25 @@ _HAS_FIELDS = tuple(f.name for f in dataclasses.fields(HardwareCaps)
 _NUM_FIELDS = ("fp32_tflops", "tf32_tflops", "fp16_tflops", "bf16_tflops", "int8_tops",
                "global_mem_bandwidth_gbs", "l2_cache_size_kb", "shared_mem_per_sm_kb",
                "sm_count")
+
+#: dataclass 里默认为 **True** 的那六个 has_* (不是全部 13 个)。
+#: 「默认是 True」本身就是 §八 第 3 条的缺陷本体, 所以这里把它当成被测对象列出来,
+#: 而不是在测试里逐个写死 True/False。
+_DEFAULTED_TRUE_FIELDS = tuple(
+    f.name for f in dataclasses.fields(HardwareCaps)
+    if f.name.startswith("has_") and f.default is True)
+
+
+def _direct_calls(source: str, func_name: str, callee: str) -> list:
+    """`func_name` 的函数体里对 `callee(...)` 的**直接调用**行号 (docstring 里的字不算)。"""
+    out = []
+    for fn in [n for n in ast.walk(ast.parse(source))
+               if isinstance(n, ast.FunctionDef) and n.name == func_name]:
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == callee):
+                out.append(node.lineno)
+    return out
 
 #: 判不了的条件, 每种写法各占一条分支 (用例数按分支算, 不按函数算)
 UNPARSABLE_REQS = (
@@ -463,6 +487,113 @@ class TestProbedSmCountSurvivesTheFieldName(TableGuardedCase):
         self.assertIn("multiprocessor_count", keys,
                       "runner 已经不再上报这个键, SM_COUNT_KEYS 里那条该退休了")
         self.assertIn("multiprocessor_count", set(SM_COUNT_KEYS) & keys)
+
+
+class TestInferencePathClaimsOnlyWhatItDerives(TableGuardedCase):
+    """§八 第 3 条: 推断路径原来是「裸默认」, 于是「认不出」被读成「支持」。
+
+    旧写法 `caps = HardwareCaps(...)` 只填了 vendor/name/cc/sm_count 四个字段, 其余
+    全部继承 dataclass 默认。默认里 `has_block_reduce`/`has_warp_shuffle`/
+    `has_warp_primitives`/`has_shared_memory`/`has_atomic_fadd`/`has_fast_math` 是 True,
+    `supported_dsls` 是 `{"cuda_c","python"}` —— 一张三者皆空的卡因此拿到「这是一台支持
+    CUDA C、有共享内存和 warp shuffle 的类 NVIDIA 设备」。而同一个模块的 `unknown_caps()`
+    对这六个字段给 False、DSL 给空集: **两个「不知道」的口径相反**, 且推断路径是乐观的那个。
+    """
+
+    def test_unrecognized_card_agrees_with_unknown_caps(self):
+        """差分守卫: 「查表没命中」和「显式声明不知道」必须给出同一份承诺。
+
+        期望值不是手抄的 —— 右边那列直接取自 `unknown_caps()`, 所以以后给它加字段
+        这条会跟着动, 而不是把测试冻在今天的口径上。
+        """
+        base = unknown_caps()
+        samples = ({}, {"name": "Mystery Accelerator X"},
+                   {"name": "MLU370-X8", "vendor": "cambricon", "device": "mlu"},
+                   {"name": "Biren128", "vendor": "iluvatar", "device": "biren"},
+                   {"name": "GPU", "compute_capability": "9.0"})
+        for hw in samples:
+            caps = detect_hardware_caps(dict(hw))
+            self.assertNotIn(caps.vendor, ("nvidia", "cpu"),
+                             f"{hw!r} 落进了一个推断分支, 这条用例在测别的东西")
+            for f in _DEFAULTED_TRUE_FIELDS:
+                self.assertEqual(getattr(base, f), getattr(caps, f),
+                                 f"{hw!r}: {f} 在两个「不知道」之间口径不同 "
+                                 f"(unknown_caps={getattr(base, f)!r}, "
+                                 f"detect={getattr(caps, f)!r})")
+            self.assertEqual(set(), caps.supported_dsls,
+                             f"{hw!r}: 认不出的卡却宣称支持 {sorted(caps.supported_dsls)}")
+
+    def test_the_cpu_branch_stops_claiming_gpu_primitives(self):
+        """旧写法在这个分支里只否认了 warp shuffle, 其余五个是默认值替它答应的"""
+        caps = detect_hardware_caps({"name": "CPU fallback", "device": "cpu"})
+        for f in _DEFAULTED_TRUE_FIELDS:
+            self.assertFalse(getattr(caps, f), f"CPU 上不该宣称 {f}")
+        self.assertEqual({"python"}, caps.supported_dsls)
+
+    def test_the_nvidia_branch_claims_them_because_it_knows_it_is_cuda(self):
+        """反向对照: 修复不是「一律 False」。
+
+        把推断路径整体改成什么都不承诺同样是一条缺陷 (真 CUDA 卡会拿不到共享内存类配方)。
+        所以这里要的正是「在 nvidia 分支上六个全 True」, 它证明上面两条红是口径变了,
+        而不是我把整个函数改死了。
+        """
+        caps = detect_hardware_caps({"name": "NVIDIA Whatever-Next", "device": "cuda",
+                                     "compute_capability": "8.6"})
+        for f in _DEFAULTED_TRUE_FIELDS:
+            self.assertTrue(getattr(caps, f), f"已知是 CUDA 设备, {f} 是可推出的事实")
+        self.assertTrue({"triton", "cuda_c", "python"} <= caps.supported_dsls)
+
+    def test_the_dsl_claim_is_not_derived_from_an_unknown_vendor(self):
+        """`supported_dsls` 里最贵的一条是 "cuda_c": 它等于「可以给这台卡发 CUDA 源码」"""
+        self.assertEqual(set(), detect_hardware_caps({"name": "MLU370"}).supported_dsls)
+        self.assertNotIn("cuda_c",
+                        detect_hardware_caps({"vendor": "ascend", "device": "npu"}).supported_dsls)
+
+    def test_recipes_that_need_those_primitives_are_not_selected_for_an_unknown_card(self):
+        """消费方视角的代价核对: 少承诺的正是这四条配方, 而不是整库。
+
+        这四条是**按当前配方库**算出来的 (R-REDUCE-01 要求 has_warp_shuffle)。配方库
+        改了这条会变红, 那时应当连同期望一起更新 —— 而不是让它静默失效。
+        """
+        planner = OptimizationPlanner()
+        gated = ("R-SOFTMAX-02", "R-LN-03", "R-LN-04", "R-REDUCE-01")
+        for kt, rid in (("softmax", "R-SOFTMAX-02"), ("layernorm", "R-LN-03"),
+                        ("layernorm", "R-LN-04"), ("softmax", "R-REDUCE-01")):
+            plan = planner.plan(kernel_type=kt, dsl="triton", hardware={"name": "Mystery X"})
+            self.assertNotIn(rid, plan.recipe_ids, f"{rid} 被发给了一台什么都不知道的卡")
+            self.assertIn("missing hardware capability",
+                          dict((r.id, why) for r, why in plan.rejected_recipes)[rid])
+        # 反向: 同一批配方在 CUDA 设备上照旧入选
+        plan = planner.plan(kernel_type="softmax", dsl="triton",
+                            hardware={"name": "NVIDIA L4", "device": "cuda",
+                                      "compute_capability": "8.6"})
+        for rid in gated:
+            self.assertIn(rid, plan.recipe_ids, f"修复把 {rid} 一起改没了")
+
+    def test_every_table_entry_survives_the_change_untouched(self):
+        """H20 那条生产路径必须**可证明**没变: 逐条全字段对照表本身。
+
+        期望值取模块里的条目 (deepcopy), 不是测试里抄的规格 —— 抄的那份从抄下就开始漂。
+        """
+        for key in _KNOWN_HARDWARE:
+            caps = detect_hardware_caps({"name": key, "device": "cuda"})
+            self.assertEqual(_KNOWN_HARDWARE[key].to_dict(), caps.to_dict(),
+                             f"查表命中的 {key!r} 被推断路径的改动影响了")
+
+    def test_the_inference_path_starts_from_unknown_caps(self):
+        """源码守卫: 推断路径不许再直接构造 `HardwareCaps(...)` (裸默认就是缺陷本体)"""
+        source = Path("operator_agent/hardware_caps.py").read_text(encoding="utf-8")
+        self.assertEqual([], _direct_calls(source, "detect_hardware_caps", "HardwareCaps"),
+                         "又回到裸默认: 「认不出」会重新被读成「支持 CUDA C」")
+        self.assertEqual(1, len(_direct_calls(source, "detect_hardware_caps", "unknown_caps")),
+                         "推断路径不再从 unknown_caps() 起步, 上面那条口径一致性就没人守着")
+
+    def test_the_source_guard_is_not_vacuous(self):
+        """解析器看不见调用时两条断言会同时「绿」—— 先证明它看得见。"""
+        source = Path("operator_agent/hardware_caps.py").read_text(encoding="utf-8")
+        self.assertEqual(1, len(_direct_calls(source, "unknown_caps", "HardwareCaps")),
+                         "_direct_calls 根本没在解析函数体, 上面那条守卫在空转")
+        self.assertEqual([], _direct_calls(source, "no_such_function", "HardwareCaps"))
 
 
 if __name__ == "__main__":
