@@ -303,6 +303,12 @@
 - **实证**：`admit_rejections` 取自 `ok_runs`，而 `_save_to_db` 只在 `all_passed` 那一支
   被调 —— 未通过运行根本不会被这道门问，它们的判定是假想事件（doc 48 §六B ①）
 - **出处**：doc 48 §六B ①
+- **外部独立佐证**：**AMDKernelVault `2609.12471v1` 行 251** 逐字
+  "Since rejection logs were not aggregated uniformly across source pipelines, we report
+  retained counts and subset-specific validation **rather than a single corpus-wide failure
+  rate**." —— 他们直接拒绝给跨来源的单一失败率，与本片「未通过运行根本不会被这道门问」
+  是同一条纪律（doc 55 §5.2）。*（不把 DSH `testing.md:29`「验证世界而不是自报」算进来：
+  那条讲的是断言的对象，不是分母 —— 顺手加来源也是过度归因。）*
 - **后果**：故事讲反（门其实一次都没拒过）
 - **类别**：H · **状态**：✅ 已修（分栏 + 空名单明说）
 

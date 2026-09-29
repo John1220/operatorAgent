@@ -1,8 +1,9 @@
-# 55 · 四篇算子 agent 新论文：一手核验与本轮吸纳
+# 55 · 五篇算子 agent 新论文：一手核验与本轮吸纳
 
 - **任务**：#75（调研 2026-08/09 的算子开发 agent 新论文并吸纳）
 - **日期**：2026-09-29
-- **一手材料**：三篇 arXiv HTML 版，原始字节与抽取行数都记在下面；本文所有引文给**行号**，可按行复核
+- **一手材料**：五篇 arXiv HTML 版（前两批三篇 + 本会话后补两篇），原始字节与抽取行数都记在下面；
+  本文所有引文给**行号**，可按 §1.2 那份脚本重跑复核
 - **本轮落码**：修复取向按报失败的阶段分支（§六），外部依据是 CUDA-Harness §4.3.1
 
 | 论文 | arXiv | HTML 字节 | 抽取后行数 | 读到哪 |
@@ -10,8 +11,8 @@
 | CUDA-Harness | `2609.00058v1` [cs.CL] 30 Aug 2026 | 196,908 | 871 | §3–§4 全文 + §5 目录 |
 | Fabrica-Bench / Fabrica Agent | `2608.25124v1` [cs.CE] 25 Aug 2026 | 191,484 | 1,078 | II-B / III-B / III-D / V-C / V-D / V-E |
 | MaxKernel | `2609.04523v1` [cs.AI] 03 Sep 2026 | 155,158 | 706 | §2 (RAG / 子 agent / 路径管理) + Table 2 讨论 |
-| AMDKernelVault | `2609.12471v1` | 未取 | 未取 | **没有一手材料，不许作依据** |
-| SWE-Serve | `2609.26777v1` | 未取 | 未取 | 同上 |
+| AMDKernelVault | `2609.12471v1` [cs.CL] 11 Sep 2026 | 477,623 | 1,621 | Abstract / §1 / §2 / §3 语料口径 / §4 reward / §7 / Appendix B 开头 |
+| SWE-Serve | `2609.26777v1` [cs.AI] 22 Sep 2026 | 630,480 | 2,907 | Abstract / §2 任务与完整性控制 / §3.1-3.2 |
 
 ---
 
@@ -223,11 +224,63 @@ verify_results if not r.passed]`）。本轮把「取向」按阶段分支（§�
 
 ---
 
-## 五 · 没取字节的两篇
+## 五 · 后补的两篇（同一天取到字节，结论照同一条规矩）
 
-`AMDKernelVault 2609.12471v1`、`SWE-Serve 2609.26777v1` 只拿到摘要级信息，
-按 doc 53 立的规矩：**不许作为任何一片的依据**。下一轮若要碰 AMDKernelVault，
-先取 HTML 原始字节再说话。
+上一节这行原本写的是「没取字节 ⇒ 不许作依据」。后来用 §1.1 那条代理路径把两篇 HTML
+都取到了（477,623 / 630,480 字节），所以下面才是有资格写的话。
+
+### 5.1 SWE-Serve `2609.26777v1`：一条可照搬的报表形状，和一条我们**已经有了**的控制
+
+它的完整性控制（行 131-132，逐字）：
+
+> "We qualify each task by checking that its hidden tests **reject the unchanged repository**
+> (the no-op control) and **accept the oracle solution**, followed by agent-assisted adversarial
+> probing and human adjudication."
+
+我方核对：这一对我方在**数值门**上已经有等价物 —— `tests/test_l2_tolerance.py:141`
+(`test_scaled_kernel_rejected`，注入 0.97 缩放的错核必须被拦) 与 `:148`
+(`test_correct_kernel_accepted`，合法核必须放行)，再加 `:154` 那条「近零参考上 rel 爆到
+2.1e4 仍须放行」。所以「门只对回归失败变红」这一层不是缺口。
+
+**真正的吸纳点是他们把这个 idea 做成了一个数字**（行 99-101，逐字）：
+
+> "On 19 tasks with end-to-end coverage, model-serving E2E tests reject roughly one-third of
+> patches that pass every other test (**45.9% under the verifier versus 69.4% with E2E tests
+> excluded from scoring**)"
+
+也就是**同一批运行、两套记分口径各报一次**（含真机端到端 / 不含），于是「本地过 ≠ 生产过」
+那个差距是一个可追踪的数而不是一句故事。我方现状：`harness_pass_rate` 逐任务报
+L1/L2/L3，原料在，但**没有「把 L3 从记分里摘掉再报一次通过率」这一栏** ——
+这正是我方 doc 33/34/35 一路在讲的那个差，缺的只是把它印成两个数。
+⇒ 落成 **#77**（改的是 `benchmarks/harness_pass_rate.py`，并发会话正在改那份文件，本片不动手）。
+顺带它给「为什么 #50 把墙钟门槛修掉」提供了同族的表述（行 297：calibrated performance gates
+只在**需要的**任务上用，全基准只有 3 个任务带性能门）—— 性能判据是例外而不是默认。
+
+### 5.2 AMDKernelVault `2609.12471v1`：一条给我们既有纪律的第三方独立佐证，和一个可登记的外部资源
+
+它的语料口径（行 251，逐字）：
+
+> "Since rejection logs were not aggregated uniformly across source pipelines, we report
+> retained counts and subset-specific validation **rather than a single corpus-wide failure rate**."
+
+这与 CHECKLOG H4 那条（「入库率分母与拒收名单不同源，把『门没问』印成『门拒了』」）
+是同一件事：**不同来源的分母不能折成一个率**。我方是撞出来的，他们是明写的 ⇒
+给 H4 补第三个独立来源（前两个是 doc 48 §六B 与 DSH `testing.md:29`）。
+
+其余核对结论（都是「已有 / 形式不对应」，不产生代码）：
+- generate–evaluate–reflect + 在 ROCm 下编译 + 跨多组测试输入验数值 + 在 AMD 硬件上测延迟
+  （行 163）= 我方 L1/L2(多组输入 `num_input_sets`)/L3 同形，MCP 那层换成 SSH。
+- 它的 reward 三项（行 308）里有一句对我们 #71 有用：speedup 项是 **bounded**，
+  理由是 "without allowing timing outliers to dominate learning" —— 与 doc 53 那条
+  「墙钟不能当预算口径」同一动机（离群读数不该决定去留），但我方是判据侧不是奖励侧，
+  所以对应物是已有的离散度门 / 三态判决，不是新代码。
+- 「SFT 是 RL 之前必需的初始化」「multi-turn RL +13.1%」属训练配方，我方不做训练 ⇒ 不对应。
+- 诚实的一面（行 487）："does not uniformly lead compilation or speed" —— 它自己的 8B
+  在 correctness 上第一、编译与速度上并非第一 ⇒ 别把「单一指标最好」读成「全面最好」，
+  与我方 #48「按 case 分布而非单一 geomean」同调。
+- **可登记的外部资源**（因为项目可能接入非 NVIDIA 平台）：公开的 HIP/Triton
+  execution-verified 语料（62,153 + 39,893 条）与 `github.com/AMD-AGI/hip_kernel_llm_lab`。
+  只登记不接入 —— 按 §四 那条 provenance 纪律，接外部人写好的核当种子必须先有来源字段。
 
 ---
 
@@ -291,6 +344,7 @@ rounds-to-compilable / rounds-to-correct 而不是单次通过率 —— 归 #76
 | CUDA-Harness §4.1/§4.2/§4.3 | 4 条里 2 条已有、1 条潜伏（#76②）、1 条落码（§六） |
 | Fabrica II-B / III-D / V-C / V-D / V-E | preserve/discard/build 进 #61/#65 的口径；「记录不买通过率」进 #51 的宣称口径；三路分流进 #76①；acceptance 分母进 #51 |
 | MaxKernel | provenance 进 #57 前置；路径纪律升级 #69 的依据；数值不吸纳 |
-| 不吸纳 | FABRICA Eq. 3（用途不同）、RLVR Eq. 4（无可更新参数，我方是 prompt 回路）、MCP 外壳、bandit/beam 常数 |
-| 未验 | §六 的真机效果；两篇未取字节的论文 |
-| 下一步（不要重新调研本文这三篇） | §五 那两篇按需取字节；#76 的三项；#48/#65 的机时活 |
+| 不吸纳（含 SWE-Serve 的训练/基准构造与我们不对应的部分、AMDKernelVault 的 SFT+RL 配方） | FABRICA Eq. 3（用途不同）、RLVR Eq. 4（无可更新参数，我方是 prompt 回路）、MCP 外壳、bandit/beam 常数 |
+| 未验 | §六 的真机效果 |
+| 后补 | 两篇取到字节后的结论（§五）：SWE-Serve ⇒ #77（双记分口径），AMDKernelVault ⇒ CHECKLOG H4 第三源 |
+| 下一步（本文这**五篇**都已一手核过，下一轮不要重新调研） | #76 的三项、#77 的双记分口径；#48/#65/#71/#72/#74 的机时活 |
