@@ -88,12 +88,21 @@ class ArtifactStore:
         # 后者再抄两列进 `tests/golden_registry.json` —— 那是 golden 路径的出口, 不是产物。
         # 预算/成本出口的读者在**下一次运行**与事后复盘里, 那里没有内存对象可读,
         # 所以同指纹、同 `resume` 一样单独立顶层键。
-        # 只取 `llm_cost` 这一个键, 不把整个 `metadata` 倒出来: `metadata` 里还放着
-        # 「执行快照路径」这类含真实路径的外挂 (落盘键白名单静默丢值与整包外泄是同一枚硬币)。
+        # 只走**登记过的键**，不把整个 `metadata` 倒出来。我原先在这里写的理由是
+        # 「metadata 里还放着含真实路径的执行快照外挂」—— 那句**没核过**：今天
+        # `artifact.metadata` 只有两个写者 (`conductor.py:219` 的 `stop` 与 `:982` 的
+        # `llm_cost`，都是登记键)，执行快照是**另一个文件** `execution_snapshot.json`。
+        # 门仍然要留，但它守的是「未登记的键不许过界」这个**未来**契约，
+        # 与当前有没有这种键无关（见 CHECKLOG I8）。
         # 缺账单时**不写这个键** —— 「没有成本记录」与「成本为 0」是两件事。
         _llm_cost = (artifact.metadata or {}).get("llm_cost")
         if _llm_cost:
             result_data["llm_cost"] = _llm_cost
+        # 「循环为什么停」(doc 53 §7.1)。以前只有 stdout 上的一行 print, 于是产物里
+        # 「没练够」「练到顶了」「修坏了」三者完全同形 —— rounds-to-pass 那类统计要的正是它。
+        _stop = (artifact.metadata or {}).get("stop")
+        if _stop:
+            result_data["stop"] = _stop
         result_path = artifact_dir / "result.json"
         result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
 

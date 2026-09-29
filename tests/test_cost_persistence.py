@@ -120,7 +120,11 @@ class TestCostReachesResultJson(_StoreCase):
 
 class TestTheBoundaryStaysNarrow(_StoreCase):
     def test_the_rest_of_metadata_is_not_dumped(self):
-        """只搬 `llm_cost`。整包倒出来会把含真实路径的外挂一起落盘。"""
+        """只搬登记过的键。整包倒出来时未登记的键会跟着过界。
+
+        ⚠️ 那两个诱饵是**合成的**：今天 `artifact.metadata` 只有 `stop` 与 `llm_cost`
+        两个写者（`CHECKLOG I8` 数过），本条钉的是那道门本身，不是对当前内容的描述。
+        """
         art = KernelArtifact(task_id="t1", code="x", metadata={
             "llm_cost": _tracker().summary(),
             "remote_workdir": "/somewhere/keep/private",

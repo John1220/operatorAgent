@@ -140,6 +140,25 @@
 - **通则**：**值过了落盘边界 ≠ 口径是对的**。补「谁在读这个值」时，同一轮就要问
   「它统计的是哪一段时间」；否则接好的读者会安静地把累计当单次用。
 
+### I8 · 注释拿「没验证的外挂」当理由，顺带藏了一条不可区分的用例
+- **原话**：我在 `artifact_store.py:91-92` 写「`metadata` 里还放着『执行快照路径』这类
+  含真实路径的外挂」，用它作为「只搬白名单键」的理由
+- **实证**：清点 `artifact.metadata` 的写者，`operator_agent/` 下只有两处 ——
+  `conductor.py:219`（`stop`）与 `conductor.py:982`（`llm_cost`），两个都是登记键；
+  执行快照是**另一个文件** `execution_snapshot.json`（`conductor.py:7`），从来不在
+  `metadata` 里。那句话是把 `schemas.py:572` 的一句注释（「存放…执行快照路径 等外挂」）
+  当成了实测。同一处还让变异标定 M6（整包倒 `metadata`）打不红
+  `test_an_artifact_without_a_stop_block_writes_no_key`：那次运行的 `metadata` 只有
+  `stop` 一个键，pop 之后整包是空的 ⇒ 两种写法**不可区分**
+- **出处**：注释与 `tests/test_cost_persistence.py:122` 的 docstring 已改口（门不动）；
+  标定改用例 `test_the_rest_of_metadata_is_not_dumped` 作 M6 的读者，并补 M8/M9 两条
+  变异 ⇒ 9 条 0 逃逸
+- **后果**：举一个不存在的例子当理由，下一个读代码的人会在 `metadata` 里找那个键，
+  找不到就判定白名单是 cargo cult 而拆掉它 —— 而那道门守的恰恰是**将来**写进
+  `metadata` 的东西。另一半：一条变异打不红某条用例时，先怀疑 fixture 里那个键是不是
+  只有一个（不可区分），再怀疑用例是死守卫 —— 顺序反了会误删有用的断言
+- **类别**：I · **状态**：✅ 注释已改口（同一会话变异标定撞出，代码的门与判据不动）
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -248,6 +267,7 @@
 | I5 | 用例判定随本机有无 torch 翻转 | I/S | ⚠️ |
 | I6 | 「没人读」按手里那个变量名数出来 | I | ✅ |
 | I7 | 落盘了但口径是累计 | I/H | ✅ |
+| I8 | 注释拿没验证的外挂当理由，顺带藏了一条不可区分的用例 | I | ✅ |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

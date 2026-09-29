@@ -199,6 +199,26 @@ class Conductor:
         # `_flush_snapshot` 也可以在 `execute()` 之外被调到 (单测直接调它), 不该 AttributeError。
         self._environment: dict = {"fingerprint": {}, "drift": None}
 
+    #: 循环出口的词汇表。**每个词都要有写者** —— 多一个没写者的词就是「算了没人读」的副本,
+    #: `tests/test_stop_reason.py` 按差集钉这条。
+    STOP_REASONS = ("passed", "stagnant", "converged", "fix_error", "l1_l2_failed",
+                    "search_error", "rounds_exhausted")
+
+    def _record_stop(self, artifact, round_num: int, reason: str, detail: str = "") -> None:
+        """把「循环为什么停」记成数据, 而不是只留一行 print。
+
+        形状借自 DSH 的 `agent/turn-stopping` (doc 53 §7.1): 停止是一个有名字的边界,
+        不是散在 `break` 里的副作用。读者是量具与事后复盘 —— rounds-to-pass 归因需要
+        区分「没练够」(`rounds_exhausted`) 与「练到顶了」(`converged`), 今天在产物里
+        这两者与「修坏了」长得完全一样 (`all_passed=False` + 一个轮次数)。
+        """
+        if reason not in self.STOP_REASONS:
+            raise ValueError(f"出口词汇外的 reason: {reason!r} (词汇表 {self.STOP_REASONS})")
+        if artifact.metadata is None:
+            artifact.metadata = {}
+        artifact.metadata["stop"] = {"reason": reason, "round": int(round_num),
+                                     "detail": detail}
+
     def execute(
         self,
         task: TaskSchema,
@@ -627,6 +647,8 @@ class Conductor:
                 print(f"\n[Conductor] 所有验证通过!")
                 # ── 可复现性 Harness: 通过前写快照, 方便后续 resume 时直接复用最终轮 ──
                 snapshot_target_dir = _snap()
+                self._record_stop(artifact, round_num, "passed", "所有验证通过 (L1/L2/L3)")
+
                 break
 
             # 缺口 1: 「数字不好看」不等于「性能未改善」—— 测量本身可能不可信。
@@ -707,6 +729,8 @@ class Conductor:
                 if rounds_without_improvement >= max_stagnant_rounds:
                     print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善，提前终止优化")
                     snapshot_target_dir = _snap()
+                    self._record_stop(artifact, round_num, "stagnant", "连续无改善达上限")
+
                     break
 
             # 缺口 4 的正解: 改善判据该看「离 roofline 上界还有多远」, 而不是继续拿
@@ -731,6 +755,8 @@ class Conductor:
                       f"bw={_rl.get('hw_peak_bandwidth_gbs', 0):.0f} GB/s "
                       f"({_rl.get('compute_used', '?')}) — {_rl.get('peak_source', '出处未知')}")
                 snapshot_target_dir = _snap()
+                self._record_stop(artifact, round_num, "converged", "绑定轴已达 roofline 上界")
+
                 break
 
             l1_l2_failed = any(
@@ -773,6 +799,8 @@ class Conductor:
                             disabled_recipes=disabled_recipes,
                             all_verification_results=all_verification_results,
                         )
+                        self._record_stop(artifact, round_num, "fix_error", "Fixer 修复抛异常, 停止迭代")
+
                         break
                     print(f"  修复说明: {fix_note}")
                     pending_fix = fixed_code
@@ -817,6 +845,8 @@ class Conductor:
                     continue
                 print(f"\n[Conductor] L1/L2 验证失败且已达最大轮次，停止迭代")
                 snapshot_target_dir = _snap()
+                self._record_stop(artifact, round_num, "l1_l2_failed", "L1/L2 失败且已达最大轮次")
+
                 break
 
             if l3_result and not l3_result.passed and round_num < self.max_optimize_rounds:
@@ -862,6 +892,8 @@ class Conductor:
                         disabled_recipes=disabled_recipes,
                         all_verification_results=all_verification_results,
                     )
+                    self._record_stop(artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
+
                     break
                 print(f"  优化建议: {suggestion}")
                 print(f"  新 Sketch 版本: v{current_sketch.version}")
@@ -879,6 +911,12 @@ class Conductor:
             snapshot_target_dir = _snap()
             if not (l3_result and not l3_result.passed and round_num < self.max_optimize_rounds):
                 print(f"\n[Conductor] 已达最大优化轮次，停止迭代")
+
+        # 循环正常走到末尾 (没被任何 break 收走) —— 这一档以前只在 stdout 上有一行 print,
+        # 产物里与「修坏了」「到顶了」完全同形。补记成数据。
+        if not (artifact.metadata or {}).get("stop"):
+            self._record_stop(artifact, self.max_optimize_rounds, "rounds_exhausted",
+                              "轮次用完仍未通过, 也没有触发任何提前出口")
 
         # 构建最终产物
         artifact.code = current_code
