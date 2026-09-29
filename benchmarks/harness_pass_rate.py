@@ -15,7 +15,14 @@
     python3 benchmarks/harness_pass_rate.py            # 全量
     python3 benchmarks/harness_pass_rate.py --repeats 1 # 先冒烟
 
-⚠️ 三条读数限制, 都在报表里显式打印, 不要脱离它们引用数字:
+    # 改了一处配方/prompt 之后, 拿两份落盘报表判「有没有用」(不需要 GPU):
+    python3 benchmarks/harness_pass_rate.py --compare A/pass_rate.json B/pass_rate.json
+
+「能判变化」不是把两次的百分数并排看一眼: 5/6 → 3/6 时 Fisher 精确双侧 p=0.545
+(doc 48 §六B 亲算过), n=6 这个量级**判不出** 30 个百分点的回归。所以报表必须同时
+说出「当前样本能分辨多大的差」, 而「没测出差异」只有在**本来测得出**的时候才允许说。
+
+⚠️ 四条读数限制, 都在报表里显式打印, 不要脱离它们引用数字:
   1. **语料只有两个算子** (matmul fp16 / layernorm fp32)。加算子的前提是输入契约已经
      验证过 —— doc 41 记录过一次真实事故: attention 因为多传一个 `causal` 连烧三轮。
      凭空造输入会让「通过率」量到契约错误而不是模型能力。
@@ -25,6 +32,10 @@
   3. **通过率与档位必须一起读**。一个在 `uninformative` 档上「通过」的核, 它的加速比
      没有资格驱动任何闭环决策 (缺口 1)。所以报表把 decision-grade 占比与通过率并列,
      单看通过率会把「盲跑但碰巧过了」读成成功。
+  4. **单一通过率是门槛位置的函数** (doc 48 §6.2 ①)。把用例选在「中位加速比≈门槛」处,
+     83.3% 这个数换一套 shape 就会变。报表因此附一条门槛扫描曲线 (默认 0.9/1.0/1.1x),
+     并且曲线是**对同一批已生成候选的重新计分** —— 不是「把门槛改低再跑一遍」:
+     搜索行为本身是被当时的门槛塑形的, 改低门槛重跑会生成另一批候选。
 """
 import argparse
 import json
@@ -196,6 +207,295 @@ def _quantiles(values):
             "p75": q(0.75), "max": q(1.0)}
 
 
+# ─── 判变化: 样本量 / Fisher / 门槛扫描 ─────────────────────────
+# 这一层存在的理由是 doc 48 §六B 那次亲自算错预期的教训: 任务级 5/6 → 3/6
+# 看起来「掉了一半」, 而 Fisher 精确双侧 p = 0.545 —— n=6 这个量级什么都判不出。
+# 报表若只印两个百分数, 读者会自己做这个错误判决, 而错误判决长得和正确的一模一样。
+
+def fisher_exact(a_pass, a_n, b_pass, b_n):
+    """2×2 Fisher 精确双侧 p 值。纯 Python, 不依赖 scipy。
+
+    表:
+             通过   未通过
+      臂 A   a     a_n-a
+      臂 B   b     b_n-b
+
+    双侧 p = 「所有出现概率 ≤ 观测表概率」的表的概率之和。
+    doc 48 §六B 的已知答案: 5/6 vs 3/6 ⇒ p ≈ 0.545454… —— 测试里钉了这一对,
+    公式方向写反或边界漏表都会撞红它。
+    """
+    if not (0 <= a_pass <= a_n and 0 <= b_pass <= b_n) or a_n <= 0 or b_n <= 0:
+        raise ValueError(f"非法 2×2 表: ({a_pass}/{a_n}, {b_pass}/{b_n})")
+    from math import comb
+
+    total_n = a_n + b_n
+    total_pass = a_pass + b_pass
+    # A 臂通过数 k 的超几何边缘分布; k 的合法范围受两边样本数同时夹住
+    lo = max(0, total_pass - b_n)
+    hi = min(a_n, total_pass)
+
+    def _p(k):
+        # C(a_n, k) * C(b_n, total_pass-k) / C(total_n, total_pass)
+        return (comb(a_n, k) * comb(b_n, total_pass - k)) / comb(total_n, total_pass)
+
+    p_obs = _p(a_pass)
+    # 浮点容差: 概率本身很小, 用相对容差把「同样极端」的表收进来, 否则 5/6 vs 3/6
+    # 会因二进制表示把对称表丢掉半边, p 变成 0.27 而不是 0.545
+    eps = max(1e-12, p_obs * 1e-9)
+    return min(1.0, sum(_p(k) for k in range(lo, hi + 1) if _p(k) <= p_obs + eps))
+
+
+def _z(p):
+    """标准正态分位数。Python 3.8+ 自带, 不引入 scipy。"""
+    from statistics import NormalDist
+    return NormalDist().inv_cdf(p)
+
+
+def required_runs_per_arm(p_a, delta, alpha=0.05, power=0.8):
+    """两比例检验: 要分辨 |p_b - p_a| ≥ delta, 每臂至少几次运行。
+
+    正态近似 (与 doc 48「粗算 n≈20 每臂」同一族的估算, 只是把假设摊开):
+        n ≈ (z_{1-α/2} + z_{power})² · (p_a(1-p_a) + p_b(1-p_b)) / delta²
+    p_b 取 p_a + delta (改善侧) 与 p_a - delta (恶化侧) 里方差更大的那个 ——
+    分辨「变差」和分辨「变好」需要的样本不一样多时, 用多的那个。
+
+    返回整数 (向上取整)。给不出合法输入就 raise, **不猜一个数**。
+    """
+    if not 0 < alpha < 1 or not 0 < power < 1:
+        raise ValueError(f"alpha/power 必须在 (0,1): alpha={alpha} power={power}")
+    if not 0 < p_a < 1:
+        raise ValueError(f"p_a 必须在 (0,1): {p_a}")
+    if delta <= 0:
+        raise ValueError(f"delta 必须 > 0: {delta}")
+    if p_a + delta > 1 and p_a - delta < 0:
+        raise ValueError(f"delta={delta} 相对 p_a={p_a} 连一侧都够不着")
+    z_sum = _z(1 - alpha / 2.0) + _z(power)
+    candidates = []
+    for p_b in (p_a + delta, p_a - delta):
+        if 0 < p_b < 1:
+            candidates.append(p_a * (1 - p_a) + p_b * (1 - p_b))
+    if not candidates:
+        raise ValueError(f"p_a={p_a}, delta={delta} 没有合法的 p_b")
+    var = max(candidates)
+    return int(np.ceil(z_sum * z_sum * var / (delta * delta)))
+
+
+def min_detectable_delta(n_per_arm, p_a=0.5, alpha=0.05, power=0.8):
+    """当前每臂样本量「最多只能分辨」多大的比例差 (最坏方差 p_a=0.5 时的下限)。
+
+    从 `required_runs_per_arm` 的公式反解 Δ (取 p_b = p_a + Δ, 且 p_a=0.5 时
+    p_a(1-p_a)+p_b(1-p_b) = 0.5 - Δ²):
+        Δ = z_sum · sqrt(0.5 / (n + z_sum²))
+    n 越小这个数越大。n=6 时约 53pp —— 正好解释了为什么 5/6→3/6 判不出东西。
+    """
+    if n_per_arm <= 0:
+        raise ValueError(f"n_per_arm 必须 > 0: {n_per_arm}")
+    if not 0 < alpha < 1 or not 0 < power < 1:
+        raise ValueError(f"alpha/power 必须在 (0,1): alpha={alpha} power={power}")
+    # 仅在 p_a=0.5 (最大方差) 处有闭式解; 其它 p_a 下需要迭代, 那会把「量程」
+    # 伪装成一个依赖未知真比例的数。所以这里**只报最坏情况**, 它是乐观界限:
+    # 真 p 离 0.5 越远, 同样 n 能分辨的 Δ 越小, 而我们事先并不知道真 p。
+    z_sum = _z(1 - alpha / 2.0) + _z(power)
+    return z_sum * np.sqrt(0.5 / (n_per_arm + z_sum * z_sum))
+
+
+def threshold_curve(runs, thresholds=(0.9, 1.0, 1.1)):
+    """同一批候选在不同 `min_speedup` 门槛下的重新计分 (doc 48 §6.2 ①)。
+
+    两层分开给, 分母不同不合并:
+      · 轮级: 有 speedup 读数的轮里, speedup ≥ t 的比例 (功能过的轮才有读数可言,
+        但这里不过滤 L2 —— 过滤会让「差 2~3%」那批消失, 而那正是曲线要看的);
+      · 任务级: 完成的运行里, 「存在至少一轮 speedup ≥ t 且该轮 L2 过」的比例。
+        这是**假设那个门槛当时就生效**时, 这批候选能不能交差。
+
+    ⚠️ 这不是「把门槛改低再跑一遍」: 搜索是被当时的门槛塑形的, 换门槛会生成另一批
+    候选。曲线只能回答「这批货在别的门槛下卖不卖得掉」, 不能回答「改低门槛流水线
+    会变强吗」。这句话必须跟曲线一起出现在报表里。
+    """
+    thr = tuple(float(t) for t in thresholds)
+    ok_runs = [r for r in runs if r.get("ok")]
+    speedups = []
+    for r in ok_runs:
+        for h in r.get("rounds") or []:
+            sp = h.get("speedup")
+            if isinstance(sp, (int, float)) and not isinstance(sp, bool):
+                speedups.append(float(sp))
+    round_rows = []
+    task_rows = []
+    for t in thr:
+        r_num = sum(1 for s in speedups if s >= t)
+        r_den = len(speedups)
+        t_num = 0
+        for r in ok_runs:
+            for h in r.get("rounds") or []:
+                sp = h.get("speedup")
+                lv = h.get("levels_passed") or {}
+                if (isinstance(sp, (int, float)) and not isinstance(sp, bool)
+                        and sp >= t and lv.get("L2")):
+                    t_num += 1
+                    break
+        t_den = len(ok_runs)
+        round_rows.append({"threshold": t, "passed": r_num, "denom": r_den,
+                           "pct": _pct(r_num, r_den)})
+        task_rows.append({"threshold": t, "passed": t_num, "denom": t_den,
+                          "pct": _pct(t_num, t_den)})
+    return {"thresholds": list(thr), "rounds": round_rows, "tasks": task_rows,
+            "caveat": "同一批已生成候选的重新计分, 不是改门槛重跑 —— 搜索行为被当时的门槛塑形"}
+
+
+def compare_runs(runs_a, runs_b, meta_a=None, meta_b=None, target_delta=0.30):
+    """两份运行记录的 A/B 判决: 这次改动「测得出变化」还是「本来测不出」。
+
+    判决词只有四个, 而且语义是互斥的:
+      · `improved` / `regressed` —— Fisher 双侧 p < α, 且方向由成功率差的符号定;
+      · `no_detected_difference` —— p ≥ α **且** 当前样本本来分辨得出 target_delta;
+      · `underpowered` —— p ≥ α 且样本量连 target_delta 都分辨不出。这时正确的读法是
+        「不知道」, 不是「没变化」。doc 48 §六B 那次 5/6→3/6 正是这一档。
+
+    主判决看**任务级成功率** (运行是独立样本)。L3 轮级作为辅助一起算, 但注意
+    轮嵌在运行里、并不独立 —— 报表只把它当地图, 不当第二张判决书。
+    """
+    ok_a = [r for r in runs_a if r.get("ok")]
+    ok_b = [r for r in runs_b if r.get("ok")]
+    pass_a = sum(1 for r in ok_a if r.get("final_all_passed"))
+    pass_b = sum(1 for r in ok_b if r.get("final_all_passed"))
+    n_a, n_b = len(ok_a), len(ok_b)
+
+    def _l3(runs):
+        num = den = 0
+        for r in runs:
+            for h in r.get("rounds") or []:
+                lv = h.get("levels_passed") or {}
+                if "L3" in lv:
+                    den += 1
+                    if lv.get("L3"):
+                        num += 1
+        return num, den
+
+    l3_a, l3_na = _l3(ok_a)
+    l3_b, l3_nb = _l3(ok_b)
+
+    # 样本不足时 Fisher 仍算 (它是对的), 但**判决词必须让路**
+    denom_ok = n_a >= MIN_DENOM and n_b >= MIN_DENOM
+    p_task = fisher_exact(pass_a, n_a, pass_b, n_b) if n_a and n_b else None
+    p_l3 = fisher_exact(l3_a, l3_na, l3_b, l3_nb) if l3_na and l3_nb else None
+
+    rate_a = pass_a / n_a if n_a else None
+    rate_b = pass_b / n_b if n_b else None
+    delta_obs = (rate_b - rate_a) if (rate_a is not None and rate_b is not None) else None
+
+    # 量程: 这批样本最多分辨多大的差。p_a 取基线侧的观测率 (夹到 (0,1)),
+    # 没有基线时用 0.5 —— 最坏方差, 于是量程偏保守 (说「能分辨的差」偏大 ⇒
+    # 更容易把 `no_detected_difference` 降级成 `underpowered`, 方向是诚实的)。
+    p_scale = rate_a if (rate_a is not None and 0 < rate_a < 1) else 0.5
+    n_min = min(n_a, n_b) if (n_a and n_b) else 0
+    detectable = min_detectable_delta(n_min, p_a=p_scale) if n_min else None
+    required = None
+    try:
+        required = required_runs_per_arm(max(0.05, min(0.95, p_scale)), target_delta)
+    except ValueError:
+        required = None
+
+    alpha = 0.05
+    if not denom_ok:
+        verdict = "underpowered"
+        reason = (f"每臂完成的运行不足 MIN_DENOM={MIN_DENOM} "
+                  f"(A={n_a}, B={n_b}) —— 百分数都不该出, 更谈不上判变化")
+    elif p_task is None:
+        verdict = "underpowered"
+        reason = "有一臂没有可用的成功率分母"
+    elif p_task < alpha:
+        if delta_obs is not None and delta_obs > 0:
+            verdict = "improved"
+        elif delta_obs is not None and delta_obs < 0:
+            verdict = "regressed"
+        else:
+            verdict = "no_detected_difference"
+        reason = f"任务级 Fisher 双侧 p={p_task:.4g} < {alpha}, Δ={delta_obs:+.3f}"
+    else:
+        if detectable is not None and target_delta is not None and detectable <= target_delta:
+            verdict = "no_detected_difference"
+            reason = (f"p={p_task:.4g} ≥ {alpha}, 而样本量分辨得出 "
+                      f"{target_delta:.0%} 量级的差 (可分辨下限 ≈{detectable:.1%})")
+        else:
+            verdict = "underpowered"
+            reason = (f"p={p_task:.4g} ≥ {alpha}, 且样本量连 {target_delta:.0%} 的差都"
+                      f"分辨不出 (可分辨下限 ≈{(detectable or 0):.1%}) —— "
+                      f"正确的读法是「不知道」, 不是「没变化」")
+
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "alpha": alpha,
+        "target_delta": target_delta,
+        "task_success": {
+            "a": (pass_a, n_a), "b": (pass_b, n_b),
+            "rate_a": rate_a, "rate_b": rate_b, "delta": delta_obs,
+            "p_value": p_task,
+        },
+        "l3": {
+            "a": (l3_a, l3_na), "b": (l3_b, l3_nb),
+            "p_value": p_l3,
+            "note": "轮嵌在运行里, 不独立 —— 只作地图, 不作第二张判决书",
+        },
+        "power": {
+            "n_a": n_a, "n_b": n_b, "n_min": n_min,
+            "detectable_delta": detectable,
+            "required_per_arm": required,
+            "target_delta": target_delta,
+        },
+        "speedup": {
+            "a": _quantiles([h["speedup"] for r in ok_a for h in (r.get("rounds") or [])
+                             if isinstance(h.get("speedup"), (int, float))
+                             and not isinstance(h.get("speedup"), bool)]),
+            "b": _quantiles([h["speedup"] for r in ok_b for h in (r.get("rounds") or [])
+                             if isinstance(h.get("speedup"), (int, float))
+                             and not isinstance(h.get("speedup"), bool)]),
+            "note": "描述性分布, 不做检验: 轮内相关, 不满足独立样本假设",
+        },
+        "meta": {"a": meta_a or {}, "b": meta_b or {}},
+    }
+
+
+def format_comparison(cmp):
+    lines = ["", "=" * 62, "A/B 判决 (能不能判出变化)", "=" * 62]
+    ma, mb = cmp.get("meta", {}).get("a") or {}, cmp.get("meta", {}).get("b") or {}
+    if ma.get("git_head") or mb.get("git_head"):
+        lines.append(f"  A: {ma.get('git_head', '?')}  →  B: {mb.get('git_head', '?')}")
+    ts = cmp["task_success"]
+    a_ok, a_n = ts["a"]
+    b_ok, b_n = ts["b"]
+
+    def _rate(n, d):
+        return f"{n}/{d}" + (f" = {n / d * 100:.1f}%" if d else "")
+
+    lines.append(f"  任务级成功: A {_rate(a_ok, a_n)}  →  B {_rate(b_ok, b_n)}")
+    if ts["p_value"] is not None:
+        lines.append(f"  Fisher 精确双侧 p = {ts['p_value']:.4g}"
+                     + (f"   Δ = {ts['delta']:+.3f}" if ts["delta"] is not None else ""))
+    l3 = cmp["l3"]
+    lines.append(f"  L3 轮级 (地图): A {_rate(*l3['a'])}  →  B {_rate(*l3['b'])}"
+                 + (f"  p = {l3['p_value']:.4g}" if l3["p_value"] is not None else ""))
+    pw = cmp["power"]
+    if pw.get("detectable_delta") is not None:
+        lines.append(f"  量程: 每臂 n≈{pw['n_min']} 时最多分辨 ≈{pw['detectable_delta']:.1%} 的差"
+                     + (f" (要分辨 {pw['target_delta']:.0%} 约需 n={pw['required_per_arm']}/臂)"
+                        if pw.get("required_per_arm") else ""))
+    sa, sb = cmp["speedup"]["a"], cmp["speedup"]["b"]
+    if sa and sb:
+        lines.append(f"  加速比中位: A {sa['median']}x (n={sa['n']})  →  "
+                     f"B {sb['median']}x (n={sb['n']})   [描述性, 未检验]")
+    label = {
+        "improved": "✅ 测出了改善",
+        "regressed": "❌ 测出了回归",
+        "no_detected_difference": "➖ 没测出差异 (样本量本来分辨得出目标差幅)",
+        "underpowered": "⚠️  判不出 (样本量不够) —— 不是「没变化」",
+    }[cmp["verdict"]]
+    lines.append(f"\n判决: {label}")
+    lines.append(f"  {cmp['reason']}")
+    return "\n".join(lines)
+
+
 def aggregate(runs):
     """把逐次运行的原始记录聚合成报表。返回的每个百分数都**带分母**。"""
     ok_runs = [r for r in runs if r.get("ok")]
@@ -280,6 +580,16 @@ def aggregate(runs):
             "calls": sum(int(r.get("llm_calls") or 0) for r in ok_runs),
             "usd": round(sum(float(r.get("cost_usd") or 0.0) for r in ok_runs), 4),
             "wall_s": round(sum(float(r.get("wall_s") or 0.0) for r in ok_runs), 1),
+        },
+        "threshold_curve": threshold_curve(ok_runs),
+        "power": {
+            "n_a": len(ok_runs),
+            "n_min": len(ok_runs),
+            "detectable_delta": (
+                min_detectable_delta(len(ok_runs)) if ok_runs else None),
+            "required_per_arm": required_runs_per_arm(0.5, 0.30),
+            "target_delta": 0.30,
+            "note": "量程按最坏方差 p=0.5 报, 是乐观界限: 真 p 离 0.5 越远越容易分辨",
         },
         "denominator_ok": min(len(ok_runs), len(rounds)) >= MIN_DENOM,
     }
@@ -388,6 +698,28 @@ def format_report(agg):
     c = agg["cost"]
     lines.append(f"\n【成本】{c['tokens']} tokens / {c.get('calls', 0)} 次调用 ≈ ${c['usd']}"
                  f" · 墙钟 {c['wall_s']} s")
+
+    curve = agg.get("threshold_curve") or {}
+    if curve.get("tasks"):
+        lines.append("\n【门槛扫描】" + curve.get(
+            "caveat", "同一批已生成候选的重新计分"))
+        for tr, rr in zip(curve["tasks"], curve.get("rounds") or []):
+            tp, td = tr["passed"], tr["denom"]
+            rp, rd = rr["passed"], rr["denom"]
+            lines.append(f"  ≥{tr['threshold']}x: 任务 {tp}/{td}"
+                         + (f" = {tr['pct']}%" if tr["pct"] is not None else "")
+                         + f" · 轮 {rp}/{rd}"
+                         + (f" = {rr['pct']}%" if rr["pct"] is not None else ""))
+
+    pw = agg.get("power") or {}
+    det = pw.get("detectable_delta")
+    if det is not None:
+        lines.append(f"\n【判变化的量程】当前 n≈{pw.get('n_min')} 时最多分辨 "
+                     f"≈{det:.1%} 的比例差 (α=0.05, power=0.8, 最坏方差)")
+        if pw.get("required_per_arm"):
+            lines.append(f"  要分辨 {pw.get('target_delta', 0.30):.0%} 量级的差, "
+                         f"约需 n={pw['required_per_arm']}/臂。"
+                         f"「没测出差异」只有在这个量程内说才有意义。")
     return "\n".join(lines)
 
 
@@ -468,12 +800,40 @@ def run_one(label, kernel_type, precision, shape, backend, rounds):
     return rec
 
 
+def _load_payload(path: str) -> dict:
+    p = Path(path)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if "runs" not in data:
+        raise SystemExit(f"❌ {p} 不是 pass_rate.json (没有 runs 键)")
+    return data
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repeats", type=int, default=3, help="每个用例重复几次 (默认 3)")
     ap.add_argument("--rounds", type=int, default=3, help="max_optimize_rounds (默认 3)")
     ap.add_argument("--out", default="", help="报表落盘目录 (默认 output/harness/<时间戳>)")
+    ap.add_argument("--compare", nargs=2, metavar=("A.json", "B.json"), default=None,
+                    help="离线判决两份已落盘的 pass_rate.json (不需要 GPU/LLM)")
+    ap.add_argument("--target-delta", type=float, default=0.30,
+                    help="判变化时关心的最小差幅 (默认 0.30 = 30 个百分点)")
     args = ap.parse_args()
+
+    if args.compare:
+        # 纯离线路径: 不建 LLMClient、不碰 RemoteExecutor —— 这是「改完之后判有没有用」
+        # 的日常入口, 不该每次都要 GPU 机在线。
+        payload_a = _load_payload(args.compare[0])
+        payload_b = _load_payload(args.compare[1])
+        meta_a = {"git_head": payload_a.get("git_head"), "knobs": payload_a.get("knobs"),
+                  "path": args.compare[0]}
+        meta_b = {"git_head": payload_b.get("git_head"), "knobs": payload_b.get("knobs"),
+                  "path": args.compare[1]}
+        cmp = compare_runs(payload_a.get("runs") or [], payload_b.get("runs") or [],
+                           meta_a=meta_a, meta_b=meta_b, target_delta=args.target_delta)
+        print(format_comparison(cmp))
+        # 退出码反映判决本身, 便于脚本化: 0=测出改善 / 1=测出回归 / 2=没测出或判不出
+        return {"improved": 0, "regressed": 1,
+                "no_detected_difference": 2, "underpowered": 3}[cmp["verdict"]]
 
     out_dir = Path(args.out) if args.out else (
         Path(__file__).resolve().parents[1] / "output" / "harness"

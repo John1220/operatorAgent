@@ -12,9 +12,12 @@ import json
 import unittest
 from pathlib import Path
 
-from benchmarks.harness_pass_rate import (MIN_DENOM, aggregate, cost_from_metadata,
-                                          device_record, first_pass_round, format_report,
-                                          record_rounds)
+from benchmarks.harness_pass_rate import (MIN_DENOM, aggregate, compare_runs,
+                                          cost_from_metadata, device_record,
+                                          fisher_exact, first_pass_round,
+                                          format_comparison, format_report,
+                                          min_detectable_delta, record_rounds,
+                                          required_runs_per_arm, threshold_curve)
 from operator_agent.backend_caps import Cap
 from tests.backend_fakes import DeclaredFakeBackend
 
@@ -623,3 +626,223 @@ class TestReportNeverReadsTheEnvForTheDevice(unittest.TestCase):
             "    return {\"gpu\": os.environ.get(\"OPERATOR_AGENT_GPU\", \"(未固定)\")}\n"
         )
         self.assertEqual(["device_record", "main"], _env_lookup_sites(synthetic))
+
+
+# ─── 判变化: Fisher / 样本量 / 门槛扫描 / A-B 判决 ───────────────
+# 这一组对应 doc 48 §六B 那次亲自差点判错的现场: 任务级 5/6 → 3/6 看起来「掉了一半」,
+# 而 Fisher 双侧 p = 0.545。报表若只印两个百分数, 读者会自己做出错误判决。
+
+class TestFisherExactMatchesTheKnownAnswer(unittest.TestCase):
+    def test_5_of_6_versus_3_of_6_is_the_reading_from_doc_48(self):
+        """doc 48 §六B 的已知答案: p ≈ 0.545 —— 公式方向写反会撞红这一条"""
+        p = fisher_exact(5, 6, 3, 6)
+        self.assertAlmostEqual(0.545454, p, places=5,
+                               msg="5/6 vs 3/6 的 Fisher 双侧 p 不再是 doc 48 那个 0.545")
+
+    def test_total_separation_is_small_and_symmetric(self):
+        p_fwd = fisher_exact(10, 10, 0, 10)
+        p_rev = fisher_exact(0, 10, 10, 10)
+        self.assertLess(p_fwd, 0.001, "10/10 vs 0/10 居然判不出差异")
+        self.assertAlmostEqual(p_fwd, p_rev, places=9,
+                               msg="换臂之后 p 变了 —— Fisher 不是对称的")
+
+    def test_identical_tables_give_one(self):
+        self.assertAlmostEqual(1.0, fisher_exact(5, 10, 5, 10), places=9)
+
+    def test_one_difference_on_tiny_samples_stays_large(self):
+        """1/2 vs 0/2 的 p 必须很大 —— 这是「n 小就该判不出」的最小复现"""
+        self.assertGreater(fisher_exact(1, 2, 0, 2), 0.4)
+
+    def test_illegal_tables_are_refused_not_clamped(self):
+        for bad in ((-1, 5, 0, 5), (3, 2, 0, 5), (0, 0, 1, 1), (1, 5, 1, 0)):
+            with self.assertRaises(ValueError):
+                fisher_exact(*bad)
+
+
+class TestPowerMathIsMonotoneAndHonest(unittest.TestCase):
+    def test_smaller_delta_needs_more_runs(self):
+        n_wide = required_runs_per_arm(0.5, 0.30)
+        n_tight = required_runs_per_arm(0.5, 0.10)
+        self.assertGreater(n_tight, n_wide,
+                           "分辨更小的差却要更少样本 —— 公式反了")
+
+    def test_more_runs_can_see_smaller_deltas(self):
+        d6 = min_detectable_delta(6)
+        d36 = min_detectable_delta(36)
+        self.assertGreater(d6, d36, "样本变多反而说能分辨的差变大了")
+        # 6 次运行分辨不出 30pp —— 正是 doc 48 那次 5/6→3/6 的处境
+        self.assertGreater(d6, 0.30)
+
+    def test_detectable_delta_covers_the_30pp_target_near_the_rough_estimate(self):
+        """粗算 n≈20/臂 (doc 48) 的位置上, 量程应当已经不大于 40pp; 36/臂 才够 30pp"""
+        self.assertLessEqual(min_detectable_delta(36), 0.30 + 1e-9)
+        self.assertGreater(min_detectable_delta(20), 0.30)
+
+    def test_required_n_rejects_impossible_inputs(self):
+        for bad in dict(p_a=0.0, delta=0.3), dict(p_a=0.5, delta=0.0), dict(p_a=1.5, delta=0.1):
+            with self.assertRaises(ValueError):
+                required_runs_per_arm(**bad)
+
+    def test_swap_direction_does_not_flip_sample_size(self):
+        """要分辨「变好 30pp」和「变差 30pp」用的是方差更大的那一侧, 结果对称"""
+        self.assertEqual(required_runs_per_arm(0.2, 0.3), required_runs_per_arm(0.8, 0.3))
+
+
+class TestThresholdCurveRescoresTheSameCandidates(unittest.TestCase):
+    def test_curve_moves_monotonically_with_the_threshold(self):
+        # 0.80 过不了 0.9, 所以 0.9x 档是 3/4 而不是 4/4 —— 期望必须跟着数据算, 不是拍脑袋
+        speeds = [0.95, 1.05, 1.20, 0.80]
+        runs = [_run([_round(1, l2=True, l3=True, validity=VALID, speedup=s)])
+                for s in speeds]
+        curve = threshold_curve(runs, thresholds=(0.9, 1.0, 1.1))
+        pcts = [row["pct"] for row in curve["rounds"]]
+        self.assertEqual([75.0, 50.0, 25.0], pcts,
+                         f"门槛从 0.9 抬到 1.1, 通过率必须单调不升: {pcts}")
+        self.assertEqual([75.0, 50.0, 25.0], [r["pct"] for r in curve["tasks"]])
+
+    def test_boundary_is_inclusive(self):
+        """门槛语义是「加速比 ≥ min_speedup」。写成 > 会把正好 1.00x 的读数判失败"""
+        runs = [_run([_round(1, l2=True, l3=True, validity=VALID, speedup=1.0)])
+                for _ in range(MIN_DENOM)]
+        curve = threshold_curve(runs, thresholds=(1.0,))
+        self.assertEqual(MIN_DENOM, curve["rounds"][0]["passed"])
+
+    def test_rounds_without_a_speedup_are_not_in_the_denominator(self):
+        """L1 挂掉的轮没有读数 —— 算进分母就是把「没测到」记成「没达到」"""
+        runs = [_run([_round(1, l1=False)]) for _ in range(MIN_DENOM)]
+        runs += [_run([_round(1, l2=True, l3=True, validity=VALID, speedup=1.2)])
+                 for _ in range(MIN_DENOM)]
+        curve = threshold_curve(runs, thresholds=(1.0,))
+        self.assertEqual(MIN_DENOM, curve["rounds"][0]["denom"],
+                         "没有读数的轮混进了门槛扫描的分母")
+
+    def test_task_curve_counts_a_run_if_any_qualifying_round_exists(self):
+        """任务级门槛扫描: 3 轮里第 3 轮才越过 1.1x, 这个任务在 1.1x 档应当算通过"""
+        rounds = [_round(1, l2=True, l3=False, validity=VALID, speedup=0.9),
+                  _round(2, l2=True, l3=False, validity=VALID, speedup=1.0),
+                  _round(3, l2=True, l3=True, validity=VALID, speedup=1.15)]
+        curve = threshold_curve([_run(rounds), _run(rounds)], thresholds=(1.0, 1.1))
+        self.assertEqual(2, curve["tasks"][0]["passed"])
+        self.assertEqual(2, curve["tasks"][1]["passed"])
+
+    def test_caveat_is_carried_so_the_curve_cannot_be_read_as_a_rerun(self):
+        curve = threshold_curve(_n_passing(MIN_DENOM))
+        self.assertIn("重新计分", curve["caveat"])
+        self.assertIn("不是", curve["caveat"])
+
+
+class TestCompareRefusesToClaimWhenUnderpowered(unittest.TestCase):
+    """判决词只有四个, 且「不知道」绝不许被说成「没变化」"""
+
+    def _arm(self, n_pass, n_total, speedup=1.2):
+        runs = []
+        for i in range(n_total):
+            if i < n_pass:
+                runs.append(_run([_round(1, l2=True, l3=True, validity=VALID,
+                                        speedup=speedup)], admitted=True))
+            else:
+                runs.append(_run([_round(1, l2=True, l3=False, validity=VALID,
+                                        speedup=0.9)], final=False))
+        return runs
+
+    def test_doc_48_reading_is_underpowered_not_no_change(self):
+        """5/6 → 3/6: 两个百分数并排像是「掉了 33pp」, 而这是判不出的"""
+        cmp = compare_runs(self._arm(5, 6), self._arm(3, 6))
+        self.assertEqual("underpowered", cmp["verdict"],
+                         "5/6→3/6 被判成有结论 —— 正是 doc 48 §六B 差点犯的错")
+        self.assertIn("不知道", cmp["reason"])
+        self.assertNotEqual("no_detected_difference", cmp["verdict"])
+
+    def test_a_clear_gap_on_tiny_samples_still_counts_as_detected(self):
+        """0/8 vs 8/8 的 p 远小于 0.05, 即使 n< 那个「30pp 量程」也测得出"""
+        cmp = compare_runs(self._arm(0, 8), self._arm(8, 8))
+        self.assertIn(cmp["verdict"], ("improved", "regressed"))
+        self.assertLess(cmp["task_success"]["p_value"], 0.05)
+
+    def test_direction_follows_the_sign_of_delta(self):
+        worse = compare_runs(self._arm(8, 10), self._arm(1, 10))
+        better = compare_runs(self._arm(1, 10), self._arm(8, 10))
+        self.assertEqual("regressed", worse["verdict"])
+        self.assertEqual("improved", better["verdict"])
+        self.assertAlmostEqual(-worse["task_success"]["delta"],
+                               better["task_success"]["delta"], places=9)
+
+    def test_big_samples_with_a_small_gap_say_no_detected_difference(self):
+        """两臂各 40 次、52% vs 55%: 分辨得出 30pp, 但这 3pp 确实没测出来"""
+        cmp = compare_runs(self._arm(21, 40), self._arm(22, 40), target_delta=0.30)
+        self.assertEqual("no_detected_difference", cmp["verdict"])
+        self.assertGreaterEqual(cmp["task_success"]["p_value"], 0.05)
+
+    def test_below_min_denom_is_underpowered_even_if_rates_look_dramatic(self):
+        cmp = compare_runs(self._arm(0, 2), self._arm(2, 2))
+        self.assertEqual("underpowered", cmp["verdict"])
+        self.assertIn("MIN_DENOM", cmp["reason"])
+
+    def test_power_block_reports_both_sides_of_the_question(self):
+        cmp = compare_runs(self._arm(5, 6), self._arm(3, 6))
+        pw = cmp["power"]
+        self.assertEqual(6, pw["n_min"])
+        self.assertIsNotNone(pw["detectable_delta"])
+        self.assertIsNotNone(pw["required_per_arm"])
+        self.assertGreater(pw["detectable_delta"], 0.30)
+
+    def test_format_comparison_puts_the_verdict_last_and_visible(self):
+        text = format_comparison(compare_runs(self._arm(5, 6), self._arm(3, 6)))
+        self.assertIn("判不出", text)
+        self.assertIn("Fisher", text)
+        self.assertIn("量程", text)
+
+    def test_swapping_arms_swaps_the_verdict_word_not_the_p_value(self):
+        a, b = self._arm(1, 10), self._arm(8, 10)
+        fwd, rev = compare_runs(a, b), compare_runs(b, a)
+        self.assertEqual("improved", fwd["verdict"])
+        self.assertEqual("regressed", rev["verdict"])
+        self.assertAlmostEqual(fwd["task_success"]["p_value"],
+                               rev["task_success"]["p_value"], places=9)
+
+    def test_l3_is_present_but_marked_as_a_map_not_a_second_verdict(self):
+        cmp = compare_runs(self._arm(5, 6), self._arm(3, 6))
+        self.assertIn("地图", cmp["l3"]["note"])
+
+    def test_comparison_is_json_serialisable(self):
+        json.dumps(compare_runs(self._arm(5, 6), self._arm(3, 6)))
+
+
+class TestReportCarriesTheCurveAndThePowerBudget(unittest.TestCase):
+    def test_report_includes_threshold_scan_and_power(self):
+        runs = [_run([_round(1, l2=True, l3=True, validity=VALID, speedup=0.97)])
+                for _ in range(MIN_DENOM)]
+        text = format_report(aggregate(runs))
+        self.assertIn("门槛扫描", text)
+        self.assertIn("0.9", text)
+        self.assertIn("1.0", text)
+        self.assertIn("1.1", text)
+        self.assertIn("判变化的量程", text)
+        self.assertIn("重新计分", text)
+
+    def test_aggregate_stores_the_curve_so_offline_compare_can_reuse_it(self):
+        agg = aggregate(_n_passing(MIN_DENOM))
+        self.assertIn("threshold_curve", agg)
+        self.assertIn("power", agg)
+        self.assertEqual(3, len(agg["threshold_curve"]["thresholds"]))
+        self.assertEqual(MIN_DENOM, agg["power"]["n_min"])
+
+
+class TestKnownAnswerOnTheTwoRealBaselines(unittest.TestCase):
+    """拿 doc 48 §六B 那两份真机报表当已知答案: 判决必须是「判不出」"""
+
+    def test_the_two_saved_baselines_do_not_claim_a_regression(self):
+        root = REPO_ROOT / "output" / "harness"
+        paths = sorted(root.glob("*/pass_rate.json"))
+        if len(paths) < 2:
+            self.skipTest("本地没有两份真机基线")
+        a = json.loads(paths[0].read_text(encoding="utf-8"))
+        b = json.loads(paths[1].read_text(encoding="utf-8"))
+        cmp = compare_runs(a.get("runs") or [], b.get("runs") or [],
+                           meta_a={"git_head": a.get("git_head")},
+                           meta_b={"git_head": b.get("git_head")})
+        # 5/6 → 3/6, Fisher p ≈ 0.545
+        self.assertEqual("underpowered", cmp["verdict"])
+        self.assertAlmostEqual(0.545454, cmp["task_success"]["p_value"], places=4)
+        self.assertEqual(5, cmp["task_success"]["a"][0], "A 是更早那份基线 (5/6)")
+        self.assertEqual(3, cmp["task_success"]["b"][0], "B 是更晚那份 (3/6)")
