@@ -241,7 +241,15 @@ def run_arm(name: str, backend, out_root: Path, work: Path, rounds: int,
 def child_main(task_id: str, out_root: str) -> int:
     os.environ["OPERATOR_AGENT_OUTPUT_DIR"] = out_root
     backend = make_backend()
-    c = Conductor(backend=backend, llm=llm_from_config(), max_optimize_rounds=2)
+    # ⚠️ 这里必须和 `build()` 一样注入临时语料。真机那一跑 (doc 50 §7.7) 就是因为子进程
+    # 走的是默认路径, 把 3 条 `retrieved` 事件写进了仓库的 `output/kernel_db.jsonl` ——
+    # 而那些事件有读者 (检索排序里的「曾被检索 N 次」), 所以这不是无害的噪音。
+    # `build()` 注入了、`child_main()` 没注入, 正是「同一个不变量只在一条路径上成立」的形状。
+    work = Path(out_root).parent
+    c = Conductor(backend=backend, llm=llm_from_config(),
+                  kernel_db=KernelDatabase(jsonl_path=str(work / f"kdb-child-{task_id}.jsonl")),
+                  failure_db=FailureDatabase(jsonl_path=str(work / f"fdb-child-{task_id}.jsonl")),
+                  max_optimize_rounds=2)
     c.store.output_dir = Path(out_root)
     c.execute(make_task(task_id), inputs_for(), None, target_gflops=10.0)
     return 0
