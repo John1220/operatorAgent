@@ -167,6 +167,28 @@ def calibrate(root: str, files: Dict[str, str], targets: Sequence[str],
     return results
 
 
+def reading_conditions(root: str) -> str:
+    """**读数条件与读数同印**: 同一台机上有两套解释器, 装不装 torch 不一样
+
+    2026-09-30 实撞: 同一份 HEAD `00a88ed` 的干净 worktree, 用
+    `~/opt/miniconda3/bin/python3` (3.9.12, torch 2.8.0) 读是 **986 passed / 1 skipped**,
+    用 `/usr/bin/python3` (3.9.6, 无 torch) 读是 **981 passed / 1 failed / 5 skipped** ——
+    两边总数都是 987, 差的 5 条全是 CHECKLOG I5 那一族 (用例判定随本机有无 torch 翻转),
+    没有一行代码不同。这张 21 行表的红名单在两套解释器下各跑过一遍、逐行相同, 所以这一行
+    不是宣称「数会变」, 是让下一轮能分辨**条件差与回归** —— 只印一个数就做不出这个判断。
+    """
+    try:
+        rev = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=root,
+                             capture_output=True, text=True).stdout.strip() or "?"
+        dirty = subprocess.run(["git", "status", "--porcelain", "-uall"], cwd=root,
+                               capture_output=True, text=True).stdout.strip()
+    except OSError:
+        rev, dirty = "?", "?"
+    return (f"读数条件: python={sys.version.split()[0]} @ {sys.executable} "
+            f"torch={'有' if importlib.util.find_spec('torch') else '无'} "
+            f"HEAD={rev} 未提交改动={'有' if dirty else '无'}")
+
+
 def summarize(results: Sequence[Result]) -> str:
     beh = [r for r in results if r.behavioral]
     stru = [r for r in results if not r.behavioral]
@@ -192,6 +214,7 @@ def main(argv: Sequence[str]) -> int:
     root = os.path.abspath(args.root)
     files, targets, rows = load_spec(args.spec)
 
+    print(reading_conditions(root))
     problems = check_shape(root, files, rows)
     if problems:
         print("❌ 规格本身有问题:")
@@ -208,8 +231,7 @@ def main(argv: Sequence[str]) -> int:
         print(f"❌ {exc}")
         return 2
     for r in results:
-        tag = r.verdict if r.verdict != "KILLED" else "KILLED"
-        print(f"- {r.name}: {tag} ({len(r.fails)} 条红)  witness={r.witness[:60]}")
+        print(f"- {r.name}: {r.verdict} ({len(r.fails)} 条红)  witness={r.witness[:60]}")
     print("\n" + summarize(results))
     escaped = [r for r in results if r.verdict in ("ESCAPED", "ANCHOR", "ERROR")]
     return 1 if escaped else 0
