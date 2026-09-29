@@ -27,7 +27,10 @@ Thumbs.db
 output/
 logs/
 debug/
-tests/golden_registry.json
+# tests/golden_registry.json —— 2026-09-29 起**入库**（#73）。它以前被 ignore，
+# 于是整套 golden 期望只存在于一台机上（`git log --all` 证明它从未被跟踪），
+# 而它含绝对家目录路径 ⇒ 既不能提交也没有别的读者。现在路径改成 repo 内相对，
+# 期望就成了被版本控制的资产：改动它必须留下一次可评审的 diff。
 triton/
 
 # ─── 本地私有配置 (敏感信息) ───

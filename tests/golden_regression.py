@@ -10,9 +10,10 @@ Golden 回归 Harness (#3 号 Harness)
   # 1) 初次建立 baseline (写入 tests/golden_registry.json)
   python tests/golden_regression.py baseline
 
-  # 2) 对比当前代码 vs baseline (CI 里用这个, 失败时 exit code != 0)
+  # 2) 对比当前代码 vs baseline (CI 里用这个)
+  #    exit code: 0 = 没有要处理的事; 1 = 有回归要修代码; 2 = 期望过期了, 要人签认
   python tests/golden_regression.py compare
-  python tests/golden_regression.py compare --tolerance 0.15        # 性能 15% 以内可容忍 (默认 0.2 = 20%)
+  python tests/golden_regression.py compare --tolerance 0.15        # 性能**双向** ±15% (默认 0.2 = ±20%)
   python tests/golden_regression.py compare --case matmul_mock_py   # 只跑单个 case
 
   # 3) 列出所有注册的 golden case
@@ -21,8 +22,12 @@ Golden 回归 Harness (#3 号 Harness)
 设计原则:
   * 默认全部跑 MockGPU，不依赖真 GPU/SSH/LLM（LLM 用 MockLLM 注入"已知能通过的代码"作为输出），
     这样 CI 在本地/无网环境也能跑；需要真 GPU case 可 enable_gpu=True 单独加。
-  * baseline 只存 artifact_dir 路径 + 验证通过/GFLOPS，不存代码副本 (artifact_dir 本身就是权威副本)。
-  * compare 失败时把 "FAILED" 的 case 列出来, 不改 baseline (避免 silent 覆盖, 需要显式 `baseline` 更新)。
+  * baseline 存**相对 repo 根**的 artifact_dir + 验证通过/GFLOPS。⚠️ 那个目录在 `output/`
+    下、是 gitignore 的，所以它**不是**「权威代码副本」—— 旧版本地绝对路径曾让整份
+    registry 只能活在这台机上 (见 doc 54)。
+  * compare 的判据是**正交事实各自上报**（`FACTS`），状态由事实推出；「一致地失败」
+    「修好了」「性能数上漂」「没有性能读数」都不许再写成 PASS。失败时不改 baseline
+    (避免 silent 覆盖, 需要显式 `baseline` 更新)。
 """
 
 from __future__ import annotations
@@ -36,7 +41,8 @@ from dataclasses import dataclass, asdict, field
 from typing import Any, Callable, Optional
 
 # 允许直接 `python tests/golden_regression.py` 运行
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 
 from operator_agent import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
@@ -47,7 +53,46 @@ from operator_agent.kernel_db import FailureDatabase
 
 
 REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_registry.json")
-DEFAULT_TOLERANCE = 0.20  # baseline GFLOPS 的 ±20% 以内算 OK
+
+
+def portable(p: str) -> str:
+    """把 repo 内的绝对路径收成**相对 repo 根**的形式。
+
+    registry 要能被提交，前提是它不含机器本地路径：旧版写的是
+    `/Users/.../output/...` 这种绝对串，那既让整份期望文件只能活在一台机上
+    （它因此被 .gitignore 排除、从未进过版本库），又把用户名写进了一个本该可分享的
+    产物里。留着这个目录本身没意义（`output/` 是 gitignore 的），它只是**出处指针**。
+    """
+    if not p:
+        return ""
+    ap = os.path.abspath(p)
+    if ap == REPO_ROOT or ap.startswith(REPO_ROOT + os.sep):
+        return os.path.relpath(ap, REPO_ROOT)
+    return ap
+DEFAULT_TOLERANCE = 0.20  # baseline GFLOPS 的 ±20% 以内算 OK (⚠️ 见下面的 FACTS: 旧实现只罚下行)
+
+# ── 正交事实清单 (#73, 吸纳 DSH `docs/defensive-patterns.md:9` + `docs/testing.md:27-29`) ──
+# 规则原文: "A result can be several things at once ... Surface each independent fact on
+# its own; never nest one flag's report inside another's branch, or a caller reads a
+# cut-short run as a clean success."
+#
+# 本仓的失效形态不是截断，是**一个 `PASS` 盖住四件不同的事**（实测 4 例里只有 1 例是活的
+# 仪器，报表却写 `PASS 4 / FAIL 0`）：一致地坏、修好了没人更新期望、性能数漂了 +492%、
+# 压根没有性能读数 —— 以前全叫 PASS。所以下面每个事实**单独一个名字、单独计数**，
+# 汇总行不许只报 PASS 数。
+FACTS = (
+    "functional_regression",   # baseline 过 → 当前不过: 唯一确定是回归的一族
+    "perf_regression",         # 掉出容忍窗口的下行: 也是回归
+    "perf_drift_up",           # 上行超出容忍窗口: 不是回归, 但那个期望值必须被人重新签认
+    "baseline_was_failing",    # 两边都失败 ⇒ 这一例检测不了任何东西 (死仪器)
+    "fixed_since_baseline",    # baseline 坏 → 当前好: 期望过期了
+    "no_perf_reference",       # 这一例没有可用的性能读数 (gflops 为 0 或不判性能)
+)
+
+#: 状态词。`REVIEW` 与 `FAIL` 分开是因为它们要求的动作不同：
+#: FAIL = 代码坏了；REVIEW = **期望**过期了，得有人决定是刷新还是修 case。
+#: 混成一个词就回到了本片要消除的那个失效形态。
+STATUSES = ("PASS", "REVIEW", "FAIL", "SKIP")
 
 
 # ─── Mock 代码库: 保证 MockGPU 能稳定通过 L1/L2, 且给出稳定的 "伪 GFLOPS" 数字 ──
@@ -118,8 +163,9 @@ class BaselineRecord:
 @dataclass
 class CompareReport:
     case_id: str
-    status: str                   # "PASS" | "FAIL" | "SKIP"
+    status: str                   # "PASS" | "REVIEW" | "FAIL" | "SKIP" (见 STATUSES)
     reason: str = ""
+    facts: tuple = ()             # 命中的独立事实 (FACTS 里的词), 可为多只
     baseline_gflops: float = 0.0
     current_gflops: float = 0.0
     delta_ratio: float = 0.0      # (current - baseline) / baseline
@@ -366,7 +412,7 @@ class GoldenRegressionHarness:
             description=case.description,
             timestamp=time.time(),
             git_hash=_git_hash() or "",
-            artifact_dir=artifact.saved_dir or "",
+            artifact_dir=portable(artifact.saved_dir or ""),
             all_passed=artifact.all_passed,
             l1_passed=l1_passed,
             l2_passed=l2_passed,
@@ -440,16 +486,15 @@ class GoldenRegressionHarness:
                 print(f"[Golden] ❌ {case.case_id} 执行异常: {e}")
                 continue
 
-            status, reason, dr = _compare_one(bl, cur, tolerance=tolerance, strict_l3=strict_l3)
+            status, facts, reason, dr = _compare_one(bl, cur, tolerance=tolerance, strict_l3=strict_l3)
             print(f"[Golden] {status}  {reason}")
             reports.append(CompareReport(
-                case_id=case.case_id, status=status, reason=reason,
+                case_id=case.case_id, status=status, reason=reason, facts=facts,
                 baseline_gflops=bl.gflops, current_gflops=cur.gflops, delta_ratio=dr,
                 baseline_all_passed=bl.all_passed, current_all_passed=cur.all_passed,
             ))
 
         self._print_report(reports)
-        failed = [r for r in reports if r.status == "FAIL"]
         return reports
 
     # --- 内部辅助 ---
@@ -466,46 +511,74 @@ class GoldenRegressionHarness:
             dr = f"{r.delta_ratio*100:+.1f}%" if r.delta_ratio else "-"
             print(f"  {r.case_id:<{w}}  {r.status:<6}  {bl:>9}  {cu:>9}  {dr:>7}  {r.reason}")
         print(f"{'='*(w + 56)}")
-        n_pass = sum(1 for r in reports if r.status == "PASS")
-        n_fail = sum(1 for r in reports if r.status == "FAIL")
-        n_skip = sum(1 for r in reports if r.status == "SKIP")
-        print(f"汇总: PASS {n_pass} / FAIL {n_fail} / SKIP {n_skip} (共 {len(reports)} case)")
+        n = {s: sum(1 for r in reports if r.status == s) for s in STATUSES}
+        print(f"汇总: PASS {n['PASS']} / REVIEW {n['REVIEW']} / FAIL {n['FAIL']} "
+              f"/ SKIP {n['SKIP']} (共 {len(reports)} case)")
+        # 独立事实**各自一个数**，不折叠进状态里（DSH `defensive-patterns.md:9`）。
+        # 一个 case 可以同时命中多个 ⇒ 这些数之和可以大于 case 数 —— 而这正是它比
+        # 「PASS 4」更有用的原因：以前那个数把死仪器和漂了 5 倍的期望都说成好消息。
+        hits = {f: sum(1 for r in reports if f in r.facts) for f in FACTS}
+        print("独立事实: " + (", ".join(f"{f}={c}" for f, c in hits.items() if c) or "无"))
+        dead = [r.case_id for r in reports if "baseline_was_failing" in r.facts]
+        if dead:
+            print(f"⚠️ 死仪器 (baseline 本身就是 FAIL, 检测不了任何回归): {', '.join(dead)}")
 
 
 def _compare_one(bl: BaselineRecord, cur: BaselineRecord, tolerance: float,
-                 strict_l3: bool) -> tuple[str, str, float]:
-    """比较单个 baseline vs 当前结果, 返回 (status, reason, delta_ratio)"""
-    # 功能回归: baseline PASS 时当前也必须 PASS
-    if bl.all_passed and not cur.all_passed:
-        return ("FAIL",
-                f"功能回归: baseline all_passed=True → 当前 all_passed=False (L1={cur.l1_passed} L2={cur.l2_passed} L3={cur.l3_passed})",
-                0.0)
-    # baseline 是 FAIL 的 (比如故意存的反例), 允许当前变 PASS; 但 FAIL→FAIL 且同样失败类型, 算 PASS
-    if not bl.all_passed and not cur.all_passed:
-        return ("PASS", "baseline 本就是 FAIL, 当前也 FAIL (无功能回归)", 0.0)
-    if not bl.all_passed and cur.all_passed:
-        return ("PASS", "baseline 是 FAIL → 当前 PASS (修复了, 建议更新 baseline)", 0.0)
+                 strict_l3: bool) -> tuple[str, tuple, str, float]:
+    """比较单个 baseline vs 当前结果, 返回 (status, facts, reason, delta_ratio)。
 
-    # L3 性能回归
-    if strict_l3 and bl.gflops > 0:
-        delta = cur.gflops - bl.gflops
-        dr = delta / bl.gflops
-        # 容忍窗口: 允许 baseline * (1 - tolerance) ~ +inf
-        if cur.gflops < bl.gflops * (1.0 - tolerance):
-            return (
-                "FAIL",
-                f"性能回归: 当前 GFLOPS={cur.gflops:.2f} 比 baseline {bl.gflops:.2f} 低 {dr*100:.1f}% (容忍阈值 -{tolerance*100:.0f}%)",
-                dr,
-            )
-        dr = (cur.gflops - bl.gflops) / bl.gflops
-        return ("PASS",
-                f"功能一致, GFLOPS {bl.gflops:.2f}→{cur.gflops:.2f} ({dr*100:+.1f}%)",
-                dr)
+    `facts` 是**独立事实的集合**，不是一个状态词（DSH `defensive-patterns.md:9`）；
+    状态由 facts 推出：命中回归类事实 ⇒ FAIL，只有「期望过期」类事实 ⇒ REVIEW，空 ⇒ PASS。
+    分开是因为这两者要求的动作不同 —— 一个是**代码坏了**，一个是**期望要有人签认**。
 
+    旧版把下面这四件事都返回成 PASS：两边都失败（死仪器）、baseline 坏而现在好了、
+    性能数漂了 +492%（容忍窗写成 ±20% 却只罚下行）、以及本例压根没有性能读数
+    （而且 reason 文案还谎称 `strict_l3=False`，实际那一维是开着的）。
+    """
+    facts: list = []
+    notes: list = []
     dr = 0.0
-    if bl.gflops > 0:
-        dr = (cur.gflops - bl.gflops) / bl.gflops
-    return ("PASS", f"功能一致 (strict_l3=False, 不判性能)", dr)
+
+    # 功能轴
+    if bl.all_passed and not cur.all_passed:
+        facts.append("functional_regression")
+        notes.append(f"功能回归: baseline all_passed=True → 当前 False "
+                     f"(L1={cur.l1_passed} L2={cur.l2_passed} L3={cur.l3_passed})")
+    elif not bl.all_passed and not cur.all_passed:
+        facts.append("baseline_was_failing")
+        notes.append("两边都失败: 这一例检测不了任何回归, 是**死仪器**而不是「无回归」")
+    elif not bl.all_passed and cur.all_passed:
+        facts.append("fixed_since_baseline")
+        notes.append("baseline 是 FAIL 而当前 PASS ⇒ 期望已过期, 需要有人刷新或说明为什么留着")
+
+    # 性能轴: 只有两边都通过时「加速比」这件事才有对象
+    if bl.all_passed and cur.all_passed:
+        if not strict_l3:
+            facts.append("no_perf_reference")
+            notes.append("lenient 模式: 本例不判性能")
+        elif bl.gflops <= 0:
+            facts.append("no_perf_reference")
+            notes.append(f"baseline GFLOPS={bl.gflops} 不是可用分母 ⇒ 性能轴无从比较 "
+                         f"(当前读数 {cur.gflops})")
+        else:
+            dr = (cur.gflops - bl.gflops) / bl.gflops
+            if cur.gflops < bl.gflops * (1.0 - tolerance):
+                facts.append("perf_regression")
+                notes.append(f"性能回归: {bl.gflops:.2f}→{cur.gflops:.2f} ({dr*100:+.1f}%), "
+                             f"超出容忍 -{tolerance*100:.0f}%")
+            elif dr > tolerance:
+                facts.append("perf_drift_up")
+                notes.append(f"性能上漂: {bl.gflops:.2f}→{cur.gflops:.2f} ({dr*100:+.1f}%): "
+                             f"不是回归, 但这个期望值已不代表任何被测物, 要人签认后刷新")
+
+    if {"functional_regression", "perf_regression"} & set(facts):
+        status = "FAIL"
+    elif facts:
+        status = "REVIEW"
+    else:
+        status = "PASS"
+    return status, tuple(facts), "; ".join(notes) or "功能与性能都在容忍窗口内", dr
 
 
 def _git_hash() -> Optional[str]:
@@ -530,7 +603,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_bl = sub.add_parser("baseline", help="跑全部 case, 写入/更新 baseline registry")
     p_bl.add_argument("--case", help="只跑指定 case_id")
 
-    p_cmp = sub.add_parser("compare", help="跑全部 case, 对比 baseline, FAIL 则 exit=1")
+    p_cmp = sub.add_parser("compare", help="跑全部 case 对比 baseline: 回归 exit=1, 期望待签认 exit=2")
     p_cmp.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE,
                        help=f"性能回归容忍率 (默认 {DEFAULT_TOLERANCE:.0%})")
     p_cmp.add_argument("--case", help="只跑指定 case_id")
@@ -558,8 +631,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             only_case=args.case,
             strict_l3=not args.lenient,
         )
-        failed = [r for r in reports if r.status == "FAIL"]
-        return 1 if failed else 0
+        codes = {r.status for r in reports}
+        # 两个退出码分开，是因为它们要求的**动作**不同：1 = 代码坏了要修，
+        # 2 = 期望过期了要有人签认（刷新 baseline 或说明为什么留着）。
+        # 合成一个码就等于把本片刚拆开的两件事又叠回去。
+        if "FAIL" in codes:
+            return 1
+        if "REVIEW" in codes:
+            return 2
+        return 0
 
     ap.print_help()
     return 2
