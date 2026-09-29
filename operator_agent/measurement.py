@@ -314,6 +314,70 @@ def ruler_note(agg: dict) -> str:
     return head + "; " + counts
 
 
+# ── 跨组聚合: 只 fold「报了这个键」的那些组 ────────────────────────────────
+#
+# 上面那一族问的是「几组用的是不是同一把尺」(`single_ruler`), 这一族问的是另一件事:
+# 「聚合出来的那个数底下是**几组**」。现场是 doc 57 §三 第 3 条, 由
+# `benchmarks/probe_l2_sampling_gate.py` 的臂 0b 打出来: 旧写法把三个键用
+# `m.get("max_rel_error", 0.0)` / `m.get("bad_elements", 0)` / `m.get("matched_ratio", 1.0)`
+# 兜底, 于是**从没算过这三个量的那条比对路径** (声明里没有 `Cap.FULL_OUTPUT_TENSOR` 的那条,
+# 判的是纯绝对阈值) 在产物里变成了「无相对误差、零坏点、全部元素匹配」。三处细节让它比
+# 看上去更贵:
+#   ① 只发生在**通过**那一侧 (失败时提前 return 原始 metrics) ⇒ 被污染的正好是通过率的分母;
+#   ② 兜出来的值与真值长得一样 (`matched_ratio=1.0` 是个完全合理的读数) ⇒ 从 `result.json`
+#      读不出这两条路的区别;
+#   ③ 「min over 几组」这件事本来就没写 —— 即使每组都报了, 读者也不知道那个 min 覆盖了几组。
+# 规则因此是三条, 各对应一种已经犯过的读法 (缺证据当证据、把像样的默认值当读数、把分母压平)。
+L2_AGGREGATIONS: tuple = (
+    ("max_error", max),
+    ("max_rel_error", max),
+    ("matched_ratio", min),
+    ("bad_elements", sum),
+    ("compared_elements", sum),
+    ("coverage", min),
+)
+
+
+def aggregate_l2_readings(sets: list[dict]) -> tuple[dict, dict]:
+    """把逐组 L2 读数各按各的算子聚合成一份, 并把「这个键是从几组聚出来的」一起返回
+
+    `(值, 出处)`; 出处形如 `{键: [报过的组数, 参与聚合的组数]}` (用 list 而不是 tuple ——
+    这份东西要进 `result.json`)。三条规则:
+      * 只 fold **报了这个键**的那些组, 缺席就是缺席, 不当 0 也不当 1.0;
+      * 一组都没报的键**不发布** (写 0 会被读成「查过了, 零坏点」, 与本仓 #53/#81 那一族同形);
+      * 出处照实上报: `matched_ratio` 从 1/3 组聚出来与从 3/3 组聚出来是两个不同的数,
+        产物里得看得出来, 否则「min over what」又被压平了一层。
+    """
+    total = len(sets)
+    if not total:
+        # 一组都没进来时返回两份**空**东西: 此时「这些量 0/0 组算过」不是信息而是噪音,
+        # 而调用方 (`verifier._verify_function`) 本来也不会进 `has_reference` 那一支
+        return {}, {}
+    values: dict = {}
+    origin: dict = {}
+    for key, op in L2_AGGREGATIONS:
+        vals = [s[key] for s in sets if key in s]
+        origin[key] = [len(vals), total]
+        if vals:
+            values[key] = op(vals)
+    return values, origin
+
+
+def aggregate_note(origin: dict) -> str:
+    """把「哪些键一条都没报过 / 哪些只从部分组聚出来」说成一句人话; 全都齐时返回空串"""
+    missing = sorted(k for k, (got, _) in origin.items() if got == 0)
+    partial = sorted(k for k, (got, tot) in origin.items() if 0 < got < tot)
+    if not missing and not partial:
+        return ""
+    parts = []
+    if missing:
+        parts.append(f"这些量**没有任何一组算过**, 因此不发布: {missing}")
+    if partial:
+        parts.append("这些量只从部分组聚出来: "
+                     + ", ".join(f"{k} {origin[k][0]}/{origin[k][1]} 组" for k in partial))
+    return " ⚠️ " + "; ".join(parts)
+
+
 def binding_attainment(metrics: dict) -> Optional[float]:
     """绑定轴上的 roofline 达成率 (%), 拿不到返回 None
 

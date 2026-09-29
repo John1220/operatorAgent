@@ -137,18 +137,41 @@ def main() -> int:
         print(f"❌ 前提变了: 两个在册后端走的是同一条路 ({branches[0]}) ⇒ 本探针的分叉读数过期")
         return 2
 
-    print("\n== 臂 0b · 默认值审计 (`_verify_function` 通过侧聚合里那句 `m.get(..., 默认)`) ==")
+    print("\n== 臂 0b · 默认值审计 (通过侧聚合只 fold 报过的组, #81) ==")
+    # 这一臂原来是**只读不判**的: 它把 `matched_ratio=1.00e+00 bad=0` 印出来并在出现时喊一句
+    # 「聚合结果里出现了这条路没算的量」。#81 修完之后那条报警永远不再触发 —— 于是这一臂退化成
+    # 「什么都不印」, 而「什么都不印」与「这一臂根本没在检查」在屏幕上长得一样 (本仓那一族:
+    # 算了没人读)。现在它两侧都判: 纯绝对那条**不许**出现这三个键, AND 那条**必须**出现。
+    arm_bad = 0
     for (label, be), br in zip(backends, branches):
         r, _ = verdict(be, CORRECT, 1.0, 5e-1)
-        invented = [k for k in AND_ONLY_KEYS if k in r.metrics and br.startswith("纯绝对")]
         print(f"  {label}: atol={fmt(r, 'atol')} matched_ratio={fmt(r, 'matched_ratio')} "
-              f"max_rel={fmt(r, 'max_rel_error')} bad={fmt(r, 'bad_elements')}")
-        if invented:
-            print(f"    ❗这条路自己**不算** matched_ratio/bad_elements/rtol, 但聚合结果里出现了它们 "
-                  f"({', '.join(invented)})")
-            print("      ⇒ 来源是 `m.get('matched_ratio', 1.0)` / `m.get('max_rel_error', 0.0)` / "
-                  "`m.get('bad_elements', 0)` —— 缺证据被写成了「全部元素匹配、零坏点、无相对误差」。"
-                  "从 `result.json` 读不出这两条路的区别")
+              f"max_rel={fmt(r, 'max_rel_error')} bad={fmt(r, 'bad_elements')} "
+              f"aggregated_over={r.metrics.get('aggregated_over', '— 没这个键')}")
+        present = [k for k in AND_ONLY_KEYS if k in r.metrics]
+        if br.startswith("纯绝对"):
+            if present:
+                arm_bad += 1
+                print(f"    ❗#81 又回来了: 这条路不算 {AND_ONLY_KEYS}, 而聚合发布了 "
+                      f"{present} —— 缺证据被写成了「全部元素匹配、零坏点、无相对误差」")
+            elif r.metrics.get("aggregated_over") is None:
+                arm_bad += 1
+                print("    ❗三个键都没发布, 但也没留下「哪几组算过」的出处 "
+                      "(metrics.aggregated_over) ⇒ 读的人分不清「没测」与「测了且为 0」")
+            else:
+                print("    ✔ 这条路没算的量在聚合里也不出现, 且出处标明它们 0/n 组")
+        else:
+            if len(present) != len(AND_ONLY_KEYS):
+                arm_bad += 1
+                print(f"    ❗AND 那条本该自己算出 {AND_ONLY_KEYS}, 缺了 {set(AND_ONLY_KEYS) - set(present)}")
+            elif "aggregated_over" in r.metrics:
+                arm_bad += 1
+                print("    ❗全都报过时不必发布 aggregated_over (它此时不携带信息)")
+            else:
+                print("    ✔ 三个量都在, 且不必发布出处")
+    if arm_bad:
+        print(f"❌ 臂 0b 有 {arm_bad} 处不符 ⇒ #81 那条「聚合不许造证据」的规矩被改动碰坏了")
+        return 2
 
     print("\n== 臂 1 · 全零候选 (max_error=5e-1, 即三个 driver 历史上一直传的那个值) ==")
     for label, be in backends:

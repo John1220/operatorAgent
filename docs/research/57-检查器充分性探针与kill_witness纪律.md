@@ -60,10 +60,14 @@ forgives them by construction`）。三条最要紧的：
 我方 L2 有**两条**比对路径，而 `tolerance.py` 的 docstring 自称「容差表与判定式都定义在这里，
 单一事实来源」：
 
-- `verifier.py:509-517` —— 声明了 `Cap.FULL_OUTPUT_TENSOR` 的那路：`effective_atol`（容差表与任务
+- `_verify_single_set` 里 `Cap.FULL_OUTPUT_TENSOR in caps` 那路：`effective_atol`（容差表与任务
   `max_error` **取 min**）+ 相对项的 AND 形式；
-- `verifier.py:498` —— **没有**那个 Cap 的那路：`max_error <= task.constraints.max_error`，
-  纯绝对、**不查表**、**没有相对项**。`LocalExecutor:955-962` 声明的是**空集**，所以它走这条。
+- **没有**那个 Cap 的那路（同一个函数的另一支）：`max_error <= task.constraints.max_error`，
+  纯绝对、**不查表**、**没有相对项**。`LocalExecutor.capabilities` 声明的是**空集**，所以它走这条。
+
+⚠️ 这一节原先写的是 `verifier.py:509-517` / `:498` 这类行号，而 `verifier.py` 是并发会话会改的
+文件 —— 行号早就指错地方了（同一个坐标在探针的输出表里也被重播，见 doc 58 §4.2 与 CHECKLOG I30）。
+锚点一律用符号名：改名字会响，挪位置不会。
 
 可达性不是理论问题：`remote_executor.py:1113-1116` 是 `mode: "local"` 的显式选择，
 `:1154-1158` 是 `mode: "auto"` 在 SSH/HTTP 两级探测都失败后的落点。**一台连不上 H20 的控制机
@@ -91,23 +95,26 @@ forgives them by construction`）。三条最要紧的：
    `matched_ratio=1.0` ⇒ 通过。这正是外部那句「全零核通过每一次官方试验」在我方代码里的
    复现，而且 `band/signal` 那一列就是它说的「四千倍于信号」的可测形式。
    反向对照臂（`max_error=1e-5` 时两路都拦）证明「通过」是幅值造成的，不是探针的错。
-3. **通过那一侧的聚合 metrics 会造证据**：`verifier.py:380-384` 用
+3. **通过那一侧的聚合 metrics 会造证据**：旧写法用
    `m.get("max_rel_error", 0.0)` / `m.get("bad_elements", 0)` / `m.get("matched_ratio", 1.0)`
    把纯绝对那条**从没算过**的三个量补成了「无相对误差、零坏点、全部元素匹配」。
    探针臂 0b 直接打出：`atol=— 没这个键  matched_ratio=1.00e+00  max_rel=0.00e+00  bad=0`。
    ⇒ 从 `result.json` 里**读不出这两条路的区别**，而失败那一侧反而不造（它提前 return 原始
    metrics）。缺的这一半恰好只出现在「通过」上 —— 也就是通过率的分母上。
+   **【#81 已于 2026-09-30 落码，见 §八；同一臂的改后读数是
+   `atol=— 没这个键 matched_ratio=— 没这个键 max_rel=— 没这个键 bad=— 没这个键`】**
 
 **我自己在这只探针上交的两次学费**（都是本仓记过的族的又一次落地）：
 
 - 第一版打表用 `.get("max_rel_error", 0.0)` / `.get("matched_ratio", 1.0)`。这不只是「探针也会
-  兜底」—— 它让同一个 `matched=1.00e+00` 变得**无法归因**：是被测代码真算的、是 `verifier:384`
+  兜底」—— 它让同一个 `matched=1.00e+00` 变得**无法归因**：是被测代码真算的、是 `_verify_function`
   兜出来的、还是探针自己兜的？我第一版就把它读成「local 那条路报告相对误差为 0」，差点把账记错一层。
   改成缺键印 `— 没这个键` 之后读数是 `atol=— 没这个键 matched_ratio=1.00e+00 bad=0`，
   这才分清：`matched_ratio` 确实在**聚合结果**里（被 `verifier` 的默认值造出来的），`atol` 从不存在
   （CHECKLOG I21：**量具打表不许给缺键填默认值**，填了就把三层压成一层）。
 - 第一版拿 `coverage` 当分支判别键，于是 MockGPU 一半的行被印成「纯绝对那条」。
-  `coverage` 两条路都上报（`:497` 与 `:526` 各写各的，后者恒 1.0）；真正只有 AND 那条会算的
+  `coverage` 两条路都上报（`_verify_single_set` 两个分支各写各的，AND 那条在参考干净时恒 1.0）；
+  真正只有 AND 那条会算的
   是 `atol`。**判别键必须选「只有一侧产它」的那个**，而且要用对照臂验一次它真的能分开
   （CHECKLOG I22）。
 
@@ -179,7 +186,7 @@ memory management, representing genuine domain knowledge and nontrivial computat
 |---|---|---|
 | kill witness 进分母，不可杀的隔离 | **吸纳（纪律）→ 已落，见 §七** | #83：`benchmarks/mutation_calibrate.py` + `benchmarks/mut_specs/fixer_stage_branch.py`，本仓那张表现在报两个分母 |
 | 全零核与带宽比是可测的 | **吸纳（已落探针）** | `benchmarks/probe_l2_sampling_gate.py`；判据改动挂 #80/#82 |
-| 「聚合默认值 = 造证据」 | **吸纳（判据）** | #81（`verifier.py:380-384`，被并发会话占着，等让开） |
+| 「聚合默认值 = 造证据」 | **吸纳（判据）→ 已落，见 §八** | #81：`measurement.aggregate_l2_readings` + `_verify_function` 通过侧，11 例 / 11 条变异 11/11 |
 | 门要测 held-out 性能而非只测正确性 | **改造后吸纳** | #84（held-out 配置轴，需机时）；#77 的分母口径同步 |
 | 预算延长要有客观进展当证人 | **吸纳（设计）** | 并进 #71 的前提，不再单独挂项 |
 | 代理无接受权 / 完整性门拒自接受的成功 | **依据加固** | #56（已修）/ #51 的宣称口径各多一个源 |
@@ -308,3 +315,63 @@ A 组那份假生产文件是 `pick(x)`（返 `"a"` 或 `"b"`），配两种测�
 - **结构那三行的隔离理由没有机械退休条件。** 如果哪天它们变成可杀（比如给 `run()` 加一条能造出
   「L3 单独失败还进了 Fixer」的活路径），得**有人**把它们移回行为分母 —— 目前没有任何东西会红。
   这是 §五 那条「算了没人读」的自愿版，登记在此而不是假装解决。
+
+---
+
+## 八 · #81 落了（2026-09-30）：通过侧的聚合只 fold「报过的组」
+
+§三 第 3 条撞出的那条缺陷，这一节是它落下来的样子。**零机时、零生产行为改变** —— 判决仍然由
+每组自己决定，这片动的只有「产物与日志里印什么」。
+
+**为什么排在这一步而不是先去改两条路的容差口径（#80）**：#80 改的是判据，会把「同一份核在两个
+在册后端上一过一挂」这个已经量到的事实改掉，动它需要机时对照才说得清代价；而 #81 是纯上报侧的
+诚实性，与 §六 那条「先补分母再动排序」（doc 49 §八 第 14 条）同一条顺序纪律 —— 先把读数洗诚实，
+再去动会改变判决的东西。
+
+三个落点，每个都对应一个已经犯过的错：
+
+1. **规则上收成单点**：`measurement.aggregate_l2_readings(sets)` → `(值, 出处)`。
+   逐键只 fold 报了这个键的那些组；一个组都没报的键**不发布**；出处是
+   `{键: [报过的组数, 参与聚合的组数]}`。放进 `measurement` 而不是留在 `verifier` 里，是因为
+   它与 #87 那族（`single_ruler` / `l2_ruler_reading` / `cross_round_ruler`）读的是同一批键，
+   两处各写一遍就是两套口径。
+2. **两个出口都要有话**：`metrics` 里少掉不发布的键、`metrics["aggregated_over"]` 带上出处，
+   同时 message 里那句 `matched_ratio=…` 改成**只在真有组报过时才念**。理由与 §三 那条探针学费
+   互为镜像：只在 metrics 里改而 message 照旧念 1.0，读日志的人拿到的还是同一句假话（#87 片 1 的
+   那条 M4 变异就是专门打这个的）。
+3. **探针那一臂从「只读不判」升成两侧都判**：臂 0b 原先只在缺证据被发布时喊一句 ❗，修完之后
+   那条报警永远不触发，于是它退化成的样子与「这一臂根本没在检查」在屏幕上完全一样。现在它两侧
+   都判并打 ✔：纯绝对那条**不许**出现那三个键、且必须带出处；AND 那条**必须**出现、且不许带
+   出处（此时那一栏不携带信息）。任何一侧不符 ⇒ 探针退出码 2。
+
+**读数**（同一张表，臂 0b，改前 → 改后）：
+
+```
+LocalExecutor (空 Cap 集): atol=— 没这个键  matched_ratio=1.00e+00  max_rel=0.00e+00  bad=0
+                 →  atol=— 没这个键  matched_ratio=— 没这个键  max_rel=— 没这个键  bad=— 没这个键
+                    aggregated_over={'max_error': [1, 1], 'max_rel_error': [0, 1], 'matched_ratio': [0, 1],
+                                     'bad_elements': [0, 1], 'compared_elements': [1, 1], 'coverage': [1, 1]}
+MockGPU (AND 那条): 四个数全部照旧, 且**没有** aggregated_over 那一栏
+```
+
+**「某一组报了、某一组没报」这一侧不需要构造**：远端载荷是按 `_REMOTE_L2_METRIC_KEYS` 的
+`if k in remote_verify` 逐键过滤透传上来的，所以部署在远端的 `run_kernel.py` 少报哪个键，控制端
+就只能如实缺着 —— 这一条用例（`test_older_remote_payload_missing_one_key_reads_as_partial`）走的是
+真实分支（`Cap.REMOTE_VERIFY` + 发放「远端回什么载荷」），不是 monkeypatch 聚合本身。它与 #87
+片 1 用的是同一个现场，两片各核一件事：那半核「各组的尺是否同一把」，这半核「聚合值底下是几组」。
+
+**变异标定 11 条, 11/11 全拦、无逃逸**（表在 `tests/test_l2_aggregate_evidence.py` 文件头）。
+两条是刻意配的**反向变异**（A6「note 总是报警」、V2「出处总是发布」），能杀掉它们的只有那两条
+正向对照 —— 又一次落地 I27「用例也要有能杀掉它的那个变异」。
+
+### 没做的事（登记而不是假装解决）
+
+- **`aggregated_over` 目前只有 message 一个读者**：它没穿过落盘边界 —— `result.json` 里既没有
+  `verification_results` 的 metrics，血缘那一份也只从 L2 取尺的三个键
+  （`measurement.l2_ruler_reading`）。给它接第二个读者与 #87 剩下的「`ref_oracle` 没穿过落盘
+  边界」是同一片地，两处一起接才不必动两次血缘形状。这与 §五 那条「算了没人读」同族，只是这次
+  是自愿留的、且写在了键的旁边（`measurement.aggregate_l2_readings` 的 docstring 与用例文件头）。
+- **失败那一侧不聚合**（它提前 return 原始 metrics），所以这片没动它；「失败侧的 metrics 是否会
+  被下游按聚合口径读」还没核。
+- **#80 仍未动**：两条比对路的容差口径不同源（纯绝对那条不查表、没有相对项）这件事今天还在，
+  探针臂 1-4 那批读数仍然有效。改它是判据改动，要配机时对照。

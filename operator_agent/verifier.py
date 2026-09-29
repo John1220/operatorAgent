@@ -18,7 +18,8 @@ from .anticheat import static_audit
 from .interface_contract import check_kernel_interface, input_key_sets
 from . import tolerance
 from . import measurement
-from .measurement import GATE_PARAM_KEYS, single_ruler
+from .measurement import (GATE_PARAM_KEYS, aggregate_l2_readings, aggregate_note,
+                          single_ruler)
 from .hardware_caps import detect_hardware_caps
 from .backend_caps import Backend, Cap, CapabilityMissing
 
@@ -359,12 +360,12 @@ class Verifier:
 
         # 支持单组输入 (dict) 或多组输入套件 (list[dict])
         input_sets = test_inputs if isinstance(test_inputs, list) else [test_inputs]
-        max_error_overall = 0.0
-        max_rel_error_overall = 0.0
-        total_compared = 0
-        total_bad = 0
-        min_matched_ratio = 1.0
-        min_coverage = 1.0
+        # 报了 `max_error` 的那些组的原始 metrics。聚合不在这里逐键做, 交给
+        # `measurement.aggregate_l2_readings` 一次做完 —— 旧写法在这里备了六个标量累加器并用
+        # `m.get(键, 默认)` 逐键兜底, 于是纯绝对那条路**从没算过**的 matched_ratio /
+        # bad_elements / max_rel_error 被补成「全部匹配、零坏点、无相对误差」(#81,
+        # 现场读数见 doc 57 §三 第 3 条与探针臂 0b)。
+        sets_with_reference: list[dict] = []
         # 每组输入各自上报它**实际用的那把尺**; 是否合成一个单值, 由循环后的
         # `measurement.single_ruler` 判 (见那里的注释 —— 旧写法是「第一组赢」)
         gates: list[dict] = []
@@ -388,13 +389,7 @@ class Verifier:
             m = r.metrics
             if "max_error" in m:
                 has_reference = True
-                max_error_overall = max(max_error_overall, m["max_error"])
-                max_rel_error_overall = max(max_rel_error_overall, m.get("max_rel_error", 0.0))
-                total_compared += m.get("compared_elements", 0)
-                total_bad += m.get("bad_elements", 0)
-                # 多组输入取最差的一组: 任一组掉到 rho 以下就不该算通过
-                min_matched_ratio = min(min_matched_ratio, m.get("matched_ratio", 1.0))
-                min_coverage = min(min_coverage, m.get("coverage", 1.0))
+                sets_with_reference.append(m)
                 g = {k: m[k] for k in GATE_PARAM_KEYS if k in m}
                 if g:
                     gates.append(g)
@@ -409,15 +404,22 @@ class Verifier:
 
         gate_params, gate_conflicts = single_ruler(gates)
         oracle_agg = self._aggregate_oracles(oracles)
+        agg_values, agg_origin = aggregate_l2_readings(sets_with_reference)
+        agg_note = aggregate_note(agg_origin)
         if has_reference:
-            msg = (f"功能验证通过 ({len(input_sets)} 组输入), 最大误差={max_error_overall:.2e}, "
-                   f"matched_ratio={min_matched_ratio:.6f}")
-            if min_coverage < 1.0:
-                msg += f", 覆盖率={min_coverage * 100:.1f}%"
+            msg = (f"功能验证通过 ({len(input_sets)} 组输入), "
+                   f"最大误差={agg_values['max_error']:.2e}")
+            # 只有真有组报过才念 —— 旧写法在这里无条件念 `matched_ratio=1.000000`,
+            # 而那个 1.0 是 `m.get(..., 1.0)` 兜出来的 (#81)
+            if "matched_ratio" in agg_values:
+                msg += f", matched_ratio={agg_values['matched_ratio']:.6f}"
+            if "coverage" in agg_values and agg_values["coverage"] < 1.0:
+                msg += f", 覆盖率={agg_values['coverage'] * 100:.1f}%"
             if ref_nonfinite and sum(ref_nonfinite):
                 # 「覆盖率」说的是比了多大比例, 这一句说的是**为什么**没比上 —— 两个都要有,
                 # 否则读者只能去猜是分片取样的锅还是参考自己炸了
                 msg += f" (参考另有 {sum(ref_nonfinite)} 个非有限值, 已从分母剔除)"
+            msg += agg_note
             if gate_conflicts:
                 msg += (f" ⚠️ 这几组用的**不是同一把尺** {sorted(gate_conflicts)}, "
                         f"聚合值因此不发布单值 (见 metrics.gate_params_conflict)")
@@ -425,16 +427,15 @@ class Verifier:
             # 必须在这里接上, 否则「通过」那一侧永远读不到它 (与 _aggregate_oracles 同一条教训)
             msg += self._oracle_note(oracle_agg)
             metrics = {
-                "max_error": max_error_overall,
-                "max_rel_error": max_rel_error_overall,
-                "matched_ratio": min_matched_ratio,
-                "bad_elements": total_bad,
                 "num_input_sets": len(input_sets),
-                "compared_elements": total_compared,
-                "coverage": min_coverage,
+                **agg_values,
                 **gate_params,
                 **oracle_agg,
             }
+            if agg_note:
+                # 与 `aggregate_note` 同一个条件: 全都齐时不写这个键 (它就不携带信息),
+                # 一旦有键缺报或部分缺报, 它说清「这个 min/sum 底下是几组」
+                metrics["aggregated_over"] = agg_origin
             if gate_conflicts:
                 # 摊开成 {键: {组下标: 那一组实际用的值}} —— 读的人不必重跑就能看出
                 # 是哪几组、哪一把尺不一致
