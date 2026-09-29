@@ -183,11 +183,19 @@ class TestHopperRecipesActuallySelectable(unittest.TestCase):
 
         写 "memory_bound" 会静默走进 Planner 的「既不是 memory 也不是 compute」
         分支, 于是所有 compute_bound 配方一律放行 —— 测出来的结果毫无意义。
+
+        ⚠️ 那两个 provenance 键不是样板: Planner 从 doc 49 §八 第 17 条那次修正起,
+        要求 `roofline_bound` 与 `peak_trusted` 才能确认「这一轮的轴是证据」。缺任何一个,
+        整个 roofline 块就被判为不承重、bound 条件**整体不参与筛选** —— 那时这一组用例
+        断言的「按轴筛」根本不会发生, 而它们看起来仍然全绿 (只会绿在错误的理由上)。
+        键名用 Verifier 平铺到 L3 metrics 顶层的那个 (`gflops_utilization_pct`)。
         """
         planner = OptimizationPlanner()
         plan = planner.plan(kernel_type=kernel_type, dsl="triton", hw_caps=caps,
                             roofline={"bound_type": bound,
-                                      "gflops_util": gflops_util})
+                                      "roofline_bound": bound,
+                                      "peak_trusted": True,
+                                      "gflops_utilization_pct": gflops_util})
         rejected = {r.id: why for r, why in plan.rejected_recipes}
         return {r.id for r in plan.selected_recipes}, rejected
 

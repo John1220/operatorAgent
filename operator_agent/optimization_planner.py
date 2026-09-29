@@ -77,6 +77,71 @@ class Recipe:
         return self.generic_template
 
 
+#: 轴向的闭合词汇。只有这两个值能参与筛选; `"unknown"` / 契约测试里的 `"mixed"` /
+#: 拼错的词一律按「不知道」处理。词表以 Verifier 的产出为准 (裸词), 这里不另立第二套
+#: —— 两套词汇之间的那次漂移 (`memory_bound` vs `memory`) 让 bound 感知静默失效过。
+AXIS_VALUES = ("memory", "compute")
+
+
+def _axis_field(src: dict, key: str):
+    """同一个键在两种传入形状里位置不同, 两边都读。
+
+    生产调用方 (`conductor.py:497`) 传的是 **L3 metrics 顶层**: Verifier 在那儿平铺了
+    `bound_type` / `roofline_bound` / 两侧利用率 (`verifier.py:595-606`), 而
+    `peak_trusted` **只活在 `roofline_analysis` 块里**; 但 `plan()` 的 docstring 说的是
+    「Roofline 分析结果」那一个块。只按一种形状读, 「我没接对」就会被读成「没有这个
+    数据」—— 同一个位置错误在 doc 50 §7.5 里让一张表的表头打成了 None。
+    """
+    if key in src:
+        return src[key]
+    block = src.get("roofline_analysis")
+    if isinstance(block, dict):
+        return block.get(key)
+    return None
+
+
+def axis_evidence(src: dict) -> tuple[bool, str]:
+    """这一轮的 roofline 块能不能拿来筛配方。返回 `(能用, 原因)`。
+
+    关键在于**轴向不是测出来的**: `bound_type` 是算术强度 AI 与脊点
+    (`peak_gflops / peak_bw`) 比出来的, 而 AI 来自任务声明的 shape 与精度。所以它的
+    可信度取决于脊点算没算出来、以及脊点用的那个分母口径核过没有 —— 跟「这一轮的计时
+    可不可信」是两个问题, 不要用 `measurement_validity` 判它 (那是计时链的门, 已经有
+    自己的三态)。把两者混成一个数是 doc 49 §八 第 17 条那种「一个块里两个口径」。
+
+    三条门各自对应一种实测过的失效:
+      * `src` 为空 ⇒ 首轮压根没有上一轮的测量。
+      * `roofline_bound == "unknown"` ⇒ 脊点没算出来 (peak=0), 此时 `_roofline_analysis`
+        会把 `bound_type` **兜到算子名启发式** (`verifier.py:1006`), 于是同一个块里
+        `roofline_bound="unknown"` 与 `bound_type="compute"` 并存 —— 后者是猜测穿了
+        测量的衣服。
+      * `peak_trusted is not True` ⇒ 分母来自未核口径的表行 (`⚠️` 前缀) 或根本没命中表,
+        比较的两边不同源。利用率两个百分比同样是从这个分母除出来的, 一起作废。
+
+    取不到 ⇒ **不据此过滤**, 而不是「默认视为 compute-bound」。方向是刻意选的一侧:
+    基于一个无法核实的轴去**拒绝**一条配方, 会在 `rejected_recipes` 里留下一个看起来
+    很合理的理由, 而没人会去查它凭什么 —— 与 `measurement.py` 里「不可信不能说已到
+    上界」是同一个不对称 (误拒不报错, 误放只是多几轮)。
+    """
+    src = src or {}
+    if not src:
+        return False, "本轮没有上一轮的测量 (首轮)"
+    bound = _axis_field(src, "bound_type")
+    if bound not in AXIS_VALUES:
+        return False, f"bound_type={bound!r} 不在轴向词汇 {AXIS_VALUES} 内"
+    roofline_bound = _axis_field(src, "roofline_bound")
+    if roofline_bound == "unknown":
+        return False, ("roofline_bound=unknown: 脊点没算出来 (peak=0), 此时 bound_type "
+                       "是兜到算子名启发式的猜测, 不是这条轴上的证据")
+    if roofline_bound is not None and roofline_bound not in AXIS_VALUES:
+        return False, f"roofline_bound={roofline_bound!r} 不是可比的轴"
+    trusted = _axis_field(src, "peak_trusted")
+    if trusted is not True:
+        return False, (f"peak_trusted={trusted!r}: 分母口径未核 (未命中表 / ⚠️ 行 / 缺键), "
+                       "AI 与脊点两边不同源, 判出的轴和两侧利用率都不承重")
+    return True, f"bound={bound} (脊点与分母口径都可核)"
+
+
 class OptimizationPlanner:
     """
     确定性优化配方选择器 (三层架构)
@@ -330,7 +395,10 @@ class OptimizationPlanner:
         Args:
             kernel_type: 算子类型
             dsl: 目标 DSL (triton, cuda_c, etc.)
-            roofline: Roofline 分析结果
+            roofline: 上一轮的 roofline 数据 —— 接受两种形状 (L3 metrics 顶层, 或
+                `_roofline_analysis` 那个块), `_axis_field` 两边都读。它可以是**空的**
+                (首轮), 也可以非空但**不承重** (分母口径未核), 后者由 `axis_evidence()`
+                裁决并原样记进 `plan.axis`。
             hardware: 硬件信息 dict (来自 backend.get_hardware_info())
             hw_caps: 硬件能力描述 (若提供则直接使用，否则从 hardware 推断)
             precision: 精度
@@ -363,9 +431,19 @@ class OptimizationPlanner:
         dsl_normalized = self.DSL_ALIASES.get(dsl.lower(), dsl.lower())
 
         kt = (kernel_type or "").lower()
-        bound_type = roofline.get("bound_type", "unknown")
-        gflops_util = roofline.get("gflops_utilization_pct", 0)
-        bw_util = roofline.get("bandwidth_utilization_pct", 0)
+        axis_ok, axis_note = axis_evidence(roofline)
+        # 轴不可用时三个值一起退到「不参与」: `bound_type="unknown"` 让 bound 条件整体
+        # 跳过, 利用率归零让 `low_utilization` / `low_bandwidth_util` 那两个条件跳过
+        # (它们的判断式是 `util > 0 and util >= thresh`, 0 就是「没有这个读数」)。
+        # 留着原值而只跳过 bound, 会把同一个分母除出来的利用率继续用来拒绝配方。
+        # 一律走 `_axis_field` 而不是 `roofline.get`: 后者只认顶层形状, 于是「轴可用但
+        # 值在块里」的组合会让 axis_ok 与 bound_type 自己打架。
+        bound_type = _axis_field(roofline, "bound_type") if axis_ok else "unknown"
+        # `or 0` 不是装饰: `_axis_field` 对缺键返回 None, 而下面那两个利用率条件是
+        # `util > 0 and ...` —— None 会在比较时抛 TypeError (原代码用 `.get(k, 0)`
+        # 兜住了这个)。缺键在这里的语义就是「没有这个读数」, 与 0 同样不参与。
+        gflops_util = (_axis_field(roofline, "gflops_utilization_pct") or 0) if axis_ok else 0
+        bw_util = (_axis_field(roofline, "bandwidth_utilization_pct") or 0) if axis_ok else 0
 
         selected: list[Recipe] = []
         rejected: list[tuple[Recipe, str]] = []
@@ -407,6 +485,7 @@ class OptimizationPlanner:
             roofline=roofline,
             precision=precision,
             hw_caps=hw_caps,
+            axis={"usable": axis_ok, "bound_type": bound_type, "note": axis_note},
         )
 
     def _check_all_caps(self, reqs: list[str], caps: HardwareCaps) -> tuple[bool, str]:
@@ -504,14 +583,16 @@ class OptimizationPlanner:
         conds = recipe._conditions
         if conds.get("always"):
             return True
-        # compute_bound: 首轮(无 roofline 数据, bound_type=unknown)时默认视为 compute-bound
-        # 因为大部分大矩阵算子都是 compute-bound
-        if conds.get("compute_bound"):
-            if bound_type == "memory":
+        # bound 条件: 轴不可用 (`unknown`) 时**两个方向都不参与**, 既不再「默认视为
+        # compute-bound」, 也不拒绝。原实现是刻意非对称的 —— unknown 放行 compute_bound、
+        # 拒绝 memory_bound, 于是一轮没做过任何测量的优化, 会把所有访存向配方挡在门外,
+        # 理由是「它不是 memory-bound」, 而这句话的真实依据是「我们不知道」。
+        # `AXIS_VALUES` 之外的词一律走这条路, 包括契约测试里的 "mixed" 和拼错的值。
+        if bound_type in AXIS_VALUES:
+            if conds.get("compute_bound") and bound_type == "memory":
                 return False
-            # bound_type == "compute" 或 "unknown" (首轮) 都通过
-        if conds.get("memory_bound") and bound_type != "memory":
-            return False
+            if conds.get("memory_bound") and bound_type != "memory":
+                return False
         # 低利用率条件: 首轮无数据时不做限制 (视为 0 < threshold 通过)
         low_thresh = conds.get("low_utilization", 0)
         if low_thresh and gflops_util > 0 and gflops_util >= low_thresh:
@@ -542,6 +623,11 @@ class OptimizationPlan:
     roofline: dict
     precision: str
     hw_caps: HardwareCaps
+    #: 这一轮绑定轴的裁决 (`{"usable", "bound_type", "note"}`), 由 `plan()` 填。
+    #: 它必须是一个**独立字段**而不是从 `roofline` 现算: `to_prompt()` 和 `summary()`
+    #: 都要说同一句话, 两处各自解读那个块就会分叉 —— 而缺省 (直接构造的 plan) 按
+    #: 「不可用」处理, 于是「没有裁决」不可能被读成「有一个 bound 可以断言」。
+    axis: dict = field(default_factory=dict)
 
     @property
     def recipe_ids(self) -> list[str]:
@@ -565,11 +651,22 @@ class OptimizationPlan:
                      f"(Tensor Core={'Y' if self.hw_caps.has_tensor_core else 'N'}, "
                      f"SM={self.hw_caps.sm_count}, "
                      f"BW={self.hw_caps.global_mem_bandwidth_gbs:.0f}GB/s)")
-        if self.roofline:
+        if self.axis.get("usable"):
             lines.append(
-                f"当前状态: bound={self.roofline.get('bound_type', '?')}, "
-                f"GFLOPS利用率={self.roofline.get('gflops_utilization_pct', 0):.1f}%, "
-                f"带宽利用率={self.roofline.get('bandwidth_utilization_pct', 0):.1f}%"
+                f"当前状态: bound={self.axis.get('bound_type', '?')}, "
+                f"GFLOPS利用率={(_axis_field(self.roofline, 'gflops_utilization_pct') or 0):.1f}%, "
+                f"带宽利用率={(_axis_field(self.roofline, 'bandwidth_utilization_pct') or 0):.1f}%"
+            )
+        elif self.roofline:
+            # 有块但不可用: 这里既不能继续印 `bound=…`, 也不能什么都不印。什么都不印会让
+            # 「测过但那个分母不可信」和「首轮还没测过」在 prompt 里长得一模一样; 而印出
+            # 那个值就是让模型把一个猜测当结论 —— doc 49 §八 第 17 条实测到的正是这条:
+            # 同一个块里 `roofline_bound="unknown"` 与 `bound_type="compute"` 并存,
+            # 而只有后者会走进 prompt。
+            lines.append(
+                f"瓶颈轴: 本轮**不作判定** ({self.axis.get('note', 'plan() 未给出轴向裁决')})"
+                f" —— 下面的配方按算子类型与硬件能力选出, 未按 roofline 轴向筛选; "
+                f"请自己从代码判断这个核是访存密集还是计算密集。"
             )
         lines.append("")
         lines.append("以下优化配方按优先级排列，你必须严格按照每个配方的代码模式编写代码，不得遗漏。")
@@ -606,5 +703,11 @@ class OptimizationPlan:
         """简短摘要，用于日志"""
         ids = ", ".join(self.recipe_ids) if self.selected_recipes else "none"
         caps_info = f"vendor={self.hw_caps.vendor}"
+        # 轴向裁决必须在日志里可见: 「这一轮的配方选择依据了什么」以前只能靠反推
+        # selected 集合, 而 off 的时候恰恰是最需要它出现的那一轮。
+        axis_info = ("on:" + str(self.axis.get("bound_type"))
+                     if self.axis.get("usable")
+                     else "off:" + str(self.axis.get("note", "plan() 未给出裁决")))
         return (f"Plan(round={self.round_num}, dsl={self.dsl}, {caps_info}, "
+                f"axis=[{axis_info}], "
                 f"recipes=[{ids}], n_selected={len(self.selected_recipes)})")
