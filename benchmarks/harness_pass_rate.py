@@ -52,7 +52,8 @@ import numpy as np  # noqa: E402
 from operator_agent.backend_caps import Cap  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402
 from operator_agent.llm_client import LLMClient  # noqa: E402
-from operator_agent.measurement import Validity, persist_decision  # noqa: E402
+from operator_agent.measurement import (Validity, correctness_verified_levels,
+                                        persist_decision)  # noqa: E402
 from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
 from operator_agent.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema, TaskType,
@@ -139,6 +140,25 @@ def _level_rate(rounds, level):
 
 def _pct(num, den):
     return round(num / den * 100, 1) if den else None
+
+
+def last_round_correctness_passed(rec) -> bool:
+    """「摘掉真机那一栏」的判定: **最后一轮**那份代码的 L1 与 L2 都通过
+
+    外部一手 (arXiv:2609.26777v1 行 99-101, 逐字): "45.9% under the verifier versus
+    69.4% with E2E tests excluded from scoring" —— 同一批运行、两套记分口径并排报,
+    那个差就是「本地过 ≠ 生产过」的量 (#77)。
+
+    取**最后一轮**而不是「曾经有哪一轮过」: 两个口径必须落在同一份代码上。
+    `final_all_passed` 说的是最终交付那一版, 而「第 2 轮对了、第 3 轮改坏了」的运行
+    按「曾经过」会被算成本地通过 —— 那是一个关于历史的问题, 不是关于这份代码的问题。
+    谓词本身在 `measurement.correctness_verified_levels`: 修订起点 (#85) 与这一栏读同
+    一个集合, 两处各写一遍就是两套口径。
+    """
+    rounds = rec.get("rounds") or []
+    if not rounds:
+        return False
+    return correctness_verified_levels(rounds[-1].get("levels_passed") or {})
 
 
 def _duplicate_rate(ok_runs):
@@ -507,6 +527,15 @@ def aggregate(runs):
     l3 = _level_rate(rounds, "L3")
 
     passed_runs = [r for r in ok_runs if r.get("final_all_passed")]
+    # 双记分口径 (#77): 同一批运行、同一个分母, 只差最后那道真机门。
+    local_runs = [r for r in ok_runs if last_round_correctness_passed(r)]
+    # 形状上 `passed_runs` 应当是 `local_runs` 的子集 (`final_all_passed` 含 L1/L2)。
+    # 反过来出现「真机说过了、本地口径说没过」= 血缘与判决不同源, 那种运行**不能**被
+    # 折进一个百分数里 —— 单独列出来, 让读报表的人去查那一份 result.json。
+    dual_scoring_conflicts = sorted(
+        str(r.get("case")) for r in passed_runs if not last_round_correctness_passed(r))
+    l3_only_blockers = sorted({str(r.get("case")) for r in local_runs
+                               if not r.get("final_all_passed")})
     rtp = [r["rounds_to_pass"] for r in passed_runs if r.get("rounds_to_pass")]
 
     tiers = {}
@@ -555,6 +584,10 @@ def aggregate(runs):
         "level_pcts": {"L1": _pct(*l1), "L2": _pct(*l2), "L3": _pct(*l3)},
         "task_success": (len(passed_runs), len(ok_runs)),
         "task_success_pct": _pct(len(passed_runs), len(ok_runs)),
+        "task_success_local": (len(local_runs), len(ok_runs)),
+        "task_success_local_pct": _pct(len(local_runs), len(ok_runs)),
+        "l3_only_blockers": l3_only_blockers,
+        "dual_scoring_conflicts": dual_scoring_conflicts,
         "rounds_to_pass": _quantiles(rtp),
         "passed_via": via,
         "validity_tiers": tiers,
@@ -645,6 +678,17 @@ def format_report(agg):
 
     ts, td = agg["task_success"]
     lines.append(f"\n【任务级成功】{ts}/{td} = {agg['task_success_pct']}%  (最终 all_passed)")
+    # 双记分口径 (#77, 外部一手 arXiv:2609.26777v1 行 99-101 的形状): 同一批运行、同一个分母,
+    # 只差最后那道真机门。只报上面那个数, 「本地做不到」与「做到了但过不了性能门」就分不开。
+    tl, tld = agg["task_success_local"]
+    lines.append(f"【同一批, 摘掉真机 L3】{tl}/{tld} = {agg['task_success_local_pct']}%"
+                 f"  ← 差 {tl - ts} 次是「本地已经过了、真机那道门判死」")
+    if agg["l3_only_blockers"]:
+        lines.append("  只被 L3 拦住的运行: " + ", ".join(agg["l3_only_blockers"]))
+    if agg["dual_scoring_conflicts"]:
+        lines.append("  ❌ 两套口径互相矛盾 (all_passed 为真而最后一轮的 L1/L2 读数不支持): "
+                     + ", ".join(agg["dual_scoring_conflicts"])
+                     + " —— 那是血缘与判决不同源, 别把这两个数当成绩读")
     if agg["rounds_to_pass"]:
         q = agg["rounds_to_pass"]
         lines.append(f"【rounds-to-pass】median {q['median']} · p25 {q['p25']} · "

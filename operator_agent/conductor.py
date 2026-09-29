@@ -33,7 +33,8 @@ from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
 from .measurement import (ROOFLINE_CONVERGED_PCT, Validity, Verdict,
-                          binding_attainment, roofline_converged, verdict)
+                          binding_attainment, correctness_verified_levels,
+                          roofline_converged, verdict)
 from .agent_logger import capture_execution
 from .optimization_planner import OptimizationPlanner
 
@@ -121,16 +122,12 @@ def correctness_verified(results: list) -> bool:
     (L1+L2), 不含 L3 的性能门: 一个「正确但不够快」的核完全可以当修订起点, 一个「编不过」的
     不行。
 
-    两个都不是多余的细节:
-    * **要求两级都在场**。`Verifier.verify()` 是 fail-fast (L1 挂就 return), 所以「L2 通过」
-      单独出现时它根本不存在于这份列表里 —— 用 `all(...)` 数空集会得到 True, 那是把
-      「没测过」读成「测过且通过」(本仓那条老纪律, doc 49 §八 那一族)。
-    * **用 `is True` 而不是真值判断**。缺那一级时 `dict.get` 给 None, 而 None 是假值这件事
-      恰好对, 但只对得靠运气; 写死 `is True` 之后「通过」这个词只可能来自一个真的布尔。
+    「verified 是正确性 (L1+L2), 不含 L3 的性能门」与「两级都要在场」这两条**不在这里定义**,
+    它们在 `measurement.CORRECTNESS_LEVELS` / `correctness_verified_levels` —— 端到端报表的
+    「摘掉真机那一栏」(#77) 读的是同一个集合。所以下面这层只是把 `VerificationResult` 对象
+    映射成那个 dict 形状。
     """
-    passed = {r.level: r.passed for r in results}
-    return (passed.get(VerificationLevel.L1_COMPILE) is True
-            and passed.get(VerificationLevel.L2_FUNCTION) is True)
+    return correctness_verified_levels({r.level.value: r.passed for r in results})
 
 
 def verified_parent_from(iteration_history: list[dict],
@@ -147,9 +144,7 @@ def verified_parent_from(iteration_history: list[dict],
     if not iteration_history or not current_code:
         return None
     last = iteration_history[-1]
-    levels = last.get("levels_passed") or {}
-    if (levels.get(VerificationLevel.L1_COMPILE.value) is True
-            and levels.get(VerificationLevel.L2_FUNCTION.value) is True):
+    if correctness_verified_levels(last.get("levels_passed") or {}):
         return current_code
     return None
 

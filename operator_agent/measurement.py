@@ -44,6 +44,7 @@ from enum import Enum
 from typing import List, Optional
 
 from .backend_caps import Cap
+from .schemas import VerificationLevel
 
 
 class Validity(str, Enum):
@@ -107,6 +108,28 @@ NOISE_BAND = {
 # ⚠️ 参照 KernelBench-Hard 的一句话: 人写的 Hopper 核常见只到峰值的 60~85% —— 按
 # 这个量级, 90 是一个**偏乐观**的出口, 打不开它才是常态 (docs/research/42)。
 ROOFLINE_CONVERGED_PCT = 90.0
+
+
+# ── 「正确性已验证」的单点定义 ────────────────────────────────────────────────
+# 这个集合现在有**两个读者**, 而且它们读的必须是同一件事:
+#   · `conductor.correctness_verified` —— 修订起点退回哪一版 (arXiv:2609.35140v1 行 214);
+#   · `benchmarks/harness_pass_rate`   —— 端到端报表里「摘掉真机那一栏」的通过率 (#77,
+#     外部一手 arXiv:2609.26777v1 行 99-101 的双记分口径)。
+# 两处各写一遍 `("L1", "L2")` 就是两套口径 —— 那是本仓反复登记过的那一族 (CHECKLOG I22/H4)。
+#
+# L3 **不在**这里面: 一个「正确但不够快」的核是被验证过的, 只是没到性能门槛。
+CORRECTNESS_LEVELS: tuple = (VerificationLevel.L1_COMPILE.value,
+                             VerificationLevel.L2_FUNCTION.value)
+
+
+def correctness_verified_levels(levels: dict) -> bool:
+    """`levels` 是 `{VerificationLevel.value: passed}` —— 血缘与报表里的那种形状
+
+    「到场」和「通过」都要查: `Verifier.verify()` 是 fail-fast, L1 挂时 L2 那一格**根本不存在**,
+    而 `all(...)` 在这种残缺列表上照样会给 True —— 缺证据不是通过 (doc 49 §八 那一族)。
+    所以这里逐项 `is True`: 值只可能来自一个真的布尔, 缺键与 False 都不算数。
+    """
+    return all(levels.get(k) is True for k in CORRECTNESS_LEVELS)
 
 
 def binding_attainment(metrics: dict) -> Optional[float]:
