@@ -327,6 +327,26 @@ def unknown_caps(device_name: str = "") -> HardwareCaps:
     )
 
 
+#: 「这台卡有多少个计算单元」在仓库里存在的**两种拼法**, 顺序即优先级。
+#:
+#: §3.4 第 4 处的形状: 远端 runner 的载荷用 torch 的字段名 `multiprocessor_count`,
+#: 而 `Backend.get_hardware_info()` 的字典用聚合名 `compute_units`。这两个名字从来没有
+#: 在一个地方登记过, 于是 `detect_hardware_caps` 只认前者 —— 走 `get_hardware_info()`
+#: 这条路 (verifier 的 launch 地板、planner 的配方筛选) 时**探测到的 SM 数被静默丢掉**,
+#: 沿用表里的静态值。H20 恰好 78=78 所以从没暴露; 一台与表不一致的卡会拿着错的 SM 数选配方。
+SM_COUNT_KEYS = ("multiprocessor_count", "compute_units")
+
+
+def sm_count_from(hw_info: dict) -> Optional[int]:
+    """从两种已知拼法里取**探测到的**计算单元数; 取不到返回 None (不猜、不给默认值)"""
+    for key in SM_COUNT_KEYS:
+        value = hw_info.get(key)
+        # `bool` 显式排除: `isinstance(True, int)` 为真, 一个写成 True 的 SM 数会当成 1
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
 def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
     """
     从 backend.get_hardware_info() 返回的 dict 自动推断硬件能力。
@@ -347,7 +367,9 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
         # dataclasses.replace —— supported_dsls 是可变 set, 浅拷贝仍然共享同一个对象。
         caps = copy.deepcopy(_KNOWN_HARDWARE[key])
         # 用 hw_info 中的动态数据覆盖预定义值
-        caps.sm_count = hw_info.get("multiprocessor_count", caps.sm_count) or caps.sm_count
+        probed = sm_count_from(hw_info)
+        if probed is not None:
+            caps.sm_count = probed
         return caps
 
     # 未知硬件：根据字段尽力推断
@@ -355,7 +377,7 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
         vendor=vendor or "unknown",
         device_name=name or "unknown",
         compute_capability=cc,
-        sm_count=hw_info.get("multiprocessor_count", 0) or 0,
+        sm_count=sm_count_from(hw_info) or 0,
     )
 
     # 根据 device 类型推断

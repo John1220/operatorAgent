@@ -21,10 +21,12 @@ from unittest import mock
 
 from operator_agent.hardware_caps import (
     HardwareCaps,
+    SM_COUNT_KEYS,
     UnknownHardware,
     _KNOWN_HARDWARE,
     detect_hardware_caps,
     get_caps_for_target,
+    sm_count_from,
     unknown_caps,
 )
 from operator_agent.optimization_planner import (
@@ -371,6 +373,96 @@ class TestTypoedRecipeCannotBeSelected(TableGuardedCase):
         """判不了不许把整轮 plan() 打断 —— 那是 compute_capability 那次事故的教训。"""
         for req in UNPARSABLE_REQS:
             self._plan_with(req)
+
+
+class TestProbedSmCountSurvivesTheFieldName(TableGuardedCase):
+    """§3.4 第 4 处: 「这台卡有几个计算单元」有**两种拼法**, 而读者只认其中一种。
+
+    远端 runner 的载荷用 torch 的字段名 `multiprocessor_count`;
+    `Backend.get_hardware_info()` 的字典用聚合名 `compute_units`。
+    旧写法 `hw_info.get("multiprocessor_count", caps.sm_count)` 走后者这条路时永远取不到值
+    ⇒ **探测到的 SM 数被静默丢掉, 沿用表里的静态数**。H20 恰好 78=78 所以从没暴露;
+    一台与表不一致的卡会拿着错的 SM 数去选配方 (配方里有 `sm_count <= 78` 这类条件)。
+    """
+
+    def test_the_aggregated_key_reaches_the_caps(self):
+        """核心: 表里写 78, 探测说 108 ⇒ 必须是 108 (探测赢过表)"""
+        info = {"name": "NVIDIA H20", "device": "cuda", "compute_capability": "9.0",
+                "compute_units": 108}
+        self.assertEqual(78, _KNOWN_HARDWARE["h20"].sm_count)
+        self.assertEqual(108, detect_hardware_caps(info).sm_count)
+
+    def test_unknown_card_keeps_the_probe(self):
+        info = {"name": "NVIDIA Whatever-Next", "device": "cuda", "compute_units": 56}
+        self.assertEqual(56, detect_hardware_caps(info).sm_count)
+
+    def test_absent_or_zero_falls_back_to_the_table_not_to_zero(self):
+        """「没探测到」不等于「0 个单元」—— 那会把一台真卡变成 0 SM"""
+        table = detect_hardware_caps({"name": "NVIDIA H20", "device": "cuda",
+                                      "compute_units": 0})
+        self.assertEqual(78, table.sm_count, "0 被当成读数覆盖了表里的静态值")
+        unknown = detect_hardware_caps({"name": "NVIDIA Whatever-Next", "device": "cuda"})
+        self.assertEqual(0, unknown.sm_count, "没探测过时不许编一个 SM 数")
+
+    def test_the_payload_name_wins_when_both_spellings_are_present(self):
+        """优先级是**口径**而不是巧合: 载荷名 (torch 直接给的) 排在聚合名前面"""
+        self.assertEqual(78, sm_count_from({"multiprocessor_count": 78, "compute_units": 108}))
+        self.assertEqual(("multiprocessor_count", "compute_units"), SM_COUNT_KEYS)
+
+    def test_bool_is_not_an_sm_count(self):
+        """`isinstance(True, int)` 为真 —— 一个写成 True 的 SM 数不该当成 1"""
+        self.assertIsNone(sm_count_from({"compute_units": True}))
+        self.assertIsNone(sm_count_from({}))
+        self.assertIsNone(sm_count_from({"compute_units": -5}))
+
+    def test_every_real_backend_dict_is_readable_by_the_accessor(self):
+        """差分守卫①: **写者**用哪个键由写者自己说, 不是我抄进测试的。
+
+        这条才是原本会漏掉缺陷的那种覆盖: 上面几条即便全绿, 只说明我认识的两种拼法能用;
+        一旦某个后端换用第三种键名, 探测值又会静默丢掉, 而这里会红。
+        """
+        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.remote_executor import LocalExecutor, SSHExecutor
+        from unittest.mock import patch
+
+        ssh = SSHExecutor(host="probe.invalid")
+        ssh._deployed = True
+        payload = {"name": "NVIDIA H20", "device": "cuda", "compute_capability": "9.0",
+                   "total_memory_gb": 96.0, "multiprocessor_count": 78}
+        with patch.object(ssh, "_ssh_exec_json", return_value=dict(payload)):
+            dicts = {"SSHExecutor": ssh.get_hardware_info()}
+        dicts["MockGPU"] = MockGPU().get_hardware_info()
+        dicts["LocalExecutor"] = LocalExecutor().get_hardware_info()
+
+        seen = set()
+        for label, info in dicts.items():
+            found = sm_count_from(info)
+            self.assertIsNotNone(found, f"{label} 的字典里的 SM 数读者取不到 (键名又漂了)")
+            self.assertGreater(found, 0, label)
+            seen |= {k for k in SM_COUNT_KEYS if k in info}
+        self.assertTrue(seen, "一个 SM 键都没在真实字典里出现过 —— 这条断言在空转")
+
+    def test_the_runner_payload_spelling_is_read_from_the_runner_itself(self):
+        """差分守卫②: `multiprocessor_count` 这一拼法来自远端 runner 的载荷, 不是我想像的。
+
+        两个写者 (runner 载荷 / 后端字典) 用了两种拼法, 这正是 §3.4 第 4 处的成因。
+        这里去 `run_kernel.py` 的 AST 里把 `get_gpu_info()` **真正 return 的字典键**取出来
+        核对, 而不是手抄一个键名 —— 手抄的那份从抄下那一刻就开始漂 (§7.9 同一条纪律)。
+        """
+        import ast
+        from pathlib import Path
+
+        source = Path("remote_scripts/run_kernel.py").read_text(encoding="utf-8")
+        keys = set()
+        for fn in [n for n in ast.walk(ast.parse(source))
+                   if isinstance(n, ast.FunctionDef) and n.name == "get_gpu_info"]:
+            for node in ast.walk(fn):
+                if isinstance(node, ast.Dict):
+                    keys |= {k.value for k in node.keys if isinstance(k, ast.Constant)}
+        self.assertGreater(len(keys), 3, f"没解析出载荷的键 (只拿到 {keys}) —— 解析找错了地方")
+        self.assertIn("multiprocessor_count", keys,
+                      "runner 已经不再上报这个键, SM_COUNT_KEYS 里那条该退休了")
+        self.assertIn("multiprocessor_count", set(SM_COUNT_KEYS) & keys)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@
 | 5 | host 指向不可达别名 (传输层真的坏) | 同样抛 —— 证明第 4 条不是只有打桩才能触发 |
 | 6 | 真机 `_setup_uv_env()` | True, 且远端 `.python-version` 与远端解释器版本**读回来**一致 |
 | 7 | 报表读的卡号 (#52) | == 远端 runner 自报的 `selected_gpu`; 读它**不**再花一次往返; 本地设 `OPERATOR_AGENT_GPU=2` 时 `conflicts` 必须为真而 `gpu` 仍是实卡 |
+| 8 | SM 数被字段名丢掉 (§3.4 第 4 处) | 把真机字典里的 `compute_units` 注入成 99 ⇒ `detect_hardware_caps()` 必须跟着变 99 (旧写法读不到那个键, 会回表里的 78) |
 
 ⚠️ 只打印派生值 (布尔、数字、版本号)。远端原文必然带那台机器的工作目录与用户名,
 按项目约定不进仓库、也不进本脚本的输出。
@@ -30,6 +31,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from operator_agent.hardware_caps import detect_hardware_caps  # noqa: E402
 from operator_agent.remote_executor import (  # noqa: E402
     HardwareProbeFailed,
     SSHExecutor,
@@ -112,8 +114,7 @@ def main() -> int:
     checks = [
         ("1 探测值与 nvidia-smi 的独立问法一致 (器件名 + 显存)",
          str(info.get("name")).lower() in smi_name.lower()
-         or smi_name.lower() in str(info.get("name")).lower(),
-         ),
+         or smi_name.lower() in str(info.get("name")).lower()),
         ("1b 显存与 nvidia-smi 在同一台卡的换算内一致 (不是表里抄的 40GB)",
          _same_card(info["memory"]["global"]["size"], smi_mem)),
         ("2 SM 数来自探测载荷 (与载荷逐字相等, 不是查表)",
@@ -135,6 +136,13 @@ def main() -> int:
         ("7c 本地设了 OPERATOR_AGENT_GPU=2 时冲突必须响, 而 gpu 仍是实卡",
          rec["conflicts"] is True and rec["gpu"] == ex.selected_gpu
          and rec["requested_env"] == "2"),
+        # 检查 8 (§3.4 第 4 处): 已知幅度的信号注入 —— 把**真机字典**里的 SM 数改成 99,
+        # 派生出的 caps 必须跟着变 99。旧写法读的是 `multiprocessor_count` (字典里没这个键),
+        # 于是会返回表里的 78 ⇒ 这一条在旧代码上必然红, 而真机数值恰好 78=78 本身看不出区别。
+        ("8 注入 SM 数=99 后 caps 跟着变 (探测值没被字段名丢掉)",
+         detect_hardware_caps(dict(info, compute_units=99)).sm_count == 99),
+        ("8b 未注入时真机读数不变 (78, 与载荷逐字相等)",
+         detect_hardware_caps(dict(info)).sm_count == 78 == probe.get("multiprocessor_count")),
     ]
     print(f"\n{'=' * 66}\n标定判据\n{'=' * 66}")
     bad = 0
