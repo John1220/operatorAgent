@@ -14,6 +14,17 @@
     /行号越界）各一条。只测前者的话「把整篇拼起来找」也能绿，而那样等于什么都没核；
   · **取不到字节不许算通过** —— 与 #53/#64 同族（缺证据当否定证据的反面：当肯定证据）。
 
+第四件是 2026-09-30 读 doc 60 时撞出来的，它把上面第三条拆成了两格：
+  · **带正文的 404 是响应，没正文才是取不到**；**`--doc` 只载入一份表时，全局引文清单要按表筛**。
+    前一条的意义不只是「能跑」：Vestrum `2609.33822v1` 那两个主机都给 404，而 `export.arxiv.org`
+    （脚本走的那条）只有 126 B / 1 行 `404`，`arxiv.org` 才给 7,901 B / 31 行那句
+    `No HTML for '…'` ⇒ 表与 needle 都必须按**脚本能重取的那一份**记（doc 60 §七）。
+    后一条的实跑形态是 **32/65** —— 31 条别的文档的引文被当成「锚点对不上」，而模块 docstring
+    的用法行本身就在推荐 `--doc 只核一份`。⇒ 新增 5 例（23 → 28）与另一张表
+    `benchmarks/mut_specs/anchor_fetch_is_a_response.py`（6 行，**6 杀 / 0 逃逸**）。
+    其中 R6 第一次是**假绿**：我断言 `In("doc.md")`，而变异印出的是 `['/tmp/…/doc.md']` ——
+    列 repr 里也含那个子串 ⇒ 逃逸；改成同时断言「没有 `None`、没有 `['`」才杀得掉（I32 那一族）。
+
 变异标定 (每条只改一处 `benchmarks/recheck_arxiv_anchors.py`，跑完立刻逐字节复原并断言 sha256
 一致。2026-09-30 实跑，基线 22 passed，**6 杀 / 1 逃逸**):
     M1 区间不约束（整篇拼起来找）              → 3 条红  ← 这条判据的全部价值就在这
@@ -37,12 +48,24 @@ M7 的逃逸是**结构性的、不是用例写松了**：`citation_in_range` �
 **这两条各自的变异没有重跑** —— 不是它们不可杀，是这次没标；M1~M7 那七条也不覆盖新的多文档
 路径（它们改的是单份表内的判据）。下一个人若要动 `DEFAULT_DOCS` 或 `main()` 的读表逻辑，
 先补这两条的变异标定再动。
+
+⇒ **这句欠账同日已清**（读 doc 60 时我就是那个「下一个人」）：`main()` 的读表/取数侧改了一处
+（带正文的 404 进比对）与两处新增（引文按表筛、全量跑的孤儿引文拉退出码 2），对应的标定在
+`benchmarks/mut_specs/anchor_fetch_is_a_response.py`（6 行 6 杀，其中 R3/R4/R5 三条打的正是
+「多文档路径」，R5 是 R3/R4 那句「筛掉了 N 条」的读者 —— 沉默的筛选与没有筛选不可区分）。
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import os
 import sys
+import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -280,6 +303,129 @@ class TestAdviceIsTriaged(unittest.TestCase):
                    if isinstance(n, ast.FunctionDef) and n.name == "main")
         self.assertIn("closing_advice", ast.dump(mfn),
                       "main() 不叫 closing_advice ⇒ 那句误诊还留在输出里")
+
+
+class TestResponseVsFetchFailure(unittest.TestCase):
+    """`main()` 的取数侧：一条**带正文的 404** 是响应，不是「取不到」
+
+    2026-09-30 读 doc 60 时撞出来的，两处都在 `main()` 里，而且都不是「表错了」：
+
+    ① Vestrum `2609.33822v1` 没有 HTML —— `export.arxiv.org` 给 **HTTP 404 + 126 B 正文**，
+       而 `arxiv.org` 给 404 + 7,901 B / 31 行的成样式页（第 8 行逐字 `No HTML for '…'`）。
+       旧代码任何 `HTTPError` 都记成取数失败 ⇒ **那一篇永远核不了**，而它正文恰恰是要引的东西。
+       把「服务器明确告诉你没有」与「网络没答话」压成同一格，就是被引那篇 (Limbo) 批评的
+       「把未知当失败」长在核它的工具上 (doc 60 §七)。
+    ② `--doc` 只载入一份表，`CITATIONS` 却是全局扁平清单 ⇒ 别的文档的引文全被判成
+       「锚点对不上」。第一次实测是 **32/65**，而模块 docstring 的用法行就在推荐这条 (`# 只核一份`)。
+       只补「默认并读多份」不够 —— 那修的是默认路径，没修 `--doc` 本身。
+    """
+
+    @staticmethod
+    def _raises(body: bytes):
+        """一个真的 `urlopen`: 抛 HTTPError 并把正文挂在 fp 上
+
+        第一版这里写成 `side_effect=lambda *a: self._http_error(body)` —— 那**不会抛**,
+        Mock 把返回的异常实例当普通返回值, 而 `HTTPError` 自己就支持 `with` 与 `.read()`,
+        于是代码走的是 200 那条成功分支, 测出来的绿与我打算测的那件事毫无关系 (I32 那一族:
+        判据的输入是空气)。
+        """
+        def _call(*a, **k):
+            raise urllib.error.HTTPError("https://x/y", 404, "Not Found", {}, io.BytesIO(body))
+        return _call
+
+    def _run_main(self, table_md: str, side_effect, citations, only_one_doc=True):
+        """把 `main()` 的取数换成注入的假响应；表住在临时文件里"""
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "doc.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(table_md)
+            argv = ["--doc", path] if only_one_doc else []
+            docs = (path,) if not only_one_doc else DEFAULT_DOCS
+            with mock.patch.object(urllib.request, "urlopen", side_effect=side_effect), \
+                 mock.patch("benchmarks.recheck_arxiv_anchors.CITATIONS", citations), \
+                 mock.patch("benchmarks.recheck_arxiv_anchors.DEFAULT_DOCS", docs), \
+                 contextlib.redirect_stdout(io.StringIO()) as buf:
+                code = main(argv)
+            return code, buf.getvalue()
+
+    def test_a_404_with_a_body_is_compared_against_the_table(self):
+        """成立那一侧：404 的正文照常进字节/行数比对，表对得上就绿、对不上就红
+
+        只测「不崩」是不够的 —— 判据是它**真的进了比对**：表里数字错时同一条路径必须红，
+        否则「404 也收」会被写成「404 一律放过」（那是把缺证据读成通过的另一半）。
+        """
+        body = b"<html><body><p>404</p></body>"
+        row = _table_row("2609.33822v1", body)
+        cites = [("2609.33822v1", 1, 1, "404")]
+        code, out = self._run_main(row + "\n", self._raises(body), cites)
+        self.assertEqual(0, code, out)
+        self.assertIn("带正文的响应", out, "那句要印出来, 否则下一个人读不出这是 404 不是 200")
+
+        code2, out2 = self._run_main("| x | `2609.33822v1` | 9,999 | 99 |\n",
+                                     self._raises(body), cites)
+        self.assertEqual(1, code2, out2)
+        self.assertIn("文档里那张表", out2, "取到了正文却对不上 ⇒ 建议要指表, 不能指网络")
+
+    def test_a_404_with_no_body_is_still_a_fetch_failure(self):
+        """反侧：404 且**没有正文**时不许当成响应 —— 那是真取不到"""
+        row = _table_row("1111.2222v1", BODY)
+        code, out = self._run_main(row + "\n", self._raises(b""), [])
+        self.assertEqual(1, code, out)
+        self.assertIn("没有正文", out)
+        self.assertNotIn("带正文的响应", out)
+
+    def test_single_doc_run_does_not_consent_to_other_docs_citations(self):
+        """`--doc` 载入一份表时, 别的引文要**筛掉并说明**, 不许判成红
+
+        旧行为实测是 32/65：31 条别的文档的引文全被判成「锚点对不上」。
+        """
+        row = _table_row("1111.2222v1", BODY)
+        others = [c for c in CITATIONS if c[0] != "1111.2222v1"]
+        self.assertTrue(others, "构造前提: 全局清单里得有别的文档的引文")
+        fake = mock.MagicMock()
+        fake.__enter__.return_value.read.return_value = BODY
+        code, out = self._run_main(row + "\n", lambda *a, **k: fake, others)
+        self.assertEqual(0, code, out)
+        self.assertIn("本轮未核", out)
+        self.assertNotIn("❌ 行 ", out, "别的文档的引文不许变成红点")
+
+    def test_full_run_with_an_orphan_citation_is_exit_2_not_green(self):
+        """全量跑里有引文的 id 不在任何表 ⇒ **退出码 2**：那批锚点从来没被重跑过 (I28)
+
+        这一条不 patch `DEFAULT_DOCS` 就测不到 —— 真实表覆盖了所有在册 id，所以把 `CITATIONS`
+        换成一条不存在的 id，让它必然落进「筛掉了、但不是因为只读一份」那一格。
+        """
+        nb, nl = _table_counts(BODY)
+        row = f"| x | `1111.2222v1` | {nb} | {nl} |\n"
+        fake = mock.MagicMock()
+        fake.__enter__.return_value.read.return_value = BODY
+        code, out = self._run_main(row, lambda *a, **k: fake,
+                                   [("9999.9999v9", 1, 1, "no-such-needle")],
+                                   only_one_doc=False)
+        self.assertEqual(2, code, out)
+        self.assertIn("从来没被重跑过", out)
+
+
+    def test_the_empty_table_message_names_the_files_it_read(self):
+        """「一条锚点都没解析出来」那句要说**读了哪些文件**，不许说 `None`
+
+        原句是 `f"❌ 在 {args.doc} 里…"` —— 全量跑时 `args.doc` 就是 `None`，于是消息把原因指向
+        一个根本没被读过的东西。一条指错原因的错误消息比没有消息更贵（处方式错误那条纪律）。
+        """
+        code, out = self._run_main("| 散文里提到 `1111.2222v1` 但不是四列的表行 |\n",
+                                   lambda *a, **k: mock.MagicMock(), [])
+        self.assertEqual(2, code, out)
+        self.assertIn("doc.md", out, "那句要列出真读过的文件名")
+        # ↓ 两条**反列 repr**: 变异 R6 把消息换成 `{args.doc}` 时, 印出来是 `['/tmp/…/doc.md']`,
+        #   它**也含** `doc.md` ⇒ 只断言 `In("doc.md")` 杀不掉那条 (第一次标定就逃逸在此)。
+        #   真正要钉的是「消息里说的是文件名, 不是某个参数的 repr / None」。
+        self.assertNotIn("None", out, out)
+        self.assertNotIn("['", out, "列 repr 混进消息 ⇒ 它说的是「参数」而不是「读了哪些文件」")
+
+
+def _table_counts(body: bytes) -> tuple:
+    from benchmarks.arxiv_html_to_lines import to_lines
+    return len(body), len(to_lines(body.decode()))
 
 
 if __name__ == "__main__":
