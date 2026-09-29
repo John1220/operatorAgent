@@ -112,6 +112,37 @@ def _validity_of(metrics: dict) -> Validity:
         return Validity.VALID
 
 
+def _round_axes(l3_result, test_inputs) -> dict:
+    """本轮 roofline 的轴 + 输入形状身份, 原样搬进血缘。
+
+    为什么要搬: 可达上界是**按 shape / 算术强度索引的一条曲线** (doc 42 实测), 而曲线要
+    能被复盘, 就得有 `(shape, AI) -> 本轮达到的速率` 这些点。Verifier 每轮其实都算过
+    (算术强度、脊点、两侧达成率、峰值出处与 `peak_trusted`), 只是从没离开内存。
+
+    两条纪律:
+    * **不挑键** —— 整块复制 `roofline_analysis`。给落盘键做白名单的那次 (doc 48), 代价是
+      那一批真机数据的血缘永久没了, 而且忘加一个键的失效方式是静默的。
+    * **没有就不写** —— 这一轮没走到 L3 (L1/L2 就死了) 时返回空 dict, 于是 `result.json`
+      里根本没有 `roofline` 这个键。缺键 ≠ 空块: 后者会把「没测过」写成「测了, 值是空」。
+    """
+    out: dict = {}
+    metrics = getattr(l3_result, "metrics", None) or {}
+    axes = metrics.get("roofline_analysis")
+    if isinstance(axes, dict) and axes:
+        out["roofline"] = dict(axes)
+    shapes, dtypes = {}, {}
+    for name, arr in (test_inputs or {}).items():
+        shape = getattr(arr, "shape", None)
+        if shape is None:
+            continue
+        shapes[name] = list(shape)
+        dtypes[name] = str(getattr(arr, "dtype", ""))
+    if shapes:
+        out["input_shapes"] = shapes
+        out["input_dtypes"] = dtypes
+    return out
+
+
 class Conductor:
     """
     Conductor - 任务编排器
@@ -542,6 +573,12 @@ class Conductor:
                 # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
                 "candidate_signature": sig,
                 "duplicate_of": dup_of,
+                # 分母的原料 (缺口 3 的「先补分母」那半, doc 49 §八 第 14 条): Verifier 每轮**已经算出** roofline 的全部轴
+                # (算术强度、脊点、两侧达成率、峰值出处与可信位), 但它们只活到本次判决结束,
+                # 从没进过血缘 —— 于是「可达上界是按 shape/AI 索引的曲线」这件已经量出来的
+                # 事实, 任何离线复盘都用不上。整块搬, **不挑键**: doc 48 那次给落盘键做
+                # 白名单, 代价是那一批真机数据的血缘永久没了。缺的那块不填默认值。
+                **_round_axes(l3_result, test_inputs),
             })
 
             def _snap() -> str:
