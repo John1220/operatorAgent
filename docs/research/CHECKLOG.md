@@ -225,6 +225,28 @@
   **通则：可达性是按主机名（甚至按 scheme）的性质，记录时要给表格而不是给一句「X 可达」**
 - **类别**：I · **状态**：✅ 已改成按主机名的表格（代理端口的值按纪律不进仓库）
 
+### I13 · 按 Hearsay 的仪器读我方自己：`result.json` 整表都是当事人自述
+- **原话**：我方把 `result.json` / `execution_snapshot.json` 称作「可追溯的落盘」，
+  并在 #62 里计划「给驱动加一句『我跑的是哪份代码』的自检」来补审计链条
+- **实证**：外部一手仪器（Hearsay `2609.32495v1`，cs.CR，528,125 B / 1,889 行）给的定义是
+  **introspective**（"holds only the system's own account of its execution"）vs
+  **evidentiary**（"a reader who was not there can check it **without taking the system's word**,
+  including that something did not happen"；操作判据 "a claim counts only where a witness the
+  system does not control confirms it"）。它审计十六个在册框架的结论：
+  **"None of the thirty-two cells of external verifiability is present"**（0 present/3 partial/29 absent），
+  而服务在场者的八个属性平均 80% 且随提交数上升（ρ=0.55）。逐条读我方落盘的写者：
+  gflops/speedup/三态由我方部署的 runner 写、`stop`/`llm_cost` 键由控制端写、
+  `total_cost_usd` 是我方按 token × 本地价表折算（`llm_client.py:84-86`，`:144` 只是汇总）——
+  **全部自述**；唯一天生非自述的量是 **token 数**（`llm_client.py:326-330` 从响应 `usage` 取，
+  取不到才退化并写 `usage_source`），而且账本已经带了「谁写的」这个一等键
+- **出处**：doc 56 §2
+- **后果**：#62 原计划的「驱动自检并报出自己的版本」按这条定义**仍是自述**（"The remedy is
+  **another writer, not richer logging**"，且它明说 hash chain over the harness's own log 做不到）
+  ⇒ 已把 #62 的 ① 改成**两个写者**（控制端算远端哈希并落盘 + 另一个进程复核并单独落一份）。
+  另两条附带教训：① 我第一版把费用写成「provider 写的」，是没读 `:84-86` 那三行的过度顺推；
+  ② 「算了没人读」这条纪律整个站在**服务在场者**那一侧（那 80%），活跃度买不到另一类
+- **类别**：I · **状态**：⚠️ 已知（#62 已按两个写者改写；#78 落观测侧）
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -344,6 +366,7 @@
 | I10 | 把「今天没人走」的分支报成现行缺陷（潜伏 vs 现行） | I | ✅ |
 | I11 | 批量变异只在最后统一复原 ⇒ 后面几条的红是前面几条的账 | H | ✅ |
 | I12 | 「站点直连可用」其实是某个主机名直连可用 | I | ✅ |
+| I13 | 按外部仪器读我方：落盘全是当事人自述，只有一个量有外部写者 | I | ⚠️ |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
