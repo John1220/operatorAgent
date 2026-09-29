@@ -360,15 +360,35 @@ class MockGPU(Backend):
         return result
 
     def _compute_metrics(self, result: ExecutionResult, inputs: dict, elapsed: float):
-        """计算 GFLOPS 和内存带宽"""
+        """计算 GFLOPS 和内存带宽
+
+        ⚠️ 形状分支必须先分维数: 1D A@B 是 **dot product** (2N FLOPs, 不是 GEMM)。
+        原先 `m, k = a.shape` 对一维输入直接 `not enough values to unpack`,
+        于是 M02 这类 reduce/dot 题在 MockGPU 上根本跑不完 —— 评分器还没开始打分
+        就死在指标计算里 (LeetCUDA pilot 首次 --self-test 抓到)。
+        """
         if "A" in inputs and "B" in inputs:
             a = np.asarray(inputs["A"])
             b = np.asarray(inputs["B"])
-            m, k = a.shape
-            k2, n = b.shape
-            flops = 2 * m * n * k
-            result.gflops = (flops / elapsed / 1e9) if elapsed > 0 else 0
-            bytes_moved = (m * k + k * n + m * n) * 4  # FP32 = 4 bytes
+            if a.ndim == 2 and b.ndim == 2:
+                m, k = a.shape
+                _k2, n = b.shape
+                flops = 2 * m * n * k
+                bytes_moved = (m * k + k * n + m * n) * 4
+            elif a.ndim == 1 and b.ndim == 1:
+                # dot: 2N mul-add, 读两个向量写一个标量
+                n = a.shape[0]
+                flops = 2 * n
+                bytes_moved = (2 * n + 1) * 4
+            elif a.ndim == 2 and b.ndim == 1:
+                # matvec: 2*M*N
+                m, k = a.shape
+                flops = 2 * m * k
+                bytes_moved = (m * k + k + m) * 4
+            else:
+                flops = 0
+                bytes_moved = int(a.nbytes + b.nbytes)
+            result.gflops = (flops / elapsed / 1e9) if elapsed > 0 and flops else 0
             result.memory_bandwidth_gbs = (bytes_moved / elapsed / 1e9) if elapsed > 0 else 0
 
     def benchmark(
