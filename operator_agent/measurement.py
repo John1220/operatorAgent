@@ -37,6 +37,12 @@ L3 的数字有三种「不可信」, 而它们都不该被当成「性能不达
 
 本模块只做判定: 不含硬件数据 (launch 地板由调用方从 hardware_caps 取), 不做 I/O,
 不依赖 torch。定位与 `tolerance.py` 相同 —— 单一权威判据 + 可离线单测。
+
+上面五条件之外, 这里还住着一族问「**判据本身用的是哪把尺**」的规则 (缺口 1 的另一半,
+#87): `GATE_PARAM_KEYS` / `single_ruler` (一场之内几组输入之间) 与 `l2_ruler_reading` /
+`cross_round_ruler` / `ruler_note` (一次运行之内几轮之间)。它们放在这里而不是留在
+`verifier.py` 里, 是因为读者有两个 (`conductor` 每轮那句 `[Ruler]` 与端到端报表那一栏),
+而两个读者必须读同一个集合 —— 与上面 `CORRECTNESS_LEVELS` 那条是同一个理由。
 """
 
 from dataclasses import dataclass, field
@@ -130,6 +136,182 @@ def correctness_verified_levels(levels: dict) -> bool:
     所以这里逐项 `is True`: 值只可能来自一个真的布尔, 缺键与 False 都不算数。
     """
     return all(levels.get(k) is True for k in CORRECTNESS_LEVELS)
+
+
+# ── 「用的是哪把尺」的单点定义 (缺口 1 / #87 第 2 片) ─────────────────────────
+# 外部一手 (arXiv:2609.35140v1 行 150, 逐字):
+#     "𝒮 is the **immutable** evaluation specification ... It keeps correctness and
+#      performance criteria fixed across attempts."
+# 那句话问的不是「算得对不对」, 而是**整条判据里是不是同一把尺**。第 1 片 (commit 2b6a390)
+# 管的是「一场之内、几组输入之间」; 本片管「一次运行之内、几轮之间」。
+#
+# 这三键的名字与「同值才配发布单值」那条规则**只在这里定义一次**。它们原先住在
+# `verifier.GATE_PARAM_KEYS` / `verifier._single_ruler`, 而跨轮那半必须用同一个集合 ——
+# 两处各写一遍就是两套口径 (CHECKLOG I22/H4 那一族), 而第 1 片立的规矩是「逐组收集后统一
+# 判定」, 搬到这里才配被轮级与运行级两个读者共用。
+GATE_PARAM_KEYS: tuple = ("atol", "rtol", "required_matched_ratio")
+
+#: 每轮的尺读数写进 `iteration_history` 时用的键。**产它的 (conductor) 与读它的
+#: (conductor 的跨轮判定、端到端报表) 都从这里取名字**, 免得两处字符串飘开之后就只剩
+#: 「报表那一栏永远是空的」这种静默失效。
+LINEAGE_RULER_KEY = "l2_ruler"
+
+RULER_REPORTED = "reported"            #: 这一轮各组同一把尺, 值照抄
+RULER_CONFLICT = "self_conflict"       #: 这一轮自己就不是同一把尺
+RULER_UNREPORTED = "unreported"        #: 一个尺键都没报 (没走到 L2 / 没做参考比对)
+
+
+def single_ruler(gates: list[dict]) -> tuple[dict, dict]:
+    """只有「每一组参考比对都用同一把尺」时, 聚合值才配发布一个单值
+
+    返回 `(可发布的单值, 冲突表)`。冲突表形如 `{键: {组下标: 那一组实际用的值}}`,
+    读的人不必重跑就能看出是哪几组、哪一把尺不一致。
+
+    旧写法是 `if not gate_params: gate_params = ...` —— 第一组赢, 而它下面聚合的是跨组的量
+    (`max_error` 取 max、`matched_ratio` 取 min)。于是产物里会印着「atol=1e-3」, 而那个混合值
+    其实是几把不同的尺各自判过之后再混起来的 —— 读它的人 (含 `benchmarks/probe_l2_sampling_gate.py`,
+    它正是拿这几个键核「绝对+相对」那条门的) 会把一个不存在的统一口径当成前提。
+
+    冲突时那个键**直接不发布**, 而不是挑一个: 与 #64「分母不可信时 `bound_type` 不许替它判」
+    同形。一组**缺**这个键同样算冲突 (不能假设它与别的组同值), 所以这里的判据是
+    「每一组都在场且每一组同值」。
+
+    ⚠️ 「每一组都在场」那半是本片真正的牙齿, 它**今天真能发生**而不需要谁出错: 远端那路的载荷
+    是按 `verifier._REMOTE_L2_METRIC_KEYS` 逐键过滤 (`if k in remote_verify`) 透传上来的,
+    所以部署在远端的 `run_kernel.py` 是旧版本、或某组走了缺字段的分支时, 就会出现「A 组报了
+    `required_matched_ratio`、B 组没报」。
+    """
+    if not gates:
+        return {}, {}
+    single: dict = {}
+    conflict: dict = {}
+    for key in GATE_PARAM_KEYS:
+        vals = {i: g[key] for i, g in enumerate(gates) if key in g}
+        if not vals:
+            # 没有任何一组报过这个键 ⇒ 既不发布, 也**不谎报冲突**。写漏这一支时冲突表里
+            # 会出现 `{"rtol": {}}` 这种空证人, 而 message 会照着念「这几组用的不是同一把尺
+            # ['rtol']」—— 拿一个谁都没报过的键去报警, 与本仓「缺证据不是否定证据」同族。
+            continue
+        if len(vals) == len(gates) and len({repr(v) for v in vals.values()}) == 1:
+            single[key] = next(iter(vals.values()))
+        else:
+            conflict[key] = vals
+    return single, conflict
+
+
+def l2_ruler_reading(l2_metrics) -> dict:
+    """把一轮 L2 的 metrics 收成「这一轮用的哪把尺」那一份读数, 供血缘与跨轮判定用
+
+    三态, 每条都对应一种**不同的**下游该读出来的意思:
+      * `reported` —— 这一轮各组同一把尺, 能报的键都报出来了;
+      * `self_conflict` —— 第 1 片那道守卫在这一轮内部就报了警 (`gate_params_conflict`
+        在场)。**这不等于「换了一把尺」**: 它是「这一轮自己说不清用了哪把」, 两件事的
+        修法不同 (前者查部署, 后者查多组输入的口径);
+      * `unreported` —— 一个尺键都没有: 那轮死在 L1/L2 之前, 或 L2 只验可执行性没做参考比对。
+
+    「没有读数」与「读数说尺变了」必须分开 —— 后者是证据, 前者只是缺陷信号 (本仓 #53 那一族:
+    把 `speedup=None` 印成「没有加速」)。
+    """
+    m = l2_metrics if isinstance(l2_metrics, dict) else {}
+    values = {k: m[k] for k in GATE_PARAM_KEYS if k in m}
+    conflict = m.get("gate_params_conflict")
+    if conflict:
+        # 打架的键名也带上: 读者要能分清「atol 说不清但 rtol 说得清」和「全都说不清」
+        return {"state": RULER_CONFLICT,
+                "conflicted_keys": sorted(str(k) for k in conflict), **values}
+    if values:
+        return {"state": RULER_REPORTED, **values}
+    return {"state": RULER_UNREPORTED}
+
+
+def cross_round_ruler(iteration_history: list) -> dict:
+    """一次运行之内, 各轮的数值门用的是不是同一把尺。
+
+    入参是 `artifact.iteration_history` (或报表里那份原样搬运的 `rounds`), 每轮取
+    `LINEAGE_RULER_KEY` 那一项。**没有那一项**与「有, 但是 `unreported`」一起算「这一轮
+    没报」—— 前者是这次运行跑在写这个键之前的代码上 (续跑旧快照就会遇到), 血缘里没有原料,
+    所以只能如实计入分母, 不能倒推成「没漂移」。
+
+    判据是**逐键**的, 与第 1 片同形 (不因一个键打架就让别的键陪着不说话):
+      * 某个键被 **≥2 轮**报过且值全同 ⇒ 该键 `same`;
+      * 被 ≥2 轮报过且值不同 ⇒ 进 `ruler_changed`, 并带每轮的取值当证人;
+      * 只被 1 轮报过 ⇒ 没有可比对象, 既不说同也不说变 —— 这类键进 `ruler_keys_partial`。
+
+    `ruler_same` 因此是三态: `True` 只在「至少有一个键可比, 且可比键都不打架」时成立;
+    `False` 是有证人; `None` 是**没有任何可比对** (少于两轮报过尺)。把 None 折成 True
+    就是「拿缺证据当通过」, 折成 False 就是「拿缺证据当反证」, 两个方向都错过。
+    """
+    rounds = list(iteration_history or ())
+    readings: list = []
+    for idx, h in enumerate(rounds):
+        if not isinstance(h, dict):
+            continue
+        reading = h.get(LINEAGE_RULER_KEY)
+        if not isinstance(reading, dict):
+            continue
+        label = h.get("round", idx + 1)
+        readings.append((label, reading))
+
+    states = [r.get("state") for _, r in readings]
+    vals_by_key: dict = {}
+    for key in GATE_PARAM_KEYS:
+        per_round = {label: r[key] for label, r in readings if key in r}
+        if per_round:
+            vals_by_key[key] = per_round
+    comparable = {k: v for k, v in vals_by_key.items() if len(v) >= 2}
+    changed = {k: v for k, v in comparable.items()
+               if len({repr(x) for x in v.values()}) > 1}
+    # 「报了几轮」按**覆盖最广的那个键**来算, 因为各轮报的键集合可以不同 (远端那路逐键过滤)。
+    # 拿轮数当分母会把「这一轮压根没报 rtol」算成「rtol 上出现了不一致」的反面 —— 那是
+    # 第 1 片那条 M2 (缺组当同值) 的跨轮版本。
+    coverage = max((len(v) for v in vals_by_key.values()), default=0)
+
+    return {
+        "ruler_rounds_total": len(rounds),
+        # 血缘里**带了尺读数**的轮数。为 0 时这一栏是「测不到」而不是「一致」——
+        # 与 `_duplicate_rate` 那个 `duplicate_measurable` 同一个位置。
+        "ruler_rounds_recorded": len(readings),
+        "ruler_rounds_reported": states.count(RULER_REPORTED),
+        "ruler_rounds_self_conflict": states.count(RULER_CONFLICT),
+        "ruler_rounds_unreported": states.count(RULER_UNREPORTED),
+        "ruler_key_coverage": coverage,
+        "ruler_same": (None if not comparable else not changed),
+        "ruler_changed": changed,
+        # 顺序跟着 `GATE_PARAM_KEYS` 走 (不是字母序): `vals_by_key` 就是按那个顺序建的,
+        # 而报表会把这份名单原样印出来 —— 名单的顺序也该是可预期的。
+        "ruler_keys_partial": tuple(
+            k for k, v in vals_by_key.items() if len(v) < coverage),
+    }
+
+
+def ruler_note(agg: dict) -> str:
+    """把 `cross_round_ruler` 的结果写成给人读的一行 —— **只报不判**
+
+    与 `verifier._oracle_note` 同定位: 这一句不改任何判决。它存在的理由是「跨轮换了尺」
+    今天**没有阈值可判** —— 按本项目「观测先于判定」的处置 (同一位置上的另一条是环境漂移
+    只降到 DEGRADED), 先把这件事在日志与报表里变得可见, 并让**分母**跟着一起出来。
+
+    三个分支都要能单独被测出来, 所以措辞里不出现「正常」: `ruler_same is None` 说的是
+    「无从比对」, 把它印成「各轮一致」就是拿缺证据当通过。
+    """
+    if not agg.get("ruler_rounds_recorded"):
+        return ""
+    same = agg.get("ruler_same")
+    counts = (f"报了尺的轮 {agg['ruler_rounds_reported']}"
+              f" (另有 {agg['ruler_rounds_self_conflict']} 轮内部就不一致、"
+              f"{agg['ruler_rounds_unreported']} 轮没报; "
+              f"共 {agg['ruler_rounds_total']} 轮)")
+    if same is True:
+        head = "各轮的尺一致"
+    elif same is False:
+        head = ("⚠️ 各轮的尺**不一致**: 变了的是 "
+                f"{dict(agg['ruler_changed'])} —— 不据此判核失败, "
+                f"去查部署是否中途换过版本")
+    else:
+        head = "各轮的尺**无从比对** (可比键不到两轮报过)"
+    if agg.get("ruler_keys_partial") and same is not False:
+        head += f" (只被部分轮报过: {list(agg['ruler_keys_partial'])})"
+    return head + "; " + counts
 
 
 def binding_attainment(metrics: dict) -> Optional[float]:

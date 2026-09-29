@@ -32,9 +32,10 @@ from .llm_client import LLMClient
 from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
-from .measurement import (ROOFLINE_CONVERGED_PCT, Validity, Verdict,
-                          binding_attainment, correctness_verified_levels,
-                          roofline_converged, verdict)
+from .measurement import (LINEAGE_RULER_KEY, ROOFLINE_CONVERGED_PCT, Validity,
+                          Verdict, binding_attainment, cross_round_ruler,
+                          correctness_verified_levels, l2_ruler_reading,
+                          roofline_converged, ruler_note, verdict)
 from .agent_logger import capture_execution
 from .optimization_planner import OptimizationPlanner
 
@@ -178,6 +179,23 @@ def _round_axes(l3_result, test_inputs) -> dict:
         out["input_shapes"] = shapes
         out["input_dtypes"] = dtypes
     return out
+
+
+def _round_ruler(verify_results: list) -> dict:
+    """本轮 L2 报的那把尺, 收成能进血缘的那一份读数 (#87 第 2 片)
+
+    三态判据与键名都在 `measurement.l2_ruler_reading` / `GATE_PARAM_KEYS` —— 这里只负责从
+    `VerificationResult` 列表里把 L2 那一格挑出来。挑不出来 (L1 就死了, `verify()` 是
+    fail-fast) 时得到的是 `unreported`, 而**不是**「这一轮的尺和上一轮一样」。
+
+    为什么要单独存一份而不是让读者去翻 `levels_passed`: 尺的**值**只有在 L2 的 metrics 里,
+    而那份在循环结束时会被最后一轮的盖掉 (与 #63 那批「轴只活到本次判决结束」同形)。
+    血缘是唯一穿过落盘边界的地方, 于是「第 1 轮与第 5 轮用的是不是同一把尺」这个问题
+    今天第一次可以离线复盘, 而不必重跑。
+    """
+    l2 = next((r for r in verify_results
+               if getattr(r, "level", None) == VerificationLevel.L2_FUNCTION), None)
+    return l2_ruler_reading(getattr(l2, "metrics", None) if l2 else None)
 
 
 class Conductor:
@@ -657,6 +675,10 @@ class Conductor:
                 "measurement_validity": (l3_result.metrics.get("measurement_validity")
                                          if l3_result else None),
                 "recipes_applied": list(applied_recipes),
+                # 本轮数值门用的哪把尺 (#87 第 2 片)。三态: 报了 / 自己就说不一致 / 没报。
+                # 「跨轮的尺是不是同一把」这个问句的原料只能在这里落下 —— 循环之外只剩
+                # 最后一轮的 metrics。
+                LINEAGE_RULER_KEY: _round_ruler(verify_results),
                 # 重复率的原料: 签名进 result.json 之后, 「模型重新生成时有多少轮是同一份
                 # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
                 "candidate_signature": sig,
@@ -668,6 +690,16 @@ class Conductor:
                 # 白名单, 代价是那一批真机数据的血缘永久没了。缺的那块不填默认值。
                 **_round_axes(l3_result, test_inputs),
             })
+
+            # 每轮都算一遍「这一场里各轮的尺是不是同一把」, 但**只在它有话说的时候**打印
+            # (与上面 [Novelty] 同一个姿势)。一致时不占日志: 「各轮同尺」是这片要守的
+            # 默认前提, 不是成果; 要露出来的只有「变了」与「某一轮自己说不清用了哪把」。
+            # 这一句不改任何判决 —— 跨轮换尺今天没有阈可判, 处置与环境漂移同一条
+            # (观测先于判定, 见 `measurement.ruler_note`)。
+            _ruler_agg = cross_round_ruler(artifact.iteration_history)
+            if (_ruler_agg["ruler_same"] is False
+                    or _ruler_agg["ruler_rounds_self_conflict"]):
+                print(f"\n[Ruler] {ruler_note(_ruler_agg)}")
 
             def _snap() -> str:
                 """把当前循环状态写进 execution_snapshot.json

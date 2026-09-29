@@ -18,6 +18,7 @@ from .anticheat import static_audit
 from .interface_contract import check_kernel_interface, input_key_sets
 from . import tolerance
 from . import measurement
+from .measurement import GATE_PARAM_KEYS, single_ruler
 from .hardware_caps import detect_hardware_caps
 from .backend_caps import Backend, Cap, CapabilityMissing
 
@@ -25,6 +26,11 @@ from .backend_caps import Backend, Cap, CapabilityMissing
 # 远端 L2 返回的指标里需要透传到控制端的键。matched_ratio / bad_elements / atol /
 # rtol 是数值门改成「绝对+相对」之后新增的: 只留 max_error 的话, 控制端分不清
 # 「差一点点」和「整体缩放了 3%」, 而后者正是 docs/research/12 要拦的那类。
+#
+# ⚠️ 这个 `if k in remote_verify` 的**逐键过滤**就是「某一组报了、某一组没报」那一侧的现场:
+# 远端跑的是旧版 `run_kernel.py` 时缺哪个键, 控制端只能如实缺着。数值门口径的三键名与
+# 「同值才配发布单值」那条规则都不在这里, 它们在 `measurement.GATE_PARAM_KEYS` /
+# `single_ruler` —— 轮级 (这里) 与运行级 (`cross_round_ruler`) 两个读者必须读同一个集合。
 _REMOTE_L2_METRIC_KEYS = (
     "max_error", "max_rel_error", "matched_ratio", "bad_elements",
     "atol", "rtol", "required_matched_ratio",
@@ -34,46 +40,6 @@ _REMOTE_L2_METRIC_KEYS = (
     # 「哪错了」和「错了多少」是两个问题。
     "first_bad_index", "first_bad_actual", "first_bad_expected",
 )
-
-# 数值门「这次到底用的哪把尺」的那几个键。它们必须**逐组**收集后统一判定, 不许哪一组先出现
-# 就代表全部 (见 `_single_ruler`)。
-GATE_PARAM_KEYS = ("atol", "rtol", "required_matched_ratio")
-
-
-def _single_ruler(gates: list[dict]) -> tuple[dict, dict]:
-    """只有「每一组参考比对都用同一把尺」时, 聚合值才配发布一个单值
-
-    外部一手 (arXiv:2609.35140v1 行 150, 逐字):
-        "𝒮 is the **immutable** evaluation specification ... It keeps correctness and
-         performance criteria fixed across attempts."
-    这条纪律问的不是「算得对不对」, 是**整条判据里是不是同一把尺**。
-
-    旧写法是 `if not gate_params: gate_params = ...` —— 第一组赢, 而它下面聚合的是跨组的量
-    (`max_error` 取 max、`matched_ratio` 取 min)。于是产物里会印着「atol=1e-3」, 而那个混合值
-    其实是几把不同的尺各自判过之后再混起来的 —— 读它的人 (含 `benchmarks/probe_l2_sampling_gate.py`,
-    它正是拿这几个键核「绝对+相对」那条门的) 会把一个不存在的统一口径当成前提。
-
-    冲突时那个键**直接不发布**, 而不是挑一个: 与 #64「分母不可信时 `bound_type` 不许替它判」
-    同形。一组**缺**这个键同样算冲突 (不能假设它与别的组同值), 所以这里的判据是
-    「每一组都在场且每一组同值」。
-    """
-    if not gates:
-        return {}, {}
-    single: dict = {}
-    conflict: dict = {}
-    for key in GATE_PARAM_KEYS:
-        vals = {i: g[key] for i, g in enumerate(gates) if key in g}
-        if not vals:
-            # 没有任何一组报过这个键 ⇒ 既不发布, 也**不谎报冲突**。写漏这一支时冲突表里
-            # 会出现 `{"rtol": {}}` 这种空证人, 而 message 会照着念「这几组用的不是同一把尺
-            # ['rtol']」—— 拿一个谁都没报过的键去报警, 与本仓「缺证据不是否定证据」同族。
-            continue
-        if len(vals) == len(gates) and len({repr(v) for v in vals.values()}) == 1:
-            single[key] = next(iter(vals.values()))
-        else:
-            conflict[key] = vals
-    return single, conflict
-
 
 # 常见 GPU 硬件 **dense 规格峰值** (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
 # 格式: (FP32_TFLOPS, TF32_TFLOPS, FP16_TFLOPS, BF16_TFLOPS, memory_bandwidth_GBs)
@@ -400,7 +366,7 @@ class Verifier:
         min_matched_ratio = 1.0
         min_coverage = 1.0
         # 每组输入各自上报它**实际用的那把尺**; 是否合成一个单值, 由循环后的
-        # `_single_ruler` 判 (见那里的注释 —— 这一块的旧写法是「第一组赢」)
+        # `measurement.single_ruler` 判 (见那里的注释 —— 旧写法是「第一组赢」)
         gates: list[dict] = []
         # 逐组的高精度读数; 聚合规则见 `_aggregate_oracles` (那里记了第一版漏搬的现场)
         oracles: list[dict] = []
@@ -436,7 +402,7 @@ class Verifier:
                 if m.get("device"):
                     execution_devices.add(m["device"])
 
-        gate_params, gate_conflicts = _single_ruler(gates)
+        gate_params, gate_conflicts = single_ruler(gates)
         oracle_agg = self._aggregate_oracles(oracles)
         if has_reference:
             msg = (f"功能验证通过 ({len(input_sets)} 组输入), 最大误差={max_error_overall:.2e}, "

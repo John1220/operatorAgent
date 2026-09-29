@@ -66,7 +66,7 @@ from operator_agent.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity,
     TaskSchema, TaskType, VerificationLevel, VerificationResult,
 )
-from operator_agent.verifier import GATE_PARAM_KEYS, _single_ruler
+from operator_agent.measurement import GATE_PARAM_KEYS, single_ruler
 
 CORRECT_KERNEL = """import numpy as np
 
@@ -98,7 +98,7 @@ def _passing_set(**gate):
 
     ⚠️ 为什么这里要发放而不是用真实后端: 内置的 AND 路径对同一份 task 的每一组必然报同一把尺
     (见文件头那段实话), 所以「各组的尺不同 / 某一组缺一个键」这一侧在真实路径上构造不出来。
-    发放只替换**每组的读数**, 循环、聚合、`_single_ruler`、message 拼接全部走真代码。
+    发放只替换**每组的读数**, 循环、聚合、`single_ruler`、message 拼接全部走真代码。
     """
     m = {"max_error": 1e-7, "matched_ratio": 1.0, "bad_elements": 0,
          "compared_elements": 64, "coverage": 1.0}
@@ -133,7 +133,7 @@ class TestSingleRulerRule(unittest.TestCase):
         「没有证据」与「证据说尺是 1e-5」是两件事 —— 后者是 `m.get(k, 默认)` 造证据,
         本仓 #81 那条老毛病正是这个形状。
         """
-        single, conflict = _single_ruler([])
+        single, conflict = single_ruler([])
         self.assertEqual({}, single)
         self.assertEqual({}, conflict,
                          "没有任何组时也没有哪一组互相矛盾, 不该报冲突")
@@ -141,20 +141,20 @@ class TestSingleRulerRule(unittest.TestCase):
     def test_all_sets_agree_publishes_single_values(self):
         gates = [{"atol": 1e-5, "rtol": 1e-4, "required_matched_ratio": 0.99},
                  {"atol": 1e-5, "rtol": 1e-4, "required_matched_ratio": 0.99}]
-        single, conflict = _single_ruler(gates)
+        single, conflict = single_ruler(gates)
         self.assertEqual({"atol": 1e-5, "rtol": 1e-4, "required_matched_ratio": 0.99},
                          single)
         self.assertEqual({}, conflict)
 
     def test_one_set_publishes_itself(self):
         """缺席侧的一半: 只有一组时它就是全部, 不许因为「凑不齐多组」而判冲突"""
-        single, conflict = _single_ruler([{"atol": 2e-5, "rtol": 1e-4}])
+        single, conflict = single_ruler([{"atol": 2e-5, "rtol": 1e-4}])
         self.assertEqual({"atol": 2e-5, "rtol": 1e-4}, single)
         self.assertEqual({}, conflict)
 
     def test_differing_value_is_not_published_and_is_reported(self):
         gates = [{"atol": 1e-5, "rtol": 1e-4}, {"atol": 5e-2, "rtol": 1e-4}]
-        single, conflict = _single_ruler(gates)
+        single, conflict = single_ruler(gates)
         self.assertNotIn("atol", single, "两把不同的尺折成了一个单值")
         self.assertIn("atol", conflict)
         self.assertEqual({0: 1e-5, 1: 5e-2}, conflict["atol"],
@@ -171,7 +171,7 @@ class TestSingleRulerRule(unittest.TestCase):
         """
         gates = [{"atol": 1e-5, "rtol": 1e-4, "required_matched_ratio": 0.99},
                  {"atol": 1e-5, "rtol": 1e-4}]
-        single, conflict = _single_ruler(gates)
+        single, conflict = single_ruler(gates)
         self.assertNotIn("required_matched_ratio", single,
                          "有一组根本没报这个键, 凭什么说整场用的是同一把尺")
         self.assertEqual({0: 0.99}, conflict["required_matched_ratio"],
@@ -185,7 +185,7 @@ class TestSingleRulerRule(unittest.TestCase):
         判据上, 而这条判据没有权利炸掉主流程。
         """
         gates = [{"atol": (1e-5, 1e-6)}, {"atol": (1e-5, 1e-6)}]
-        single, conflict = _single_ruler(gates)
+        single, conflict = single_ruler(gates)
         self.assertEqual({"atol": (1e-5, 1e-6)}, single)
         self.assertEqual({}, conflict)
 
@@ -196,7 +196,7 @@ class TestSingleRulerRule(unittest.TestCase):
         照着念「这几组用的不是同一把尺 ['rtol']」。那是拿缺证据当反证 —— 报警的内容
         恰好是它自己那条判据说不能说的话。
         """
-        single, conflict = _single_ruler([{"atol": 1e-5}, {"atol": 1e-5}])
+        single, conflict = single_ruler([{"atol": 1e-5}, {"atol": 1e-5}])
         self.assertEqual({"atol": 1e-5}, single)
         self.assertEqual({}, conflict,
                          f"谁都没报过的键不该出现在冲突表里: {conflict}")
@@ -253,7 +253,7 @@ class TestAggregateThroughVerifier(unittest.TestCase):
     def test_aggregate_still_aggregates_across_sets(self):
         """守卫不许顺手改掉跨组聚合本身: max_error 取 max、compared 求和照旧
 
-        这一条是给「重构成 _single_ruler 时手滑改动了循环」准备的证人。
+        这一条是给「重构成 single_ruler 时手滑改动了循环」准备的证人。
         """
         r, _ = _scripted_aggregate(self.verifier, [{}, {}, {}])
         self.assertEqual(3, r.metrics["num_input_sets"])

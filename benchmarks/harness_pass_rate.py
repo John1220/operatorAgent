@@ -52,8 +52,9 @@ import numpy as np  # noqa: E402
 from operator_agent.backend_caps import Cap  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402
 from operator_agent.llm_client import LLMClient  # noqa: E402
-from operator_agent.measurement import (Validity, correctness_verified_levels,
-                                        persist_decision)  # noqa: E402
+from operator_agent.measurement import (LINEAGE_RULER_KEY, Validity,  # noqa: E402
+                                        correctness_verified_levels,
+                                        cross_round_ruler, persist_decision)
 from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
 from operator_agent.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema, TaskType,
@@ -569,6 +570,19 @@ def aggregate(runs):
                               and not r.get("final_all_passed"))
 
     dup, at_risk, has_sig = _duplicate_rate(ok_runs)
+    # 跨轮的尺是不是同一把 (#87 第 2 片)。判据与三态都在 `measurement.cross_round_ruler`,
+    # 这一栏是它的**第二个读者** —— 第一个是 conductor 每轮那句 `[Ruler]`。两处读同一个
+    # 函数, 所以「当场打印的那一行」与「报表里的这个数」不会长成两套口径 (I22/H4 那一族)。
+    ruler_per_run = {str(r.get("case")): cross_round_ruler(r.get("rounds") or [])
+                     for r in ok_runs}
+    # 分母直接取谓词自己的三态, 不在报表里另推一遍「几轮才算可比」—— 另推一次就是第二套
+    # 口径。`ruler_same is None` 的那些年少进分母, 单独一栏说明「报了尺但凑不出可比对」。
+    comparable_cases = sorted(c for c, a in ruler_per_run.items()
+                              if a["ruler_same"] is not None)
+    drift_cases = sorted(c for c in comparable_cases
+                         if ruler_per_run[c]["ruler_same"] is False)
+    uncomparable_cases = sorted(c for c, a in ruler_per_run.items()
+                                if a["ruler_same"] is None and a["ruler_rounds_recorded"])
     via = {}
     for r in passed_runs:
         k = r.get("passed_via") or "(未记)"
@@ -598,6 +612,14 @@ def aggregate(runs):
         "duplicate_rounds": (dup, at_risk),
         "duplicate_measurable": has_sig,
         "duplicate_pct": _pct(dup, at_risk) if has_sig else None,
+        # ── 跨轮的尺 (#87 第 2 片) ──
+        "ruler_measurable": any(a["ruler_rounds_recorded"] for a in ruler_per_run.values()),
+        "ruler_drift_runs": (len(drift_cases), len(comparable_cases)),
+        "ruler_drift_cases": [f"{c} → {dict(ruler_per_run[c]['ruler_changed'])}"
+                              for c in drift_cases],
+        "ruler_uncomparable_runs": len(uncomparable_cases),
+        "ruler_conflict_rounds": sum(a["ruler_rounds_self_conflict"]
+                                     for a in ruler_per_run.values()),
         "admitted": (len(admitted), len(passed_runs)),
         "admitted_pct": _pct(len(admitted), len(passed_runs)),
         "admit_rejections": sorted({r["admit_reason"] for r in passed_runs
@@ -711,6 +733,24 @@ def format_report(agg):
     lines.append(f"  档位分布: {agg['validity_tiers'] or '无 L3 读数'}")
     lines.append("  ⚠️ 通过率必须与这一行一起读: 在 uninformative 档上「通过」的核, "
                  "它的加速比没有资格驱动任何闭环决策。")
+
+    dnum, dden = agg["ruler_drift_runs"]
+    lines.append("\n【跨轮的尺】各轮 L2 报的 atol/rtol/required_matched_ratio 是不是同一把"
+                 " (arXiv:2609.35140v1 行 150 那条 𝒮 immutable)")
+    if not agg["ruler_measurable"]:
+        # 「测不到」而不是 0 —— 与上面【候选重复率】那一栏同一个位置、同一条纪律
+        lines.append(f"  测不到: 血缘里没有 {LINEAGE_RULER_KEY} 这项 (共 {agg['rounds']} 轮)"
+                     " —— 那多半是这批运行跑在写下这项之前, **不是**「查过了没漂移」")
+    else:
+        lines.append(f"  可比运行 (≥2 轮报了尺) {dden} · 尺变过 {dnum}"
+                     + (f" ← 明细: {', '.join(agg['ruler_drift_cases'])}"
+                        if agg["ruler_drift_cases"] else ""))
+        if agg["ruler_uncomparable_runs"]:
+            lines.append(f"  另有 {agg['ruler_uncomparable_runs']} 次运行报了尺但凑不出可比对"
+                         " —— 这一栏既不记成「一致」也不记成「变过」")
+        lines.append(f"  某一轮内部就不是同一把尺的轮数: {agg['ruler_conflict_rounds']}"
+                     "  (= metrics.gate_params_conflict 的程序侧读者, #87 第 1 片那条)")
+        lines.append("  ⚠️ 只观测不判决: 跨轮换尺今天没有阈可判, 现场通常是远端脚本中途换过版本")
 
     for label, key in (("全部轮次", "speedup_all"), ("仅 decision-grade", "speedup_decision_grade")):
         q = agg[key]
