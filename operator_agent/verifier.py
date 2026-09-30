@@ -1138,6 +1138,25 @@ class Verifier:
         )
         metrics.update(assessment.as_metrics())
         metrics["benchmark_contaminated"] = assessment.contaminated
+        # 五位资格 (设计 §4.3 / oracle.py): 与三个 can_* 并列写进 metrics,
+        # 让 Conductor 不必自己重新解释分档表 —— 「资格决定这个数被允许造成什么后果」。
+        try:
+            from .eligibility import derive_eligibility
+            elig = derive_eligibility(
+                validity=assessment.validity.value,
+                requires_real_device=Cap.REAL_DEVICE.value in required,
+                real_device=assessment.backend_real_device,
+                l3_pass_is_refused=assessment.l3_pass_is_refused,
+                lib_fallback=bool(metrics.get("lib_fallback")),
+                cv_exceeded=(assessment.dispersion is not None
+                             and assessment.validity is not measurement.Validity.VALID),
+                launch_dominance_exceeded=(assessment.launch_dominance is not None
+                                           and assessment.launch_dominance > 0.5),
+                partition_drift=bool(assessment.environment_drift),
+            )
+            metrics["eligibility"] = elig.as_dict()
+        except Exception:  # noqa: BLE001 — 资格位是增强, 不挡主流程
+            pass
         if assessment.contaminated:
             metrics["contamination_reason"] = f"测量前 util={gpu_util_pct}%"
         if assessment.reasons:

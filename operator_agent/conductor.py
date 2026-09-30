@@ -1489,16 +1489,43 @@ class Conductor:
     def _save_to_db(self, artifact: KernelArtifact, task: TaskSchema):
         """把这次的核写进跨运行经验库 (缺口 2)。门不过就只进内存, 不落盘。
 
-        刻意放在 `artifact.all_passed` 那一支里、但**再**过一道 `persist_decision`:
-        all_passed 只说明「三级验证都点了通过」, 而缺口 1 的真机数据证明那个通过可以是
-        被 launch 地板或邻居抢占造出来的 (doc 31/32/33)。持久化会把一次假信号变成
-        下一次检索的样本, 所以这里比 Voyager 的 `if success` 多两条。
+        三道门, 缺一不可 (设计 §10.5-4 / oracle.admit_to_corpus):
+          1. `persist_decision` —— 这一次读数够不够格 (can_gate / REAL_DEVICE / 有加速)
+          2. 资格位 `can_persist` —— DEGRADED 不许写长期记忆
+          3. **两次独立重测确认** (可选, `require_double_confirm` 打开时强制)
+
+        刻意放在 `artifact.all_passed` 那一支里、但**再**过门: all_passed 只说明
+        「三级验证都点了通过」, 而缺口 1 的真机数据证明那个通过可以是被 launch 地板
+        或邻居抢占造出来的 (doc 31/32/33)。一次侥幸读数不能变成永久真理。
         """
         from .kernel_db import KernelRecord
         from .measurement import persist_decision
 
         metrics = artifact.benchmark_data or {}
         keep, reason = persist_decision(metrics)
+        if keep:
+            # 资格位 + 两次确认 (设计 §10.5-4)。没有 remeasure 记录时:
+            # 默认行为保持「一次即可」以免打断现有链路; 打开
+            # `require_double_confirm` 后则**拒绝入库** —— 10% 确认预算存在
+            # 的意义就是「没留预算就等于没做完」。
+            elig = metrics.get("eligibility") or {}
+            if elig and not elig.get("can_persist", True):
+                keep = False
+                reason = (f"资格位 can_persist=False (validity="
+                          f"{metrics.get('measurement_validity')}): {reason}")
+            elif getattr(self, "require_double_confirm", False):
+                from .confirm import confirm_persist
+                remeasure = getattr(artifact, "remeasure", None)
+                keep2, reason = confirm_persist(
+                    first_speedup=metrics.get("speedup_vs_baseline"),
+                    first_validity=str(metrics.get("measurement_validity") or ""),
+                    remeasure=remeasure,
+                    min_speedup=float(task.constraints.min_speedup or 1.0),
+                )
+                if not keep2 and remeasure is None:
+                    reason = ("没有独立重测: 永久结论需要两次确认 (§10.5-4)"
+                              f" —— {reason}")
+                keep = keep2
         record = KernelRecord(
             kernel_id=artifact.kernel_id,
             algorithm=task.source.kernel_type,
