@@ -123,6 +123,8 @@ def _looks_like_torch_on_numpy(msg: str) -> bool:
         "clamp() received an invalid combination",
         "mean() received an invalid combination",
         "numpy.ndarray' object has no attribute",
+        "must be Tensor, not numpy.ndarray",
+        "must be Tensor, not numpy",
     ))
 
 
