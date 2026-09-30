@@ -678,6 +678,37 @@
   否则它在文档里与「我还没查」长得一样
 - **类别**：I/S · **状态**：✅ 已修（净树重跑 70/70 对上、退出码 0）
 
+### I38 · 一条判决路径**零证人**时，「给旧分支加一个字段读取」就是生产环境才响的崩溃
+- **原话**：`operator_agent/verifier.py` 本地执行失败那一路写成 `metrics={TRANSPORT_KEY:
+  result.transport_outcome}`
+- **实证**：`MockGPU.ExecutionResult` 的字段实测只有 `output/execution_time_ms/gflops/
+  memory_bandwidth_gbs/success/error/language/device/compile_info` —— **没有** `transport_outcome`；
+  而改完之后**全套 1242 例照样全绿**（系统解释器 1237/1/4，唯一那条红是已知的 torch 缺失项），
+  因为整张网里没有任何一条用例走到过「本机执行失败 → L2」这一步。加上
+  `test_a_local_failure_does_not_raise_and_is_published_as_answered` 之后，把读取换回直接取属性的
+  变异 T6 才 1 红
+- **出处**：`operator_agent/measurement.transport_outcome_of_result`（那份推理：手里有结果对象
+  = 传输层给回了东西，所以按 `answered` 读，不是兜默认值）＋
+  `tests/test_transport_outcome_cell.py::TestHeardVsNoAnswerThroughResults` / `TestVerifierPublishes`
+  ＋ 变异表 `benchmarks/mut_specs/transport_outcome_cell.py` 的 T6
+- **后果**：`mode="local"` / mock 那两条路的「候选算错了」判决会变成 `AttributeError` ——
+  harness 崩在一次本该由候选承担的失败上。可迁移的那句是：**一片代码往一条既有分支里加读取，
+  必须先把那条分支的用例写出来再改**；否则「测试通过」证的是这条分支今天没人走，不是新代码是对的
+- **类别**：I/S · **状态**：✅ 已修（净树重跑 10/10 拦住、33 例绿）
+
+### I39 · 报表函数自己有一道分母门 ⇒ 用例红的是「门没放行」，不是「这一栏算错了」
+- **原话**：`TestTheReportHasAReader` 第一版给 `format_report` 喂 2 次运行 / 4 轮
+- **实证**：`format_report` 印完「❌ 分母不足 (运行 2 / 轮 4, 下限 4) —— 不出百分数」就
+  `return`，其后**每一栏**都不出现，本片新增那一栏自然找不到 needle。凑够 4 次运行之后同一条
+  断言仍然红一次，原因换成「`answered` 我数成 5 而实测是 4」—— 两个原因叠在一条红里，
+  分开跑才分得清
+- **出处**：`tests/test_transport_outcome_cell.py` 文件头的「学费」段 +
+  `test_the_column_is_printed_with_each_denominator` 里那道门的注释
+- **后果**：给「输出前有一道门」的格式化函数写用例，顺序必须是①断言一个**只在本栏出现**的
+  标题（证明门已放行、这段代码被执行到了）②再断数值。与 I25（空输入时「逐元素相等」必真）
+  同族但位置不同：那里断言的是空气，这里断言的代码**根本没被执行到**，而两者都会表现为一条绿
+- **类别**：S/I · **状态**：✅ 已记（用例按实测读数钉住，门的存在本身也写进了注释）
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -840,6 +871,8 @@
 | I35 | 「读者清单」把 `X = "bound_type"` 当 docstring 剔掉 —— 它对「把键名收成常量」那一侧系统性失明 | S/I | ✅ 已修 |
 | I36 | 一行里混两个 scheme ⇒ 「`arxiv.org` 直连不通」今天只对 `http://` 那一半成立（可达性是三元组） | I/S | ✅ 已修 |
 | I37 | 带正文的 404 被记成「取数失败」—— 把「明确回答没有」与「没答话」压成同一格（长在核别人的工具上） | I/S | ✅ 已修 |
+| I38 | 一条判决路径**零证人**时，「往既有分支加一个字段读取」就是生产才响的崩溃（1242 例全绿） | I/S | ✅ 已修 |
+| I39 | 报表函数自己有一道分母门 ⇒ 用例先红在「门没放行」，再红在「数值我数错了」—— 两个原因叠一条 | S/I | ✅ 已记 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
