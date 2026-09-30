@@ -288,8 +288,11 @@ class TestFailureDatabase(unittest.TestCase):
 class TestConductorFailureRecording(unittest.TestCase):
 
     def _conductor(self, llm, max_rounds=3) -> Conductor:
+        # P1-1: 失败记录契约钉在单体路径 —— 默认路径 (CoderPipeline) 的内部修复环
+        # 与模板兜底会拦截「坏代码直达 L1」, 轮次形状不再是 generate→fix 两轮。
         return Conductor(backend=MockGPU(), kernel_db=KernelDatabase(),
-                         llm=llm, max_optimize_rounds=max_rounds)
+                         llm=llm, max_optimize_rounds=max_rounds,
+                         use_coder_pipeline=False)
 
     def test_repair_success_recorded_as_fixed(self):
         def handler(prompt):
@@ -335,8 +338,10 @@ class TestFailureCorpusNeverClaimsWhatItHasNotVerified(unittest.TestCase):
 
     def _conductor(self, handler, max_rounds=3):
         llm = MockLLM(chat_handler=handler)
+        # P1-1: 同 TestConductorFailureRecording —— 语料诚实性契约钉在单体路径
         conductor = Conductor(backend=MockGPU(), kernel_db=KernelDatabase(),
-                              llm=llm, max_optimize_rounds=max_rounds)
+                              llm=llm, max_optimize_rounds=max_rounds,
+                              use_coder_pipeline=False)
         self.added = []
         real_add = conductor.failure_db.add
 

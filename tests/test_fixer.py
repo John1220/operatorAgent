@@ -244,6 +244,14 @@ def _counting_fixer_runs(conductor: Conductor) -> list:
 
 
 class TestConductorRepairLoop(unittest.TestCase):
+    """Conductor↔Fixer 修复闭环契约 (P1-1: 显式钉在单体路径上)
+
+    这些用例断言的是**单体路径的调用形状** (fixer 恰好 1 次、修复 prompt 携带
+    L1 失败信息、预算相乘关系)。默认路径 (CoderPipeline) 有自己的内部修复环
+    与规则模板兜底, 坏代码在到达 Conductor 的 Fixer 之前就被拦截 —— 那条
+    路径的修复闭环由 test_finalist_selection.py 覆盖 (两条路径各自要有
+    端到端用例, 不是断言等价)。
+    """
 
     def _make_conductor(self, llm, max_rounds=3) -> Conductor:
         return Conductor(
@@ -251,6 +259,7 @@ class TestConductorRepairLoop(unittest.TestCase):
             kernel_db=KernelDatabase(),
             llm=llm,
             max_optimize_rounds=max_rounds,
+            use_coder_pipeline=False,
         )
 
     def test_l1_failure_repaired_and_passed(self):

@@ -257,7 +257,10 @@ class Conductor:
         prompt_manager: Optional[PromptManager] = None,
         max_optimize_rounds: int = 3,
         failure_db: Optional[FailureDatabase] = None,
-        use_coder_pipeline: bool = False,
+        # P1-1 (generation-side-review): pipeline 是默认路径 —— Planner→3 路并行
+        # 采样→compile-gate 剪枝→修复→模板兜底, 把「留哪一个」的选择权交给验证侧
+        # (决赛候选逐个跑 L1+L2, 见 _select_finalist)。单体路径保留为调试逃生门。
+        use_coder_pipeline: bool = True,
     ):
         # `is None` 而不是 `or`: `FailureDatabase` 定义了 `__len__`, 于是**一条记录都没有的
         # 注入实例是假的**, `failure_db or FailureDatabase()` 会把它丢掉换成一个默认实例 ——
@@ -281,7 +284,7 @@ class Conductor:
 
         # 初始化 Agent (注入 LLM + PromptManager)
         self.designer = DesignerAgent(self.kernel_db, llm=llm, prompt_manager=self.pm)
-        # 可选启用 CoderPipeline (Plan→并行采样→筛选→修复→回退)
+        # CoderPipeline 默认启用 (P1-1): Plan→并行采样→剪枝→修复→回退
         coder_pipeline = None
         if use_coder_pipeline and llm is not None:
             from .coder_pipeline import CoderPipeline
@@ -318,6 +321,36 @@ class Conductor:
             artifact.metadata = {}
         artifact.metadata["stop"] = {"reason": reason, "round": int(round_num),
                                      "detail": detail}
+
+    def _select_finalist(self, current_code: str, finalists: list,
+                         task, test_inputs, expected_output) -> tuple:
+        """P1-1 (generation-side-review): 决赛候选逐个跑 L1+L2, 用真机正确性定胜负
+
+        选择权在验证侧: compile-gate 只决定谁能进决赛 (≤ CoderPipeline.L2_FINALISTS)。
+        规则:
+          - 按 temperature 序 (0.1→0.4) 逐个 `verify(stop_after=L2)`, 首个全过者胜出;
+          - 胜者 != 默认候选时换码 (低温候选贴 plan 但可能错, 高温候选救场);
+          - 全败则保持默认候选 —— 选择不是门: 「没有候选过 L2」是 Fixer 的输入,
+            不是任务失败。
+        返回 (选中的代码, 胜者的 L1+L2 结果或 None)。L1+L2 结果交回调用方拼接,
+        胜者只补跑 L3, 真机 L2 不重复执行 (机时正是 P1-1 折中「前 2 名上 L2」
+        想省的那部分)。
+        """
+        from .verifier import VerificationLevel
+        for i, cand in enumerate(finalists):
+            sel = self.verifier.verify(
+                cand, task=task, test_inputs=test_inputs,
+                expected_output=expected_output,
+                stop_after=VerificationLevel.L2_FUNCTION,
+            )
+            if sel and all(r.passed for r in sel):
+                if cand != current_code:
+                    print(f"\n[Conductor] 候选选择 (P1-1): 决赛第 {i+1}/{len(finalists)} 名 "
+                          f"首个通过 L1+L2, 取代默认候选")
+                return cand, sel
+        print(f"\n[Conductor] 候选选择 (P1-1): 决赛候选无一通过 L1+L2, "
+              f"保持默认候选交完整验证")
+        return current_code, None
 
     def execute(
         self,
@@ -619,6 +652,11 @@ class Conductor:
             print(f"轮次 {round_num}/{self.max_optimize_rounds}")
             print(f"{'─'*40}")
 
+            # P1-1 (generation-side-review): 本轮若走了候选选择, 胜出候选的 L1+L2
+            # 结果缓存在这里 —— Step 4 只对它补跑 L3, 不重复真机执行。
+            # None = 本轮没有多候选 (单体路径 / 修复轮 / 决赛全败)。
+            selected_l1_l2 = None
+
             # Step 3: 获取代码
             # - 首轮 / Search 优化后: Coder 根据 Sketch + OptimizationPlanner 配方重新生成
             # - Fixer 修复后: 直接使用修复版代码重新验证
@@ -665,6 +703,16 @@ class Conductor:
                     test_inputs=test_inputs,
                 )
 
+                # ---- P1-1 候选选择: compile-gate 只定了决赛名单, 真机 L1+L2 定胜负 ----
+                # 必须紧跟本轮流水的 coder.run 读名单: `last_finalists` 跨轮残留,
+                # 修复轮 (pending_fix) 不该拿上一轮的名单重新选。
+                # getattr: 测试常用自定义 coder 替身 (无此属性 = 单候选, 跳过选择)。
+                finalists = getattr(self.coder, "last_finalists", [])
+                if len(finalists) > 1:
+                    current_code, selected_l1_l2 = self._select_finalist(
+                        current_code, finalists, task, test_inputs, expected_output,
+                    )
+
             # ---- 候选新颖度观测 (doc 47) ----
             # 只做两件事: 把结构签名写进 iteration_history (它会被序列化进 result.json,
             # 于是「模型重新生成时有多少轮是结构重复」第一次有一个能复盘的数), 以及在
@@ -680,15 +728,27 @@ class Conductor:
                       f"—— 照常验证, 本轮只在量基率")
 
             # Step 4: Verifier 验证
-            print(f"\n[Verifier] 执行三级验证...")
-            verify_results = self.verifier.verify(
-                kernel_code=current_code,
-                task=task,
-                test_inputs=test_inputs,
-                expected_output=expected_output,
-                target_gflops=target_gflops,
-                environment_drift=verify_drift,
-            )
+            # P1-1 拼接: 胜出候选的 L1+L2 已在选择循环里真机跑过 —— 只补 L3,
+            # 不重复执行; 胜者的 L1 复检走 SHA256 编译缓存, 也不再花远端往返。
+            if selected_l1_l2 is not None:
+                print(f"\n[Verifier] 执行 L3 验证 (L1+L2 已在候选选择中通过)...")
+                verify_results = selected_l1_l2 + self.verifier.verify_l3_only(
+                    kernel_code=current_code,
+                    test_inputs=test_inputs,
+                    target_gflops=target_gflops,
+                    task=task,
+                    environment_drift=verify_drift,
+                )
+            else:
+                print(f"\n[Verifier] 执行三级验证...")
+                verify_results = self.verifier.verify(
+                    kernel_code=current_code,
+                    task=task,
+                    test_inputs=test_inputs,
+                    expected_output=expected_output,
+                    target_gflops=target_gflops,
+                    environment_drift=verify_drift,
+                )
             all_verification_results = verify_results
 
             all_passed = all(r.passed for r in verify_results)

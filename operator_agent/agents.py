@@ -193,6 +193,16 @@ class CoderAgent:
         # 默认 None: 走 legacy 单线程生成+预检重试, 保持兼容
         self.pipeline = pipeline
 
+    @property
+    def last_finalists(self) -> list:
+        """Pipeline 模式下最近一次 run 的决赛候选 (P1-1, ≤ CoderPipeline.L2_FINALISTS)
+
+        读者是 Conductor: 对决赛候选逐个跑 L1+L2, 用真机正确性做最终选择。
+        单体路径 (pipeline=None) 无此概念, 返回空列表 —— 调用方据此跳过选择。
+        修复/模板回退的产物是单候选, 也在名单里 (len=1, 选择退化为不选)。
+        """
+        return self.pipeline.last_finalists if self.pipeline is not None else []
+
     def run(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None,
             test_inputs=None, **kwargs) -> str:
         if self.llm is None:

@@ -49,6 +49,10 @@ class CoderPipeline:
     MAX_REPAIR_ROUNDS = 2
     MAX_REF_CODE_CHARS = 2000
     GEN_MAX_TOKENS = 8192   # 治截断: 代码生成单独调高, 不被全局 max_tokens 卡住
+    # P1-1 (generation-side-review): compile-gate 只作早退剪枝, 不再「首个通过即
+    # 返回」。编译通过 ≠ 正确 —— 真正的选择权在 Conductor 侧的 L1+L2 (真机),
+    # 这里最多放行 L2_FINALISTS 个候选去参加, 机时不随候选数全额翻倍。
+    L2_FINALISTS = 2
 
     def __init__(
         self,
@@ -68,10 +72,17 @@ class CoderPipeline:
         self.compile_fn = compile_fn or self._default_compile
         self._agent_role = "coder"
         self._skill_name = "triton_skill"
+        # 最近一次 run() 留给 Conductor 做 L1+L2 选择的决赛候选 (P1-1)。
+        # ≤ L2_FINALISTS 个; 修复/模板产物算单候选; 全败为空。
+        self.last_finalists: list[str] = []
 
     def run(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None,
             test_inputs=None, **kwargs) -> str:
-        """主流程: Plan → 采样 → 筛选 → 修复 → 回退"""
+        """主流程: Plan → 采样 → 剪枝 → 修复 → 回退
+
+        返回值仍是单个字符串 (默认候选 = 决赛名单第一名); 决赛名单整体暴露在
+        `self.last_finalists`, 由 Conductor 逐个跑 L1+L2 做最终选择 (P1-1)。
+        """
         dsl = task.target.dsl
         recipes_ctx = optimization_recipes or ""
         # 三个采样线程共用同一份广播 (契约不随 temperature 变), 也避免每个线程各算一遍
@@ -88,17 +99,20 @@ class CoderPipeline:
               f"(temps={self.SAMPLE_TEMPERATURES})...")
         candidates = self._parallel_sample(plan, sketch, task, calling_convention)
 
-        # 3. 独立编译筛选 - 取首个通过项
-        chosen = self._select_first_pass(candidates, dsl)
-        if chosen:
-            print(f"  [CoderPipeline] 候选通过编译筛选 ({len(chosen)} chars)")
-            return chosen
+        # 3. compile-gate 早退剪枝 (P1-1): 收集通过者而不是「首个通过即返回」
+        finalists = self._prune_to_finalists(candidates, dsl)
+        self.last_finalists = list(finalists)
+        if finalists:
+            print(f"  [CoderPipeline] {len(finalists)}/{len(candidates)} 候选通过编译剪枝 "
+                  f"(决赛上限 {self.L2_FINALISTS}); 最终选择在 Conductor 侧 L1+L2")
+            return finalists[0]
 
         # 4. 有状态修复循环
         print(f"  [CoderPipeline] 全部候选未通过, 进入修复循环 (max {self.MAX_REPAIR_ROUNDS} 轮)...")
         repaired = self._repair_loop(candidates, sketch, task, dsl)
         if repaired:
             print(f"  [CoderPipeline] 修复成功 ({len(repaired)} chars)")
+            self.last_finalists = [repaired]
             return repaired
 
         # 5. 规则模板回退
@@ -106,10 +120,12 @@ class CoderPipeline:
         tmpl = self.rule_coder.generate(task, sketch)
         if tmpl:
             print(f"  [CoderPipeline] 规则模板已生成 ({len(tmpl)} chars)")
+            self.last_finalists = [tmpl]
             return tmpl
 
         # 最终兜底: 返回最优失败候选 (交由上层 Verifier 判定)
         best = self._best_failure(candidates, dsl)
+        self.last_finalists = []
         if best:
             print(f"  [CoderPipeline] 无模板, 返回最优失败候选")
             return best[0]
@@ -167,19 +183,27 @@ class CoderPipeline:
         )
         return FixerAgent._extract_code(raw)
 
-    # ─── 编译筛选 ────────────────────────────────────────────
+    # ─── 编译剪枝 ────────────────────────────────────────────
 
-    def _select_first_pass(self, candidates: list, dsl: str) -> Optional[str]:
-        """逐个预检候选, 返回首个通过项"""
-        for i, code in enumerate(candidates):
+    def _prune_to_finalists(self, candidates: list, dsl: str) -> list[str]:
+        """compile-gate 早退剪枝 (P1-1): 编译通过只是入围, 不是入选
+
+        旧 `_select_first_pass` 取首个通过者直接定终身 —— 编译通过 ≠ 正确,
+        选择权停在最弱的验证信号上。现在只做两件事:
+          1. 剪掉空候选与预检失败者 (截断/语法错不进后续任何环节);
+          2. 按 temperature 序 (0.1→0.4→0.7, 低温 = 更贴 plan 的先验) 放行
+             至多 L2_FINALISTS 个进入决赛, 由 Conductor 侧 L1+L2 真机定夺。
+        """
+        finalists = []
+        for code in candidates:
+            if len(finalists) >= self.L2_FINALISTS:
+                break
             if not code:
                 continue
-            ok, issues = self.compile_fn(code, dsl)
+            ok, _issues = self.compile_fn(code, dsl)
             if ok:
-                if len(candidates) > 1:
-                    print(f"  [CoderPipeline] 候选 {i+1}/{len(candidates)} 通过")
-                return code
-        return None
+                finalists.append(code)
+        return finalists
 
     def _best_failure(self, candidates: list, dsl: str):
         """选 issues 最少的失败候选作为修复基线; 返回 (code, issues) 或 None"""

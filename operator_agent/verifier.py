@@ -229,6 +229,7 @@ class Verifier:
         expected_output=None,
         target_gflops: float = 10.0,
         environment_drift: Optional[list] = None,
+        stop_after: Optional["VerificationLevel"] = None,
     ) -> list[VerificationResult]:
         """执行完整三级验证
 
@@ -236,6 +237,10 @@ class Verifier:
         (`environment.compare_fingerprints` 的输出)。它是 L3 有效性判定的一个输入,
         所以必须由**拿着产物库的那一层** (Conductor) 传进来 —— Verifier 自己不知道
         「上一次」是谁。None = 没做比较, 与「比过了没变」(空列表) 是两件事。
+
+        `stop_after`: 在该级**通过**后停止, 不再往下跑 (P1-1)。读者是 Conductor 的
+        候选选择: 对多个决赛候选只跑到 L2 (正确性), 用真机结果定胜负; L3 只跑
+        胜者, 机时不随候选数翻倍。None = 完整三级 (默认, 旧行为不变)。
         """
         results = []
 
@@ -244,16 +249,32 @@ class Verifier:
         results.append(l1)
         if not l1.passed:
             return results
+        if stop_after is VerificationLevel.L1_COMPILE:
+            return results
 
         l2 = self._verify_function(kernel_code, test_inputs, expected_output, task)
         results.append(l2)
         if not l2.passed:
+            return results
+        if stop_after is VerificationLevel.L2_FUNCTION:
             return results
 
         l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
                                       environment_drift=environment_drift)
         results.append(l3)
         return results
+
+    def verify_l3_only(self, kernel_code: str, test_inputs, target_gflops: float,
+                       task: TaskSchema, environment_drift=None) -> list[VerificationResult]:
+        """只跑 L3 (P1-1): 胜出候选已带 L1+L2 结果时的续接入口
+
+        读者是 Conductor 的候选选择: 决赛候选在 `verify(stop_after=L2)` 里真机
+        定过胜负后, 胜者用本方法补跑 L3 —— 真机 L2 不重复执行。返回单元素列表,
+        由调用方与已有的 L1+L2 结果拼接成完整三级。
+        """
+        l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
+                                      environment_drift=environment_drift)
+        return [l3]
 
     def _verify_compile(self, kernel_code: str, dsl: str = "python",
                         input_key_sets=None) -> VerificationResult:

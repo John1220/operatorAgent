@@ -45,8 +45,13 @@ User Request (NL or structured)
       ├── Router: decides CODE_TRANSLATION / COMPILER_BACKEND / AGENT_GENERATION
       ├── DesignerAgent (LLM): TaskSchema + RAG → UnifiedSketch (tiling, memory plan, hints)
       ├── CoderAgent (LLM): Sketch → kernel code (with pre-validation + retry loop)
-      │     └── Optional CoderPipeline: Plan → 3 parallel samples (T=0.1/0.4/0.7)
-      │           → compile-select first-pass → stateful repair (≤2 rounds) → rule template fallback
+      │     └── CoderPipeline (default, P1-1): Planner → 3 parallel samples (T=0.1/0.4/0.7)
+      │           → compile-gate as early-exit pruning (≤2 finalists) → stateful repair
+      │           (≤2 rounds) → rule template fallback. Selection among finalists happens
+      │           at the caller: the Conductor runs L1+L2 on each finalist and keeps the
+      │           first fully-correct one; L3 runs only on the winner (the splice skips
+      │           re-running the winner's L2). `use_coder_pipeline=False` is the legacy
+      │           single-call escape hatch.
       ├── Verifier: L1 (contract gate → syntax → compile) → L2 (functional + anti-cheat) → L3 (perf + Roofline)
       │     └── L3 output is tiered by measurement validity; the tier decides what the
       │         number may drive (see "Decision eligibility" below)
@@ -174,4 +179,4 @@ The LLM client (`operator_agent/llm_client.py`) is a zero-dependency OpenAI-comp
 - **Serialized remote execution**: per-host locks prevent concurrent benchmark pollution on shared GPUs
 - **Roofline everywhere**: L3 injects hardware peak GFLOPS/bandwidth, arithmetic intensity, and utilization % into metrics for SearchAgent to make data-driven optimization decisions
 - **Negative sample learning**: the Conductor feeds L1/L2 failures + Fixer results into `FailureDatabase`; the Fixer retrieves similar past cases to inform repairs
-- **Pipeline mode** (`use_coder_pipeline=True` on Conductor) enables the CoderPipeline: Planner → 3 parallel candidates → compile-gate → repair loop → rule template fallback
+- **Pipeline mode is the default** (`use_coder_pipeline=True`, P1-1): CoderPipeline = Planner → 3 parallel candidates → compile-gate pruning (≤2 finalists) → repair loop → rule template fallback; finalist selection by real L1+L2 happens in the Conductor. `use_coder_pipeline=False` keeps the legacy single-call Coder path

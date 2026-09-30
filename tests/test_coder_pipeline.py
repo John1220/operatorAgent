@@ -1,10 +1,12 @@
-"""CoderPipeline 流程测试 (Plan→并行采样→筛选→修复→回退)
+"""CoderPipeline 流程测试 (Plan→并行采样→剪枝→修复→回退)
 
 覆盖 6 个特性:
 1. Plan 阶段产出结构化计划
 2. Code 阶段仅纯代码 (提取后无解释)
 3. 并行采样 3 候选 (不同 temperature)
-4. 独立编译筛选取首个通过项
+4. compile-gate 早退剪枝 (P1-1): 收集通过者 (≤ L2_FINALISTS) 而非「首个通过
+   即定终身」—— 返回值仍是第一名 (默认候选), 决赛名单与选择语义的验收在
+   tests/test_finalist_selection.py
 5. 全部失败→有状态修复循环 (≤2轮) 修复成功
 6. 修复仍败→规则模板回退
 
@@ -153,7 +155,7 @@ class TestParallelSampling(unittest.TestCase):
         self.assertIn("def kernel", code)
 
 
-# ─── 4. 独立编译筛选 ────────────────────────────────────────
+# ─── 4. 编译剪枝 (compile-gate = 早退剪枝, 选择在 Conductor 侧 L1+L2) ──
 
 class TestCompileSelection(unittest.TestCase):
 
