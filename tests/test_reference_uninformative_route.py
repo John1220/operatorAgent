@@ -366,7 +366,7 @@ class _CountingFixer:
         self.bases: list[str] = []
         self.reflexion_calls = 0
 
-    def run(self, code, task, failed_results):
+    def run(self, code, task, failed_results, **kw):
         self.bases.append(code)
         return FIXED, "fake fix"
 

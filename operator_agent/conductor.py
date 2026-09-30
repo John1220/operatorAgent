@@ -302,7 +302,7 @@ class Conductor:
     #: 循环出口的词汇表。**每个词都要有写者** —— 多一个没写者的词就是「算了没人读」的副本,
     #: `tests/test_stop_reason.py` 按差集钉这条。
     STOP_REASONS = ("passed", "stagnant", "converged", "fix_error", "l1_l2_failed",
-                    "search_error", "rounds_exhausted")
+                    "search_error", "rounds_exhausted", "infra_retry")
 
     def _record_stop(self, artifact, round_num: int, reason: str, detail: str = "") -> None:
         """把「循环为什么停」记成数据, 而不是只留一行 print。
@@ -937,7 +937,20 @@ class Conductor:
                 for r in verify_results
             )
             if l1_l2_failed:
-                # L1(编译)/L2(功能) 失败: 携带错误信息进入 Fixer 修复闭环
+                # §8 路由: 先分类再动作。性能不达标≠bug (走搜索), 基础设施≠进度,
+                # 编译过、仅数值错 → **修不重写** (§19.3, 外部实测省 92.8% token)。
+                from .failure_route import ROUTE_DEBUG_FIX, ROUTE_HOLD, ROUTE_RETRY, classify
+                route = classify(verify_results)
+                print(f"  [Route] §8 分类: kind={route.kind} route={route.route}"
+                      f"{' · fix_not_rewrite' if route.fix_not_rewrite else ''}"
+                      f" — {route.reason}")
+                if route.route == ROUTE_RETRY:
+                    # 基础设施失败: 退避重试, 不计进度、不进负样本库 (§8 表)
+                    self._record_stop(artifact, round_num, "infra_retry",
+                                      route.reason)
+                    break
+                # ROUTE_HOLD 仍走 Fixer (既有控制流: 「那一轮仍然走 Fixer」),
+                # 只是下面的写入侧按 reference_hold 跳过沉淀 —— 不在这里 continue。
                 if round_num < self.max_optimize_rounds:
                     # L1 编译失败可能是缺依赖: 分析代码 import 并按需补装
                     l1_result = next((r for r in verify_results
@@ -975,6 +988,7 @@ class Conductor:
                     try:
                         fixed_code, fix_note = self.fixer.run(
                             repair_base, task, failed_results,
+                            fix_not_rewrite=route.fix_not_rewrite,
                         )
                     except Exception as e:
                         print(f"\n[Conductor] Fixer 修复失败 ({e})，停止迭代")

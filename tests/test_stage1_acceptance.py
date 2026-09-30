@@ -100,9 +100,8 @@ class Acceptance3_LibFallbackIsRejected(unittest.TestCase):
     def test_oracle_refuses_even_a_huge_speedup(self):
         """假候选可以「跑出」5x —— 但它测的是库, 不是生成代码"""
         c = _contract()
-        obs = evaluate(c, c.hash,
-                       lambda: {"value": 5.0, "validity": "valid",
-                                "lib_fallback": True})
+        obs = evaluate(c, lambda: {"value": 5.0, "validity": "valid",
+                                "lib_fallback": True}, record_hash=c.hash)
         self.assertFalse(obs.eligibility.can_persist)
         self.assertFalse(obs.eligibility.can_verdict)
         ok, msg = admit_to_corpus(obs, 5.0, "valid",
@@ -127,9 +126,8 @@ class Acceptance4_InterferenceIsDegradedNotPass(unittest.TestCase):
 
     def test_degraded_is_not_reported_as_pass_for_admission(self):
         c = _contract()
-        obs = evaluate(c, c.hash,
-                       lambda: {"value": 1.2, "validity": "degraded",
-                                "cv_exceeded": True})
+        obs = evaluate(c, lambda: {"value": 1.2, "validity": "degraded",
+                                "cv_exceeded": True}, record_hash=c.hash)
         ok, msg = admit_to_corpus(obs, 1.2, "degraded",
                                   ConfirmRecord(ok=True, speedup=1.15, validity="valid"))
         self.assertFalse(ok)
@@ -176,7 +174,7 @@ class Acceptance6_TamperedContractIsRefused(unittest.TestCase):
     def test_oracle_refuses_and_does_not_measure(self):
         c = _contract()
         called = []
-        obs = evaluate(c, "deadbeef", lambda: called.append(1) or {"value": 2.0})
+        obs = evaluate(c, lambda: called.append(1) or {"value": 2.0})
         self.assertEqual([], called)
         self.assertTrue(obs.refused)
 
@@ -196,7 +194,7 @@ class Acceptance6_TamperedContractIsRefused(unittest.TestCase):
             min_speedup=c.min_speedup,
         )
         self.assertNotEqual(c.hash, c2.hash)
-        obs = evaluate(c2, c.hash, lambda: {"value": 9.9, "validity": "valid"})
+        obs = evaluate(c2, lambda: {"value": 9.9, "validity": "valid"}, record_hash=c.hash)
         self.assertTrue(obs.refused)
 
 
@@ -263,8 +261,8 @@ class Acceptance8_HeartbeatOffInvalidatesWindow(unittest.TestCase):
         self.assertFalse(ruler_broken_window(r, "other-window"),
                          "跨窗不牵连")
         c = _contract()
-        obs = evaluate(c, c.hash, lambda: {"value": 2.0, "validity": "valid"},
-                       heartbeat=r)
+        obs = evaluate(c, lambda: {"value": 2.0, "validity": "valid"},
+                       record_hash=c.hash, heartbeat=r)
         self.assertFalse(obs.eligibility.can_persist)
         self.assertFalse(obs.eligibility.can_count_progress)
 
@@ -273,9 +271,8 @@ class Acceptance8_HeartbeatOffInvalidatesWindow(unittest.TestCase):
                             known_good_ratio=3.0, known_slow_ratio=1.0,
                             window_id="w1")
         c = _contract()
-        obs = evaluate(c, c.hash,
-                       lambda: {"value": 1.5, "validity": "valid"},
-                       heartbeat=r)
+        obs = evaluate(c, lambda: {"value": 1.5, "validity": "valid"},
+                       record_hash=c.hash, heartbeat=r)
         ok, msg = admit_to_corpus(
             obs, 1.5, "valid",
             ConfirmRecord(ok=True, speedup=1.4, validity="valid"))

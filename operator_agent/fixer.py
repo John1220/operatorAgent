@@ -146,6 +146,17 @@ _L2_RETREAT = (
     "若错误信息里同时出现性能未达标 —— 本轮**不要**为此优化。"
 )
 
+# §19.3 修正 2 (Don't Regenerate, Debug, arXiv:2608.02712): 编译通过、仅数值失败时
+# **修 > 重写**, 省 92.8% token, 且方法效应 (+20.4pp) 大于模型效应 (+13.0pp)。
+# 这条比 _L2_RETREAT 更紧: 不仅「别叠补丁」, 而是**只许改错误邻域**。
+_MINIMAL_FIX = (
+    "本轮是**近失 (near-miss)**: 编译已通过、能跑, 只有数值/边界不对。"
+    "取向: **最小改动修复, 禁止推倒重写**。只许改与错误直接相关的那几行"
+    "(看 first_bad_index / 错误信息指到的公式、边界、索引), 其余一律不动。"
+    "外部对照 (Don't Regenerate, Debug): 修比重写省 92.8% token, 且通过率更高。"
+    "重写会把「还没被任何检查器看过的结构」丢掉, 用一次数值错误换一轮新的未知失败。"
+)
+
 _L1_INPLACE = (
     "本轮报失败的是**编译器 / 预检** (L1): 这一版还没有跑到能被判数值的地步。"
     "取向: **就地修这一处结构或 API 误用, 保持既有的优化策略不变**。"
@@ -211,7 +222,8 @@ def failure_class(failed_results) -> str:
     return failure_class_of(levels, text)
 
 
-def stage_directive(levels: set, failure_cls: str = "") -> str:
+def stage_directive(levels: set, failure_cls: str = "",
+                    fix_not_rewrite: bool = False) -> str:
     """由「哪些级别报了失败」+「库里那个分类器怎么归类这次失败」得出本轮修复取向。
 
     四路 = Fabrica 的 interface repair / code repair / 保守退让 (arXiv:2608.25124v1
@@ -221,10 +233,13 @@ def stage_directive(levels: set, failure_cls: str = "") -> str:
     归类排在级别之前: 接口契约那一类必然落在 L1 里, 只看级别会把它并进「就地修一处 API
     误用」那条通用取向, 而那条恰恰不限制改动范围。「本级判不出」又排在归类之前: 它同样是
     L2 里的一条, 只看级别 (甚至只看类名之外的文案) 都会把它并进「退回保守写法」那条。
+    `fix_not_rewrite=True` (§8 路由的 near-miss) 压过上面的级别取向: 只许最小改动。
     不认识的归类 (含 `unknown`、真异常名) 一律退到级别那条老路径, 所以取向永不为空。
     """
     if failure_cls == FAILURE_CLASS_REFERENCE:
         return _REFERENCE_HOLD
+    if fix_not_rewrite:
+        return _MINIMAL_FIX
     if failure_cls == FAILURE_CLASS_INTERFACE:
         return _L1_INTERFACE
     return _L2_RETREAT if "L2" in levels else _L1_INPLACE
@@ -255,9 +270,14 @@ class FixerAgent:
         code: str,
         task: TaskSchema,
         failed_results: list[VerificationResult],
+        fix_not_rewrite: bool = False,
     ) -> tuple[str, str]:
         """
         修复失败代码 (带预检+重试闭环，和 CoderAgent._llm_generate_code 一致)
+
+        `fix_not_rewrite=True` (§8 路由: 编译过、仅数值失败): 把取向钉成
+        **最小改动** —— 外部实测 (Don't Regenerate, Debug) 修比重写省 92.8% token,
+        且方法效应大于模型效应。此时 prompt 不许推倒重来。
 
         关键防御:
         - 当 task.target.dsl != "triton" (昇腾等非 NVIDIA 硬件) 时, 不注入 triton_skill
@@ -299,7 +319,8 @@ class FixerAgent:
             dsl=dsl,
             precision=task.constraints.precision.value,
             failure_stage=levels or "未知",
-            stage_directive=stage_directive(level_set, failure_cls),
+            stage_directive=stage_directive(level_set, failure_cls,
+                                            fix_not_rewrite=fix_not_rewrite),
             error_details=error_details,
             history_cases=history_cases or "无",
             code=code,

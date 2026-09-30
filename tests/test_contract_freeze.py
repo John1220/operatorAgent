@@ -108,12 +108,17 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(c.hash, c2.hash)
         self.assertEqual(c.content_dict(), c2.content_dict())
 
-    def test_load_dict_of_tampered_payload_loses_hash_match(self):
+    def test_load_dict_of_tampered_payload_is_refused(self):
+        """spine-review P3-15: 载荷自带哈希与内容重算不一致 → 拒绝重建
+
+        原先忽略载荷里的 hash 重新 freeze(), 于是「被改过的载荷」拿到一个合法
+        **新**哈希, 改写检测不出来。现在 load_dict 拒绝它。
+        """
         d = _ok_contract().as_dict()
         d["min_speedup"] = 2.0
-        c2 = load_dict(d)
-        self.assertNotEqual(_ok_contract().hash, c2.hash,
-                            "改了字段重建后哈希仍相同 —— 冻结是空的")
+        with self.assertRaises(ContractError) as cm:
+            load_dict(d)
+        self.assertIn("改写", str(cm.exception))
 
 
 if __name__ == "__main__":

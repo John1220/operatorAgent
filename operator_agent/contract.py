@@ -192,14 +192,17 @@ def assert_hash(contract: FrozenContract, expected_hash: str) -> None:
 
 
 def load_dict(payload: Mapping[str, Any]) -> FrozenContract:
-    """从 `as_dict()` 的产物重建 (断点续跑 / 离线复盘用)。"""
+    """从 `as_dict()` 的产物重建 (断点续跑 / 离线复盘用)。
+
+    ⚠️ spine-review P3-15: **校验载荷自带的 hash**。原先忽略它重新 freeze(),
+    于是「被改过的载荷」会得到一个合法**新**哈希, 改写检测不出来。
+    """
     try:
         ds = DTypeSemantics(**payload["dtype_semantics"])
-        # dataclass 字段名与 asdict 一致
         bd = BaselineDef(**payload["baseline"])
         shapes = ShapeDist(entries=tuple(
             (tuple(s), float(w)) for s, w in payload["shapes"]))
-        return freeze(
+        c = freeze(
             kernel_type=payload["kernel_type"],
             dtype_semantics=ds,
             baseline=bd,
@@ -212,3 +215,42 @@ def load_dict(payload: Mapping[str, Any]) -> FrozenContract:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ContractError(f"无法从载荷重建契约: {exc}") from exc
+    claimed = payload.get("hash")
+    if claimed and claimed != (c.hash or c.compute_hash()):
+        raise ContractError(
+            f"载荷自带哈希 {str(claimed)[:12]}… 与内容重算 "
+            f"{(c.hash or c.compute_hash())[:12]}… 不一致: 判据被改写过")
+    return c
+
+
+def freeze_from_task(task, *, dtype: Optional[str] = None,
+                     tf32: bool = False,
+                     baseline_name: str = "pytorch_eager") -> FrozenContract:
+    """从 TaskSchema 冻结一份契约 (生产接线用)。
+
+    形状取任务的输入 shape 里最大的那个二维阵当代表 (单点 weight=1);
+    数值语义按 `task.constraints.precision`。**不是**完整 workload profile ——
+    那要 §3.3 的形状分布, 但先把「每轮校验哈希」这条链路接上。
+    """
+    import numpy as np
+    from .schemas import Precision, TaskSchema  # noqa: F401
+
+    kt = (getattr(getattr(task, "source", None), "kernel_type", "") or "unknown").strip()
+    cons = getattr(task, "constraints", None)
+    prec = getattr(cons, "precision", None)
+    dtype_s = dtype or (getattr(prec, "value", None) or "fp32")
+    max_error = float(getattr(cons, "max_error", 1e-4) or 1e-4)
+    min_speedup = float(getattr(cons, "min_speedup", 1.0) or 1.0)
+    return freeze(
+        kernel_type=kt,
+        dtype_semantics=DTypeSemantics(dtype=dtype_s, tf32=tf32,
+                                       accum="fp32" if dtype_s in ("fp32", "fp16") else "fp32"),
+        baseline=BaselineDef(name=baseline_name, same_device=True,
+                             same_window=True, same_dtype_semantics=True),
+        shapes=ShapeDist(entries=(((64, 64, 64), 1.0),)),
+        max_error=max_error,
+        min_speedup=min_speedup,
+        required_caps=tuple(sorted(
+            getattr(getattr(task, "target", None), "required_caps", ()) or ()
+        )),
+    )

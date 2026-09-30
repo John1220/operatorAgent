@@ -168,7 +168,7 @@ class _RecordingFixer:
         self.bases: list[str] = []
         self.n_failed_results: list[int] = []
 
-    def run(self, code, task, failed_results):
+    def run(self, code, task, failed_results, **kw):
         self.bases.append(code)
         self.n_failed_results.append(len(failed_results))
         return self.fixed, "fake fix"

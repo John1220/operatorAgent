@@ -56,9 +56,9 @@ class Observation:
 
 
 def evaluate(contract: FrozenContract,
-             contract_hash: str,
              measure: Callable[[], Mapping[str, Any]],
              *,
+             record_hash: Optional[str] = None,
              heartbeat: Optional[HeartbeatResult] = None,
              metric: str = "speedup_vs_baseline",
              unit: str = "x",
@@ -70,11 +70,26 @@ def evaluate(contract: FrozenContract,
     `validity` / `lib_fallback` / `cv_exceeded` / `launch_dominance_exceeded` /
     `partition_drift` / `l3_pass_is_refused` / `real_device`。
 
-    ⚠️ 契约哈希不匹配时**不调用 measure()** —— 连测都不该测 (设计 §13.4 第 1 条)。
+    **哈希校验是记录携带的** (spine-review P0-2): `record_hash` 是候选/记录
+    在**生成时**烙进来的契约哈希, 与 `contract.hash` 比对 —— 不是「调用方
+    同时给两侧」那种恒真。缺 `record_hash` 视为「记录没带哈希」→ 拒评
+    (设计 §13.4: `rec.contract_hash != contract.hash → 拒评`)。
+
+    ⚠️ 契约哈希不匹配时**不调用 measure()** —— 连测都不该测。
     """
-    # ── 1. 契约哈希: 改不了契约就改不了判据 ──
+    # ── 1. 契约哈希: 记录携带 vs 当前契约。改不了契约就改不了判据 ──
+    expected = contract.hash or contract.compute_hash()
+    if not record_hash:
+        return Observation(
+            metric=metric, value=None, unit=unit,
+            validity="uninformative",
+            eligibility=ELIG_ALL_FALSE,
+            refused="记录未携带 contract_hash: 无法证明判据未被改写, 拒评",
+            reasons=["missing_record_hash"],
+            provenance={"contract_hash": expected},
+        )
     try:
-        assert_hash(contract, contract_hash)
+        assert_hash(contract, record_hash)
     except ContractError as exc:
         return Observation(
             metric=metric, value=None, unit=unit,
@@ -82,7 +97,7 @@ def evaluate(contract: FrozenContract,
             eligibility=ELIG_ALL_FALSE,
             refused=str(exc),
             reasons=[str(exc)],
-            provenance={"contract_hash": contract_hash},
+            provenance={"contract_hash": expected, "record_hash": record_hash},
         )
 
     # ── 2. 心跳: 失败窗口内全资格 False, 但仍要记下数 (只是不让它造成后果) ──
@@ -119,7 +134,8 @@ def evaluate(contract: FrozenContract,
         reasons.extend(hb_reasons)
 
     prov = {
-        "contract_hash": contract.hash or contract.compute_hash(),
+        "contract_hash": expected,
+        "record_hash": record_hash,
         "heartbeat_ok": hb_ok,
         "heartbeat_epoch": getattr(heartbeat, "epoch", None),
         "baseline": contract.baseline.name,
