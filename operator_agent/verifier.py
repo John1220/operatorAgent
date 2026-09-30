@@ -1156,8 +1156,12 @@ class Verifier:
         metrics["benchmark_contaminated"] = assessment.contaminated
         # 五位资格 (设计 §4.3 / oracle.py): 与三个 can_* 并列写进 metrics,
         # 让 Conductor 不必自己重新解释分档表 —— 「资格决定这个数被允许造成什么后果」。
+        # ⚠️ **fail-closed** (spine-review P0-3): 推导抛错时写 all-False, 不许 pass。
+        # 原先 `except Exception: pass` 让守卫出 bug 时**守卫消失并放行** ——
+        # 资格键缺失 → conductor 的 `if elig and ...` 不成立 → 入库门整条跳过。
+        # 「没算出来」必须与「算出来不合格」在下游同样可见。
         try:
-            from .eligibility import derive_eligibility
+            from .eligibility import ALL_FALSE, derive_eligibility
             elig = derive_eligibility(
                 validity=assessment.validity.value,
                 requires_real_device=Cap.REAL_DEVICE.value in required,
@@ -1171,8 +1175,43 @@ class Verifier:
                 partition_drift=bool(assessment.environment_drift),
             )
             metrics["eligibility"] = elig.as_dict()
-        except Exception:  # noqa: BLE001 — 资格位是增强, 不挡主流程
-            pass
+        except Exception as exc:  # noqa: BLE001 — fail-closed
+            from .eligibility import ALL_FALSE
+            metrics["eligibility"] = ALL_FALSE.as_dict()
+            metrics["eligibility_derive_error"] = f"{type(exc).__name__}: {exc}"
+
+        # ── Oracle 唯一收口点 (spine-review P0-1 / 设计 §13.4) ──
+        # 每个 L3 读数都产一条 Observation: 资格决定它被允许造成什么后果。
+        # 哈希是**记录携带**的: 这里把契约哈希烙进 metrics, 之后由 oracle 再核。
+        try:
+            from .contract import freeze_from_task
+            from .oracle import evaluate as oracle_evaluate
+            contract = freeze_from_task(task) if task is not None else None
+            if contract is not None:
+                metrics.setdefault("contract_hash", contract.hash or contract.compute_hash())
+                obs = oracle_evaluate(
+                    contract,
+                    lambda: {
+                        "value": metrics.get("speedup_vs_baseline"),
+                        "validity": assessment.validity.value,
+                        "lib_fallback": bool(metrics.get("lib_fallback")),
+                        "real_device": assessment.backend_real_device,
+                        "l3_pass_is_refused": assessment.l3_pass_is_refused,
+                        "cv_exceeded": (assessment.dispersion is not None
+                                        and assessment.validity
+                                        is not measurement.Validity.VALID),
+                        "launch_dominance_exceeded": (
+                            assessment.launch_dominance is not None
+                            and assessment.launch_dominance > 0.5),
+                        "partition_drift": bool(assessment.environment_drift),
+                    },
+                    record_hash=metrics.get("contract_hash"),
+                    require_real_device=Cap.REAL_DEVICE.value in required,
+                    metric="speedup_vs_baseline", unit="x",
+                )
+                metrics["observation"] = obs.as_dict()
+        except Exception as exc:  # noqa: BLE001 — 观测失败不挡主流程, 但要留痕
+            metrics["observation_error"] = f"{type(exc).__name__}: {exc}"
         if assessment.contaminated:
             metrics["contamination_reason"] = f"测量前 util={gpu_util_pct}%"
         if assessment.reasons:
