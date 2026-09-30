@@ -532,6 +532,13 @@ class SearchAgent:
     Search Agent (性能优化)
     职责: 当 L3 验证未通过时，分析瓶颈并提出优化建议
     基于 LLM 驱动分析
+
+    P1-4 首片 (generation-side-review + doc 14): LLM 建议降为「先验」——
+    tiling 这一低维规整空间交给确定性邻域搜索, LLM 保留结构级判断
+    (hints/memory_plan/邻域中心)。旧实现的一次跳点直接被采纳, 失败了
+    分不清「方向不行」还是「没搜到」。首片 = roofline 启发式排序 +
+    Conductor 跨轮轮换 (真机 L3 当裁判, 改进即停); BO/bandit 的 surrogate
+    需要实测分布, 留给后续片。
     """
 
     def __init__(self, llm=None, prompt_manager: Optional[PromptManager] = None):
@@ -540,19 +547,146 @@ class SearchAgent:
         self.name = "Search"
         self._agent_role = "search"
         self._skill_name = "triton_skill"
+        # P1-4: 最近一次 run() 排好序的邻域候选 (不含本轮选中者), 供 Conductor
+        # 跨轮轮换。命名与 CoderPipeline.last_finalists 同族。
+        self.last_alternatives: list[UnifiedSketch] = []
 
     def run(self, sketch: UnifiedSketch, perf_data: dict) -> tuple[UnifiedSketch, str]:
         if self.llm is None:
             raise RuntimeError("LLM 未配置，规则模板已移除")
 
         try:
-            new_sketch, suggestion = self._llm_optimize(sketch, perf_data)
+            prior_sketch, suggestion = self._llm_optimize(sketch, perf_data)
         except Exception as e:
             # LLM 优化失败时回退到规则优化, 不中断整个任务
             print(f"  [Search] LLM 优化失败 ({e}), 回退规则优化")
-            return self._rule_optimize(sketch, perf_data)
+            prior_sketch, suggestion = self._rule_optimize(sketch, perf_data)
+
+        # P1-4: tiling 交给邻域搜索 (仅 triton —— python/cuda_c 的 block 参数
+        # 不是真实旋钮, 轮换它们只会空烧轮次); 其余 DSL 维持「直接采纳」。
+        if (sketch.target_dsl or "").lower() == "triton":
+            prior_sketch, self.last_alternatives, note = self._neighborhood_search(
+                prior_sketch, origin=sketch, perf_data=perf_data)
+            if note:
+                suggestion = f"{suggestion} ({note})"
+            if self.last_alternatives:
+                print(f"  [Search] P1-4 邻域: {len(self.last_alternatives)} 个候选排队, "
+                      f"下轮 L3 再败时按序轮换")
+        else:
+            self.last_alternatives = []
         print(f"  [Search] LLM 优化建议: {suggestion}")
-        return new_sketch, suggestion
+        return prior_sketch, suggestion
+
+    # ─── P1-4 邻域搜索 ────────────────────────────────────────
+
+    def _neighborhood_search(self, prior: UnifiedSketch, origin: UnifiedSketch,
+                             perf_data: dict) -> tuple:
+        """先验参与排序而非直接采纳; 返回 (chosen, alternatives, override_note)
+
+        分工 (doc 14 的口径): LLM 出结构 (hints/memory_plan) 与中心点,
+        tiling 的格点邻域交给确定性排序。排序只重排不删, 先验在池首位 +
+        稳定排序 ⇒ 打平时先验仍胜 —— 只有启发式给出明确方向时才会位移。
+        """
+        center = prior.tiling
+        origin_key = (origin.tiling.block_m, origin.tiling.block_n,
+                      origin.tiling.block_k)
+        # 与 origin 相同的 tiling 刚失败过, 不排进队列 (重复尝试不可归因)
+        neighbor_sketches = [
+            self._variant_of(prior, t) for t in self._lattice_neighbors(center)
+            if (t.block_m, t.block_n, t.block_k) != origin_key
+        ]
+        pool = [prior] + neighbor_sketches
+        # 先验没动 tiling 且有别的可试: 再选它等于原样重跑一轮, 让位给邻域
+        prior_key = (center.block_m, center.block_n, center.block_k)
+        if prior_key == origin_key and neighbor_sketches:
+            pool = neighbor_sketches
+        ranked = self._rank(pool, center, perf_data)
+        chosen, alternatives = ranked[0], ranked[1:]
+        # 排队候选 version 顺延: 轮换进来时血缘打印单调递增
+        for i, alt in enumerate(alternatives, start=1):
+            alt.version = prior.version + i
+        note = ""
+        if chosen is not prior:
+            t, c = chosen.tiling, center
+            note = (f"邻域排序选中 {t.block_m}x{t.block_n}x{t.block_k}, "
+                    f"LLM 先验 {c.block_m}x{c.block_n}x{c.block_k} 降为候选")
+        return chosen, alternatives, note
+
+    @staticmethod
+    def _variant_of(prior: UnifiedSketch, tiling: "TilingStrategy") -> UnifiedSketch:
+        """同代候选: 复制先验的结构性字段, 只换 tiling"""
+        return UnifiedSketch(
+            algorithm=prior.algorithm, version=prior.version,
+            tiling=tiling, memory_plan=prior.memory_plan, pipeline=prior.pipeline,
+            target_dsl=prior.target_dsl,
+            optimization_hints=prior.optimization_hints,
+            hints_this_version=prior.hints_this_version,
+        )
+
+    @staticmethod
+    def _lattice_neighbors(tiling: "TilingStrategy") -> list:
+        """中心每维 ±1 格的单步邻域; 一次只动一维 (可归因: 变了哪个旋钮一目了然)
+
+        中心不在合法格点上时不猜 (交给 schema 校验报错), 返回该维不动。
+        单步邻域 ≤ 6 个, 天然有界, 不需额外截断。
+        """
+        lattices = (
+            ("block_m", sorted(TilingStrategy._ALLOWED_BLOCK_M_N)),
+            ("block_n", sorted(TilingStrategy._ALLOWED_BLOCK_M_N)),
+            ("block_k", sorted(TilingStrategy._ALLOWED_BLOCK_K)),
+        )
+        out, seen = [], set()
+        center = (tiling.block_m, tiling.block_n, tiling.block_k)
+        for dim, lattice in lattices:
+            cur = getattr(tiling, dim)
+            if cur not in lattice:
+                continue
+            i = lattice.index(cur)
+            for j in (i - 1, i + 1):
+                if not (0 <= j < len(lattice)):
+                    continue
+                vals = dict(block_m=tiling.block_m, block_n=tiling.block_n,
+                            block_k=tiling.block_k)
+                vals[dim] = lattice[j]
+                key = (vals["block_m"], vals["block_n"], vals["block_k"])
+                if key == center or key in seen:
+                    continue
+                seen.add(key)
+                out.append(TilingStrategy(**vals))
+        return out
+
+    @staticmethod
+    def _rank(pool: list, center: "TilingStrategy", perf_data: dict) -> list:
+        """roofline 启发式排序 (首片; 不是 BO —— surrogate 需要实测分布)
+
+        方向判据 (doc 14 §二的 roofline 直觉):
+          - memory-bound (AI 低于脊点): 每 tile 算术强度不足 → 优先增大 BLOCK_K
+          - compute-bound: 疑似 occupancy 不足 → 优先减小 BLOCK_M/N
+          - unknown: 不猜方向, 「离先验近者优先」的确定性序
+        """
+        bound = (perf_data.get("roofline_bound") or perf_data.get("bound_type")
+                 or "unknown").lower()
+        l_mn = sorted(TilingStrategy._ALLOWED_BLOCK_M_N)
+        l_k = sorted(TilingStrategy._ALLOWED_BLOCK_K)
+
+        def steps(a, b, lattice):
+            if a in lattice and b in lattice:
+                return abs(lattice.index(a) - lattice.index(b))
+            return 0
+
+        def key(s: UnifiedSketch):
+            t = s.tiling
+            vol = t.block_m * t.block_n * t.block_k
+            if bound == "memory":
+                return (-t.block_k, -vol)
+            if bound == "compute":
+                return (t.block_m * t.block_n, vol)
+            dist = (steps(t.block_m, center.block_m, l_mn)
+                    + steps(t.block_n, center.block_n, l_mn)
+                    + steps(t.block_k, center.block_k, l_k))
+            return (dist, vol)
+
+        return sorted(pool, key=key)
 
     def _llm_optimize(self, sketch, perf_data) -> tuple[UnifiedSketch, str]:
         speedup = perf_data.get("speedup", 0)

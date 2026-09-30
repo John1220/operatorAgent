@@ -103,7 +103,7 @@ writes a line) so the names come from the harness, not from the Planner's guess.
 **Agent roles** (each consumes SKILL sections from `skills/triton_skill.md`):
 - **Designer** (sections 4, 5): produces tiling strategy and optimization hints from hardware info + RAG
 - **Coder** (sections 1, 2, 5, 6): generates code from sketch, with pre-validation (truncation/bracket/syntax checks) and up to 3 retries with feedback
-- **Search** (section 3): analyzes Roofline metrics, suggests new tiling; falls back to `TritonOptimizationRules` if LLM fails
+- **Search** (section 3): analyzes Roofline metrics; the LLM suggestion is a **prior**, not an adoption (P1-4) — the tiling lattice neighborhood (±1 step per dim, triton DSL only) is ranked deterministically (memory-bound → larger BLOCK_K first, compute-bound → smaller BLOCK_M/N first, unknown → closest-to-prior first), the winner becomes the next sketch and the rest queue for round-robin in the Conductor (real L3 runs are the judge; LLM is not re-asked while the queue is non-empty). Falls back to `TritonOptimizationRules` if LLM fails
 - **Fixer**: repairs L1/L2 failures using error logs + `FailureDatabase` (negative samples)
 
 **Execution backends** (`operator_agent/remote_executor.py`):

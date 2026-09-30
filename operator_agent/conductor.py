@@ -647,6 +647,12 @@ class Conductor:
         round_signatures: list = []
         duplicate_rounds = 0
 
+        # P1-4 (generation-side-review): Search 排好序的邻域候选队列 —— LLM 建议
+        # 降为先验后, 下轮 L3 再败时按序轮换, 不重新问 LLM。真机 L3 是裁判:
+        # 改进即停 (stagnation 逻辑照旧)。不进快照: 断点续跑时机器状态已变,
+        # 旧排序作废, 重新让 Search 出一轮队列。
+        search_alternatives: list = []
+
         for round_num in range(start_round, self.max_optimize_rounds + 1):
             print(f"\n{'─'*40}")
             print(f"轮次 {round_num}/{self.max_optimize_rounds}")
@@ -1144,29 +1150,41 @@ class Conductor:
                     # ---- 优化历史 ----
                     "optimization_history": optimization_history,
                 }
-                try:
-                    current_sketch, suggestion = self.search.run(current_sketch, perf_data)
-                except Exception as e:
-                    # 规则优化也失败时, 终止优化但不崩整个任务
-                    print(f"\n[Conductor] Search 优化异常 ({e}), 终止优化循环")
-                    snapshot_target_dir = self._flush_snapshot(
-                        task=task,
-                        artifact_dir=snapshot_target_dir,
-                        round_done=round_num,
-                        current_sketch=current_sketch,
-                        current_code=current_code,
-                        pending_fix=pending_fix,
-                        iteration_history=artifact.iteration_history,
-                        best_gflops=best_gflops,
-                        rounds_without_improvement=rounds_without_improvement,
-                        optimization_history=optimization_history,
-                        applied_recipes=applied_recipes,
-                        disabled_recipes=disabled_recipes,
-                        all_verification_results=all_verification_results,
-                    )
-                    self._record_stop(artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
+                if search_alternatives:
+                    # P1-4: 上一轮排好的邻域候选按序轮换 —— 系统搜索代替「每轮
+                    # 重新问一次 LLM 直觉」。轮换候选已带结构 (hints/memory_plan),
+                    # 只换了 tiling, 不需要再过 Search。
+                    current_sketch = search_alternatives.pop(0)
+                    t = current_sketch.tiling
+                    suggestion = "P1-4 邻域候选轮换"
+                    print(f"\n[Search] 轮换邻域候选: tiling={t.block_m}x{t.block_n}x{t.block_k} "
+                          f"(队列剩 {len(search_alternatives)} 个)")
+                else:
+                    try:
+                        current_sketch, suggestion = self.search.run(current_sketch, perf_data)
+                    except Exception as e:
+                        # 规则优化也失败时, 终止优化但不崩整个任务
+                        print(f"\n[Conductor] Search 优化异常 ({e}), 终止优化循环")
+                        snapshot_target_dir = self._flush_snapshot(
+                            task=task,
+                            artifact_dir=snapshot_target_dir,
+                            round_done=round_num,
+                            current_sketch=current_sketch,
+                            current_code=current_code,
+                            pending_fix=pending_fix,
+                            iteration_history=artifact.iteration_history,
+                            best_gflops=best_gflops,
+                            rounds_without_improvement=rounds_without_improvement,
+                            optimization_history=optimization_history,
+                            applied_recipes=applied_recipes,
+                            disabled_recipes=disabled_recipes,
+                            all_verification_results=all_verification_results,
+                        )
+                        self._record_stop(artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
 
-                    break
+                        break
+                    # P1-4: 排队下一轮的轮换候选 (SearchAgent 只在 triton 路径产出)
+                    search_alternatives = list(getattr(self.search, "last_alternatives", []))
                 print(f"  优化建议: {suggestion}")
                 print(f"  新 Sketch 版本: v{current_sketch.version}")
 
