@@ -439,6 +439,32 @@ def min_detectable_delta(n_per_arm, p_a=0.5, alpha=0.05, power=0.8):
     return z_sum * np.sqrt(0.5 / (n_per_arm + z_sum * z_sum))
 
 
+def _collect_unable(rounds, runs) -> list:
+    """从逐轮 metrics 里捞「说不清」的信号 (设计 §17)。只搬事实, 不猜数字。"""
+    from operator_agent.confirm import UnableToEstablish
+    u = UnableToEstablish()
+    for r in rounds:
+        m = r if isinstance(r, dict) else {}
+        # 轮级 metrics 在 record_rounds 原样搬进 rounds 的各键里
+        u.extend_metrics({
+            "measurement_can_gate": m.get("measurement_can_gate"),
+            "measurement_validity": m.get("measurement_validity"),
+            "measurement_validity_reasons": m.get("measurement_validity_reasons") or [],
+            "measurement_l3_pass_refused": m.get("measurement_l3_pass_refused"),
+            "ruler_broken": m.get("ruler_broken"),
+            "ruler_reason": m.get("ruler_reason"),
+            "contract_hash_mismatch": m.get("contract_hash_mismatch"),
+            "benchmark_contaminated": m.get("benchmark_contaminated"),
+        })
+    # 崩溃运行: 没有任何读数, 也是「无法确立」的一种
+    for r in runs:
+        if r.get("error"):
+            u.add(f"运行 {r.get('case', '?')} 崩溃, 无任何读数",
+                  str(r.get("error"))[:120], kind="measurement")
+    return [{"claim": i.claim, "reason": i.reason, "kind": i.kind,
+             "evidence": i.evidence} for i in u.items]
+
+
 def threshold_curve(runs, thresholds=(0.9, 1.0, 1.1)):
     """同一批候选在不同 `min_speedup` 门槛下的重新计分 (doc 48 §6.2 ①)。
 
@@ -895,6 +921,7 @@ def aggregate(runs):
             "wall_s": round(sum(float(r.get("wall_s") or 0.0) for r in ok_runs), 1),
         },
         "threshold_curve": threshold_curve(ok_runs),
+        "unable_to_establish": _collect_unable(rounds, runs),
         "power": {
             "n_a": len(ok_runs),
             "n_min": len(ok_runs),
@@ -1116,6 +1143,18 @@ def format_report(agg):
             lines.append(f"  要分辨 {pw.get('target_delta', 0.30):.0%} 量级的差, "
                          f"约需 n={pw['required_per_arm']}/臂。"
                          f"「没测出差异」只有在这个量程内说才有意义。")
+
+    # 「我无法确立的事」(设计 §17) —— 从不说测不准的系统, 所有数字都不可信。
+    # 空章节也要在: 「本轮没有无法确立的事」本身是一个断言, 不是省略。
+    un = agg.get("unable_to_establish") or []
+    lines.append("\n【我无法确立的事】(设计 §17 —— 一等公民, 不是附注)")
+    if not un:
+        lines.append("  (无) —— 本轮所有读数都够格支撑其结论")
+    else:
+        for i, it in enumerate(un, 1):
+            lines.append(f"  {i}. [{it.get('kind', 'other')}] {it.get('claim', '')}")
+            lines.append(f"     原因: {it.get('reason', '')}")
+        lines.append("  ⚠️ 以上条目**不许**被读成否定结论 (「没测出」≠「没有」)。")
     return "\n".join(lines)
 
 
