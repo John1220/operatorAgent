@@ -353,10 +353,13 @@ class Verifier:
         violations = static_audit(kernel_code, task.target.dsl, hardware=task.target.hardware)
         if violations:
             print(f"  [Verifier] L2 FAILED: 反作弊静态审计未通过 ({len(violations)} 处违规)")
+            from .anticheat import lib_fallback_metrics
             return VerificationResult(
                 level=VerificationLevel.L2_FUNCTION, passed=False,
                 message=f"反作弊: 检测到禁用的原生算子回退调用 ({len(violations)} 处)",
                 error_log="\n".join(violations),
+                # lib_fallback 生产者 (spine-review P1-4): 静态审计命中也是库回退
+                metrics=lib_fallback_metrics(violations=violations),
             )
 
         # 支持单组输入 (dict) 或多组输入套件 (list[dict])
@@ -542,9 +545,22 @@ class Verifier:
         result = self.backend.execute(kernel_code, inputs)
         if not result.success:
             head, full = failure_pair(result.error)
+            fail_metrics = {TRANSPORT_KEY: transport_outcome_of_result(result)}
+            # lib_fallback 生产者 (spine-review P1-4): 运行时 shield 拦到的库回退
+            # 必须搬进 metrics, 否则 eligibility 规则 4 恒 False。
+            # 优先抄执行结果里已有的 metrics (mock_gpu 已 harvest 过), 避免二次 take。
+            src = getattr(result, "metrics", None) or {}
+            if src.get("lib_fallback") or getattr(result, "lib_fallback", False):
+                fail_metrics.update({k: src[k] for k in
+                                     ("lib_fallback", "lib_fallback_evidence")
+                                     if k in src})
+                fail_metrics["lib_fallback"] = True
+            else:
+                from .anticheat import lib_fallback_metrics
+                fail_metrics.update(lib_fallback_metrics())
             return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False,
                                       message=f"执行失败: {head}", error_log=full,
-                                      metrics={TRANSPORT_KEY: transport_outcome_of_result(result)})
+                                      metrics=fail_metrics)
         if expected_output is None:
             expected_output = self._generate_reference(task, inputs)
         if expected_output is None:

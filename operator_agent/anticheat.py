@@ -29,6 +29,51 @@ class CheatDetectedError(RuntimeError):
     pass
 
 
+# ─── lib_fallback 生产者 (spine-review P1-4) ───────────────────
+# WHY: eligibility 规则 4 / oracle / verifier 都读 `lib_fallback`, 但此前全仓
+# **没有任何写入点** → 该护栏恒为 False, 报表上却显示「已检查」。恒 False 的护栏
+# 比没有更危险 (spine-review §P1-4)。这里是唯一生产者: shield_torch 拦到调用时
+# 记下被调符号, 上游用 `lib_fallback_metrics()` 搬进 metrics。
+
+_last_lib_fallback: Optional[str] = None
+
+
+def _record_lib_fallback(qualified_name: str) -> None:
+    """记下一次运行时库回退命中 (被 shield 桩拦到的被调符号)。"""
+    global _last_lib_fallback
+    _last_lib_fallback = qualified_name
+
+
+def take_lib_fallback() -> Optional[str]:
+    """取走并清空最近一次运行时命中; None = 自上次取走以来未命中。"""
+    global _last_lib_fallback
+    hit = _last_lib_fallback
+    _last_lib_fallback = None
+    return hit
+
+
+def lib_fallback_metrics(violations: Optional[list] = None) -> dict:
+    """生产者 (spine-review P1-4): 把反作弊命中写成 metrics 片段。
+
+    两个来源:
+      1. `shield_torch` 运行时拦到的调用 (`take_lib_fallback`);
+      2. `static_audit` 的违规列表 (调用方传入 `violations`)。
+
+    返回 `{"lib_fallback": True, "lib_fallback_evidence": ...}` 或空 dict。
+    上游把它 update 进 metrics 之后, `derive_eligibility(lib_fallback=...)`
+    规则 4 才有触发的可能 —— 否则这一位永远是 False。
+    """
+    evidence = []
+    hit = take_lib_fallback()
+    if hit:
+        evidence.append(f"runtime:{hit}")
+    for v in (violations or [])[:3]:
+        evidence.append(f"static:{v}")
+    if not evidence:
+        return {}
+    return {"lib_fallback": True, "lib_fallback_evidence": "; ".join(evidence)}
+
+
 # ─── 禁用清单 (static_audit 与 shield_torch 共用同一份, 避免两处漂移) ───
 
 _BLOCKED_TORCH_FUNCS = frozenset({
@@ -375,6 +420,9 @@ _SHIELD_TARGETS = {
 
 def _make_blocked(qualified_name: str):
     def _blocked(*args, **kwargs):
+        # 先记后抛: 异常可能被上游吞掉, 但 lib_fallback 生产者必须留下痕迹
+        # (spine-review P1-4)。上游用 `lib_fallback_metrics()` 搬进 metrics。
+        _record_lib_fallback(qualified_name)
         raise CheatDetectedError(
             f"反作弊: 验证执行期间禁止调用原生算子 {qualified_name}()"
         )

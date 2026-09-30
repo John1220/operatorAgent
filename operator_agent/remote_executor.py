@@ -93,6 +93,9 @@ class RemoteExecutionResult:
     #: 默认 `answered` 不是猜的 —— 能构造出这个对象就说明手里有一份远端返回; 只有 except 分支
     #: 会把它改成 `outcome_unknown`。默认选**不报警**那一侧, 因为下游拿它做的是幂等清点。
     transport_outcome: str = TRANSPORT_ANSWERED
+    #: 反作弊命中 (spine-review P1-4 的生产者之一)。LocalExecutor 的 shield_torch
+    #: 拦到库回退时置 True, 上游搬进 metrics["lib_fallback"]。
+    lib_fallback: bool = False
 
 
 @dataclass
@@ -1032,7 +1035,7 @@ class LocalExecutor(Backend):
     def execute(self, kernel_code: str, inputs: dict) -> RemoteExecutionResult:
         import numpy as np
         import time
-        from .anticheat import shield_torch
+        from .anticheat import CheatDetectedError, lib_fallback_metrics, shield_torch
         result = RemoteExecutionResult(device="cpu")
         try:
             # 反作弊: 执行期间屏蔽 torch 原生算子回退
@@ -1057,9 +1060,17 @@ class LocalExecutor(Backend):
                 bytes_moved = (m * k + k * n + m * n) * 4
                 result.memory_bandwidth_gbs = (bytes_moved / elapsed / 1e9) if elapsed > 0 else 0
             result.success = True
+        except CheatDetectedError as e:
+            # lib_fallback 生产者 (spine-review P1-4)
+            result.success = False
+            result.error = str(e)
+            result.lib_fallback = True
+            lib_fallback_metrics()  # 清掉记录, 避免泄漏到下一次执行
         except Exception as e:
             result.success = False
             result.error = str(e)
+            if lib_fallback_metrics().get("lib_fallback"):
+                result.lib_fallback = True
         return result
 
     def benchmark(self, kernel_code: str, inputs: dict, warmup: int = 3, repeat: int = 10) -> dict:

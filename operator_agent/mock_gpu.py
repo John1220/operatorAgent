@@ -13,7 +13,7 @@ import time
 import numpy as np
 from typing import Callable, Optional
 from dataclasses import dataclass, field
-from .anticheat import shield_torch
+from .anticheat import CheatDetectedError, lib_fallback_metrics, shield_torch
 from .backend_caps import Backend, Cap
 
 
@@ -29,6 +29,13 @@ class ExecutionResult:
     language: str = "python"        # python | triton
     device: str = "cpu"            # cpu | cuda | mock
     compile_info: dict = field(default_factory=dict)  # 编译元信息
+    #: 旁路信号。WHY (spine-review P1-4): `lib_fallback` 此前全仓只有读者没有
+    #: 生产者 —— 执行路径必须把反作弊命中写进来, 否则 eligibility 规则 4 恒 False。
+    metrics: dict = field(default_factory=dict)
+
+    @property
+    def lib_fallback(self) -> bool:
+        return bool(self.metrics.get("lib_fallback"))
 
 
 def _detect_triton(code: str) -> bool:
@@ -195,9 +202,17 @@ class MockGPU(Backend):
                 return self._execute_triton(kernel_code, inputs)
             else:
                 return self._execute_python(kernel_code, inputs)
+        except CheatDetectedError as e:
+            # 反作弊命中: lib_fallback 生产者 (spine-review P1-4)
+            result.success = False
+            result.error = str(e)
+            result.metrics.update(lib_fallback_metrics())
+            return result
         except Exception as e:
             result.success = False
             result.error = str(e)
+            # 即便异常类型不是 CheatDetectedError, 只要 shield 记过就算命中
+            result.metrics.update(lib_fallback_metrics())
             return result
 
     def _execute_triton(self, kernel_code: str, inputs: dict) -> ExecutionResult:
@@ -208,6 +223,10 @@ class MockGPU(Backend):
         if self._triton_available and _has_cuda():
             try:
                 return self._execute_triton_cuda(kernel_code, inputs)
+            except CheatDetectedError:
+                # 反作弊命中**不许**静默降级到 NumPy 参考 —— 那正是 lib_fallback
+                # 要拦的「正确率被库实现抬高」(spine-review P1-4)
+                raise
             except Exception as e:
                 # CUDA 执行失败, 回退到 NumPy 参考实现
                 result.device = "cuda (fallback)"
@@ -227,26 +246,33 @@ class MockGPU(Backend):
         ns = {"triton": triton, "tl": tl, "torch": torch, "__name__": "__kernel__"}
 
         # 反作弊: 执行期间屏蔽 torch 原生算子回退
-        with shield_torch():
-            exec(kernel_code, ns)
-            kernel_func = ns["kernel"]
+        try:
+            with shield_torch():
+                exec(kernel_code, ns)
+                kernel_func = ns["kernel"]
 
-            # 转换输入到 CUDA
-            torch_inputs = {
-                k: torch.from_numpy(np.asarray(v)).to(device).contiguous()
-                for k, v in inputs.items()
-            }
+                # 转换输入到 CUDA
+                torch_inputs = {
+                    k: torch.from_numpy(np.asarray(v)).to(device).contiguous()
+                    for k, v in inputs.items()
+                }
 
-            # Warmup
-            for _ in range(3):
-                _ = kernel_func(**torch_inputs)
-            torch.cuda.synchronize()
+                # Warmup
+                for _ in range(3):
+                    _ = kernel_func(**torch_inputs)
+                torch.cuda.synchronize()
 
-            # 执行并计时
-            start = time.perf_counter()
-            output = kernel_func(**torch_inputs)
-            torch.cuda.synchronize()
-            elapsed = time.perf_counter() - start
+                # 执行并计时
+                start = time.perf_counter()
+                output = kernel_func(**torch_inputs)
+                torch.cuda.synchronize()
+                elapsed = time.perf_counter() - start
+        except CheatDetectedError as e:
+            # lib_fallback 生产者 (spine-review P1-4)
+            result.success = False
+            result.error = str(e)
+            result.metrics.update(lib_fallback_metrics())
+            return result
 
         if isinstance(output, torch.Tensor):
             out_arr = output.cpu().numpy()
@@ -256,6 +282,7 @@ class MockGPU(Backend):
         result.output = out_arr
         result.execution_time_ms = elapsed * 1000
         result.success = True
+        result.metrics.update(lib_fallback_metrics())
 
         # 计算性能指标
         self._compute_metrics(result, inputs, elapsed)
@@ -343,18 +370,25 @@ class MockGPU(Backend):
         result = ExecutionResult(language="python", device="cpu")
 
         # 反作弊: 执行期间屏蔽 torch 原生算子回退
-        with shield_torch():
-            local_ns = {}
-            exec(kernel_code, local_ns)
-            kernel_func: Callable = local_ns["kernel"]
+        try:
+            with shield_torch():
+                local_ns = {}
+                exec(kernel_code, local_ns)
+                kernel_func: Callable = local_ns["kernel"]
 
-            start = time.perf_counter()
-            output = kernel_func(**inputs)
-            elapsed = time.perf_counter() - start
+                start = time.perf_counter()
+                output = kernel_func(**inputs)
+                elapsed = time.perf_counter() - start
+        except CheatDetectedError as e:
+            result.success = False
+            result.error = str(e)
+            result.metrics.update(lib_fallback_metrics())
+            return result
 
         result.output = np.asarray(output)
         result.execution_time_ms = elapsed * 1000
         result.success = True
+        result.metrics.update(lib_fallback_metrics())
 
         self._compute_metrics(result, inputs, elapsed)
         return result

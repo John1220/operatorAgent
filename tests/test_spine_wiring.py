@@ -3,6 +3,7 @@
 入库门 = persist_decision  ∧  资格位 can_persist  ∧  (可选) 两次独立重测。
 `require_double_confirm` 打开后, 没有重测就**拒绝入库** —— 不是「没有就当过了」。
 """
+import dataclasses
 import unittest
 
 from operator_agent.confirm import ConfirmRecord
@@ -88,6 +89,46 @@ class TestSaveToDbGates(unittest.TestCase):
         slow.remeasure = ConfirmRecord(ok=True, speedup=0.9, validity="valid")
         self.assertTrue(self.cond._save_to_db(fast, _task()))
         self.assertFalse(self.cond._save_to_db(slow, _task()))
+
+
+class TestRemeasureField(unittest.TestCase):
+    """spine-review P2-10: `KernelArtifact.remeasure` 必须是声明字段
+
+    WHY: `conductor._save_to_db` 读 `getattr(artifact, "remeasure", None)`,
+    但字段从未声明 → 生产路径无人写入 → `require_double_confirm=True` 时
+    入库率 100% 归零。此前测试靠 monkeypatch 属性赋值绕过, 测不出这个缺口。
+    """
+
+    def test_remeasure_is_declared_on_kernel_artifact(self):
+        names = {f.name for f in dataclasses.fields(KernelArtifact)}
+        self.assertIn("remeasure", names,
+                      "KernelArtifact 缺 remeasure 字段 —— require_double_confirm 打开即全拒")
+
+    def test_constructor_with_remeasure_persists_under_double_confirm(self):
+        cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
+        cond.require_double_confirm = True
+        art = KernelArtifact(
+            kernel_id="k-remeasure",
+            code="def kernel(A, B):\n    return A @ B\n",
+            verification_results=[],
+            benchmark_data=_good_metrics(),
+            remeasure=ConfirmRecord(ok=True, speedup=1.2, validity="valid",
+                                    independent=True),
+        )
+        self.assertTrue(cond._save_to_db(art, _task()))
+
+    def test_constructor_without_remeasure_refuses_under_double_confirm(self):
+        cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
+        cond.require_double_confirm = True
+        art = KernelArtifact(
+            kernel_id="k-no-remeasure",
+            code="def kernel(A, B):\n    return A @ B\n",
+            verification_results=[],
+            benchmark_data=_good_metrics(),
+        )
+        self.assertIsNone(art.remeasure)
+        self.assertFalse(cond._save_to_db(art, _task()),
+                         "没有重测却入库 —— 两次确认是空的")
 
 
 if __name__ == "__main__":

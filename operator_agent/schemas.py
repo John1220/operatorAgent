@@ -576,6 +576,13 @@ class KernelArtifact:
     #: (`artifact_store.py:73` 的注释), 挂在那儿就是下一份「算了没人读」—— 而这一项的
     #: 读者正是「这次续跑到底续上了没有」这件事本身 (doc 50)。
     resume_status: Optional[dict] = None
+    #: 两次独立重测确认记录 (`confirm.ConfirmRecord` 兼容形态: 有
+    #: ok/speedup/validity/independent 属性即可)。
+    #: WHY (spine-review P2-10): `conductor._save_to_db` 用
+    #: `getattr(artifact, "remeasure", None)` 读它, 但字段从未声明 →
+    #: 生产路径无人写入 → `require_double_confirm=True` 时入库率 100% 归零。
+    #: 声明字段让「没有重测」与「有重测但没过」成为可写、可查的数据。
+    remeasure: Optional[Any] = None
     saved_dir: str = ""                # ArtifactStore.save 落盘目录 (由 Conductor 赋值, 便于引用)
     created_at: float = field(default_factory=time.time)
 
