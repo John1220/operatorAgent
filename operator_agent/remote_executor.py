@@ -31,6 +31,7 @@ import subprocess
 import tempfile
 import threading
 import hashlib
+import re
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
@@ -40,7 +41,8 @@ from typing import Optional
 from .environment import EnvironmentChecker, DependencyAnalyzer, EnvironmentReport, CheckItem
 from .backend_caps import Backend, Cap
 from .hardware_caps import detect_hardware_caps
-from .measurement import (TRANSPORT_ANSWERED, TRANSPORT_KEY, transport_outcome)
+from .measurement import (TRANSPORT_ANSWERED, TRANSPORT_KEY, safe_error_text,
+                          transport_outcome)
 
 
 # 按执行目标串行化 execute/benchmark, 防止并发任务共用同一 GPU 互相污染 benchmark
@@ -60,13 +62,20 @@ def _transport_outcome_of(exc) -> str:
     「命令没跑 / 跑了但回执丢了 / 还在飞」这三种对客户端同形的世界里 (#102 第 1 片,
     依据 Limbo `2609.29095v1` 行 226-232)。判据放在 `measurement.transport_outcome` 里,
     因为读它的报表与写它的执行侧必须共用一套词表 (I22 那一族)。
+
+    ⚠️ 第二读的那个 `returncode` 是 #102 第 2 片补的: 部署那一路走的是
+    `subprocess.run(scp_cmd, check=True)`, 它打的是 `CalledProcessError` —— **码就在异常上,
+    只是名字不叫 `ssh_rc`**。在那之前 `scp` 以 255 失败 (ssh 自己连不上, 上传到底有没有发生
+    无从知道) 会被读成 `answered`, 而这正是第 1 片要区分的那两种世界。
     """
-    return transport_outcome(exc, remote_rc=getattr(exc, "ssh_rc", None))
+    return transport_outcome(
+        exc, remote_rc=getattr(exc, "ssh_rc", getattr(exc, "returncode", None)))
 
 
 def _transport_failure(exc) -> dict:
     """三个「返回 dict」的远程出口共用的失败载荷形状"""
-    return {"success": False, "error": str(exc), TRANSPORT_KEY: _transport_outcome_of(exc)}
+    return {"success": False, "error": safe_error_text(exc),
+            TRANSPORT_KEY: _transport_outcome_of(exc)}
 
 
 @dataclass
@@ -770,7 +779,9 @@ class SSHExecutor(Backend):
                 device=result.get("device", ""),
             )
         except Exception as e:
-            return RemoteExecutionResult(success=False, error=str(e),
+            # 异常**原文**不过落盘边界 (#102 第 2 片): `TimeoutExpired` 那句带着整条 ssh argv,
+            # 而这一路的结果会进 `result.json`、Fixer prompt 与失败签名三个读者。
+            return RemoteExecutionResult(success=False, error=safe_error_text(e),
                                    transport_outcome=_transport_outcome_of(e))
 
     def benchmark(self, kernel_code: str, inputs: dict, warmup: int = 3, repeat: int = 10) -> dict:

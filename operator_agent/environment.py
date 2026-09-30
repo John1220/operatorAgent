@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .measurement import safe_error_text
+
 
 # ─── 环境指纹 (doc 49 §3.5 第 1 处「算了没人读」) ────────────────────────────────
 #
@@ -224,7 +226,10 @@ class EnvironmentChecker:
             self._ssh("echo ok")
             report.add(CheckItem("ssh", True, "连接正常"))
         except Exception as e:
-            report.add(CheckItem("ssh", False, str(e)[:80], fix_hint="检查 SSH 免密登录与网络"))
+            # 与执行侧四个出口同一条规矩 (#102 第 2 片): 这句会进环境报告 → `result.json`,
+            # 而 `str(TimeoutExpired)` 带着整条 ssh argv (端口、密钥路径、user@host)。
+            report.add(CheckItem("ssh", False, safe_error_text(e)[:120],
+                                 fix_hint="检查 SSH 免密登录与网络"))
             return report   # SSH 不通, 后续无意义
 
         # 2. uv

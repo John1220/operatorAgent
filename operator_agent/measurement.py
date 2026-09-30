@@ -45,6 +45,7 @@ L3 的数字有三种「不可信」, 而它们都不该被当成「性能不达
 而两个读者必须读同一个集合 —— 与上面 `CORRECTNESS_LEVELS` 那条是同一个理由。
 """
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
@@ -258,6 +259,80 @@ def transport_outcome_of_result(result) -> str:
     这个判决路径换成一个 `AttributeError`。
     """
     return getattr(result, TRANSPORT_KEY, TRANSPORT_ANSWERED)
+
+
+# ── 远端异常的**文本**过落盘边界之前的一道掩码 (#102 第 2 片) ──
+#
+# 与 `transport_outcome` 放在同一个模块的理由是一样的: 那是异常的结构侧、这是它的文本侧,
+# 而**写它的执行侧与读它的报表/环境自检必须共用一套规矩** (I22 那一族) —— 各写一份就会长成
+# 「有一路在脱敏、另一路没有」，而那恰好是本仓最难发现的一类失效。
+#
+# ⚠️ 为什么 `str(e)` 不能直接进产物: `subprocess` 那两类异常 (`TimeoutExpired` /
+# `CalledProcessError`) 的 `str()` 里带着**整条 argv** —— ssh/scp 那条命令含 `-p <端口>`、
+# `-i <密钥路径>` 与 `<用户>@<主机>`。这句文本今天有三个读者: 落盘的 `result.json`、发给外部
+# LLM 的 Fixer prompt、以及**跨运行持久化**的失败签名 (`FixerAgent` 从错误文本里取一段做签名,
+# 见 `fixer.py:209`)。`_truncate_error` 保头保尾也救不了 —— argv 的秘密正好在**头部**。
+# 现在没出事只因为 `_build_ssh_base` 默认把 port/key/user 留给 `~/.ssh/config` 解析:
+# 那是「缺席」, **不是一道掩码** (doc 60 §四 第 2 条原文就是这个意思)。
+_MASKED = "[已隐去]"
+# 「旗标 + 值」这一对要先摘, 再摘 `user@host` 与 IPv4: 反过来 `ssh: connect to host 1.2.3.4
+# port 2222` 会先被 IPv4 那条吃掉一半而留下裸端口, 而 `-p 2222` 会变成留在文本里的 `2222`。
+# 最后那条 `port <数字>` 不是重复: 它是 ssh **自己**写的措辞 (不是 argv 的 `-p`),
+# 第一版就是只摘了 IPv4, 于是真机上那句 `connect to host [已隐去] port 2222` 里的端口活了下来。
+_ARGV_SECRET_FLAG = re.compile(r"(?i)\s(-i|-p|-l|-F|--identity-file|--port)\s+\S+")
+_USER_AT_HOST = re.compile(r"\b[\w.+-]+@[\w.-]+\b")
+_IPV4_WITH_PORT = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b")
+_PORT_WORD = re.compile(r"(?i)\b(port)\s+\d{1,5}\b")
+
+
+def mask_transport_secrets(text: str) -> str:
+    """把一段**传输层**文本里的地址类信息换成占位符; 只给远端那一路用。
+
+    刻意只在远程出口调用: 候选代码自己的 traceback 里出现 `@` 或点分数字是常见的
+    (`@triton.jit`、版本号), 对它做同样的替换会吃掉 Fixer 需要的诊断信息 —— 那一路
+    该原样进 prompt (#102 第 2 片的范围就是「远端写副作用的那几个出口」)。
+    """
+    if not text:
+        return text
+    # 保留**旗标**、只摘它的**值**: `-p`/`-i` 本身是「这一路带过端口/密钥」的线索,
+    # 而值才是秘密。整对吃掉会让掩码顺手把诊断能力一起掩掉 (用例里那条 M3 的反向对照)。
+    out = _ARGV_SECRET_FLAG.sub(r" \1 " + _MASKED, text)
+    out = _USER_AT_HOST.sub(_MASKED, out)
+    out = _IPV4_WITH_PORT.sub(_MASKED, out)
+    return _PORT_WORD.sub(r"\1 " + _MASKED, out)
+
+
+def _cmd_shape(cmd) -> str:
+    """argv 的**形状**而不是内容: 程序名 + 参数个数。
+
+    远程命令的内容在这里没有诊断价值 (载荷走 stdin、不在 argv 里, 而 argv 剩下的部分正是
+    端口/密钥/`user@host`); 程序名才是「哪一步」的线索: `ssh` = 执行/探测, `scp` = 部署上传。
+    """
+    if isinstance(cmd, (list, tuple)):
+        head = str(cmd[0]).rsplit("/", 1)[-1] if cmd else "?"
+        return f"{head} +{max(len(cmd) - 1, 0)} 个参数"
+    return mask_transport_secrets(str(cmd))[:40]
+
+
+def safe_error_text(exc) -> str:
+    """一次远程调用失败时, 那句**可以**进产物 / LLM prompt / 失败签名的文本。
+
+    带 `cmd` 的异常 (subprocess 那两类) 不再用 `str()` —— 整条 argv 就是它的 `str()`;
+    改成「异常类名 + argv 的形状 + 超时秒数或返回码」。其余异常走 `mask_transport_secrets`,
+    因为 ssh 自己写的 stderr (`connect to host <IP> port <N>`) 也在这条路上。
+    """
+    cmd = getattr(exc, "cmd", None)
+    if cmd is not None:
+        parts = [type(exc).__name__, _cmd_shape(cmd)]
+        rc = getattr(exc, "returncode", None)
+        timeout = getattr(exc, "timeout", None)
+        if rc is not None:
+            parts.append(f"rc={rc}")
+        if timeout is not None:
+            parts.append(f"超时 {timeout}s")
+        return " ".join(parts)
+    return mask_transport_secrets(str(exc))
+
 
 RULER_REPORTED = "reported"            #: 这一轮各组同一把尺, 值照抄
 RULER_CONFLICT = "self_conflict"       #: 这一轮自己就不是同一把尺
