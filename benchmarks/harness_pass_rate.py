@@ -56,6 +56,7 @@ from operator_agent.llm_client import (  # noqa: E402
 from operator_agent.measurement import (LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,  # noqa: E402
                                         PERF_GATE_PARAM_KEYS, TRANSPORT_ANSWERED,
                                         TRANSPORT_KEY, TRANSPORT_UNKNOWN, Validity,
+                                        attributable_evidence,
                                         correctness_verified_levels,
                                         cross_round_ruler, persist_decision)
 from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
@@ -445,6 +446,49 @@ def threshold_curve(runs, thresholds=(0.9, 1.0, 1.1)):
             "caveat": "同一批已生成候选的重新计分, 不是改门槛重跑 —— 搜索行为被当时的门槛塑形"}
 
 
+def pair_cases(runs_a, runs_b):
+    """按 `case` 名把两批运行配成 `(名字, A 侧结果, B 侧结果)`, 配不上的都是 `None`。
+
+    三种「配不上」分开记 (`reasons`), 因为报表要说得出**为什么**这条没有结论:
+      · `absent` —— 这一侧的批次里根本没有这条 case (换过 case 清单)
+      · `crashed` —— 这一侧跑了但 `ok=False` (崩溃的那次**没有**任务级结果)
+      · `duplicate` —— 同一批里这个名字出现两次 (不猜该用哪一次; 真机重跑同名多次是
+        `--repeats` 之外的形状, 出现了就说明记录方式与 `case` 名的约定打架)
+
+    ⚠️ 三种都不许折算成 `False`: 那正是「缺证据当反证」(#53 那一族)。也不许折算成
+    「两侧都一样」: 那会静默缩小分母。
+    """
+    def _index(runs):
+        seen = {}
+        for r in runs or []:
+            name = str(r.get("case"))
+            if name in seen:
+                seen[name] = "duplicate"
+            elif not r.get("ok"):
+                seen[name] = None
+            else:
+                seen[name] = bool(r.get("final_all_passed"))
+        return seen
+
+    ia, ib = _index(runs_a), _index(runs_b)
+    reasons = {}
+    cases = []
+    for name in sorted(set(ia) | set(ib)):
+        va = ia.get(name, "absent")
+        vb = ib.get(name, "absent")
+        for side, val, idx in (("A", va, ia), ("B", vb, ib)):
+            if val == "absent":
+                reasons.setdefault(name, []).append(f"{side} 侧没有这条 case")
+            elif val == "duplicate":
+                reasons.setdefault(name, []).append(f"{side} 侧同名出现多次")
+            elif val is None:
+                reasons.setdefault(name, []).append(f"{side} 侧那次运行崩溃了")
+        clean_a = va if isinstance(va, bool) else None
+        clean_b = vb if isinstance(vb, bool) else None
+        cases.append((name, clean_a, clean_b))
+    return cases, reasons
+
+
 def compare_runs(runs_a, runs_b, meta_a=None, meta_b=None, target_delta=0.30):
     """两份运行记录的 A/B 判决: 这次改动「测得出变化」还是「本来测不出」。
 
@@ -525,8 +569,17 @@ def compare_runs(runs_a, runs_b, meta_a=None, meta_b=None, target_delta=0.30):
                       f"分辨不出 (可分辨下限 ≈{(detectable or 0):.1%}) —— "
                       f"正确的读法是「不知道」, 不是「没变化」")
 
+    # 逐 case 那一层 (#103 第 1 片)。**算在同一份存量证据上、什么都不重新执行** —— 外部那句
+    # "Nothing is re-executed: both rules are applied to the same stored evidence" (行 1050)
+    # 是这片的做法: 两条规则读同一批 `runs`, 于是分歧是精确的而不是两次测量的差。
+    # 它不参与上面那个判决: 聚合门 (Fisher) 仍是唯一的判决书, 这一栏只补「谁变坏了」这个名字。
+    cases, case_reasons = pair_cases(runs_a, runs_b)
+    attributable = attributable_evidence(cases)
+    attributable["unmatched_reasons"] = case_reasons
+
     return {
         "verdict": verdict,
+        "attributable": attributable,
         "reason": reason,
         "alpha": alpha,
         "target_delta": target_delta,
@@ -634,6 +687,46 @@ def format_comparison(cmp):
     }[cmp["verdict"]]
     lines.append(f"\n判决: {label}")
     lines.append(f"  {cmp['reason']}")
+
+    # 【逐 case 的得与失】(#103 第 1 片, 只观测)。外面那行判决读的是**一个聚合数**,
+    # 而 HarnessLens 行 99 点名的病正是 "aggregate scores to obscure specific regressions"。
+    # 我方那份存量对照比那句还糟一档: 5/6 → 3/6 那一对比, 统计门印「判不出 —— 不知道」,
+    # 而逐 case 那一层其实是 1 条修好 + 3 条变坏 (doc 60 §六)。缺的不是更严的阈, 是**点名**。
+    att = cmp.get("attributable") or {}
+    cnt = att.get("counts") or {}
+    unmatched = att.get("unmatched_cases") or []
+    lines.append("\n【逐 case 的得与失】(两条规则算在同一份存量证据上, 什么都不重新执行)")
+    lines.append(f"  配上的 case {att.get('matched', 0)} · 修好 {cnt.get('recovered', 0)} · "
+                 f"变坏 {cnt.get('regressed', 0)} · 两侧都过 {cnt.get('stable_pass', 0)} · "
+                 f"两侧都不过 {cnt.get('stable_fail', 0)}"
+                 + (f" · 没有可用读数 {len(unmatched)}" if unmatched else ""))
+    if not att.get("matched"):
+        lines.append("  测不到: 一条都没配上 ⇒ 下面三条结论都是 `None`, "
+                     "**这不是「没有回归」也不是「都变坏了」**")
+    else:
+        lines.append(f"  配对口径的通过数: {att['pass_a']} → {att['pass_b']} "
+                     f"(Δ={att['delta']:+d}, 只在配上的 case 上数)")
+        if att["regressed_cases"]:
+            lines.append("  ❌ 变坏: " + ", ".join(att["regressed_cases"]))
+        if att["recovered_cases"]:
+            lines.append("  ✅ 修好: " + ", ".join(att["recovered_cases"]))
+    for name in unmatched:
+        why = "; ".join((att.get("unmatched_reasons") or {}).get(name, []))
+        lines.append(f"  ⚪ 无结论: {name} —— {why or '这一侧没有可用读数'}")
+    if att.get("matched"):
+        def _word(v):
+            return "接受" if v is True else ("不接受" if v is False else "无从判定")
+        _dis = att["disagreement"]
+        _ev = {"recovery": f"修好了 {len(att['recovered_cases'])} 条 (从不过到过)"}.get(
+            att.get("positive_evidence"))
+        lines.append(f"  两条规则: metric-only (Δ>0 就接受) {_word(att['accepted_metric_only'])}"
+                     f" · 可归因门 (要有正证据且零回归) {_word(att['accepted_gate'])}"
+                     f" · 分歧 {'有' if _dis else ('无' if _dis is False else '无从判定')}"
+                     + (" ← 聚合数与具体回归打架的那一次" if _dis is True else ""))
+        _no_ev = "没有 (只有 preservation 不算正证据 —— 行 880 那句 preservation alone is insufficient)"
+        lines.append(f"  正证据出处: {_ev or _no_ev}")
+    lines.append("  ⚠️ 只观测不改判决: 上面那行「判决」仍然只由 Fisher 那道门给, 这一栏不参与"
+                 "任何一次决定 (#103 第 1 片, 依据 arXiv:2608.27311v1 行 878-880)")
     return "\n".join(lines)
 
 

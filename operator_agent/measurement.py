@@ -1013,3 +1013,99 @@ def assess(median_time_ms: Optional[float] = None,
         backend_real_device=real_device,
         environment_drift=drift,
     )
+
+# ── 可归因证据门 (#103 第 1 片, 外部依据 HarnessLens `2608.27311v1` 行 99/715/878-880) ──
+#: 一手原话 (行 98-99): "Existing propose-and-verify methods typically score every candidate on a
+#: fixed task set, ... **allowing aggregate scores to obscure specific regressions**"。
+#: 那条门 (行 878-880): "A verification stage advances only if it contains **attributable positive
+#: evidence and no attributable regression**. Positive evidence is either an attributed recovery or
+#: an attributed stable success with an increased pass count; **preservation alone is insufficient**."
+#:
+#: 我方今天两份报表数字都**只比聚合数**: `compare_runs` 看任务级成功率的 Fisher 与 Δ 的符号,
+#: 从不说「哪一条 case 变坏了」。2026-09-30 在存量两份报表上量到的形状比论文那句更糟一档:
+#: `0a4f0fd` 的 5/6 与 `4e80b13` 的 3/6 之间, 统计门印的是「underpowered —— 不知道」,
+#: 而逐 case 那一层其实是 **1 条修好 + 3 条变坏** (见 doc 60 §六)。缺的不是更严的阈, 是
+#: **点名**这件事。
+#:
+#: 这条门只**观测**: 它不参与任何生产判决 (闭环的停止判据在 `conductor`, 不动)。它做的两件事
+#: 与行 1050 那句 "Nothing is re-executed" 同形状 —— 把两条规则**算在同一份存量证据上**:
+#: metric-only (Δ>0 就接受) 与可归因门 (要有正证据且零回归), 然后报它们的分歧与变坏的 case 名。
+ATTRIBUTABLE_RECOVERED = "recovered"          #: 这侧从不过到过 —— 正证据的一种
+ATTRIBUTABLE_REGRESSED = "regressed"          #: 从过到不过 —— 门要零, 不看总数
+ATTRIBUTABLE_STABLE_PASS = "stable_pass"      #: 两侧都过 = preservation, **单独不构成正证据**
+ATTRIBUTABLE_STABLE_FAIL = "stable_fail"      #: 两侧都不过
+ATTRIBUTABLE_OUTCOMES: tuple = (ATTRIBUTABLE_RECOVERED, ATTRIBUTABLE_REGRESSED,
+                                ATTRIBUTABLE_STABLE_PASS, ATTRIBUTABLE_STABLE_FAIL)
+
+
+def attributable_evidence(cases) -> dict:
+    """把「两批之间逐 case 的得与失」按两条规则各算一遍, 并给出它们的分歧。
+
+    输入 `cases`: `(名字, 上一批的结果, 这一批的结果)` 的序列, 每个结果 ∈ {True, False, None}。
+    `None` = **这一侧没有可用读数** (那次运行崩溃了 / 这批里没有这条 case / 同名出现了两次) ——
+    它既不算回归也不算通过, 只进 `unmatched`。把缺席读成「没变坏」是 #53 那一族的反面
+    (缺证据当通过), 把缺席读成「变坏了」是同一族的正面, 两条都不许。
+
+    两条规则的口径 (行 878-880 逐句对应):
+      · `accepted_metric_only` = 配对样本上 `pass_b > pass_a` —— 「聚合数涨了就算好」。
+      · `accepted_gate` = 有正证据 **且** 回归数为零。正证据只有「至少一条 recovered」这一种:
+        原文还给了第二种 ("an attributed stable success with an increased pass count"), 但在
+        按 case 配对的口径下它**蕴含在**第一种里 (两侧都过的 case 不动任何一侧的计数), 于是
+        那个分支会是永远走不到的代码 —— 这句偏差写在下面实现处, 不假装照抄。
+        **只有 preservation 不构成正证据** (行 880 "preservation alone is insufficient")。
+    `disagreement` 只有在两条都有布尔结论时才是布尔; 一条都没配上时三者都是 `None`,
+    而**不是** `accepted_gate=True` —— 没有配对样本时「零回归」是空的真, 这正是
+    I25 那一族「输入是空气时判据永真」的形状。
+    """
+    counts = {k: 0 for k in ATTRIBUTABLE_OUTCOMES}
+    recovered: list = []
+    regressed: list = []
+    unmatched: list = []
+    pass_a = pass_b = 0
+    for case in cases:
+        name, a, b = case[0], case[1], case[2]
+        if a is None or b is None:
+            unmatched.append(str(name))
+            continue
+        if a:
+            pass_a += 1
+        if b:
+            pass_b += 1
+        if not a and b:
+            counts[ATTRIBUTABLE_RECOVERED] += 1
+            recovered.append(str(name))
+        elif a and not b:
+            counts[ATTRIBUTABLE_REGRESSED] += 1
+            regressed.append(str(name))
+        elif a and b:
+            counts[ATTRIBUTABLE_STABLE_PASS] += 1
+        else:
+            counts[ATTRIBUTABLE_STABLE_FAIL] += 1
+
+    matched = sum(counts.values())
+    out = {
+        "matched": matched, "counts": counts,
+        "pass_a": pass_a, "pass_b": pass_b, "delta": pass_b - pass_a,
+        "recovered_cases": recovered, "regressed_cases": regressed,
+        "unmatched_cases": unmatched,
+        "accepted_metric_only": None, "accepted_gate": None,
+        "disagreement": None, "positive_evidence": None,
+    }
+    if not matched:
+        out["note"] = ("没有一条配上的 case —— 三条结论都是 `None`, 不是「没有回归」也不是"
+                       "「都变坏了」(缺证据既不当通过也不当反证)")
+        return out
+    if recovered:
+        out["positive_evidence"] = "recovery"
+    else:
+        # 原文给了**两种**正证据: "an attributed recovery **or** an attributed stable success
+        # with an increased pass count" (行 879-880)。按我方「只在配上的 case 上数」这个口径,
+        # 第二种**蕴含在**第一种里: 配对之后 `pass_b > pass_a` 必然意味着至少一条从不过到过
+        # (两侧都过的 case 不动任何一侧的计数)。所以这里只可能有一种正证据 —— 这不是漏抄:
+        # 他们的通过数在**固定任务集**上算, 「同一批里换了 case」也会让它涨, 那在我们看来
+        # 恰好不是正证据。留着那个分支会变成一条永远走不到的代码 + 一张杀不掉的变异行。
+        out["positive_evidence"] = None
+    out["accepted_metric_only"] = pass_b > pass_a
+    out["accepted_gate"] = bool(out["positive_evidence"]) and not regressed
+    out["disagreement"] = out["accepted_metric_only"] != out["accepted_gate"]
+    return out
