@@ -33,6 +33,16 @@ debug/
 # 期望就成了被版本控制的资产：改动它必须留下一次可评审的 diff。
 triton/
 
+# ─── 工具产物 (不属本项目内容) ───
+# DSH `present` 的草稿目录 `draft_<hash>_folder/`: 里面是 draft.xml / preview.jpg /
+# .presentation-decision.json —— 演示渲染的**中间态**, 其中 .presentation-decision.json
+# 还是 harness 自己的记账, 不是仓库资产。它渲染的正文已经落在 docs/design/ 下被版本控制,
+# 所以正确处置是清理而不是提交 (提交等于把渲染中间态当成设计文档的第二个真源)。
+# 必须用 / 锚定根目录: 它们只落在仓库根, 裸 `draft_*` 会连带匹配掉任何深度的同名目录。
+# 2026-09-30: 根目录曾有 draft_0ab3f18d_folder / draft_40af7e3d_folder 两个, 让
+# `git status` 长期不干净。
+/draft_*/
+
 # ─── 本地私有配置 (敏感信息) ───
 config.yaml
 # 请使用 config.example.yaml 作为模板, 拷贝为 config.yaml 后填入真实值
