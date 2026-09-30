@@ -482,8 +482,11 @@ class KernelDatabase:
         - hardware: 硬过滤 (mock_gpu 记录视为通用)
         - dsl: 精确匹配加权, python 作为通用回退
         - algorithm/tags: 词元重叠 + 子串相关性评分 (提供了查询但零相关则剔除)
-        - performance: 轻微加分, 同分时优先历史高性能案例
-        返回按评分降序的前 limit 条
+        - 组内实测 best (score>0) **硬排最前** (P1-2): 相关性满分 2.0/词元而
+          实测加分上限只有 1.0, 同一条轴上词元多的旧样本永远赢过实测 best。
+          performance/gflops 不参与硬排序 (对 memory-bound 失真, doc 49 §八-14),
+          只作第 2 级的轻微加分。
+        返回: 第 0 级组内实测记录按 score 降序, 其余按总分降序, 共 limit 条
         """
         candidates = list(self._records.values())
 
@@ -491,7 +494,7 @@ class KernelDatabase:
             candidates = [r for r in candidates if r.hardware == hardware or r.hardware == "mock_gpu"]
 
         query_tokens = _tokenize(algorithm + " " + " ".join(tags or []))
-        scored: list[tuple[float, KernelRecord]] = []
+        scored: list[tuple[float, KernelRecord, bool]] = []
         for r in candidates:
             score = 0.0
             if dsl:
@@ -501,22 +504,37 @@ class KernelDatabase:
                     score += 0.5
                 else:
                     continue
+            # 组内 = algorithm 子串命中 (hardware/dsl 在上面已是硬过滤)。
+            # 组边界是两级排序的前提: 只许**本组**的实测 best 升到最前,
+            # 别的算子就算实测过 (score 再高) 也不能插进本组前面。
+            in_group = bool(algorithm) and algorithm.lower() in r.algorithm.lower()
             relevance = 0.0
             record_tokens = _tokenize(
                 " ".join([r.algorithm, " ".join(r.tags), str(r.sketch or {})])
             )
             relevance += 2.0 * len(query_tokens & record_tokens)
-            if algorithm and algorithm.lower() in r.algorithm.lower():
+            if in_group:
                 relevance += 2.0
             if tags and any(t in r.tags for t in tags):
                 relevance += 2.0
             if (algorithm or tags) and relevance == 0:
                 continue
             score += relevance + _perf_weight(r)
-            scored.append((score, r))
+            scored.append((score, r, in_group))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        hits = [r for _, r in scored[:limit]]
+        # P1-2 短期 (generation-side-review): 两级排序, 让历史 best 不被相关性淹没。
+        #   第 0 级: 本组且 score>0 (可信同机加速比), 按 score 降序, 同分按总分;
+        #   第 1 级: 其余记录保持旧的总分降序 (相关性 + _perf_weight)。
+        # 硬排序权**只给 score 不给 gflops 回退**: 回退口径对 memory-bound 失真
+        # (doc 49 §八-14), 给它硬排序权会把失真放大成头名。
+        def _rank(item):
+            total, r, in_group = item
+            if in_group and r.score > 0:
+                return (0, -r.score, -total)
+            return (1, -total)
+
+        scored.sort(key=_rank)
+        hits = [r for _, r, _ in scored[:limit]]
         # 检索计数是「这条经验有没有被用」的唯一证据链, 也是将来定退役规则的输入
         # (docs/research/43 第四节: 本轮**不设**阈值, 只攒数)。
         self.note_retrievals([r.kernel_id for r in hits])

@@ -21,11 +21,11 @@ from operator_agent.measurement import persist_decision
 
 
 def _rec(kid="k1", algorithm="matmul", hardware="nvidia_gpu", dsl="triton",
-         *, performance=0.0, score=0.0, validity="valid"):
+         *, performance=0.0, score=0.0, validity="valid", tags=None):
     return KernelRecord(kernel_id=kid, algorithm=algorithm, hardware=hardware,
                         dsl=dsl, code=f"# {kid}", performance=performance,
                         score=score, measurement_validity=validity,
-                        tags=[algorithm, "verified"])
+                        tags=tags if tags is not None else [algorithm, "verified"])
 
 
 class TestPersistence(unittest.TestCase):
@@ -138,6 +138,51 @@ class TestPersistence(unittest.TestCase):
         db.add(_rec("measured", algorithm="rankprobe2", performance=1.0, score=1.05))
         hits = db.search(algorithm="rankprobe2", hardware="nvidia_gpu", dsl="triton")
         self.assertEqual(["measured", "prior"], [r.kernel_id for r in hits])
+
+    def test_group_best_is_not_flooded_out_by_relevance(self):
+        """P1-2 (generation-side-review): 组内实测 best 硬排最前, 不被词元高分淹没
+
+        旧排序把相关性 (2.0/词元) 与实测加分 (上限 1.0) 放同一条轴上 —— 这条
+        用例里 noisy 的词元重叠让它总分 9.0, 压过实测 1.4× 的 best (总分 5.5):
+        「历史最好」永远输给「描述写得热闹」。新排序下 best 是第 0 级。
+        """
+        db = KernelDatabase(jsonl_path=None)
+        db.add(_rec("best", algorithm="rankprobe3", score=1.4, tags=["rankprobe3"]))
+        db.add(_rec("noisy", algorithm="rankprobe3 alpha beta", score=0.0,
+                    validity="", tags=["rankprobe3", "alpha", "beta"]))
+        hits = db.search(algorithm="rankprobe3", hardware="nvidia_gpu", dsl="triton",
+                         tags=["alpha", "beta"])
+        self.assertEqual(["best", "noisy"], [r.kernel_id for r in hits],
+                         "组内实测 best 被词元高分淹没 —— 两级排序没生效")
+
+    def test_out_of_group_measurement_never_jumps_the_group(self):
+        """组边界: 别的算子就算实测过 (score 再高), 也不许插进本组前面
+
+        反向守卫: 若有人把第 0 级的条件从「本组且实测」放宽成「只要实测」,
+        off (score=3.0 但算法不同) 会升到第 0 级压过 on —— 这条就红。
+        """
+        db = KernelDatabase(jsonl_path=None)
+        db.add(_rec("on", algorithm="rankprobe4", score=0.0, validity="",
+                    tags=["rankprobe4", "gamma"]))
+        db.add(_rec("off", algorithm="elsewhere gamma", score=3.0,
+                    tags=["elsewhere", "gamma"]))
+        hits = db.search(algorithm="rankprobe4", hardware="nvidia_gpu", dsl="triton",
+                         tags=["gamma"])
+        ids = [r.kernel_id for r in hits]
+        self.assertIn("on", ids)
+        self.assertIn("off", ids)
+        self.assertLess(ids.index("on"), ids.index("off"),
+                        "组外实测记录跳过了组边界 —— 第 0 级条件被放宽了")
+
+    def test_equal_scores_tiebreak_by_total(self):
+        """同组同级同分: 总分 (相关性 + _perf_weight) 高的在前, 与旧序一致"""
+        db = KernelDatabase(jsonl_path=None)
+        db.add(_rec("b1", algorithm="rankprobe5", score=1.2,
+                    tags=["rankprobe5", "extra"]))
+        db.add(_rec("b2", algorithm="rankprobe5", score=1.2, tags=["rankprobe5"]))
+        hits = db.search(algorithm="rankprobe5", hardware="nvidia_gpu", dsl="triton",
+                         tags=["extra"])
+        self.assertEqual(["b1", "b2"], [r.kernel_id for r in hits])
 
 
 class TestGate(unittest.TestCase):
