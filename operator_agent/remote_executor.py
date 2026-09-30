@@ -363,6 +363,23 @@ class SSHExecutor(Backend):
                 self._gpu_pin = best[1]
                 print(f"  [SSHExecutor] 固定使用 GPU {best[1]} "
                       f"(util={best[2]}%, free={best[3] / 1024:.1f}GB)")
+                # P2-3 (generation-side-review): 本地设的 OPERATOR_AGENT_GPU 只会被
+                # 远端 runner 读到, SSHExecutor 从不读它 —— 选卡意图被静默覆盖是实验污染
+                # (doc 49 §851: 本地设 2、实际跑 7, 全程无报错)。不一致必须 WARN 一行,
+                # 不能让用户以为自己在测指定的那张卡。只提醒, 不改选卡行为:
+                # 「按利用率选卡」是共享机器上的既定设计, 不由这个环境变量推翻。
+                requested = os.environ.get("OPERATOR_AGENT_GPU", "").strip()
+                if requested:
+                    try:
+                        want = int(requested)
+                    except ValueError:
+                        print(f"  [SSHExecutor] ⚠️ 本地 OPERATOR_AGENT_GPU={requested!r} "
+                              f"不是合法卡号, 已忽略 (选卡仍按利用率自动)")
+                    else:
+                        if want != self._gpu_pin:
+                            print(f"  [SSHExecutor] ⚠️ 本地设了 OPERATOR_AGENT_GPU={want}, "
+                                  f"但自动选卡实际用 GPU {self._gpu_pin} —— "
+                                  f"本地环境变量不影响控制端选卡, 实测卡号以上面那行为准")
         except Exception as e:
             print(f"  [SSHExecutor] 选卡失败, 交由远端自动选择: {e}")
         return self._gpu_pin if self._gpu_pin >= 0 else None
