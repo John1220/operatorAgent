@@ -35,13 +35,16 @@ from .llm_client import LLMClient
 from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
-from .measurement import (LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
+from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
+                          LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
                           PERF_GATE_PARAM_KEYS, ROOFLINE_CONVERGED_PCT,
                           RULER_LABEL_CORRECTNESS,
-                          RULER_LABEL_PERFORMANCE, TRANSPORT_KEY, Validity,
-                          Verdict, binding_attainment, cross_round_ruler,
+                          RULER_LABEL_PERFORMANCE, TRANSPORT_KEY, Verdict,
+                          Validity, band_note, binding_attainment,
+                          cross_round_band, cross_round_ruler,
                           correctness_verified_levels, l2_ruler_reading,
-                          l3_ruler_reading, roofline_converged, ruler_note, verdict)
+                          l3_ruler_reading, roofline_converged,
+                          ruler_note, verdict)
 from .agent_logger import capture_execution
 from .optimization_planner import OptimizationPlanner
 
@@ -742,6 +745,11 @@ class Conductor:
                 # 白名单, 代价是那一批真机数据的血缘永久没了。缺的那块不填默认值。
                 **_round_axes(l3_result, test_inputs),
             })
+            # 这一轮那条记录的引用: 带宽要等**判决发生的那一刻**才知道用没用、用了多少
+            # (见下面 `verdict(...)` 那一支), 而这一轮的 dict 已经落在这里 —— 回头按 `-1`
+            # 取会依赖「中间没有第二次 append」, 那个前提将来被人破坏时不会响, 只会把
+            # 带宽记到别人的轮上。
+            _round_rec = artifact.iteration_history[-1]
 
             # 每轮都算一遍「这一场里各轮的尺是不是同一把」, 但**只在它有话说的时候**打印
             # (与上面 [Novelty] 同一个姿势)。一致时不占日志: 「各轮同尺」是这片要守的
@@ -837,8 +845,20 @@ class Conductor:
                     # D4 四态判决。原来这里是无带宽的 `current > best`: 于是「完全
                     # 打平」和「差 0.0001%」都会去禁用配方 —— 而禁用是**永久**决策,
                     # 需要的证据比「这次没测出更好」强。现在只有 SLOW 才禁用。
-                    v, why = verdict(current_gflops, best_gflops,
-                                     _validity_of(l3_result.metrics or {}))
+                    _validity = _validity_of(l3_result.metrics or {})
+                    v, why, used_band = verdict(current_gflops, best_gflops, _validity)
+                    # 这一轮的判决**真正用过**的那条带宽进血缘 (#87 第 4 片, **只观测**)。
+                    # 取的是 `verdict` 自己返回的那个值, 不是这里再查一次表: 分两次查同一张
+                    # 表, 中间表被换过就会记下一个「判决没用过的数」, 而这一格要回答的题正是
+                    # 「判决用过什么」。AMBIGUOUS 那两支没 consult 表 ⇒ 返回 `None`, 键**缺席**
+                    # 才是「这一轮没到判决」, 两者在 `cross_round_band` 里分开数。
+                    # 为什么这条要落盘: 带宽换了同时是两件事的读数 (档位降级按表换宽 vs
+                    # 表本身被改过), 折成一句「尺变了」就把前者报成后者 —— 归因在
+                    # `measurement.cross_round_band` 里分开做。
+                    _round_rec[LINEAGE_BAND_KEY] = used_band
+                    _band_agg = cross_round_band(artifact.iteration_history)
+                    if _band_agg["band_state"] in (BAND_SPEC_DRIFT, BAND_UNEXPLAINED):
+                        print(f"\n[Band] {band_note(_band_agg)}")
                     if v is Verdict.FAST:
                         best_gflops = current_gflops
                         rounds_without_improvement = 0

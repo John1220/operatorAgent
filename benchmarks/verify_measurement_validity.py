@@ -184,6 +184,6 @@ for label, code, kernel_type, inputs, traffic_mb, roof_us in CASES:
     cur = float(m.get("gflops", 0) or 0)
     for tag, prev in (("与上一轮持平", cur), ("上一轮差 3 倍", cur / 3.0),
                       ("上一轮好 1.5 倍", cur * 1.5)):
-        vd, why = verdict(cur, prev, validity)
+        vd, why, _used_band = verdict(cur, prev, validity)
         print(f"    verdict(cur={cur:.1f} vs {tag}) = {vd.value}  "
               f"({why}; 本档带宽 ±{band:.2%})")

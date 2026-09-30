@@ -1005,7 +1005,7 @@ class TestFourStateVerdict(unittest.TestCase):
                  (9.95, Verdict.SLOW)]
         for cur, want in cases:
             with self.subTest(current=cur):
-                v, why = verdict(cur, 10.0, Validity.VALID)
+                v, why, _used_band = verdict(cur, 10.0, Validity.VALID)
                 self.assertIs(want, v, why)
 
     def test_same_delta_is_same_when_degraded_but_fast_when_valid(self):

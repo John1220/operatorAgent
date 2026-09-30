@@ -614,23 +614,173 @@ def roofline_converged(metrics: dict) -> bool:
     return a is not None and a >= ROOFLINE_CONVERGED_PCT
 
 
+def noise_band_for(validity: Validity) -> Optional[float]:
+    """这一档的改善判决带宽; `UNINFORMATIVE` 返回 `None` 而不是表里那个 0.02。
+
+    那不是我懒得查表: `verdict()` 在 consult 表**之前**就对 uninformative 返回 AMBIGUOUS
+    ("判决带宽比信号本身宽"), 所以那一轮**没有任何判决用过这条带宽**。把它记成 0.02 会让
+    血缘里出现一个从未参与过决定的数 —— 与 #81「通过侧聚合用默认值造证据」同一族,
+    方向反过来 (那是没测的键被兜上值, 这是没用上的带宽被当成用过了)。
+    """
+    if validity is Validity.UNINFORMATIVE:
+        return None
+    return NOISE_BAND[validity]
+
+
 def verdict(current: Optional[float], previous: Optional[float],
-            validity: Validity) -> tuple[Verdict, str]:
+            validity: Validity) -> tuple[Verdict, str, Optional[float]]:
     """两轮性能值的四态判决。current/previous 是同一轴上的标量 (越大越好)。
 
     打平不算退步: `SAME` 与 `SLOW` 的区别就是「能不能禁用配方」的分界。
+
+    返回值第三个元素是**这次判决真正用过的那条带宽** (`None` = 这一支没有 consult 表)。
+    它必须从判决这里出, 不能由调用方自己查一次表 (`LINEAGE_BAND_KEY` 那格记的就是它):
+    「有没有用过带宽」是判决自己的分支结构 (缺值与 uninformative 两支都没用过), 调用方要
+    复刻这个就是第二套判据 (I22 那一族); 而分两次查同一张表之间表可以被换掉 —— 真机现场:
+    续跑跨过一次代码改动, 于是「记下的带宽」与「判决用过的带宽」不是同一个数。
     """
     if current is None or previous is None or current <= 0 or previous <= 0:
-        return Verdict.AMBIGUOUS, "无可比的性能值 (缺 current 或 previous)"
+        return Verdict.AMBIGUOUS, "无可比的性能值 (缺 current 或 previous)", None
     if validity is Validity.UNINFORMATIVE:
-        return Verdict.AMBIGUOUS, "测量档位 uninformative: 判决带宽比信号本身宽"
-    band = NOISE_BAND[validity]
+        return Verdict.AMBIGUOUS, "测量档位 uninformative: 判决带宽比信号本身宽", None
+    band = noise_band_for(validity)
     delta = (current - previous) / previous
     if delta > band:
-        return Verdict.FAST, f"+{delta:.4%} > 带宽 {band:.2%}"
+        return Verdict.FAST, f"+{delta:.4%} > 带宽 {band:.2%}", band
     if delta < -band:
-        return Verdict.SLOW, f"{delta:.4%} < -带宽 {band:.2%}"
-    return Verdict.SAME, f"{delta:+.4%} 落在带宽 ±{band:.2%} 内"
+        return Verdict.SLOW, f"{delta:.4%} < -带宽 {band:.2%}", band
+    return Verdict.SAME, f"{delta:+.4%} 落在带宽 ±{band:.2%} 内", band
+
+
+# ── 跨轮的改善判决带宽 (#87 第 4 片, **只观测**) ──
+#: 落在 `iteration_history` 每一轮上的键: 这一轮的四态判决**真正用过**的那条带宽。
+#: `None` = 这一轮走到了判决但没用带宽 (AMBIGUOUS 那两支); 键**缺席** = 这一轮压根没到
+#: L3 判决 (L1/L2 就死了) 或产物写在这项之前 —— 两者在 `cross_round_band` 里分开数。
+LINEAGE_BAND_KEY = "l3_improvement_band"
+
+BAND_SAME = "same"                        #: 用过带宽的轮数 ≥2 且值全同
+BAND_TIER_EXPLAINED = "tier_explained"    #: 带宽变了, 而档位也变了且对得上表 —— 那是**测量变差**
+BAND_SPEC_DRIFT = "spec_drift"            #: 带宽变了, 档位却没变 —— 那才是**规格漂移**
+BAND_UNEXPLAINED = "unexplained"          #: 带宽变了, 而档位那一格缺失/对不上表, 无从归因
+BAND_UNMEASURABLE = "unmeasurable"        #: 用过带宽的轮不足 2, 这个问句没有输入
+BAND_STATES: tuple = (BAND_SAME, BAND_TIER_EXPLAINED, BAND_SPEC_DRIFT,
+                      BAND_UNEXPLAINED, BAND_UNMEASURABLE)
+
+#: #87 第 4 片当初没做的那件事, 在这里有了答案: 「带宽跨轮换过」同时是**两件事**的读数 ——
+#: 档位降级本身就按表把带宽换宽 (那是测量质量那一维, `measurement_validity` 已经记着),
+#: 而**表本身**被换过才是规格漂移 (现场: 续跑跨过一次代码改动, 前一半轮用的是旧表)。
+#: 把两件事折成一句「尺变了」会把降级这件事报成漂移, 而它是我们已经知道并另有一格记录的事;
+#: 反过来把「档位一致」当「尺一致」则永远看不见换表。所以这里按 `(band, tier)` 成对判,
+#: 而且 tier 缺失时给第三态 `unexplained` —— 既不归因成表漂移, 也不归因成降级 (#53 那一族)。
+def _band_of_tier(tier):
+    """档位字符串 → 该档在表里的带宽; 认不出来 (旧产物的别的写法 / 非枚举值) 返回 `None`。
+
+    血缘里那一格存的是 `Validity.value`, 但产物可能来自写过另一套值的版本 —— 让
+    `Validity("…")` 直接抛会把一次离线复盘变成崩溃, 而这条判据要的只是「能不能归因」。
+    """
+    try:
+        return NOISE_BAND[Validity(tier)]
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def cross_round_band(history) -> dict:
+    """逐轮读 `(带宽, 档位)` 这一对, 把「测量变差」与「规格漂移」分开归因。**不改判决**。
+
+    三态在两层上: 结论本身可能是 `None` 意义上的没有输入 (`BAND_UNMEASURABLE`), 而每一对
+    读数可能是「带宽没用过」(`None`) 或「这一轮没走到判决」(键缺席) —— 后者与前者在
+    `rounds_no_band` / `rounds_no_key` 里分开数, 不许合并。
+    """
+    rounds = list(history or ())
+    used = []            # (round_no, band, tier) —— 只有真用过带宽的轮进来
+    no_band = 0          # 走到了判决但没用带宽 (AMBIGUOUS)
+    no_key = 0           # 这一轮压根没到判决 / 旧产物没有这一项
+    missing_tier = 0
+    for i, rec in enumerate(rounds, 1):
+        if LINEAGE_BAND_KEY not in rec:
+            no_key += 1
+            continue
+        band = rec[LINEAGE_BAND_KEY]
+        tier = rec.get("measurement_validity")
+        if band is None:
+            no_band += 1
+            continue
+        used.append((rec.get("round", i), band, tier))
+        if tier is None:
+            missing_tier += 1
+
+    out = {"rounds": len(rounds), "rounds_with_band": len(used),
+           "rounds_no_band": no_band, "rounds_no_key": no_key,
+           "missing_tier": missing_tier,
+           "bands": [{"round": r, "band": b, "tier": t} for r, b, t in used],
+           "band_state": BAND_UNMEASURABLE, "band_changed": {}, "drift_rounds": [],
+           "tier_rounds": []}
+    if len(used) < 2:
+        out["note"] = ("用过带宽的轮不足 2 —— 这个问句没有输入, 不是「跨轮同一条带宽」")
+        return out
+
+    distinct = {b for _, b, _ in used}
+    if len(distinct) == 1:
+        out["band_state"] = BAND_SAME
+        return out
+    out["band_changed"] = {"band": {r: b for r, b, _ in used}}
+
+    # 带宽换了: 逐对看「档位这一维能不能解释它」。能解释 ⇒ 那是测量变差 (已有另一格记着);
+    # 档位在而解释不了 ⇒ 规格漂移; 档位不在 (缺失) ⇒ 无从归因, 两个都不许说。
+    explainable = True
+    drifted_by_tier = False
+    for (r1, b1, t1), (r2, b2, t2) in zip(used, used[1:]):
+        if b1 == b2:
+            continue
+        if t1 is None or t2 is None:
+            explainable = False
+            continue
+        if t1 == t2:
+            out["band_state"] = BAND_SPEC_DRIFT
+            out["drift_rounds"].append((r1, r2))
+            continue
+        e1, e2 = _band_of_tier(t1), _band_of_tier(t2)
+        if e1 is None or e2 is None or e1 != b1 or e2 != b2:
+            explainable = False   # 连表都对不上 (或那一格根本不是个档位) —— 那就不只是降级
+            continue
+        drifted_by_tier = True
+    if out["band_state"] == BAND_SPEC_DRIFT:
+        return out
+    out["band_state"] = (BAND_TIER_EXPLAINED if (drifted_by_tier and explainable)
+                         else BAND_UNEXPLAINED)
+    if drifted_by_tier:
+        out["tier_rounds"] = [r for r, _, _ in used]
+    return out
+
+
+def band_note(agg: dict) -> str:
+    """`cross_round_band` 的那句人话 (两个读者共用一个实现, 与 `ruler_note` 同姿势)"""
+    state = agg.get("band_state")
+    if state == BAND_SAME:
+        return (f"{agg['rounds_with_band']} 轮用过带宽的那几轮, 带宽是同一把 "
+                f"{_band_head(agg)} —— 各轮同带宽是默认前提, 不占日志 (只观测不判决)")
+    if state == BAND_UNMEASURABLE:
+        return (f"测不到: 用过带宽的轮只有 {agg.get('rounds_with_band', 0)} 轮 "
+                f"(不足 2), 而 {agg.get('rounds_no_band', 0)} 轮走到了判决却没用带宽、"
+                f"{agg.get('rounds_no_key', 0)} 轮压根没这一项 —— **这不是**「跨轮同一条带宽」")
+    if state == BAND_TIER_EXPLAINED:
+        return ("带宽换了, 但那是**测量档位降级**按表换的宽 (不是规格漂移): "
+                + _band_head(agg) + f" · 轮 {agg.get('tier_rounds')}; "
+                "另一格 `measurement_validity` 已经记着档位, 这里只补归因")
+    if state == BAND_UNEXPLAINED:
+        return ("带宽换了而**归因不了**: 有轮次缺 `measurement_validity` 或对不上表 ("
+                f"缺档位的轮 {agg.get('missing_tier')}) —— 既不说「只是降级」也不说「规格漂移」"
+                f" · {_band_head(agg)}")
+    if state == BAND_SPEC_DRIFT:
+        return ("带宽在**同一档位**下换了值 ⇒ 那是规格漂移, 不是测量变差。现场通常是"
+                "续跑跨过了一次代码改动 (`NOISE_BAND` 被改过), 或两侧读的不是同一份表 · "
+                + _band_head(agg) + f" · 变在轮 {agg.get('drift_rounds')}")
+    return f"未知的带宽状态 {state!r} —— 判据与读者不同源 (I22 那一族)"
+
+
+def _band_head(agg: dict) -> str:
+    return " / ".join(f"轮 {x['round']} → {x['band']:.2%} ({x['tier']})"
+                      for x in (agg.get("bands") or [])[:4])
 
 
 # launch_dominance = 地板 / 候选 median 时间。

@@ -53,11 +53,14 @@ from operator_agent.backend_caps import Cap  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402
 from operator_agent.llm_client import (  # noqa: E402
     LLMClient, format_sampling_configs)
-from operator_agent.measurement import (LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,  # noqa: E402
+from operator_agent.measurement import (BAND_SAME, BAND_SPEC_DRIFT,  # noqa: E402
+                                        BAND_TIER_EXPLAINED, BAND_UNEXPLAINED,
+                                        BAND_UNMEASURABLE, LINEAGE_BAND_KEY,
+                                        LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
                                         PERF_GATE_PARAM_KEYS, TRANSPORT_ANSWERED,
                                         TRANSPORT_KEY, TRANSPORT_UNKNOWN, Validity,
-                                        attributable_evidence,
-                                        correctness_verified_levels,
+                                        band_note, attributable_evidence,
+                                        correctness_verified_levels, cross_round_band,
                                         cross_round_ruler, persist_decision)
 from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
 from operator_agent.schemas import (  # noqa: E402
@@ -217,6 +220,40 @@ def _ruler_stats(ok_runs, prefix: str, *, keys=None, lineage_key: str) -> dict:
         f"{prefix}_conflict_rounds": sum(a["ruler_rounds_self_conflict"]
                                          for a in per_run.values()),
         f"{prefix}_measurable_lineage_key": lineage_key,
+    }
+
+
+def _band_stats(ok_runs) -> dict:
+    """「改善判据那条带宽跨轮是不是同一把」的报表统计 (#87 第 4 片, 只观测)。
+
+    判据与归因全在 `measurement.cross_round_band` 一个函数里, 这里只数运行。**这一栏存在的
+    理由**是那条门的归因有两种、而把它们折成一句「尺变了」会指错地方:
+      · `tier_explained` —— 带宽随**测量档位**降级而变宽 (另一格 `measurement_validity`
+        已经记着这件事, 这里只是别再把它报成规格漂移)
+      · `spec_drift` —— **同一档位**下带宽换了值 ⇒ 表本身被换过 (现场: 续跑跨过了一次代码改动)
+      · `unexplained` —— 缺档位或对不上表 ⇒ 两种都不说 (缺证据既不当通过也不当反证)
+    分母 = 凑得出比较的运行 (≥2 轮用过带宽), `unmeasurable` 的那些运行两边都不进 ——
+    与 `_ruler_stats` 同一姿势。
+    """
+    per_run = {str(r.get("case")): cross_round_band(r.get("rounds") or []) for r in ok_runs}
+    comparable = sorted(c for c, a in per_run.items() if a["band_state"] != BAND_UNMEASURABLE)
+
+    def _cases(state):
+        # 每一句都走 `band_note` 那一个实现: 报表与 conductor 现场打印的那句必须同措辞,
+        # 否则「同一件事在两个地方长得不一样」会让读者以为是两件事 (I22 那一族)。
+        return sorted(f"{c} → {band_note(a)}" for c, a in per_run.items()
+                      if a["band_state"] == state)
+
+    return {
+        "band_runs_with_band": sum(1 for a in per_run.values() if a["rounds_with_band"]),
+        "band_comparable_runs": len(comparable),
+        "band_unmeasurable_runs": len(per_run) - len(comparable),
+        "band_same_runs": len(_cases(BAND_SAME)),
+        "band_tier_explained_cases": _cases(BAND_TIER_EXPLAINED),
+        "band_spec_drift_cases": _cases(BAND_SPEC_DRIFT),
+        "band_unexplained_cases": _cases(BAND_UNEXPLAINED),
+        "band_rounds_no_band": sum(a["rounds_no_band"] for a in per_run.values()),
+        "band_rounds_no_key": sum(a["rounds_no_key"] for a in per_run.values()),
     }
 
 
@@ -800,6 +837,10 @@ def aggregate(runs):
     perf_ruler_stats = _ruler_stats(ok_runs, "perf_ruler",
                                     keys=PERF_GATE_PARAM_KEYS,
                                     lineage_key=LINEAGE_PERF_RULER_KEY)
+    # 改善判据那条带宽 (#87 第 4 片)。它的**第二个**读者 (第一个是 conductor 那句 `[Band]`,
+    # 而那句只在归因得出「规格漂移」或「无从归因」时才印) —— 判据与归因都在
+    # `measurement.cross_round_band` 一个实现里, 这里只数运行。
+    band_stats = _band_stats(ok_runs)
     via = {}
     for r in passed_runs:
         k = r.get("passed_via") or "(未记)"
@@ -836,6 +877,7 @@ def aggregate(runs):
         # 相同** —— 报表消费方 (与钉它们的用例) 读的是这些名字, 改名字不是自由重构 (I20)。
         **ruler_stats,
         **perf_ruler_stats,
+        **band_stats,
         "admitted": (len(admitted), len(passed_runs)),
         "admitted_pct": _pct(len(admitted), len(passed_runs)),
         "admit_rejections": sorted({r["admit_reason"] for r in passed_runs
@@ -993,6 +1035,34 @@ def format_report(agg):
                      "远程执行 (L1 就死了 / 本地执行 / 重复候选不烧远端)")
     lines.append("  ⚠️ 只观测不改判决: 这些轮今天照样判 L2 失败。它的用处是让「这次远端可能已经"
                  "跑过一遍」在血缘里第一次有名字 (doc 60 §四 / #102 第 1 片)")
+
+    # 改善判据那条带宽 (#87 第 4 片)。**这一栏的整件事是「归因分两种」**: 把「带宽跨轮换过」
+    # 直接报成规格漂移, 会把测量档位降级这件事也报成漂移 (而另一格 `measurement_validity`
+    # 早就记着它); 反过来只认「档位一致就算尺一致」, 那就永远看不见表被换过。所以两种分开数、
+    # 分开点名, 归因不出来的第三态也不许并进任何一边。
+    _bcom = agg["band_comparable_runs"]
+    if agg["band_runs_with_band"] == 0:
+        lines.append(f"\n【改善判据那条带宽】测不到: 没有任何一轮用过判决带宽 "
+                     f"(血缘里没有 {LINEAGE_BAND_KEY} 这一项 —— 多半是这批运行跑在写下它之前, "
+                     "**不是**「各轮同一条带宽」)")
+    else:
+        lines.append(f"\n【改善判据那条带宽】可比的运行 {_bcom} 个 · "
+                     f"同一条带宽 {agg['band_same_runs']} · 档位降级换宽 "
+                     f"{len(agg['band_tier_explained_cases'])} · 同档位下换了值 (规格漂移) "
+                     f"{len(agg['band_spec_drift_cases'])} · 归因不了 "
+                     f"{len(agg['band_unexplained_cases'])}"
+                     f" · 凑不出比较的 {agg['band_unmeasurable_runs']} 个")
+        for _key, _lab in (("band_tier_explained_cases", "降级换宽"),
+                           ("band_spec_drift_cases", "规格漂移"),
+                           ("band_unexplained_cases", "无从归因")):
+            for entry in agg[_key]:
+                lines.append(f"  {_lab}: {entry}")
+        lines.append(f"  另有 {agg['band_rounds_no_band']} 轮走到了判决但没用带宽 "
+                     "(AMBIGUOUS 那两支: 缺可比性能值 / 档位 uninformative), "
+                     f"{agg['band_rounds_no_key']} 轮压根没这一项 —— 两种都不是「同一条带宽」")
+        lines.append("  ⚠️ 只观测不改判决: 四态判决照旧用当轮的档位查表, 这一栏只回答"
+                     "「那把尺跨轮是不是同一把」(AReaL-TIK 行 150 那句 𝒮 immutable 的"
+                     " performance 那一半; #87 第 4 片)")
 
     for label, key in (("全部轮次", "speedup_all"), ("仅 decision-grade", "speedup_decision_grade")):
         q = agg[key]
