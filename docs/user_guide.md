@@ -54,7 +54,7 @@ ArtifactStore (产物快照) → output/<kernel_type>/<hardware>/<时间戳>_<id
 入库门 persist_decision() → 只有「可信 + 出处对 + 未污染 + 真的加速」才写进跨运行经验库
 ```
 
-三条读图要点：
+四条读图要点：
 
 1. **通过 ≠ 生效**。每轮的性能读数先被分档（`valid / degraded / uninformative`），
    档位决定它有没有资格去禁用配方、累计停滞、或写进经验库 —— 详见第 6 章。
@@ -62,6 +62,10 @@ ArtifactStore (产物快照) → output/<kernel_type>/<hardware>/<时间戳>_<id
    （失败签名，Fixer 会检索）都是本机 JSONL 文件，默认落在 `output/` 下且不进仓库。
 3. **候选代码的每次执行都在反作弊屏蔽区内**（静态 AST 审计 + 运行时 `shield_torch` 两层），
    见 6.8。
+4. **远端失败的原因不带连接信息**。传输层异常（超时、scp 失败）的原文里其实**就是整条命令**，
+   含 `-p <端口>`、`-i <密钥路径>` 与 `<用户>@<主机>`；这些文本会进 `result.json`、Fixer 的 prompt
+   和失败签名，所以落盘前先过一道掩码（`measurement.safe_error_text`）：保留「是哪一类失败、
+   哪一步、超时多久」，摘掉地址类信息。**候选代码自己的报错原样保留** —— 那是被修对象的信息。
 
 英文/源码视角的同一张图见仓库根目录 [`CLAUDE.md`](../CLAUDE.md) 的 Architecture 一节。
 
