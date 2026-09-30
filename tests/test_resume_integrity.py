@@ -124,8 +124,16 @@ class TestTornCheckpointIsNeverInvisible(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             art, _, _ = _run(d, _task("torn1"), rounds=1)
             snap_path = Path(art.saved_dir) / SNAP
-            full = snap_path.read_bytes()
-            snap_path.write_bytes(full[: len(full) // 2])
+            # 按**字符**中点截断, 不按字节中点: 快照里有中文, 字节中点可能正好落在
+            # 一个多字节字符中间, 于是异常类名变成 UnicodeDecodeError —— 而这条用例
+            # 要钉的是「reason 只存异常类名」, 不该由截断碰巧落在哪决定它测什么。
+            # (P1-1 往血缘里加了两个键, 快照长度变了, 原来那刀碰巧切在字符边界上,
+            #  这次切进了字中间 —— 见同文件下面那条按字节扫描的属性式用例, 它本来就
+            #  接受「任何截断长度上要么完整恢复、要么显式判定读不动」。)
+            text = snap_path.read_text(encoding="utf-8")
+            head = text[: len(text) // 2]
+            snap_path.write_text(head, encoding="utf-8")
+            head_bytes = len(head.encode("utf-8"))
             resumed, out, calls = _run(d, _task("torn1"), rounds=2,
                                        resume_from=art.saved_dir)
             status = resumed.resume_status or {}
@@ -133,7 +141,7 @@ class TestTornCheckpointIsNeverInvisible(unittest.TestCase):
                              f"读不动的快照没被区分出来: {status}")
             self.assertEqual("JSONDecodeError", status.get("reason"),
                              f"只该存异常类名 (str(e) 可能带路径): {status}")
-            self.assertEqual(len(full) // 2, status.get("size_bytes"),
+            self.assertEqual(head_bytes, status.get("size_bytes"),
                              "落盘字节数就是那次崩溃的形状, 不存它等于没证据")
             self.assertIn("从头", out)
             # 从产物里读回来: 单测读内存对象看不见落盘边界 (doc 49 §7.9 那条教训)

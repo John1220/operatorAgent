@@ -157,6 +157,74 @@ class TestPriorDemotion(unittest.TestCase):
         self.assertEqual(search.last_alternatives, [])
 
 
+# ─── 2b. 方向不可达 (格点边界) ────────────────────────────────
+
+class TestSaturatedDirection(unittest.TestCase):
+    """P1-4 边界修正: 目标方向在格点边界不可达时, 不倒退、也不改猜另一个方向
+
+    旧写法按 `-block_k` 排序, 中心顶在 BLOCK_K=128 时头名会落到**减小 K** 的点上;
+    先验在池里时又会被 `-vol` 位移到更大的 M/N tile —— 也就是「启发式没给出方向,
+    先验却被位移」, 与「只有给出明确方向才位移」的承诺不符。
+    """
+
+    @staticmethod
+    def _pool(tilings):
+        return [UnifiedSketch(algorithm="matmul", target_dsl="triton", tiling=t)
+                for t in tilings]
+
+    def test_memory_saturated_never_prefers_smaller_k(self):
+        """memory-bound + BLOCK_K 已到格点最大: 头名不得是减小 K 的点"""
+        center = TilingStrategy(128, 128, 128)
+        neighbors = SearchAgent._lattice_neighbors(center)
+        self.assertIn((128, 128, 64), {(t.block_m, t.block_n, t.block_k)
+                                       for t in neighbors},
+                      "这条用例的前提是邻域里确实有一个「减小 K」的点")
+        ranked = SearchAgent._rank(self._pool(neighbors), center,
+                                   {"roofline_bound": "memory"})
+        top = ranked[0].tiling
+        self.assertEqual(top.block_k, 128, "K 到顶时不该倒退去减小 BLOCK_K")
+        # 方向不可达时退向更大的 M/N tile (与 memory-bound 的「更多复用」同向)
+        self.assertEqual((top.block_m, top.block_n, top.block_k), (256, 128, 128))
+
+    def test_memory_saturated_keeps_prior(self):
+        """方向已不可增时, 先验不该被位移 —— 只有给出明确方向才位移"""
+        center = TilingStrategy(128, 128, 128)
+        prior = UnifiedSketch(algorithm="matmul", target_dsl="triton", tiling=center)
+        pool = [prior] + self._pool(SearchAgent._lattice_neighbors(center))
+        ranked = SearchAgent._rank(pool, center, {"roofline_bound": "memory"})
+        self.assertIs(ranked[0], prior,
+                      "K 到顶 (方向不可达) 时先验仍被位移 —— 与承诺不符")
+
+    def test_compute_saturated_keeps_prior_and_does_not_grow_mn(self):
+        """compute-bound + M/N 已到最小: 不增大 M/N, 先验保留"""
+        center = TilingStrategy(16, 16, 16)
+        prior = UnifiedSketch(algorithm="matmul", target_dsl="triton", tiling=center)
+        pool = [prior] + self._pool(SearchAgent._lattice_neighbors(center))
+        ranked = SearchAgent._rank(pool, center, {"roofline_bound": "compute"})
+        self.assertIs(ranked[0], prior)
+        # no-op 先验被剔出池的形态: 没有任何候选可以把 M*N 撑大
+        ranked2 = SearchAgent._rank(
+            self._pool(SearchAgent._lattice_neighbors(center)), center,
+            {"roofline_bound": "compute"})
+        t2 = ranked2[0].tiling
+        self.assertEqual(t2.block_m * t2.block_n, 16 * 16,
+                         "M/N 到最小时不该转向增大 BLOCK_M/N")
+
+    def test_run_keeps_saturated_prior_without_override_note(self):
+        """端到端: LLM 把 BLOCK_K 推到格点顶 (128) 后, 不再被邻域位移"""
+        llm = MockSearchLLM({"suggestion": "加大 K",
+                             "new_tiling": {"block_m": 128, "block_n": 128,
+                                            "block_k": 128}})
+        search = SearchAgent(llm=llm)
+        origin = _sketch(TilingStrategy(64, 64, 128))
+        chosen, suggestion = search.run(origin, _perf(bound="memory"))
+        self.assertEqual((chosen.tiling.block_m, chosen.tiling.block_n,
+                          chosen.tiling.block_k), (128, 128, 128))
+        self.assertNotIn("降为候选", suggestion,
+                         "方向不可达时不该出现「先验降为候选」的位移说明")
+        self.assertTrue(search.last_alternatives, "邻域候选没有排队")
+
+
 # ─── 3. Conductor 跨轮轮换 (集成) ───────────────────────────
 
 class _FakeSearch:

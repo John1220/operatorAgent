@@ -26,7 +26,7 @@ VALID, DEGRADED, UNINFO = "valid", "degraded", "uninformative"
 
 
 def _round(n, l1=True, l2=None, l3=None, validity=None, speedup=None, action="optimize",
-           signature=None, duplicate_of=None, recipes=()):
+           signature=None, duplicate_of=None, recipes=(), candidates=0, l2_runs=1):
     """造一轮血缘记录。l2/l3 为 None 表示「没走到这一级」(键不存在, 不是 False)
 
     键集合必须与 Conductor 真写进 `iteration_history` 的一致 ——
@@ -41,7 +41,10 @@ def _round(n, l1=True, l2=None, l3=None, validity=None, speedup=None, action="op
     return {"round": n, "action": action, "all_passed": all(lv.values()),
             "levels_passed": lv, "measurement_validity": validity,
             "gflops": None, "speedup": speedup, "recipes_applied": list(recipes),
-            "candidate_signature": signature, "duplicate_of": duplicate_of}
+            "candidate_signature": signature, "duplicate_of": duplicate_of,
+            # P1-1 成本记账两键。默认值 = 单候选生成轮 (没触发选择, 真机 L2 一次):
+            # 聚合逻辑不消费它们, 但**键必须在** —— 这就是上面那条守卫要的。
+            "generation_candidates": candidates, "real_l2_runs": l2_runs}
 
 
 def _run(rounds, final=None, admitted=False, reason="", tokens=100, usd=0.01,

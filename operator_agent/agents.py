@@ -663,11 +663,24 @@ class SearchAgent:
           - memory-bound (AI 低于脊点): 每 tile 算术强度不足 → 优先增大 BLOCK_K
           - compute-bound: 疑似 occupancy 不足 → 优先减小 BLOCK_M/N
           - unknown: 不猜方向, 「离先验近者优先」的确定性序
+
+        **方向不可达时不许倒退, 也不改猜另一个方向** (P1-4 边界修正): 中心已经顶在
+        格点边界 (如 BLOCK_K=128) 时, 邻域里没有任何点能「继续增大 K」。旧写法按
+        `-block_k` 排序, 边界处头名会落到**那个减小 K 的点**上; 先验在池里时又会被
+        `-vol` 位移到更大的 M/N tile —— 也就是「启发式没给出方向, 先验却被位移」,
+        与「只有给出明确方向才位移」的承诺不符。
+        现在把「不得倒退」写成显式罚位: 目标轴上比中心差的候选一律垫底, 其余按
+        (目标轴, 离中心步数, 体积) 排。于是方向不通时**先验 (步数 0) 胜出**;
+        no-op 先验已被剔出池时, 退回各自的口径 (memory 更大 tile / compute 更小 tile)。
         """
-        bound = (perf_data.get("roofline_bound") or perf_data.get("bound_type")
-                 or "unknown").lower()
+        # `roofline_bound` 由 conductor 用 `.get(..., "unknown")` 填, 恒为非空字符串,
+        # 所以这里**没有 `or bound_type` 回退** —— 那会是一段永不执行的代码 (旧写法
+        # 就有, 已删)。脊点算不出时它是 "unknown", 与 optimization_planner 拒绝拿
+        # bound_type 当可比轴的口径一致: 宁可说不知道, 不拿猜测穿轴。
+        bound = str(perf_data.get("roofline_bound", "unknown")).lower()
         l_mn = sorted(TilingStrategy._ALLOWED_BLOCK_M_N)
         l_k = sorted(TilingStrategy._ALLOWED_BLOCK_K)
+        center_area = center.block_m * center.block_n
 
         def steps(a, b, lattice):
             if a in lattice and b in lattice:
@@ -677,14 +690,17 @@ class SearchAgent:
         def key(s: UnifiedSketch):
             t = s.tiling
             vol = t.block_m * t.block_n * t.block_k
-            if bound == "memory":
-                return (-t.block_k, -vol)
-            if bound == "compute":
-                return (t.block_m * t.block_n, vol)
             dist = (steps(t.block_m, center.block_m, l_mn)
                     + steps(t.block_n, center.block_n, l_mn)
                     + steps(t.block_k, center.block_k, l_k))
-            return (dist, vol)
+            if bound == "memory":
+                backward = 0 if t.block_k >= center.block_k else 1
+                return (backward, -t.block_k, dist, -vol)
+            if bound == "compute":
+                area = t.block_m * t.block_n
+                backward = 0 if area <= center_area else 1
+                return (backward, area, dist, vol)
+            return (0, 0, dist, vol)
 
         return sorted(pool, key=key)
 

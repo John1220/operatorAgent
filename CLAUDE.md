@@ -50,7 +50,13 @@ User Request (NL or structured)
       │           (≤2 rounds) → rule template fallback. Selection among finalists happens
       │           at the caller: the Conductor runs L1+L2 on each finalist and keeps the
       │           first fully-correct one; L3 runs only on the winner (the splice skips
-      │           re-running the winner's L2). `use_coder_pipeline=False` is the legacy
+      │           re-running the winner's L2; the all-fail path reuses the default
+      │           candidate's L1+L2 as the Fixer evidence instead of re-running it).
+      │           **Selection is by correctness only** — when several finalists pass L2
+      │           the temperature-order first one wins and the faster one is never timed:
+      │           a deliberate machine-time tradeoff, not an oversight, so a "first-correct
+      │           beats fastest" reading of the winner is the correct one.
+      │           `use_coder_pipeline=False` is the legacy
       │           single-call escape hatch.
       ├── Verifier: L1 (contract gate → syntax → compile) → L2 (functional + anti-cheat) → L3 (perf + Roofline)
       │     └── L3 output is tiered by measurement validity; the tier decides what the

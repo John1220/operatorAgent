@@ -210,6 +210,11 @@ class TestSelectionByL2(unittest.TestCase):
                          [WRONG.strip(), RIGHT.strip()])
         # L3 只跑胜者一次 —— 「前 2 名上 L2」折中要省的就是这里
         self.assertEqual([c.strip() for c in l3_codes], [RIGHT.strip()])
+        # P1-1 成本记账进血缘: 本轮生成 2 个决赛候选、真机 L2 跑 2 次。
+        # 不记下来, 「翻为默认后机时涨了多少」在产物里就没有原料 (与 levels_passed 同类)。
+        hist = artifact.iteration_history[0]
+        self.assertEqual(hist["generation_candidates"], 2)
+        self.assertEqual(hist["real_l2_runs"], 2)
 
     def test_all_finalists_failing_l2_keeps_default_and_fixer_takes_over(self):
         """决赛全败 → 保持默认候选交完整验证 → Conductor 的 Fixer 接手闭环
@@ -227,15 +232,20 @@ class TestSelectionByL2(unittest.TestCase):
 
         self.assertTrue(artifact.all_passed)
         self.assertEqual(artifact.code.strip(), RIGHT.strip())
-        # L2 序列: 决赛两个 WRONG 各一次 (选择循环) + 默认候选完整验证再跑一次
-        # (全败路径的已知小代价: 完整验证需要完整的失败证据喂 Fixer, happy path
-        # 不走这里) + 修复轮的 RIGHT 一次
+        # L2 序列: 决赛两个 WRONG 各一次 (选择循环) + 修复轮的 RIGHT 一次。
+        # 上一版这里是 3 个 WRONG —— 全败出口把默认候选的失败结果丢掉了, 让调用方
+        # 用完整 verify() 重跑一遍 L1+L2。现在复用那份结果 (它本来就是喂 Fixer 的
+        # 失败证据), 全败轮不再白烧一次真机 L2。
         self.assertEqual([c.strip() for c in l2_codes],
-                         [WRONG.strip(), WRONG.strip(), WRONG.strip(),
-                          RIGHT.strip()])
+                         [WRONG.strip(), WRONG.strip(), RIGHT.strip()])
         # 真 Fixer 被调用过 (fixer_repair.md 的标记), 且只被调用一次
         fixer_prompts = [p for p, _ in llm.chat_calls if FIXER_MARKER in p]
         self.assertEqual(len(fixer_prompts), 1)
+        # 全败轮的真机 L2 = 2 (两个决赛候选各一次; 复用默认候选的失败结果,
+        # 没有第三次)。修复轮是单候选路径, 记 0 个决赛候选 + 1 次 L2。
+        r1, r2 = artifact.iteration_history[0], artifact.iteration_history[1]
+        self.assertEqual((r1["generation_candidates"], r1["real_l2_runs"]), (2, 2))
+        self.assertEqual((r2["generation_candidates"], r2["real_l2_runs"]), (0, 1))
 
 
 if __name__ == "__main__":

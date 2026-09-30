@@ -332,25 +332,45 @@ class Conductor:
           - 胜者 != 默认候选时换码 (低温候选贴 plan 但可能错, 高温候选救场);
           - 全败则保持默认候选 —— 选择不是门: 「没有候选过 L2」是 Fixer 的输入,
             不是任务失败。
-        返回 (选中的代码, 胜者的 L1+L2 结果或 None)。L1+L2 结果交回调用方拼接,
-        胜者只补跑 L3, 真机 L2 不重复执行 (机时正是 P1-1 折中「前 2 名上 L2」
-        想省的那部分)。
+
+        返回 `(选中的代码, 已跑完的 L1+L2 结果 或 None, 结果是否已是最终态, 真机 L2 次数)`:
+          - 胜出候选通过 L1+L2 → `(胜者, [l1, l2], False, n)`, 调用方只补 L3
+            (真机 L2 不重复; L1 也不必复检 —— 它已经在选择循环里跑过);
+          - 决赛全败 → `(默认候选, 默认候选的 [l1, l2], True, n)`, 调用方**直接采用**:
+            L2 已经失败, 本来就不该跑 L3; 而这份失败结果正是喂 Fixer 的证据,
+            上一版丢掉它、让调用方重跑一遍 L1+L2 —— 全败轮白烧一次真机 L2;
+          - 名单里找不到默认候选 (自定义 coder 替身) → `(默认候选, None, False, n)`,
+            退回完整三级验证的老路径, 不复用来源不明的结果。
+        `n` 是选择循环里**真实执行过的 L2 次数** (L1 就挂的候选不计), 由调用方写进
+        本轮血缘 —— P1-1 翻转把每轮生成从 1 个候选变成最多 2 个决赛候选, 「机时涨了
+        多少」这个问句的原料只能在这里落下。
         """
         from .verifier import VerificationLevel
+        default_results = None
+        l2_runs = 0
         for i, cand in enumerate(finalists):
             sel = self.verifier.verify(
                 cand, task=task, test_inputs=test_inputs,
                 expected_output=expected_output,
                 stop_after=VerificationLevel.L2_FUNCTION,
             )
+            l2_runs += sum(1 for r in sel
+                           if r.level is VerificationLevel.L2_FUNCTION)
+            if cand == current_code:
+                # 默认候选的结果留一份给「全败」出口复用 (就是喂 Fixer 的失败证据)
+                default_results = sel
             if sel and all(r.passed for r in sel):
                 if cand != current_code:
                     print(f"\n[Conductor] 候选选择 (P1-1): 决赛第 {i+1}/{len(finalists)} 名 "
                           f"首个通过 L1+L2, 取代默认候选")
-                return cand, sel
+                return cand, sel, False, l2_runs
+        if default_results is not None:
+            print(f"\n[Conductor] 候选选择 (P1-1): 决赛候选无一通过 L1+L2, "
+                  f"保持默认候选 (复用它的 L1+L2 失败证据, 不重跑真机)")
+            return current_code, default_results, True, l2_runs
         print(f"\n[Conductor] 候选选择 (P1-1): 决赛候选无一通过 L1+L2, "
               f"保持默认候选交完整验证")
-        return current_code, None
+        return current_code, None, False, l2_runs
 
     def execute(
         self,
@@ -658,10 +678,17 @@ class Conductor:
             print(f"轮次 {round_num}/{self.max_optimize_rounds}")
             print(f"{'─'*40}")
 
-            # P1-1 (generation-side-review): 本轮若走了候选选择, 胜出候选的 L1+L2
-            # 结果缓存在这里 —— Step 4 只对它补跑 L3, 不重复真机执行。
-            # None = 本轮没有多候选 (单体路径 / 修复轮 / 决赛全败)。
+            # P1-1 (generation-side-review): 本轮若走了候选选择, 已跑完的 L1+L2
+            # 结果缓存在这里 —— Step 4 复用它, 不重复真机执行。
+            # None = 本轮没有多候选 (单体路径 / 修复轮 / 名单里没有默认候选)。
+            # l1_l2_is_final = 这份结果已是最终态 (决赛全败: L2 已失败, 不该再跑 L3)。
             selected_l1_l2 = None
+            l1_l2_is_final = False
+            # P1-1 成本记账: 本轮 compile-gate 放行了几个决赛候选, 以及真机 L2 跑了几次。
+            # 翻转默认路径后每轮生成从 1 个候选变成最多 2 个决赛候选 + 最多 2 次 L2,
+            # 而「这次翻转让机时涨了多少」在产物里此前没有任何原料。
+            round_candidates = 0
+            round_l2_runs = None      # None = 由 verify_results 现算 (非选择路径)
 
             # Step 3: 获取代码
             # - 首轮 / Search 优化后: Coder 根据 Sketch + OptimizationPlanner 配方重新生成
@@ -714,8 +741,10 @@ class Conductor:
                 # 修复轮 (pending_fix) 不该拿上一轮的名单重新选。
                 # getattr: 测试常用自定义 coder 替身 (无此属性 = 单候选, 跳过选择)。
                 finalists = getattr(self.coder, "last_finalists", [])
+                round_candidates = len(finalists)
                 if len(finalists) > 1:
-                    current_code, selected_l1_l2 = self._select_finalist(
+                    (current_code, selected_l1_l2, l1_l2_is_final,
+                     round_l2_runs) = self._select_finalist(
                         current_code, finalists, task, test_inputs, expected_output,
                     )
 
@@ -734,9 +763,15 @@ class Conductor:
                       f"—— 照常验证, 本轮只在量基率")
 
             # Step 4: Verifier 验证
-            # P1-1 拼接: 胜出候选的 L1+L2 已在选择循环里真机跑过 —— 只补 L3,
-            # 不重复执行; 胜者的 L1 复检走 SHA256 编译缓存, 也不再花远端往返。
-            if selected_l1_l2 is not None:
+            # P1-1 拼接: 候选选择里已经跑过 L1+L2, 这里只补缺的那一段 ——
+            # 胜者补 L3; **全败**时那份 L1+L2 本身就是最终结果 (L2 已失败, 不跑 L3),
+            # 同时也是喂 Fixer 的失败证据, 不必重算 (上一版丢掉它、重跑一遍真机 L2;
+            # 旧注释写的「胜者的 L1 复检走 SHA256 编译缓存」其实不存在 —— 拼接路径
+            # 根本不进 L1)。
+            if selected_l1_l2 is not None and l1_l2_is_final:
+                print(f"\n[Verifier] 复用候选选择中的 L1+L2 失败结果 (不重跑真机)...")
+                verify_results = selected_l1_l2
+            elif selected_l1_l2 is not None:
                 print(f"\n[Verifier] 执行 L3 验证 (L1+L2 已在候选选择中通过)...")
                 verify_results = selected_l1_l2 + self.verifier.verify_l3_only(
                     kernel_code=current_code,
@@ -756,6 +791,13 @@ class Conductor:
                     environment_drift=verify_drift,
                 )
             all_verification_results = verify_results
+
+            # P1-1 成本记账 (续): 非选择路径的 L2 次数直接从这一轮的验证结果里数 ——
+            # L2 挂了就早退没有 L3, 所以「结果里有没有 L2」就是「L2 跑没跑」。
+            if round_l2_runs is None:
+                round_l2_runs = sum(
+                    1 for r in verify_results
+                    if r.level is VerificationLevel.L2_FUNCTION)
 
             all_passed = all(r.passed for r in verify_results)
             # 「这一版被验证过」必须在这一刻、由这一刻的读数记下 —— 等下一轮再回头找就没了:
@@ -789,6 +831,14 @@ class Conductor:
                 "measurement_validity": (l3_result.metrics.get("measurement_validity")
                                          if l3_result else None),
                 "recipes_applied": list(applied_recipes),
+                # P1-1 成本记账: CoderPipeline 翻为默认后, 一个「生成轮」的机时开销变成
+                # 「最多 2 个决赛候选各跑一次 L1+L2, 胜者再跑一次 L3」。这两个数不进血缘,
+                # 「这次翻转让机时涨了多少」就只能靠重跑一遍估 —— 与上面 `levels_passed`
+                # 记的是同一类搬运缺陷 (原料在循环里有效, 出了循环只剩最后一轮)。
+                # `generation_candidates` 三态: 0 = 本轮没走 pipeline 生成 (修复轮);
+                # 1 = 单候选生成 (没触发选择); 2 = 多候选上了真机 L1+L2 选择。
+                "generation_candidates": round_candidates,
+                "real_l2_runs": round_l2_runs,
                 # 本轮数值门用的哪把尺 (#87 第 2 片)。三态: 报了 / 自己就说不一致 / 没报。
                 # 「跨轮的尺是不是同一把」这个问句的原料只能在这里落下 —— 循环之外只剩
                 # 最后一轮的 metrics。
