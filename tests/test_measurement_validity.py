@@ -625,6 +625,40 @@ class TestDispersionGate(unittest.TestCase):
         self.assertIsNone(with_d.dispersion)
         self.assertNotIn("dispersion_iqr_over_median", with_d.as_metrics())
 
+    def test_the_structured_dispersion_verdict_is_exposed(self):
+        """`dispersion_exceeded` = 判过阈值的那一处给出的结论 (spine-review P1-6)
+
+        原先把 `validity is not VALID` 当成「cv 超标」传给资格推导 —— 那个式子从不
+        与任何 CV 阈值比较, 只是把档位重编码了一遍。结论必须由判过阈值的地方给出,
+        下游只搬运不重推。
+        """
+        def _d(v):
+            return assess(median_time_ms=NET_MS_MATMUL_4096,
+                          launch_floor_us=H20_FLOOR_US, dispersion=v).dispersion_exceeded
+        self.assertIs(False, _d(0.01), "紧样本被判成超标")
+        self.assertIs(False, _d(DISPERSION_DEGRADED), "阈值上取闭区间, 不该算超标")
+        self.assertIs(True, _d(0.15))
+        self.assertIs(True, _d(0.45), "UNINFORMATIVE 那档也在「越界」里")
+        # 没上报样本 → None (无从判定), 与 False (判定过、没超) 是两件事
+        self.assertIsNone(assess(median_time_ms=NET_MS_MATMUL_4096,
+                                 launch_floor_us=H20_FLOOR_US).dispersion_exceeded)
+
+    def test_a_non_dispersion_downgrade_does_not_claim_dispersion(self):
+        """**P1-6 回归**: 污染造成的降级不许被记成「离散度超标」
+
+        样本很紧 (dispersion=0.01) 而 util 超阈值 → 档位是 DEGRADED, 但原因**不是**
+        离散度。旧写法在这里会把 `validity is not VALID` 当成 cv 超标 (True), 于是
+        「离散度」这个标签指向一个从未被检查过的量。判据若退回那种写法, 这条立刻红。
+        """
+        a = assess(median_time_ms=NET_MS_MATMUL_4096, launch_floor_us=H20_FLOOR_US,
+                   dispersion=0.01, gpu_util_pct=CONTAMINATION_UTIL_PCT + 1)
+        self.assertIs(a.validity, Validity.DEGRADED)
+        self.assertIs(False, a.dispersion_exceeded,
+                      "污染降级被贴上了「离散度超标」")
+        self.assertTrue(any("util" in r for r in a.reasons), a.reasons)
+        self.assertFalse(any("离散度" in r for r in a.reasons),
+                         f"降级理由里混进了没发生的离散度: {a.reasons}")
+
     def test_worse_signal_wins_when_two_fire_at_once(self):
         """离散度只到 DEGRADED, 但地板支配到 UNINFORMATIVE → 取更差的。"""
         a = assess(median_time_ms=NET_MS_LAYERNORM_SMALL, launch_floor_us=H20_FLOOR_US,
@@ -897,6 +931,25 @@ class TestVerifierPropagatesDispersion(unittest.TestCase):
         r = self._l3(candidate_ms=1.040, baseline_ms=1.10)
         self.assertEqual(Validity.VALID.value, r.metrics["measurement_validity"])
         self.assertNotIn("dispersion_iqr_over_median", r.metrics)
+
+    def test_the_real_dispersion_verdict_reaches_the_oracle(self):
+        """**P1-6 接线**: 喂给资格推导的 `cv_exceeded` 必须是真判过阈值的那个值
+
+        `observation.provenance.rule_inputs` 是资格位的原料 —— 从五个布尔回推不出
+        是哪个输入判的。原先 verifier 传的是 `validity is not VALID` 的重编码, 于是
+        下面第一条 (样本很紧、降级只因 util 污染) 也会被记成 `cv_exceeded=True`。
+        """
+        def _rule_inputs(**kw):
+            r = self._l3(candidate_ms=1.040, baseline_ms=1.10, **kw)
+            return r.metrics["observation"]["provenance"]["rule_inputs"]
+
+        # 降级原因**不是**离散度 → 不许说 cv 超标
+        self.assertIs(False, _rule_inputs(dispersion=0.02, util=90)["cv_exceeded"],
+                      "污染降级被记成了「离散度超标」")
+        # 真的是离散度 → 记 True
+        self.assertIs(True, _rule_inputs(dispersion=0.42)["cv_exceeded"])
+        # 紧样本 → False
+        self.assertIs(False, _rule_inputs(dispersion=0.02)["cv_exceeded"])
 
     def test_window_intruder_reaches_metrics_and_message(self):
         """util 快照干净、iqr 干净, 只有 max/median 报警 —— 仍要写进 message。

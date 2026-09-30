@@ -992,6 +992,13 @@ class MeasurementAssessment:
     contaminated: bool = False
     dispersion: Optional[float] = None           # iqr/median, None = 样本不足或未上报
     max_over_median: Optional[float] = None      # 窗口内抢占的旁证, 与 dispersion 互补
+    #: 离散度是否**真的**越过了阈值 (`> DISPERSION_DEGRADED`, 含 UNINFORMATIVE 那档)。
+    #: None = 未上报 / 样本不足, 无从判定。
+    #: 这是离散度判据的**唯一**来源 (spine-review P1-6): 调用方不许拿
+    #: `validity is not VALID` 重编码一遍 —— 那个式子从不与任何 CV 阈值比较, 于是
+    #: 污染 / 出处矛盾 / 漂移造成的降级都会被贴上「离散度超标」的标签, 让诊断文本
+    #: 指向一个没被检查过的东西。
+    dispersion_exceeded: Optional[bool] = None
     intruder_suspected: bool = False             # 仅诊断; 为何不作判据见 assess() 内说明
     #: 任务要求、而执行侧没声明的能力 (`Cap.value` 字符串, 已排序)
     capability_shortfall: tuple = ()
@@ -1053,6 +1060,10 @@ class MeasurementAssessment:
             out["launch_floor_us"] = self.launch_floor_us
         if self.dispersion is not None:
             out["dispersion_iqr_over_median"] = self.dispersion
+        if self.dispersion_exceeded is not None:
+            # 结论而不是原料: 下游要用「离散度超标了吗」时读这个键, 不许自己拿
+            # validity 再推一遍 (spine-review P1-6 正是那样发生的)。
+            out["dispersion_exceeded"] = self.dispersion_exceeded
         if self.max_over_median is not None:
             out["dispersion_max_over_median"] = self.max_over_median
         out["measurement_intruder_suspected"] = self.intruder_suspected
@@ -1161,7 +1172,10 @@ def assess(median_time_ms: Optional[float] = None,
         reasons.append(f"测量前 GPU util={gpu_util_pct}%, 基准被污染, 加速比不可比")
         validity = _worse(validity, Validity.DEGRADED)
 
+    disp_exceeded: Optional[bool] = None
     if dispersion is not None and dispersion >= 0:
+        # 「越界」= 至少落进 DEGRADED 档。**判据就在这一行**, 别处不许拿 validity 重推。
+        disp_exceeded = dispersion > DISPERSION_DEGRADED
         if dispersion > DISPERSION_UNINFORMATIVE:
             validity = _worse(validity, Validity.UNINFORMATIVE)
             reasons.append(
@@ -1239,6 +1253,7 @@ def assess(median_time_ms: Optional[float] = None,
         contaminated=contaminated,
         dispersion=dispersion,
         max_over_median=max_over_median,
+        dispersion_exceeded=disp_exceeded,
         intruder_suspected=intruder,
         capability_shortfall=shortfall,
         provenance_conflict=conflicts,

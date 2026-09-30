@@ -8,6 +8,7 @@
 | 测试状态 | `113 passed in 1.46s`（7 个 spine 测试文件） |
 | 设计出处 | `docs/design/autonomous-operator-agent-design.md` §3 / §4 / §10.5 / §13 / §14 |
 | 审查结论 | **§14 验收未通过** —— 实现是一个库，不是一条链路 |
+| 落地状态 | **2026-09-30 部分落地**。P0-1 / P0-3 / P1-4 由 spine 修复批次落地（`2d37625` / `4b427a1` / `aa9b5bc`）；**本轮补 P0-2 与 P1-6**（各节末尾有「落地」注）。**P1-5 仍未修**，见该节 —— 它缺的是生产者，不是判据 |
 
 ## 结论摘要
 
@@ -78,6 +79,19 @@ obs = evaluate(c, c.hash, lambda: {"value": 2.0, "validity": "valid"}, heartbeat
 与当前契约比对。现在的形状下，"物理收口"的强度完全取决于调用方自觉，
 而这恰是收口本应消灭的东西。
 
+**落地（2026-09-30）**：签名侧早在 P0-1 批次就换成了 `record_hash=…`，本轮把**唯一的生产调用方**接上 —— `verifier.py` 不再 `setdefault` 一个从当前契约现算的哈希回喂，而是把载荷**携带**的旧哈希搬进来比对（`contract_hash` 进了 extra_key 白名单，这是它此前根本到不了 oracle 的原因）；载荷没带就显式声明 `fresh=True`，结论记 `hash_check="fresh_unverified"`。三种形态由调用方明说，含糊一律拒评：
+
+| 调用形态 | 结论 | 含义 |
+|---|---|---|
+| `record_hash="…"` 匹配 | `verified` | 真的校验过 |
+| `record_hash="…"` 不符 | `mismatch` + 拒评 | 判据被改写 |
+| `fresh=True` | `fresh_unverified` | 新观测，**没得校**（不声称校验过） |
+| 两者都不给 / 同时给 | `missing` + 拒评 | 含糊 = 失败关闭 |
+
+顺带补上一个**死读键**：`confirm.py:104` 一直读 `metrics["contract_hash_mismatch"]` 来出「契约被改写，本次评测作废」那条结论，而全仓**没有任何生产写入者** —— 于是它永远不会出现在报告里。现在 `hash_check == "mismatch"` 时由 verifier 写入该键，并有端到端用例钉住「verifier 写的键正是报告在读的键」。
+
+**残留（本轮未动，已单列）**：这条校验真正该守的是**复用**路径 —— `confirm.ConfirmRecord` 不带契约哈希，`admit_to_corpus` 只信 `remeasure.speedup`；而 `artifact.remeasure` 的生产路径无人写入（`schemas.py:583` 已自记）。所以「契约被改写」在**跨轮复用**上仍无守卫，缺的是生产端而不是判据。
+
 ### P0-3 守卫会静默消失（fail-open）
 
 `verifier.py:1144-1162`
@@ -139,6 +153,20 @@ if heartbeat is not None:      # ← 不传心跳 = 尺子健康
 **保留意见**：`real_device=None` 的默认**是对的**（`eligibility.py:131-134` 的理由成立：
 缺键 ≠ 检查过且不合格，否则诚实的本地 mock 会被判死）。本文只反对 `heartbeat_ok` 的默认。
 
+**补证（2026-09-30，本轮仍未修）**：`oracle.py:23` 引了
+`from .calibration import HeartbeatResult, heartbeat_due`，而 `heartbeat_due`
+**全仓只有这一处 import、零调用**。也就是说「到了该塞参照对的时刻」这道判据，
+本该写在收口点里却从未写成；同时 `ruler_broken_window(None, …)` **显式**返回
+`False`（`heartbeat_result is None` → 不算坏）。两者叠加 = **一次心跳都没做过的
+运行，尺子被当成健康的**。
+
+为什么不能照上文那句「默认改成 `False`」直接改：`heartbeat_due(n_measurements,
+interval)` 要的是调用方自己维护的**累计真值测量次数**，oracle 独自判不了；而生产
+路径上目前**没有任何心跳生产者**。直接改默认，每一次 L3 读数都会因「没做过心跳」
+被降级或拒评 —— 这与 P2-10 打开 `require_double_confirm` 就把入库率归零是同一个
+陷阱。正确顺序是**先建生产者**（谁累计计数、谁按 `interval` 塞已知好/已知慢参照对），
+再把 `heartbeat_ok` 改成「没做就不算通过」。
+
 ### P1-6 `cv_exceeded` 名不副实
 
 `verifier.py:1151-1152`
@@ -155,6 +183,21 @@ cv_exceeded=(assessment.dispersion is not None
 `DISPERSION_DEGRADED / DISPERSION_UNINFORMATIVE` 判过，结论在 `assessment.reasons` 里。
 
 后果：任何原因导致的降级都会被额外贴上"离散度超标"标签，`reasons` 被污染。
+
+**落地（2026-09-30）**：判据搬到了**判过阈值的那一处** —— `MeasurementAssessment`
+新增 `dispersion_exceeded`（`> DISPERSION_DEGRADED`，含 UNINFORMATIVE 那档；
+`None` = 没上报样本，与 `False` = 判过且没超是两件事），verifier 两次重编码合并成
+一处 `cv_exceeded = bool(assessment.dispersion_exceeded)`。
+
+两点如实说明：
+
+1. **本轮它的行为是惰性的** —— 规则 6 与规则 7（`tier == degraded`）落同一个位型，
+   所以旧写法算出的资格位与新写法一致。修的是**名字与输入**：`cv_exceeded=True`
+   现在真的意味着「离散度越过了阈值」，而不是「档位不是 VALID」。
+2. 正因为惰性，只测资格位是**测不出**这条修复的。所以资格推导的输入被收成
+   `rule_inputs` 写进 `Observation.provenance` —— 五个布尔回推不出是哪个输入判的，
+   而「上游传了个错的值、下游无从分辨」正是这一族的失效方式。回归用例就钉在
+   `rule_inputs.cv_exceeded` 上（换回旧表达式即红，已实测）。
 
 ---
 

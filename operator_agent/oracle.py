@@ -41,6 +41,11 @@ class Observation:
     provenance: dict = field(default_factory=dict)
     #: 拒评时这里放 ContractError 文案; 有值 = 本次**没有**有效观测
     refused: str = ""
+    #: 契约哈希校验的**结论**, 机器可读 (spine-review P0-2):
+    #: `verified` (记录携带的哈希与当前契约一致) / `fresh_unverified` (新观测, 没有旧
+    #: 记录可校 —— 只盖了溯源戳, **没有**校验过) / `mismatch` / `missing`。
+    #: 有它下游就不必从 `refused` 的文案里猜到底发生了什么。
+    hash_check: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -53,6 +58,7 @@ class Observation:
             "reasons": list(self.reasons),
             "provenance": dict(self.provenance),
             "refused": self.refused,
+            "hash_check": self.hash_check,
         }
 
 
@@ -60,6 +66,7 @@ def evaluate(contract: FrozenContract,
              measure: Callable[[], Mapping[str, Any]],
              *,
              record_hash: Optional[str] = None,
+             fresh: bool = False,
              heartbeat: Optional[HeartbeatResult] = None,
              metric: str = "speedup_vs_baseline",
              unit: str = "x",
@@ -77,33 +84,57 @@ def evaluate(contract: FrozenContract,
 
     **哈希校验是记录携带的** (spine-review P0-2): `record_hash` 是候选/记录
     在**生成时**烙进来的契约哈希, 与 `contract.hash` 比对 —— 不是「调用方
-    同时给两侧」那种恒真。缺 `record_hash` 视为「记录没带哈希」→ 拒评
-    (设计 §13.4: `rec.contract_hash != contract.hash → 拒评`)。
+    同时给两侧」那种恒真。
+
+    三种形态由调用方**明说**, 不许靠默认值糊过去:
+      * `record_hash="…"` → 复用一条已存在的记录, 真比对; 不匹配拒评。
+      * `fresh=True`      → 本次是**新观测**, 没有旧记录可校: 只盖溯源戳, 结论记
+        `hash_check="fresh_unverified"` —— 明确表示**没有校验过**, 而不是假装校验通过。
+      * 两者都没给        → 拒评 (fail-closed)。
+    生产调用方原先用「从当前契约现算一个哈希再回喂」把第三种伪装成第一种,
+    于是校验恒真。本函数拦不住伪造, 但「没带哈希」再也不可能被静默读成通过。
 
     ⚠️ 契约哈希不匹配时**不调用 measure()** —— 连测都不该测。
     """
     # ── 1. 契约哈希: 记录携带 vs 当前契约。改不了契约就改不了判据 ──
     expected = contract.hash or contract.compute_hash()
-    if not record_hash:
+    if record_hash and fresh:
         return Observation(
             metric=metric, value=None, unit=unit,
             validity="uninformative",
             eligibility=ELIG_ALL_FALSE,
-            refused="记录未携带 contract_hash: 无法证明判据未被改写, 拒评",
+            refused="record_hash 与 fresh=True 同时给出: 无法判定这是新观测还是"
+                    "复用旧记录, 拒评",
+            reasons=["ambiguous_hash_mode"],
+            provenance={"contract_hash": expected, "record_hash": record_hash},
+            hash_check="missing",
+        )
+    if not record_hash and not fresh:
+        return Observation(
+            metric=metric, value=None, unit=unit,
+            validity="uninformative",
+            eligibility=ELIG_ALL_FALSE,
+            refused="记录未携带 contract_hash: 无法证明判据未被改写, 拒评"
+                    " (新观测请显式传 fresh=True —— 那条路不声称校验过)",
             reasons=["missing_record_hash"],
             provenance={"contract_hash": expected},
+            hash_check="missing",
         )
-    try:
-        assert_hash(contract, record_hash)
-    except ContractError as exc:
-        return Observation(
-            metric=metric, value=None, unit=unit,
-            validity="uninformative",
-            eligibility=ELIG_ALL_FALSE,
-            refused=str(exc),
-            reasons=[str(exc)],
-            provenance={"contract_hash": expected, "record_hash": record_hash},
-        )
+    if record_hash:
+        try:
+            assert_hash(contract, record_hash)
+        except ContractError as exc:
+            return Observation(
+                metric=metric, value=None, unit=unit,
+                validity="uninformative",
+                eligibility=ELIG_ALL_FALSE,
+                refused=str(exc),
+                reasons=[str(exc)],
+                provenance={"contract_hash": expected, "record_hash": record_hash},
+                hash_check="mismatch",
+            )
+    # 「校验过」与「没得校」必须可区分 —— 前者才算收口, 后者只是溯源
+    hash_check = "verified" if record_hash else "fresh_unverified"
 
     # ── 2. 同卡配对 (设计 §11-2 / §13.4 硬性语义 2) ──
     # 声明了 same_device、实际跑到两张卡上的加速比**作废**。
@@ -121,6 +152,7 @@ def evaluate(contract: FrozenContract,
                 provenance={"contract_hash": expected,
                             "candidate_device": candidate_device,
                             "baseline_device": baseline_device},
+                hash_check=hash_check,
             )
 
     # ── 3. 心跳: 失败窗口内全资格 False, 但仍要记下数 (只是不让它造成后果) ──
@@ -137,20 +169,35 @@ def evaluate(contract: FrozenContract,
     evidence = [str(e) for e in (raw.get("evidence") or [])]
 
     # ── 3. 资格位 (设计 §4.3 八条, 短路) ──
+    # 先把规则输入收成一份, 再喂 derive_eligibility —— 同一份也进 provenance。
+    # 为什么必须留下: 这一族反复出现的失效是「上游传了个错的值, 下游无从分辨」
+    # (spine-review P1-6 就是 `cv_exceeded` 被传成「档位不是 VALID」的重编码,
+    #  而资格位只回五个布尔, 从中看不出到底哪个输入说它不合格)。
+    peak_exceeded = bool(raw.get("peak_exceeded")) or (
+        peak is not None and isinstance(value, (int, float))
+        and not isinstance(value, bool) and value > peak * 1.05)
+    rule_inputs = {
+        "lib_fallback": bool(raw.get("lib_fallback")),
+        "peak_exceeded": peak_exceeded,
+        "cv_exceeded": bool(raw.get("cv_exceeded")),
+        "launch_dominance_exceeded": bool(raw.get("launch_dominance_exceeded")),
+        "partition_drift": bool(raw.get("partition_drift")),
+        "l3_pass_is_refused": bool(raw.get("l3_pass_is_refused")),
+        "real_device": raw.get("real_device"),
+        "require_real_device": bool(require_real_device),
+    }
     elig = derive_eligibility(
         validity=validity,
         contract_hash_ok=True,               # 上面已拦
         heartbeat_ok=hb_ok,
         requires_real_device=require_real_device,
-        real_device=raw.get("real_device"),
-        lib_fallback=bool(raw.get("lib_fallback")),
-        peak_exceeded=bool(raw.get("peak_exceeded"))
-        or (peak is not None and isinstance(value, (int, float))
-            and not isinstance(value, bool) and value > peak * 1.05),
-        cv_exceeded=bool(raw.get("cv_exceeded")),
-        launch_dominance_exceeded=bool(raw.get("launch_dominance_exceeded")),
-        partition_drift=bool(raw.get("partition_drift")),
-        l3_pass_is_refused=bool(raw.get("l3_pass_is_refused")),
+        real_device=rule_inputs["real_device"],
+        lib_fallback=rule_inputs["lib_fallback"],
+        peak_exceeded=peak_exceeded,
+        cv_exceeded=rule_inputs["cv_exceeded"],
+        launch_dominance_exceeded=rule_inputs["launch_dominance_exceeded"],
+        partition_drift=rule_inputs["partition_drift"],
+        l3_pass_is_refused=rule_inputs["l3_pass_is_refused"],
     )
     if not hb_ok:
         reasons.append("RULER_BROKEN: 标定心跳失败, 同窗观测全资格 False")
@@ -168,6 +215,10 @@ def evaluate(contract: FrozenContract,
         },
     }
     prov.update(raw.get("provenance") or {})
+    # 资格位的**原料** (见上面 rule_inputs 的说明): 五个布尔回推不出是哪个输入判的。
+    # 写在 `prov.update(...)` **之后** —— 这是评测器自己的审计记录, 不该被载荷的
+    # provenance 覆盖; 能改写「为什么判成这样」的记录等于没有记录。
+    prov["rule_inputs"] = dict(rule_inputs)
 
     return Observation(
         metric=metric,
@@ -178,6 +229,7 @@ def evaluate(contract: FrozenContract,
         evidence=evidence,
         reasons=reasons,
         provenance=prov,
+        hash_check=hash_check,
     )
 
 

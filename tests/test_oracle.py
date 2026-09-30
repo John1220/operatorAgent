@@ -73,6 +73,43 @@ class TestRecordCarriedHash(unittest.TestCase):
         )
         obs = evaluate(c2, lambda: _measure(2.0), record_hash=c1.hash)
         self.assertTrue(obs.refused)
+        self.assertEqual("mismatch", obs.hash_check,
+                         "不匹配要被机器可读地记下来, 而不是只留一句文案")
+
+    def test_fresh_observation_measures_without_claiming_verification(self):
+        """新观测 (没有旧记录可校): 必须能测, 但结论要写明「没校验过」
+
+        spine-review P0-2 的要害不是「拒评一切」, 而是**不许把没得校说成校验过**。
+        生产路径上每个 L3 读数都是新观测 —— 若这里也拒评, 整条闭环直接死。
+        """
+        c = _contract()
+        obs = evaluate(c, lambda: _measure(1.3), fresh=True)
+        self.assertEqual(1.3, obs.value, "新观测被误拒: 没得校不等于不能测")
+        self.assertFalse(obs.refused)
+        self.assertEqual("fresh_unverified", obs.hash_check)
+        # 溯源戳仍在: 这条读数是在哪个契约下取得的 (供日后复用比对)
+        self.assertEqual(c.hash, obs.provenance["contract_hash"])
+        self.assertTrue(obs.eligibility.can_persist,
+                        "新观测不该因为「没有旧记录」这个结构性事实而被降格")
+
+    def test_verified_and_fresh_are_distinguishable(self):
+        """「校验过」与「没得校」必须在结论上可区分 —— 拆掉恒真的全部意义在这"""
+        c = _contract()
+        verified = evaluate(c, lambda: _measure(1.3), record_hash=c.hash)
+        fresh = evaluate(c, lambda: _measure(1.3), fresh=True)
+        self.assertEqual("verified", verified.hash_check)
+        self.assertEqual("fresh_unverified", fresh.hash_check)
+
+    def test_fresh_with_record_hash_refuses_as_ambiguous(self):
+        """两种形态同时给出 = 说不清是新观测还是复用旧记录 → 拒评, 不许挑一个信"""
+        c = _contract()
+        called = []
+        obs = evaluate(c, lambda: called.append(1) or _measure(),
+                       record_hash=c.hash, fresh=True)
+        self.assertEqual([], called, "说不清形态却仍然测了")
+        self.assertTrue(obs.refused)
+        self.assertIn("同时给出", obs.refused)
+        self.assertEqual("missing", obs.hash_check)
 
 
 class TestHeartbeatWindowInvalidates(unittest.TestCase):

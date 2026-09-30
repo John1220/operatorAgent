@@ -782,5 +782,93 @@ class TestReadersAreNotJustMentions(unittest.TestCase):
                          "说明文字里的 `.get('mode')` 不该被当成读者")
 
 
+# ─── 契约哈希: 记录携带的才叫「校验过」 (spine-review P0-2) ──────
+
+class TestContractHashIsRecordCarried(unittest.TestCase):
+    """拆掉恒真: 载荷带来的旧契约哈希才比对, 没带就明说「没得校」
+
+    原先 `verifier.py` 写的是 `metrics.setdefault("contract_hash", stamp)` 再把
+    同一个值当 `record_hash` 回喂 —— 比较的两侧都由那一行自己造, `assert_hash`
+    恒真, 「唯一收口点」名存实亡。现在两侧来源分开:
+      * 载荷带的旧哈希 → 真比对 (不匹配 → 拒评);
+      * 没带           → `fresh=True`, 结论记 `fresh_unverified`。
+    """
+
+    def _stale(self, **kw):
+        payload = _bench(mode="cuda", device="cuda:2", **kw)
+        payload["contract_hash"] = "0" * 64          # 记录携带的旧契约, 与当前不符
+        return payload
+
+    def test_stale_carried_hash_refuses_and_the_conclusion_becomes_readable(self):
+        """过期契约 → 拒评, 且 `contract_hash_mismatch` 真的被写出来
+
+        这个键此前**没有任何生产写入者**, 而 `confirm.py` 的 UnableReport 一直在读
+        它 —— 于是「契约被改写, 本次评测作废」永远不会出现在报告里 (死读键)。
+        """
+        r, _ = _l3(_verifier(REAL, self._stale()),
+                   _task(required=(Cap.REAL_DEVICE,)))
+        obs = r.metrics["observation"]
+        self.assertEqual("mismatch", obs["hash_check"])
+        self.assertTrue(obs["refused"])
+        self.assertFalse(obs["eligibility"]["can_verdict"],
+                         "契约不匹配还能判决 —— 收口没接上")
+        self.assertIs(True, r.metrics["contract_hash_mismatch"],
+                      "结论没落到 confirm.py 读的那个键上 ⇒ 报告里永远看不到它")
+
+    def test_no_carried_hash_is_marked_fresh_not_verified(self):
+        """载荷没带旧哈希 = 新观测: 照常可判决, 但结论写明**没有**校验过
+
+        生产路径上每个 L3 读数都是新观测 —— 这里若按拒评处理, 整条闭环直接死;
+        所以要紧的不是拒, 而是不许把「没得校」说成「校验通过」。
+        """
+        r, _ = _l3(_verifier(REAL, _bench(mode="cuda", device="cuda:2")),
+                   _task(required=(Cap.REAL_DEVICE,)))
+        obs = r.metrics["observation"]
+        self.assertEqual("fresh_unverified", obs["hash_check"])
+        self.assertFalse(obs["refused"])
+        self.assertTrue(r.passed, r.message)
+        self.assertEqual(Validity.VALID.value, r.metrics["measurement_validity"])
+        self.assertNotIn("contract_hash_mismatch", r.metrics)
+
+    def test_a_carried_hash_matching_the_contract_is_verified(self):
+        """带的旧哈希与当前契约一致 → 这才是真的校验过 (方向对照)"""
+        from operator_agent.contract import freeze_from_task
+        payload = _bench(mode="cuda", device="cuda:2")
+        task = _task(required=(Cap.REAL_DEVICE,))
+        payload["contract_hash"] = freeze_from_task(task).hash
+        r, _ = _l3(_verifier(REAL, payload), task)
+        self.assertEqual("verified", r.metrics["observation"]["hash_check"])
+        self.assertNotIn("contract_hash_mismatch", r.metrics)
+
+    def test_the_mismatch_reaches_the_unable_to_establish_report(self):
+        """生产者→消费者: verifier 写的键正是报告在读的那个键
+
+        两边各自的单测都在 (verifier 写 / confirm 读), 但**跨文件**的词汇漂移只有
+        这样一条端到端断言才拦得住 —— 而这个键此前根本没有生产者, 于是报告里那条
+        「契约被改写, 本次评测作废」永远不会出现。
+        """
+        from operator_agent.confirm import UnableToEstablish
+        r, _ = _l3(_verifier(REAL, self._stale()),
+                   _task(required=(Cap.REAL_DEVICE,)))
+        u = UnableToEstablish()
+        u.extend_metrics(r.metrics)
+        self.assertIn("contract", {i.kind for i in u.items},
+                      f"契约作废没进报告: {u.render()}")
+
+    def test_the_stamp_is_always_the_live_contract(self):
+        """溯源戳永远写**当前**契约, 载荷带的那个另存在 observation 里
+
+        两者混作一个键, 产物里就读不出「这数在哪个尺子下取得」与「它自称是哪个
+        尺子下取得的」的区别 —— 而这条不符正是要报出来的东西。
+        """
+        from operator_agent.contract import freeze_from_task
+        task = _task(required=(Cap.REAL_DEVICE,))
+        live = freeze_from_task(task).hash
+        r, _ = _l3(_verifier(REAL, self._stale()), task)
+        self.assertEqual(live, r.metrics["contract_hash"])
+        self.assertEqual("0" * 64,
+                         r.metrics["observation"]["provenance"]["record_hash"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

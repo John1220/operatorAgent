@@ -949,7 +949,12 @@ class Verifier:
                           "sm_clock_mhz_before", "sm_clock_mhz_after",
                           "sm_clock_max_mhz_before", "sm_clock_max_mhz_after",
                           "mem_clock_mhz_before", "mem_clock_mhz_after",
-                          "throttle_bits_before", "throttle_bits_after"):
+                          "throttle_bits_before", "throttle_bits_after",
+                          # spine-review P0-2: 记录**携带**的契约哈希必须能搬进来,
+                          # 否则 oracle 那边只剩「现算一个」这一条路, 校验恒真。
+                          # 载荷带头哈希 = 这条读数出自某次已在别处烙过契约的测量,
+                          # 与当前契约比对才有意义 (不匹配 → 拒评)。
+                          "contract_hash"):
             if extra_key in bench:
                 metrics[extra_key] = bench[extra_key]
             elif extra_key in candidate_metrics:
@@ -1175,6 +1180,13 @@ class Verifier:
         )
         metrics.update(assessment.as_metrics())
         metrics["benchmark_contaminated"] = assessment.contaminated
+        # 离散度判据的**唯一**来源 (spine-review P1-6)。原先两处调用点各自写
+        # `assessment.dispersion is not None and validity is not VALID` —— 那个式子
+        # 从不与任何 CV 阈值比较, 只是把「档位不是 VALID」重编码了一遍, 于是污染 /
+        # 出处矛盾 / 漂移造成的降级全被贴上「离散度超标」标签 (名不副实),
+        # 而且同一次调用里传了两遍。真正判过阈值的是 `measurement.assess`,
+        # 结论现在以 `dispersion_exceeded` 暴露, 这里只搬运不重推。
+        cv_exceeded = bool(assessment.dispersion_exceeded)
         # 五位资格 (设计 §4.3 / oracle.py): 与三个 can_* 并列写进 metrics,
         # 让 Conductor 不必自己重新解释分档表 —— 「资格决定这个数被允许造成什么后果」。
         # ⚠️ **fail-closed** (spine-review P0-3): 推导抛错时写 all-False, 不许 pass。
@@ -1189,8 +1201,7 @@ class Verifier:
                 real_device=assessment.backend_real_device,
                 l3_pass_is_refused=assessment.l3_pass_is_refused,
                 lib_fallback=bool(metrics.get("lib_fallback")),
-                cv_exceeded=(assessment.dispersion is not None
-                             and assessment.validity is not measurement.Validity.VALID),
+                cv_exceeded=cv_exceeded,
                 launch_dominance_exceeded=(assessment.launch_dominance is not None
                                            and assessment.launch_dominance > 0.5),
                 partition_drift=bool(assessment.environment_drift),
@@ -1201,15 +1212,27 @@ class Verifier:
             metrics["eligibility"] = ALL_FALSE.as_dict()
             metrics["eligibility_derive_error"] = f"{type(exc).__name__}: {exc}"
 
-        # ── Oracle 唯一收口点 (spine-review P0-1 / 设计 §13.4) ──
+        # ── Oracle 唯一收口点 (spine-review P0-1 / P0-2 / 设计 §13.4) ──
         # 每个 L3 读数都产一条 Observation: 资格决定它被允许造成什么后果。
-        # 哈希是**记录携带**的: 这里把契约哈希烙进 metrics, 之后由 oracle 再核。
         try:
             from .contract import freeze_from_task
             from .oracle import evaluate as oracle_evaluate
             contract = freeze_from_task(task) if task is not None else None
             if contract is not None:
-                metrics.setdefault("contract_hash", contract.hash or contract.compute_hash())
+                stamp = contract.hash or contract.compute_hash()
+                # **记录携带**的哈希 (spine-review P0-2): 只有当载荷真带了旧记录哈希
+                # 时才有得校。原来这里写的是
+                #     metrics.setdefault("contract_hash", stamp)
+                # 再把它当 `record_hash` 回喂 —— 两侧都由这一行自己造出来, 于是
+                # `assert_hash` 恒真, 「唯一收口点」名存实亡。现在:
+                #   * 带旧哈希 → 真比对 (不匹配 → oracle 拒评, 且下面记 mismatch 键);
+                #   * 没带     → 明说这是**新观测** (`fresh=True`), 只盖溯源戳,
+                #                observation 里记 `hash_check="fresh_unverified"`,
+                #                绝不声称校验过 —— 「没得校」与「校验过」可区分。
+                carried = metrics.get("contract_hash")
+                metrics["contract_hash"] = stamp   # 溯源: 这条读数在哪个契约下取得
+                # (载荷带的那个值会留在 observation.provenance.record_hash 里,
+                #  oracle 自己记, 这里不必再开一个键。)
                 obs = oracle_evaluate(
                     contract,
                     lambda: {
@@ -1218,19 +1241,23 @@ class Verifier:
                         "lib_fallback": bool(metrics.get("lib_fallback")),
                         "real_device": assessment.backend_real_device,
                         "l3_pass_is_refused": assessment.l3_pass_is_refused,
-                        "cv_exceeded": (assessment.dispersion is not None
-                                        and assessment.validity
-                                        is not measurement.Validity.VALID),
+                        "cv_exceeded": cv_exceeded,
                         "launch_dominance_exceeded": (
                             assessment.launch_dominance is not None
                             and assessment.launch_dominance > 0.5),
                         "partition_drift": bool(assessment.environment_drift),
                     },
-                    record_hash=metrics.get("contract_hash"),
+                    record_hash=carried or None,
+                    fresh=not carried,
                     require_real_device=Cap.REAL_DEVICE.value in required,
                     metric="speedup_vs_baseline", unit="x",
                 )
                 metrics["observation"] = obs.as_dict()
+                # 让「契约被改写」这条结论真的有人读: `confirm.py` 的 UnableReport
+                # 一直在读 `contract_hash_mismatch`, 而此前**没有任何生产写入者**
+                # —— 那条「本次评测作废」的条目永远不会出现在报告里 (死读键)。
+                if obs.hash_check == "mismatch":
+                    metrics["contract_hash_mismatch"] = True
         except Exception as exc:  # noqa: BLE001 — 观测失败不挡主流程, 但要留痕
             metrics["observation_error"] = f"{type(exc).__name__}: {exc}"
         if assessment.contaminated:
