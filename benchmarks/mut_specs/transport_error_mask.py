@@ -5,7 +5,7 @@
     python3 -B -m benchmarks.mutation_calibrate \\
         --spec benchmarks/mut_specs/transport_error_mask.py
 
-九行全在行为分母：这一片的判据本身就是「给一份带秘密的输入, 看输出里还有没有」——
+十一行全在行为分母：这一片的判据本身就是「给一份带秘密的输入, 看输出里还有没有」——
 每行都有一个具体输入能观察到差异, 所以没有结构行 (按 #83, 没有可观察差异的行要写隔离理由,
 而这里每一行都有)。
 
@@ -115,4 +115,27 @@ ROWS = [
         '            return {"success": False, "error": str(e)}',
         "存在具体输入可观察: 超时输入下那一格键直接消失 (`KeyError`), 而错误文本带着 argv —— "
         "本片的三个 dict 出口共用一个实现正是「两处各写一份就会有一份忘了掩码」的防线 (I22 那一族)", True),
+
+    Row("M10 探连通那一路的 reason 仍是异常原文 (argv 进 `Resolution.attempts`)",
+        "rx",
+        "            # 在被入库的那天变成第一次泄漏 (#102 第 2 片)。\n"
+        "            return False, safe_error_text(e, with_class=True)",
+        "            # 在被入库的那天变成第一次泄漏 (#102 第 2 片)。\n"
+        '            return False, f"{type(e).__name__}: {e}"',
+        "存在具体输入可观察: 探测走的是同一个 `_ssh_exec`, 超时异常带整条 argv ⇒ 那句 reason "
+        "进 `Resolution.attempts` (doc 49 §7.8 末那条 ⚠️ 正是指着这一格: 谁把解析结果入库就"
+        "先泄漏一次)。这一行同时也是 `with_class` 那半的证人: 摘掉掩码之后类名还在, 所以红的不是"
+        "「少了字」而是「多了秘密」", True),
+
+    Row("M11 同一条尾巴的第二个出口: HTTP 那一路的 probe reason",
+        "rx",
+        '                return False, f"/health 返回 HTTP {resp.status}"\n'
+        "        except Exception as e:\n"
+        "            return False, safe_error_text(e, with_class=True)",
+        '                return False, f"/health 返回 HTTP {resp.status}"\n'
+        "        except Exception as e:\n"
+        '            return False, f"{type(e).__name__}: {e}"',
+        "存在具体输入可观察: 一条 `URLError(OSError('connect to host 203.0.113.9 port 18080'))` "
+        "—— 两个远端探测出口共用一个去处 (`Resolution.attempts`), 只掩 ssh 那一条就是「两处各"
+        "写一份, 有一份忘了」的第二个实例 (I22 那一族)", True),
 ]

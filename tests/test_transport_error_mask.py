@@ -24,11 +24,13 @@
     版本号与路径是被修的对象, 掩掉就等于把 Fixer 需要的信息吃掉 (有一条用例钉住这条不对称)。
   · 远端**载荷自带的** `result["error"]` (候选在远端跑出来的 traceback) 同样原样保留: 那不是
     传输细节。本片的靶子是「异常原文」, 不是「一切远端文本」。
-  · `HTTPExecutor` 那条走的是 `e.reason` 而不是整条 URL, 不在泄漏面上 (清点结论见 doc 60)。
+  · `HTTPExecutor` 的两条各按去处处理: 它的 `/health` 探测 reason **掩了** (那份 reason 与 ssh
+    那一路同一个去处 —— `Resolution.attempts`，将来要入库)；它的 compile 那条 raise 走的是
+    `e.reason` 而不是整条 URL (`urllib` 的 `str()` 里不含 URL)，不在泄漏面上 (清点结论见 doc 60)。
   · **print 出口没掩** (如 `_pinned_gpu` 那句 `print(…: {e})`): 它只进被 `capture_execution`
     收到的 stdout 日志, 不进判决、不进签名。这一格留在这里当**已知未做**, 不假装覆盖。
 
-变异标定（2026-09-30 实跑，基线 **16 passed**，表在 `benchmarks/mut_specs/transport_error_mask.py`）:
+变异标定（2026-09-30 实跑，基线 **19 passed**，表在 `benchmarks/mut_specs/transport_error_mask.py`）:
 
     M1 `safe_error_text` 退回 `str(exc)` (整条 argv 又进落盘边界)
     M2 掩码只摘 IPv4, 不摘 ssh 自己那句 `port <数字>` (**本片第一版的真红法**)
@@ -39,6 +41,8 @@
     M7 `transport_outcome` 不再读 `returncode` (scp 的 255 被读成「听到了回答」)
     M8 反向: 把 `CalledProcessError` 也列进「没听到回答」的名字表 (凡带返回码都不知成没成)
     M9 三条 dict 出口里有一条自己写 `str(e)` 而不用共用的 `_transport_failure`
+    M10 探连通那一路的 reason 仍是 `f"{type(e).__name__}: {e}"` (argv 进 `Resolution.attempts`)
+    M11 同一条尾巴的第二个出口 (HTTP 那一路的 probe reason)
 
 运行: PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest tests/test_transport_error_mask.py -q
 """
@@ -233,6 +237,47 @@ class TestTheRemoteExits(unittest.TestCase):
         detail = ssh_item[0].detail or ""
         _assert_no_secrets(self, detail)
         self.assertIn("TimeoutExpired", detail)
+
+    def test_the_probe_reason_keeps_the_class_but_not_the_argv(self):
+        """⚠️ doc 49 §7.8 末那条 ⚠️ 说的就是这个出口: 解析结果**将来**要入库
+
+        `probe_connection()` 的 `reason` 进 `Resolution.attempts` —— 那是被打印、也最可能
+        被序列化进产物的那一格。超时输入下它以前是 `f"{type(e).__name__}: {e}"`, 而 `{e}`
+        就是整条 ssh argv。
+        """
+        ex = _ssh_executor()
+        ex._ssh_exec = mock.Mock(side_effect=_timeout_exc())
+        ok, reason = ex.probe_connection()
+        self.assertFalse(ok)
+        _assert_no_secrets(self, reason)
+        self.assertIn("TimeoutExpired", reason)
+        self.assertEqual(1, reason.count("TimeoutExpired"),
+                         "带 cmd 那一支的文本里已经有类名了, 再前缀一次就是两处 (与报表读不通)")
+
+    def test_a_name_only_exception_still_names_its_class(self):
+        """**反向对照 (with_class 那一半)**: 掩码不许顺手吃掉「哪一类失败」
+
+        doc 49 §3.3 S3 的立片理由就是 reason 要分得开 DNS / 认证 / 超时, 而 `socket.gaierror`
+        那类的原话里**没有**类名 —— 少了这一半, 那道掩码就会把本片要守的东西换成另一种看不见。
+        """
+        ex = _ssh_executor()
+        ex._ssh_exec = mock.Mock(side_effect=OSError("nodename nor servname provided"))
+        ok, reason = ex.probe_connection()
+        self.assertFalse(ok)
+        self.assertEqual("OSError: nodename nor servname provided", reason)
+
+    def test_the_http_probe_reason_is_masked_too(self):
+        """同一道掩码的第二个探连通出口 (HTTP 那一路) —— 没有它这一行就没有读者"""
+        from urllib.error import URLError
+        from operator_agent.remote_executor import HTTPExecutor
+        ex = HTTPExecutor(base_url="http://203.0.113.9:18080")
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=URLError(OSError("connect to host 203.0.113.9 port 18080"))):
+            ok, reason = ex.probe_connection()
+        self.assertFalse(ok)
+        self.assertNotIn("203.0.113.9", reason, reason)
+        self.assertNotIn("18080", reason, reason)
+        self.assertIn("URLError", reason, "类名要留着: 那是「连不上」与「跑完了报错了」的分界")
 
 
 class TestTheScopeIsExactlyRemote(unittest.TestCase):

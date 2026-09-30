@@ -595,7 +595,10 @@ class SSHExecutor(Backend):
             self._ssh_exec("echo ok")
             return True, ""
         except Exception as e:
-            return False, f"{type(e).__name__}: {e}"
+            # `reason` 会进 `Resolution.attempts` 并被打印 (doc 49 §7.8 末那条 ⚠️ 说的就是
+            # 这一格: 「谁要把解析结果入库, 必须先剥路径」)。这里先过掩码, 那条尾巴就不会
+            # 在被入库的那天变成第一次泄漏 (#102 第 2 片)。
+            return False, safe_error_text(e, with_class=True)
 
     @property
     def selected_gpu(self) -> Optional[int]:
@@ -911,7 +914,7 @@ class HTTPExecutor(Backend):
                     return True, ""
                 return False, f"/health 返回 HTTP {resp.status}"
         except Exception as e:
-            return False, f"{type(e).__name__}: {e}"
+            return False, safe_error_text(e, with_class=True)
 
     def lock_identity(self) -> str:
         return f"http:{self.base_url}"

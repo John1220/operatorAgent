@@ -314,12 +314,17 @@ def _cmd_shape(cmd) -> str:
     return mask_transport_secrets(str(cmd))[:40]
 
 
-def safe_error_text(exc) -> str:
+def safe_error_text(exc, with_class: bool = False) -> str:
     """一次远程调用失败时, 那句**可以**进产物 / LLM prompt / 失败签名的文本。
 
     带 `cmd` 的异常 (subprocess 那两类) 不再用 `str()` —— 整条 argv 就是它的 `str()`;
     改成「异常类名 + argv 的形状 + 超时秒数或返回码」。其余异常走 `mask_transport_secrets`,
     因为 ssh 自己写的 stderr (`connect to host <IP> port <N>`) 也在这条路上。
+
+    `with_class=True` 给的是**只有一句 reason**的那些读者 (连通性探测的
+    `Resolution.attempts`): 那里要分得开「DNS / 认证 / 超时」是哪一类, 而 `socket.gaierror`
+    的原话里没有类名。默认关着是因为四个出口那边的文本已经自带出处
+    (`SSH exec failed [rc=…]`), 前面再加一个 `RuntimeError:` 是噪声。
     """
     cmd = getattr(exc, "cmd", None)
     if cmd is not None:
@@ -331,7 +336,10 @@ def safe_error_text(exc) -> str:
         if timeout is not None:
             parts.append(f"超时 {timeout}s")
         return " ".join(parts)
-    return mask_transport_secrets(str(exc))
+    text = mask_transport_secrets(str(exc))
+    if with_class and text and type(exc).__name__ not in text:
+        return f"{type(exc).__name__}: {text}"
+    return text
 
 
 RULER_REPORTED = "reported"            #: 这一轮各组同一把尺, 值照抄
