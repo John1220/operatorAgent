@@ -324,5 +324,34 @@ class TestSharedPathRatchet(unittest.TestCase):
         self.assertIn("chmod 600", strings, "远端上传后要显式收权限 (scp 保留源 mode)")
 
 
+class TestSmokeBurnerArm(unittest.TestCase):
+    """smoke_spine_h20.py 的竞争臂 —— #69 纪律在它身上的落法
+
+    旧写法两处违规 (ratchet 撞出来的): 固定名 `/tmp/burner_gpu{gpu}.log`
+    (世界可写区的可预测路径) 与拆除用内容模式 `pkill -f '2048,2048'`
+    (会误伤任何恰好带着这串的进程, 且只请求不读回)。这条钉住新写法的形状。
+    """
+
+    def test_burner_command_carries_its_random_path_as_the_kill_marker(self):
+        """MARK = 落点本体: pkill/pgrep/rm 三个动作对着同一个不可预测路径。
+
+        burner 是 `python -c` 内联代码, 落点本身不在它的 argv 里 —— 所以必须
+        显式把落点塞进 argv (MARK= 赋值), `pkill -f <落点>` 才指得到它。
+        """
+        import smoke_spine_h20 as smoke
+        log = "/tmp/burner-1a2b3c4d.log"
+        cmd = smoke._burner_command(3, log)
+        self.assertIn(f'MARK="{log}"', cmd)
+        self.assertIn(f"> {log} 2>&1", cmd)
+
+    def test_smoke_uses_the_helpers_not_ad_hoc_paths(self):
+        """驱动不许绕开 helper 自己拼路径/拆除 (判据 = AST 里的调用, 非文本)"""
+        called = _called_names(ROOT / "benchmarks" / "smoke_spine_h20.py")
+        self.assertIn("remote_scratch_path", called,
+                      "落点不再从 _scratch 拿随机名了")
+        self.assertIn("stop_interferer", called,
+                      "拆除退回成裸 pkill —— 没有读回的拆除只是请求")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
