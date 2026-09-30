@@ -199,21 +199,9 @@ class Acceptance6_TamperedContractIsRefused(unittest.TestCase):
 
 
 # ─── §14-7 跨卡配对 → 拒绝该观测 ────────────────────────────────
-def pairing_conflict(candidate_device, baseline_device,
-                     candidate_window=None, baseline_window=None) -> str:
-    """运行时配对检查。返回拒绝理由, 空串 = 通过。
-
-    契约冻结时已要求 same_device/same_window, 但那是**声明**; 这里是**运行时**
-    观测的复核 —— 声明了同卡、实际跑到两张卡上的加速比必须作废 (设计 §11-2)。
-    """
-    if candidate_device != baseline_device:
-        return (f"候选与基线不在同一张卡: cand={candidate_device!r} "
-                f"baseline={baseline_device!r} —— 跨卡加速比无指称对象, 作废")
-    if (candidate_window is not None and baseline_window is not None
-            and candidate_window != baseline_window):
-        return (f"候选与基线不在同一时间窗: {candidate_window!r} vs "
-                f"{baseline_window!r} —— 热/时钟状态污染, 作废")
-    return ""
+# `pairing_conflict` 现在在 `operator_agent.placement` (spine-review P3-16:
+# 验收不该测测试自己的函数)。本组测的是**库** + oracle 的运行时复核。
+from operator_agent.placement import pairing_conflict  # noqa: E402
 
 
 class Acceptance7_CrossDevicePairingIsRejected(unittest.TestCase):
@@ -232,9 +220,17 @@ class Acceptance7_CrossDevicePairingIsRejected(unittest.TestCase):
     def test_direction_control_unity_is_not_refused(self):
         self.assertEqual("", pairing_conflict("a", "a"))
 
+    def test_oracle_refuses_cross_device_observation(self):
+        """运行时复核: 契约声明同卡, 实测两张卡 → 拒评"""
+        c = _contract()
+        obs = evaluate(c, lambda: {"value": 2.0, "validity": "valid"},
+                       record_hash=c.hash,
+                       candidate_device="gpu-0", baseline_device="gpu-1")
+        self.assertTrue(obs.refused)
+        self.assertFalse(obs.eligibility.can_persist)
+
     def test_contract_freeze_also_requires_same_device(self):
         with self.assertRaises(ContractError):
-            _contract()  # 已通过
             freeze(
                 kernel_type="matmul",
                 dtype_semantics=DTypeSemantics(dtype="fp16"),

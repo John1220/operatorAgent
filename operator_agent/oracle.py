@@ -25,6 +25,7 @@ from .confirm import ConfirmRecord, confirm_persist
 from .contract import ContractError, FrozenContract, assert_hash
 from .eligibility import ALL_FALSE as ELIG_ALL_FALSE
 from .eligibility import Eligibility, derive_eligibility
+from .placement import pairing_conflict
 
 
 @dataclass
@@ -65,6 +66,10 @@ def evaluate(contract: FrozenContract,
              remeasure: Optional[ConfirmRecord] = None,
              require_real_device: bool = True,
              peak: Optional[float] = None,
+             candidate_device: Optional[str] = None,
+             baseline_device: Optional[str] = None,
+             candidate_window: Optional[str] = None,
+             baseline_window: Optional[str] = None,
              ) -> Observation:
     """一次完整评测。`measure()` 返回的键至少含 `value` 与可选
     `validity` / `lib_fallback` / `cv_exceeded` / `launch_dominance_exceeded` /
@@ -100,7 +105,25 @@ def evaluate(contract: FrozenContract,
             provenance={"contract_hash": expected, "record_hash": record_hash},
         )
 
-    # ── 2. 心跳: 失败窗口内全资格 False, 但仍要记下数 (只是不让它造成后果) ──
+    # ── 2. 同卡配对 (设计 §11-2 / §13.4 硬性语义 2) ──
+    # 声明了 same_device、实际跑到两张卡上的加速比**作废**。
+    # spine-review P3-16: 这条检查必须在库里, 不能只活在测试文件里。
+    if candidate_device is not None or baseline_device is not None:
+        pair_why = pairing_conflict(candidate_device, baseline_device,
+                                   candidate_window, baseline_window)
+        if pair_why:
+            return Observation(
+                metric=metric, value=None, unit=unit,
+                validity="uninformative",
+                eligibility=ELIG_ALL_FALSE,
+                refused=pair_why,
+                reasons=[pair_why],
+                provenance={"contract_hash": expected,
+                            "candidate_device": candidate_device,
+                            "baseline_device": baseline_device},
+            )
+
+    # ── 3. 心跳: 失败窗口内全资格 False, 但仍要记下数 (只是不让它造成后果) ──
     hb_ok = True
     hb_reasons = []
     if heartbeat is not None:
