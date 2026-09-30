@@ -72,7 +72,10 @@ uninformative 0.0248，**系统性比真实跨次散布大 3~8 倍**（它量的
 
 - `Verdict` 四态枚举 `FAST / SAME / SLOW / AMBIGUOUS`；
 - `NOISE_BAND: {Validity → float}`；
-- `verdict(current, previous, validity) → (Verdict, 人类可读理由)`；
+- `verdict(current, previous, validity) → (Verdict, 人类可读理由, 这次判决用过的那条带宽)`
+  —— 第三个元素是 #87 第 4 片加的（[doc 58](58-缓存语义与墙钟上界等新吸收.md) §3.5）：没用过带宽
+  的两支（缺可比值 / 档位 `uninformative`）给 `None`。它必须由判决自己给出，调用方查表两次之间
+  表可以被换过，于是「记下的」与「用过的」就不是同一个数；判决结果与文案一字未改。
 - `binding_attainment(metrics)` / `roofline_converged(metrics)` —— 后者带可信性守卫：
   `measurement_can_gate is False` 或 `benchmark_contaminated` 时一律 False（不可信的
   测量没有资格宣布「已经到顶」）。
@@ -176,7 +179,8 @@ resume 读的是后者。删掉出口那次不影响任何可观测结果。曾�
    「绑定轴已达 roofline N% (>= 90%), 判定已收敛」。原有「性能未改善」保留但含义收窄
    到 `SAME`。任何按日志文本做统计的脚本要跟着改。
 4. `metrics` 无新增键（三态那批键已有），四态判决本身不写进 metrics —— 它只在
-   Conductor 的局部，理由见 §八。
+   Conductor 的局部，理由见 §八。（⚠️ 这句 today 已过期一半：判决**用过的那条带宽**自
+   #87 第 4 片起写在**每一轮的记录**里而不是 `metrics` 里，见 §三 上面那条与 doc 58 §3.5。）
 
 ## 七、测试账
 
@@ -195,9 +199,11 @@ resume 读的是后者。删掉出口那次不影响任何可观测结果。曾�
 
 ## 八、没做的事
 
-- **四态判决没有落进 `metrics`/快照**。目前只有 Conductor 当场消费。若以后要离线分析
-  「哪一轮被判成什么」，得把 `verdict` 与所用带宽一起写进 `metrics` —— 那需要先把
-  `measurement_validity` 那批键的搬运约定理清（doc 33 抓过一次搬运丢字段）。
+- **四态判决本身没有落进 `metrics`/快照**，「哪一轮被判成 FAST/SAME/SLOW」今天仍只能从日志读。
+  ⚠️ 但这一条已经**只剩一半**：判决**用过的那条带宽**自 #87 第 4 片起写在每一轮的记录里
+  （`l3_improvement_band`，doc 58 §3.5），所以「跨轮是不是同一条带宽」这个离线问句有原料了；
+  没原料的是判决结果自己。把它一起写进去需要先把 `measurement_validity` 那批键的搬运约定理清
+  （doc 33 抓过一次搬运丢字段）。
 - **缺口 3（峰值表收敛到 `HardwareCases` 一处 + 用实测替代 datasheet）**：§四末尾那条
   风险的正解在这里，也是 D4 判据可信度的天花板。优先级因此往上提一格。
 - **D5 噪声导向停止**：D4 处理的是「这一轮的读数算不算证据」，D5 处理的是「样本够不够
