@@ -23,7 +23,8 @@
 | §8 失败分类路由 | `operator_agent/failure_route.py`（五路 + `fix_not_rewrite`） | ✅ |
 | §17「无法确立」 | `confirm.UnableToEstablish` + 量具报表章节 | ✅ |
 | §14 验收八条 | `tests/test_stage1_acceptance.py` | ✅（MockGPU 等价物） |
-| §5 bandit 调参 / §11 多卡放置 / §12 模板后端 | — | ⏳ 未做 |
+| §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/竞争降级） | ✅ |
+| §5 bandit 调参 / §12 模板后端 | — | ⏳ 未做 |
 
 **审查**：`spine-review.md` 记了 P0–P3；P0 三项与 P1-4/P2-10 已修。  
 **尚未宣称收益**（§19.4）：真机 §14 冒烟之前，不对外说资格审计带来收益。
