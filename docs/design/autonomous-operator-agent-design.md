@@ -2,12 +2,31 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 设计草案（接口未实现） |
+| 状态 | **Stage 0–1 已落地**（见文末「落地状态」）；Stage 2+ 仍为设计 |
 | 目的 | 给出一个可自动运行、自主搜索并产出**可审计结论**的 GPU 算子开发 agent 的架构与接口约定 |
 | 独立性 | 本文不依赖任何既有实现；所有接口为从零定义 |
 | 运行模式 | **无人值守**（autonomous）：无人在环内裁决歧义、发现失效 |
 | 目标硬件 | **多卡**（同构与异构并存） |
 | DSL 边界 | 初期 Triton / CUDA；后端接口预留 **TVM / CUTLASS 模板型后端** |
+
+---
+
+## 落地状态（`design/autonomous-spine` 分支）
+
+| 设计节 | 产物 | 状态 |
+|---|---|---|
+| §3 契约冻结 + 哈希 | `operator_agent/contract.py`（含 `freeze_from_task` / `load_dict` 校验载荷 hash） | ✅ |
+| §4.3 五位资格 | `operator_agent/eligibility.py` | ✅ |
+| §10.5-1 标定心跳 | `operator_agent/calibration.py`（成对参照双比值） | ✅ |
+| §10.5-4 两次确认 | `operator_agent/confirm.py`（`require_double_confirm` 开关） | ✅ |
+| §13.4 Oracle 收口 | `operator_agent/oracle.py`，已接 **L3 出口**（`verifier._assess_measurement`） | ✅ |
+| §8 失败分类路由 | `operator_agent/failure_route.py`（五路 + `fix_not_rewrite`） | ✅ |
+| §17「无法确立」 | `confirm.UnableToEstablish` + 量具报表章节 | ✅ |
+| §14 验收八条 | `tests/test_stage1_acceptance.py` | ✅（MockGPU 等价物） |
+| §5 bandit 调参 / §11 多卡放置 / §12 模板后端 | — | ⏳ 未做 |
+
+**审查**：`spine-review.md` 记了 P0–P3；P0 三项与 P1-4/P2-10 已修。  
+**尚未宣称收益**（§19.4）：真机 §14 冒烟之前，不对外说资格审计带来收益。
 
 ---
 
