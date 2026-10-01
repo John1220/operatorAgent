@@ -230,6 +230,8 @@ class Verifier:
         target_gflops: float = 10.0,
         environment_drift: Optional[list] = None,
         stop_after: Optional["VerificationLevel"] = None,
+        heartbeat=None,
+        heartbeat_expected: bool = False,
     ) -> list[VerificationResult]:
         """执行完整三级验证
 
@@ -241,6 +243,12 @@ class Verifier:
         `stop_after`: 在该级**通过**后停止, 不再往下跑 (P1-1)。读者是 Conductor 的
         候选选择: 对多个决赛候选只跑到 L2 (正确性), 用真机结果定胜负; L3 只跑
         胜者, 机时不随候选数翻倍。None = 完整三级 (默认, 旧行为不变)。
+
+        `heartbeat` / `heartbeat_expected`: 标定心跳 (设计 §10.5-1)。前者是**本窗口**
+        的一对已知参照读数, 后者说「这次到期了」—— 到期而 `heartbeat is None` 时收口点
+        按 RULER_BROKEN 处理 (spine-review P1-5: 「没做心跳」不许读成「心跳通过」)。
+        两个都由**拿着测量计数的那一层** (Conductor) 传进来: Verifier 不知道这是第几次
+        真值测量。
         """
         results = []
 
@@ -260,12 +268,16 @@ class Verifier:
             return results
 
         l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
-                                      environment_drift=environment_drift)
+                                      environment_drift=environment_drift,
+                                      heartbeat=heartbeat,
+                                      heartbeat_expected=heartbeat_expected)
         results.append(l3)
         return results
 
     def verify_l3_only(self, kernel_code: str, test_inputs, target_gflops: float,
-                       task: TaskSchema, environment_drift=None) -> list[VerificationResult]:
+                       task: TaskSchema, environment_drift=None,
+                       heartbeat=None, heartbeat_expected: bool = False,
+                       ) -> list[VerificationResult]:
         """只跑 L3 (P1-1): 胜出候选已带 L1+L2 结果时的续接入口
 
         读者是 Conductor 的候选选择: 决赛候选在 `verify(stop_after=L2)` 里真机
@@ -273,7 +285,9 @@ class Verifier:
         由调用方与已有的 L1+L2 结果拼接成完整三级。
         """
         l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
-                                      environment_drift=environment_drift)
+                                      environment_drift=environment_drift,
+                                      heartbeat=heartbeat,
+                                      heartbeat_expected=heartbeat_expected)
         return [l3]
 
     def _verify_compile(self, kernel_code: str, dsl: str = "python",
@@ -877,7 +891,9 @@ class Verifier:
 
     def _verify_performance(self, kernel_code: str, test_inputs, target_gflops: float,
                             task: TaskSchema,
-                            environment_drift: Optional[list] = None) -> VerificationResult:
+                            environment_drift: Optional[list] = None,
+                            heartbeat=None, heartbeat_expected: bool = False,
+                            ) -> VerificationResult:
         min_required = task.constraints.min_speedup
         print(f"  [Verifier] L3: 性能验证 (要求加速比 >= {min_required:.2f}x vs baseline)...")
         # 多组输入套件时，性能基准使用第一组输入
@@ -1072,7 +1088,8 @@ class Verifier:
                 metrics["gpu_shared_with_others"] = bool(others)
                 msg, assessment = self._assess_measurement(
                     metrics, msg, kernel_min_ms, gpu_util_pct=util, task=task,
-                    environment_drift=environment_drift)
+                    environment_drift=environment_drift,
+                    heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
                 passed = self._refuse_l3_pass(passed, assessment)
                 if not metrics.get("benchmark_contaminated") and others:
                     msg += f" (注: 卡与 {others} 个其他进程共享, 瞬时 util={util}%)"
@@ -1109,7 +1126,8 @@ class Verifier:
                    f"(要求 >= {min_required:.2f}x, {bound}-bound)")
             msg, assessment = self._assess_measurement(
                 metrics, msg, kernel_min_ms, task=task,
-                environment_drift=environment_drift)
+                environment_drift=environment_drift,
+                heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
             passed = self._refuse_l3_pass(passed, assessment)
             print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
             return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
@@ -1130,7 +1148,8 @@ class Verifier:
                f"(目标 {target_gflops * min_required:.2f})")
         msg, assessment = self._assess_measurement(
             metrics, msg, kernel_min_ms, task=task,
-            environment_drift=environment_drift)
+            environment_drift=environment_drift,
+            heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
         passed = self._refuse_l3_pass(passed, assessment)
         print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
         return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
@@ -1149,7 +1168,8 @@ class Verifier:
 
     def _assess_measurement(self, metrics: dict, msg: str, candidate_ms,
                             gpu_util_pct=None, task: Optional[TaskSchema] = None,
-                            environment_drift: Optional[list] = None):
+                            environment_drift: Optional[list] = None,
+                            heartbeat=None, heartbeat_expected: bool = False):
         """写入测量有效性三态判定, 返回 `(追加了原因说明的 msg, assessment)`
 
         缺口 1 的失效方式不是「没算」而是「算了没人读」: `benchmark_contaminated`
@@ -1251,6 +1271,11 @@ class Verifier:
                     fresh=not carried,
                     require_real_device=Cap.REAL_DEVICE.value in required,
                     metric="speedup_vs_baseline", unit="x",
+                    # 心跳: 只对**它自己量过的那扇窗**作数 (§13.5) —— Conductor 是为
+                    # 本轮这条读数跑的心跳, 所以本读数记在同一个 window 里。
+                    heartbeat=heartbeat,
+                    heartbeat_expected=heartbeat_expected,
+                    candidate_window=(heartbeat.window_id if heartbeat is not None else None),
                 )
                 metrics["observation"] = obs.as_dict()
                 # 让「契约被改写」这条结论真的有人读: `confirm.py` 的 UnableReport
@@ -1258,6 +1283,19 @@ class Verifier:
                 # —— 那条「本次评测作废」的条目永远不会出现在报告里 (死读键)。
                 if obs.hash_check == "mismatch":
                     metrics["contract_hash_mismatch"] = True
+                # 同一族的另一个死读键, 这份是尺子: `confirm.py` 的「该窗口内所有数字
+                # 不可用」与 `harness_pass_rate` 都在读 `ruler_broken`/`ruler_reason`,
+                # 而此前同样没有生产写入者。只在**真有心跳可谈**时写:
+                #   有心跳且通过 → False  (「检查过, 是好的」)
+                #   失败 / 到期没跑 → True + 理由
+                #   本次与心跳无关 → 不写 (「没检查」不许伪装成「检查过且好」)
+                if obs.provenance.get("heartbeat_checked") or \
+                        obs.provenance.get("heartbeat_expected"):
+                    metrics["heartbeat"] = obs.provenance
+                    metrics["ruler_broken"] = bool(obs.ruler_broken)
+                    if obs.ruler_broken:
+                        metrics["ruler_reason"] = "; ".join(
+                            obs.provenance.get("heartbeat_reasons") or [])
         except Exception as exc:  # noqa: BLE001 — 观测失败不挡主流程, 但要留痕
             metrics["observation_error"] = f"{type(exc).__name__}: {exc}"
         if assessment.contaminated:

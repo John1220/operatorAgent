@@ -8,7 +8,7 @@
 | 测试状态 | `113 passed in 1.46s`（7 个 spine 测试文件） |
 | 设计出处 | `docs/design/autonomous-operator-agent-design.md` §3 / §4 / §10.5 / §13 / §14 |
 | 审查结论 | **§14 验收未通过** —— 实现是一个库，不是一条链路 |
-| 落地状态 | **2026-09-30 部分落地**。P0-1 / P0-3 / P1-4 由 spine 修复批次落地（`2d37625` / `4b427a1` / `aa9b5bc`）；**本轮补 P0-2 与 P1-6**（各节末尾有「落地」注）。**P1-5 仍未修**，见该节 —— 它缺的是生产者，不是判据 |
+| 落地状态 | **2026-09-30 已落地**：P0-1 / P0-3 / P1-4 由 spine 修复批次落地（`2d37625` / `4b427a1` / `aa9b5bc`）；P0-2 / P1-6（`57dd970`）与 **P1-5 / P2-10 + P3-11/12/13**（本轮）随后落地，各节末尾有「落地」注。唯一**未做**的是 10% 预算的**账本**（见 P2-10 节末） |
 
 ## 结论摘要
 
@@ -153,19 +153,41 @@ if heartbeat is not None:      # ← 不传心跳 = 尺子健康
 **保留意见**：`real_device=None` 的默认**是对的**（`eligibility.py:131-134` 的理由成立：
 缺键 ≠ 检查过且不合格，否则诚实的本地 mock 会被判死）。本文只反对 `heartbeat_ok` 的默认。
 
-**补证（2026-09-30，本轮仍未修）**：`oracle.py:23` 引了
+**补证（2026-09-30）**：`oracle.py` 那时引了
 `from .calibration import HeartbeatResult, heartbeat_due`，而 `heartbeat_due`
 **全仓只有这一处 import、零调用**。也就是说「到了该塞参照对的时刻」这道判据，
 本该写在收口点里却从未写成；同时 `ruler_broken_window(None, …)` **显式**返回
 `False`（`heartbeat_result is None` → 不算坏）。两者叠加 = **一次心跳都没做过的
 运行，尺子被当成健康的**。
 
-为什么不能照上文那句「默认改成 `False`」直接改：`heartbeat_due(n_measurements,
-interval)` 要的是调用方自己维护的**累计真值测量次数**，oracle 独自判不了；而生产
-路径上目前**没有任何心跳生产者**。直接改默认，每一次 L3 读数都会因「没做过心跳」
-被降级或拒评 —— 这与 P2-10 打开 `require_double_confirm` 就把入库率归零是同一个
-陷阱。正确顺序是**先建生产者**（谁累计计数、谁按 `interval` 塞已知好/已知慢参照对），
-再把 `heartbeat_ok` 改成「没做就不算通过」。
+**落地（2026-09-30）**：按上文那句「先建生产者」的顺序做了，判据没有再动 `oracle`
+的默认值，而是让调用方**明说**这一次是否到期：
+
+- **生产者**：`Conductor` 维护「本次运行的真值测量条数」，`_heartbeat_for_next_measurement()`
+  在 `heartbeat_due(n, interval)` 成立时**当场**跑一对已知参照（`heartbeat_interval`
+  默认 5，非法值构造时就拒）。到位只跑一次（`_heartbeat_ran_for`）—— 否则 L1/L2 挂掉、
+  计数不前进的那些轮次会每轮重跑一次心跳。心跳读数走 `calibration.backend_bench_fn`
+  → `backend.benchmark`，与候选**同一条计时通道**；只在控制机 `perf_counter` 上计时
+  的 `default_bench_fn` 测不出远端尺子坏了，只留给离线单测。
+- **判据**：`oracle.evaluate` 收 `heartbeat_expected`。到期而 `heartbeat is None` →
+  RULER_BROKEN（全资格 False）；没到期且没传 → 不作尺子声明。`ruler_broken_window`
+  终于被派发（同一扇窗才牵连，§13.5）。
+- **可分辨**：「检查过且好」与「没检查」不共用一个 False —— `Observation.ruler_broken`
+  之外，provenance 里另有 `heartbeat_checked` / `heartbeat_expected` / `heartbeat_reasons`
+  三格。verifier 据此写 `metrics["ruler_broken"]`/`ruler_reason`（**这两个键此前同样是
+  零生产者的死读键**，`confirm.py` 的「该窗口内所有数字不可用」一直在读）、只有真有心跳
+  可谈时才写。
+- **只有本窗才算数**（§13.5 的两面）：别窗坏了不牵连本次，别窗**好了也不给本次背书** ——
+  「检查过」若按「收到过一张心跳」记，递一张陈旧心跳就能把没被测过的窗口洗成「已检查」。
+  到期却只递来别窗读数 → 本窗仍按「到期没跑」判坏。生产路径上 `Conductor` 总是传当窗
+  那张，这条只在调用方递错时才响。
+- **`heartbeat_due` 的死 import 已删**：它现在活在真正需要它的那一层（Conductor 拿得到
+  累计计数，oracle 拿不到）。
+
+真正的边界（写在用例里，不藏着）：默认参照对是纯 Python 小 matmul 与重复 8 遍的慢核，
+所以它证明的是「计时通道还能分辨快慢 + 后端量得出参照物」，**不是**绝对锚点——没有
+`expected_good` 时只做分离度检查。真机要连绝对偏置一起抓，得由调用方注入硬件的
+`expected_good` 与自己的参照核源码（`calibration` 的注入点一直留着）。
 
 ### P1-6 `cv_exceeded` 名不副实
 
@@ -263,15 +285,43 @@ elif getattr(self, "require_double_confirm", False):
 测试只靠 monkeypatch 造 `remeasure`（`tests/test_spine_wiring.py:63-84`），
 所以测不出这个。这个开关目前是「要么没用，要么是自杀开关」。
 
+**落地（2026-09-30）**：两条都改了。
+
+- 字段早在 P2-10 那批就补上了（`schemas.py` 的 `remeasure` 有注释记着来由），本轮补的是
+  **写者**：`Conductor._produce_remeasure()` 在**真会进语料**的那一支（`artifact.all_passed`）
+  里再跑一次 L3，把结果写成 `ConfirmRecord`。放在这里而不是每轮都跑：确认的对象是
+  「进语料」这个动作，对每一轮重测等于机时翻倍，而绝大多数轮次不会被记住 —— 这正是设计
+  §10.2「最后 10% 预算」的取舍。开关 `require_double_confirm` 现在是构造参数的一部分
+  （默认 `False`，仍是机时承诺），不再是「有本事你自己挂上去」的隐藏属性。
+- **独立性的诚实边界**（写进方法 docstring）：给的是「另跑一次 L3」—— 新的计时窗口，同一台
+  机器、同一份输入、同一张卡。它抓得住「第一次是侥幸」，抓不住「这台机器的尺子系统性偏了」
+  —— 后者是标定心跳的活。`independent=True` 声称的只是前者。
+- 重测**也过尺子检查**（到期就跑心跳）：否则「决定永久记忆的那一次测量」恰好会成为唯一
+  没被检查过的那一次。落在坏窗口里的重测 `ok=False`，理由里带 `ruler_broken`（实测摘掉
+  这条判据，用例变红）。
+- **顺带补上 P0-2 那个残留**（本文档 P0-2 节末列的）：`ConfirmRecord` 现在带
+  `contract_hash`（取**第二次**读数那条契约的戳，不是第一次的），`confirm_persist` 在首次
+  那头给了哈希时判同一性 —— 不符回「重测在另一条契约下取得」，**没带**回「无从证明两次
+  量的是同一条判据」。判据在两次测量之间被改写时，那两条读数就不再是同一条断言的两次
+  确认，这个字段是唯一能证明它的东西。
+- 端到端用例：`require_double_confirm=True` + 生产者 → `_save_to_db` **放行**（不再是归零）；
+  换掉首次那条契约的哈希 → 拒，且断言拒的理由**正是**契约那一条（否则摘掉该判据用例仍会
+  因别的门而拒，等于空转 —— 实测摘掉后 3 条用例变红）。
+
+⚠️ 一条**未做**的：10% 预算仍然只有原则、没有账本。「留了多少预算给确认」与「实际花了
+多少」在产物里都读不出来，所以 `_produce_remeasure` 无法按预算决定要不要跑 —— 它按
+`require_double_confirm` 跑。要做成设计里那张预算表，得先有跨轮的成本账本（现有的
+`CostTracker` 只记 LLM token，不记 GPU 机时）。
+
 ---
 
 ## P3 死代码与门面
 
 | # | 位置 | 问题 |
 |---|---|---|
-| 11 | `oracle.py:23` | 导入 `heartbeat_due` 但从未使用 |
-| 12 | `calibration.py:218` | `heartbeat_due` / `ruler_broken_window` 除测试外无读者 → 设计 §10.6 的 `if heartbeat_due(): if not calibrate(): abort` 主循环**不存在** |
-| 13 | `oracle.py:65` | `remeasure` 参数声明了、从不使用（commit message 却称 oracle 做"可选重测确认"） |
+| ~~11~~ | ~~`oracle.py:23`~~ | ~~导入 `heartbeat_due` 但从未使用~~ **已修**：死 import 删除；`heartbeat_due` 现在活在拿得到累计计数的那一层（`Conductor._heartbeat_for_next_measurement`）|
+| ~~12~~ | ~~`calibration.py:218`~~ | ~~`heartbeat_due` / `ruler_broken_window` 除测试外无读者~~ **已修**：两者都有了生产读者（计数与到位判定在 `Conductor`，窗口判据在 `oracle.evaluate`）。仍**未做**：§10.6 那个 `abort` —— 心跳失败目前只作废那一扇窗的读数，不终止整轮运行 |
+| ~~13~~ | ~~`oracle.py:65`~~ | ~~`remeasure` 参数声明了、从不使用~~ **已修**：死形参删除（全仓无人传；确认逻辑本来就在 `admit_to_corpus`）。`oracle.evaluate` 的 docstring 不再声称它做确认 |
 | 14 | `contract.py:31` | `_DTYPE_KEYS` 定义了、从未使用 |
 | 15 | `contract.py:194-214` | **`load_dict()` 忽略载荷里的 `hash`**，重新 `freeze()` 算一个新哈希 → 被改过的载荷得到合法新哈希；续跑若拿内嵌 hash 当期望值，改写检测不出来 |
 | 16 | `tests/test_stage1_acceptance.py:204` | **`pairing_conflict()` 只存在于测试文件里**，库里没有 → §14-7「跨卡配对拒绝」测的是一个不会发布的函数 |

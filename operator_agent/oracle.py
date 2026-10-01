@@ -1,8 +1,13 @@
 """Oracle —— 评测器唯一收口点 (设计 §13.4 / §2 总体图的「脊柱」)
 
-把四件脊柱收成**一次 evaluate**:
+把脊柱收成**一次 evaluate**:
 
-    契约哈希  →  心跳窗口  →  资格位  →  观测(值+溯源+资格)  →  可选重测确认
+    契约哈希  →  心跳窗口  →  资格位  →  观测(值+溯源+资格)
+
+入库则再叠一道（同模块的 `admit_to_corpus`）: 资格 `can_persist` **且** 两次确认。
+两步分开是有意的 —— 重测要花机时，而它只在**要进语料**时才需要，不该由「每次评测」
+触发。（`evaluate` 原先收着一个从不使用的 `remeasure` 形参，那个形状会让人以为它
+在做这件事；形参已删。）
 
 为什么是「唯一收口点」: 设计 §13.4 的三条硬性语义必须在 evaluate **内部**而不是
 调用方 —— 否则每个调用点都会漏掉其中一条 (本仓已多次踩过「算了没人读」/「声明了
@@ -20,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
-from .calibration import HeartbeatResult, heartbeat_due
+from .calibration import RULER_BROKEN, HeartbeatResult, ruler_broken_window
 from .confirm import ConfirmRecord, confirm_persist
 from .contract import ContractError, FrozenContract, assert_hash
 from .eligibility import ALL_FALSE as ELIG_ALL_FALSE
@@ -46,6 +51,11 @@ class Observation:
     #: 记录可校 —— 只盖了溯源戳, **没有**校验过) / `mismatch` / `missing`。
     #: 有它下游就不必从 `refused` 的文案里猜到底发生了什么。
     hash_check: str = ""
+    #: 尺子状态: True = 本次读数落在**心跳失败**的窗口内 (§4.3 第 2 条 → 资格全 False),
+    #: 或者心跳**到期却没跑**。False = 有心跳且通过, 或本次与心跳无关 —— 「没检查」与
+    #: 「检查过且好」的两件事记在 provenance 的 `heartbeat_checked`/`heartbeat_expected`
+    #: 两格里, 不共用一个 False。
+    ruler_broken: bool = False
 
     def as_dict(self) -> dict:
         return {
@@ -59,6 +69,7 @@ class Observation:
             "provenance": dict(self.provenance),
             "refused": self.refused,
             "hash_check": self.hash_check,
+            "ruler_broken": self.ruler_broken,
         }
 
 
@@ -68,9 +79,9 @@ def evaluate(contract: FrozenContract,
              record_hash: Optional[str] = None,
              fresh: bool = False,
              heartbeat: Optional[HeartbeatResult] = None,
+             heartbeat_expected: bool = False,
              metric: str = "speedup_vs_baseline",
              unit: str = "x",
-             remeasure: Optional[ConfirmRecord] = None,
              require_real_device: bool = True,
              peak: Optional[float] = None,
              candidate_device: Optional[str] = None,
@@ -156,11 +167,33 @@ def evaluate(contract: FrozenContract,
             )
 
     # ── 3. 心跳: 失败窗口内全资格 False, 但仍要记下数 (只是不让它造成后果) ──
-    hb_ok = True
-    hb_reasons = []
-    if heartbeat is not None:
-        hb_ok = bool(heartbeat.ok)
-        hb_reasons = list(heartbeat.reasons or [])
+    # 「没做心跳」不许读成「心跳通过」(spine-review P1-5)。但判据是**到期**而不是
+    # 「永远要求」: 短跑 / 离线路径上心跳本就不到期, 一律要求会把每一次读数都降级
+    # —— 那与打开 `require_double_confirm` 就把入库率归零是同一个陷阱。于是由调用方
+    # 明说 `heartbeat_expected`: 到期而没跑 = 尺子状态**未知**, 无人值守下未知按坏处理。
+    hb_checked = heartbeat is not None
+    hb_window = str(getattr(heartbeat, "window_id", "") or "")
+    # 只有**本窗**的心跳才算数 —— §13.5 的两面: 别窗坏了不牵连本次, 别窗好了也不给本次
+    # 背书。「检查过」若按「收到过一张心跳」记, 递一张陈旧心跳就能把没被测过的窗口洗成
+    # 已检查。构造上 Conductor 总是传当窗那张, 所以这条只在调用方递错时才响。
+    if hb_checked and candidate_window and hb_window != candidate_window:
+        hb_checked = False
+    hb_reasons: list = []
+    if hb_checked:
+        # 用窗口判据而不是裸 `ok`: 一张卡/一扇窗的尺子坏了不该牵连别的窗口 (§13.5)。
+        hb_broken = ruler_broken_window(heartbeat, candidate_window or "")
+        hb_reasons = [str(r) for r in (heartbeat.reasons or [])]
+    elif heartbeat_expected:
+        hb_broken = True
+        if heartbeat is not None:
+            hb_reasons = [f"{RULER_BROKEN}: 心跳到期, 但手上这次参照读数是别窗 "
+                          f"({hb_window}) 的, 不覆盖本次"]
+        else:
+            hb_reasons = [f"{RULER_BROKEN}: 标定心跳到期, 但本次没有参照读数"]
+    else:
+        # 不是本窗的读数 → 对本次不作任何声明 (既不判坏, 也不记成检查过)。
+        hb_broken = False
+    hb_ok = not hb_broken
 
     raw = dict(measure())
     value = raw.get("value")
@@ -200,7 +233,7 @@ def evaluate(contract: FrozenContract,
         l3_pass_is_refused=rule_inputs["l3_pass_is_refused"],
     )
     if not hb_ok:
-        reasons.append("RULER_BROKEN: 标定心跳失败, 同窗观测全资格 False")
+        reasons.append(f"{RULER_BROKEN}: 标定心跳失败, 同窗观测全资格 False")
         reasons.extend(hb_reasons)
 
     prov = {
@@ -208,6 +241,16 @@ def evaluate(contract: FrozenContract,
         "record_hash": record_hash,
         "heartbeat_ok": hb_ok,
         "heartbeat_epoch": getattr(heartbeat, "epoch", None),
+        # 「没检查」与「检查过且好」必须分得开: `heartbeat_ok=False` 一种值有两种成因
+        # (心跳失败 / 到期没跑), 只看它读不出是哪种 —— 下面两格就是那个区别。
+        "heartbeat_checked": hb_checked,
+        "heartbeat_expected": bool(heartbeat_expected),
+        "heartbeat_window_id": getattr(heartbeat, "window_id", ""),
+        "heartbeat_reasons": list(hb_reasons),
+        "heartbeat_ratios": {
+            "good": getattr(heartbeat, "known_good_ratio", None),
+            "slow": getattr(heartbeat, "known_slow_ratio", None),
+        },
         "baseline": contract.baseline.name,
         "dtype_semantics": {
             "tf32": contract.dtype_semantics.tf32,
@@ -230,6 +273,7 @@ def evaluate(contract: FrozenContract,
         reasons=reasons,
         provenance=prov,
         hash_check=hash_check,
+        ruler_broken=hb_broken,
     )
 
 
@@ -249,5 +293,9 @@ def admit_to_corpus(obs: Observation,
     ok, why = confirm_persist(first_speedup if first_speedup is not None else obs.value,
                               first_validity or obs.validity,
                               remeasure,
-                              min_speedup=min_speedup)
+                              min_speedup=min_speedup,
+                              # 两次确认的**前提**是同一条判据。观测自己带着它取得时
+                              # 的那条契约的戳, 不必再让调用方传一遍 (P0-2 的同款理由:
+                              # 能由记录携带的, 就不要让调用方随手给)。
+                              first_contract_hash=str(obs.provenance.get("contract_hash") or ""))
     return ok, why

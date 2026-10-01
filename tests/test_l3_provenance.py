@@ -126,10 +126,10 @@ def _task(required=(), min_speedup=1.0, dsl="python", hardware="nvidia_gpu",
     )
 
 
-def _l3(verifier, task=None, code=PYTHON_MATMUL):
+def _l3(verifier, task=None, code=PYTHON_MATMUL, **kw):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        r = verifier._verify_performance(code, _inputs(), 0.0, task or _task())
+        r = verifier._verify_performance(code, _inputs(), 0.0, task or _task(), **kw)
     return r, buf.getvalue()
 
 
@@ -868,6 +868,53 @@ class TestContractHashIsRecordCarried(unittest.TestCase):
         self.assertEqual(live, r.metrics["contract_hash"])
         self.assertEqual("0" * 64,
                          r.metrics["observation"]["provenance"]["record_hash"])
+
+
+# ─── 尺子: 心跳的结论必须落到报告读的那两个键上 (spine-review P1-5) ──
+
+def _hb(ok, window="hb-1", slow=3.0, reasons=()):
+    from operator_agent.calibration import HeartbeatResult
+    return HeartbeatResult(ok=ok, epoch=1, reasons=tuple(reasons),
+                           known_good_ratio=1.0, known_slow_ratio=slow,
+                           window_id=window)
+
+
+class TestRulerVerdictReachesTheReport(unittest.TestCase):
+    """`ruler_broken` / `ruler_reason` 此前是**死读键** (`confirm.py` 的「该窗口内所有
+    数字不可用」与 `harness_pass_rate` 都在读, 全仓没有生产写入者)。这条把它接上。
+    """
+
+    def _reading(self, task=None, **kw):
+        return _l3(_verifier(REAL, _bench(mode="cuda", device="cuda:2")),
+                   task or _task(required=(Cap.REAL_DEVICE,)), **kw)[0]
+
+    def test_a_broken_ruler_invalidates_the_reading_and_reaches_the_report(self):
+        from operator_agent.confirm import UnableToEstablish
+        r = self._reading(heartbeat=_hb(False, slow=1.0,
+                                        reasons=["RULER_BROKEN: 分离度不足"]),
+                          heartbeat_expected=True)
+        self.assertIs(True, r.metrics["ruler_broken"])
+        self.assertIn("RULER_BROKEN", r.metrics["ruler_reason"])
+        self.assertFalse(r.metrics["observation"]["eligibility"]["can_verdict"],
+                         "尺子坏了这条读数仍然可判决")
+        u = UnableToEstablish()
+        u.extend_metrics(r.metrics)
+        self.assertIn("ruler", {i.kind for i in u.items}, u.render())
+
+    def test_a_healthy_ruler_says_it_was_checked(self):
+        """「检查过且好」要写成 False, 不能缺席 —— 缺席与 False 是两件事"""
+        r = self._reading(heartbeat=_hb(True), heartbeat_expected=True)
+        self.assertIs(False, r.metrics["ruler_broken"])
+        self.assertTrue(r.metrics["observation"]["eligibility"]["can_verdict"])
+
+    def test_due_but_missing_is_written_as_broken(self):
+        """到期没跑 ≠ 没到期: 前者必须写 True, 后者一个键都不写"""
+        due = self._reading(heartbeat=None, heartbeat_expected=True)
+        self.assertIs(True, due.metrics["ruler_broken"])
+        self.assertIn("心跳", due.metrics["ruler_reason"])
+        not_due = self._reading()
+        self.assertNotIn("ruler_broken", not_due.metrics,
+                         "没检查的读数写了个 ruler_broken —— 那是「检查过且好」的位子")
 
 
 if __name__ == "__main__":

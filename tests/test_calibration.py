@@ -17,8 +17,9 @@ import math
 import unittest
 
 from operator_agent.calibration import (
-    HeartbeatResult, RULER_BROKEN, default_bench_fn, default_inputs, heartbeat,
-    heartbeat_due, known_good_kernel, known_slow_kernel, ruler_broken_window,
+    KNOWN_GOOD_SOURCE, KNOWN_SLOW_SOURCE, HeartbeatResult, RULER_BROKEN, _from_source,
+    backend_bench_fn, default_bench_fn, default_inputs, heartbeat, heartbeat_due,
+    known_good_kernel, known_slow_kernel, ruler_broken_window,
 )
 
 
@@ -166,6 +167,55 @@ class TestDefaultPairIsRunnable(unittest.TestCase):
         A, B = default_inputs(n=8)
         self.assertEqual(8, len(A))
         self.assertEqual(8, len(B[0]))
+
+
+class TestBackendMeasuredPair(unittest.TestCase):
+    """参照物必须由**同一把尺子**量 (spine-review P1-5 的生产端)
+
+    只用 `default_bench_fn` 在控制机上计时, 测的是**控制机的 `perf_counter`**: 远端 /
+    runner 的计时通道坏了它照样报绿 —— 那是「报表上显示为已检查」的变体。所以真机
+    路径走 `backend_bench_fn` → `backend.benchmark(code, inputs)`, 与候选同一条通道。
+    """
+
+    def test_source_and_callable_forms_agree(self):
+        """两种形态出自同一个定义体 —— 不许各自漂"""
+        A, B = default_inputs(n=8)
+        self.assertEqual(known_good_kernel(A, B),
+                         _from_source(KNOWN_GOOD_SOURCE, "g")(A, B))
+        self.assertEqual(known_slow_kernel(A, B, repeats=3),
+                         _from_source(KNOWN_SLOW_SOURCE, "s")(A, B, repeats=3))
+        self.assertTrue(getattr(known_good_kernel, "__source__", ""))
+        self.assertTrue(getattr(known_slow_kernel, "__source__", ""))
+
+    def test_names_survive_the_source_form(self):
+        """exec 出来的函数一律叫 `kernel` —— 不改名会让慢核被当成好核"""
+        self.assertEqual("known_good_kernel", known_good_kernel.__name__)
+        self.assertEqual("known_slow_kernel", known_slow_kernel.__name__)
+
+    def test_backend_measured_pair_separates(self):
+        """经后端量参照对: 诚实路径 ok, 且慢核显著更慢 (设计分离度 ≈8×)"""
+        from operator_agent.mock_gpu import MockGPU
+        result = heartbeat(backend_bench_fn(MockGPU(), warmup=1, repeat=3))
+        self.assertTrue(result.ok, result.reasons)
+        self.assertGreaterEqual(result.known_slow_ratio, 2.0, result.reasons)
+
+    def test_kernel_without_source_form_breaks_the_ruler(self):
+        """后端量不了参照物 → RULER_BROKEN, 不是静默放行"""
+        from operator_agent.mock_gpu import MockGPU
+        result = heartbeat(backend_bench_fn(MockGPU()),
+                           good_kernel=lambda A, B: None,
+                           slow_kernel=lambda A, B: None)
+        self.assertFalse(result.ok)
+        self.assertTrue(any(RULER_BROKEN in r for r in result.reasons), result.reasons)
+
+    def test_transport_failure_is_not_read_as_a_reading(self):
+        """`_transport_failure` 以**字典**形态返回 —— 不许被读成一次计时"""
+        from tests.backend_fakes import fake_backend
+        backend = fake_backend(benchmark=lambda *a, **kw: {
+            "success": False, "error": "SSHTransportError: 没听到回答"})
+        result = heartbeat(backend_bench_fn(backend))
+        self.assertFalse(result.ok, "传输失败被当成了读数")
+        self.assertTrue(any(RULER_BROKEN in r for r in result.reasons), result.reasons)
 
 
 if __name__ == "__main__":

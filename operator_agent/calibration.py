@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import inspect
 import math
 import time
 from dataclasses import dataclass
@@ -39,9 +40,16 @@ RULER_BROKEN = "RULER_BROKEN"
 
 
 # ─── 默认参照对: 纯 Python 小 matmul (好核) vs 多算几遍的慢核 ─────────────────
+#
+# 参照核的**源码形态**为什么必须存在 (而不是只留可调用形态):
+# 真机路径要让**同一把尺子**去量参照物 —— 走 `backend.benchmark(code, inputs)`, 与
+# 候选同一条计时通道 (部署 / runner / 计时循环 / JSON 回传)。只用 `default_bench_fn`
+# 在控制机上计时, 测的是**控制机的 `perf_counter`**: 远端的尺子坏了它照样报绿, 那是
+# 「报表上显示为已检查」的变体。`backend_bench_fn` 就是走这条路的那把尺子。
+#
+# 两种形态由**同一个定义体** `_MATMUL_BODY` 生成, 不并存两份会各自漂的拷贝。
 
-def known_good_kernel(A, B):
-    """已知好参照核: 小矩阵乘。故意朴素但正确 —— 它是尺子的「准星」。"""
+_MATMUL_BODY = """\
     n, p, m = len(A), len(B), len(B[0])
     out = [[0.0] * m for _ in range(n)]
     for i in range(n):
@@ -52,18 +60,48 @@ def known_good_kernel(A, B):
             for j in range(m):
                 row[j] += aik * bk[j]
     return out
+"""
 
+KNOWN_GOOD_SOURCE = '''\
+def kernel(A, B):
+    """已知好参照核: 小矩阵乘。故意朴素但正确 —— 它是尺子的「准星」。"""
+''' + _MATMUL_BODY
 
-def known_slow_kernel(A, B, repeats=8):
-    """故意写慢的参照核: 同样的 matmul 重复算 `repeats` 遍, 只留最后一遍。
-
-    分离度是设计出来的, 不是测出来的期望 —— `repeats=8` 时慢核读数应约 8× 好核,
-    远超默认下界 `min_slow_ratio=2.0`, 于是「带内」判据对计时噪声不敏感。
-    """
+#: 故意写慢的参照核: 同样的 matmul 重复算 `repeats` 遍, 只留最后一遍。
+#: 分离度是**设计出来的**, 不是测出来的期望 —— `repeats=8` 时慢核读数应约 8× 好核,
+#: 远超默认下界 `min_slow_ratio=2.0`, 于是「带内」判据对计时噪声不敏感。
+#: `repeats` 是形参而非写死的常量: 调用约定是 `kernel(**inputs)`, 后端路径把它放进
+#: `inputs` 就能调, 于是不必再存一个迟早与调用方漂开的数字。
+KNOWN_SLOW_SOURCE = '''\
+def kernel(A, B, repeats=8):
+    """故意写慢的参照核: 同样的 matmul 重复算 `repeats` 遍, 只留最后一遍。"""
     out = None
     for _ in range(max(1, int(repeats))):
-        out = known_good_kernel(A, B)
+        out = _plain(A, B)
     return out
+
+
+def _plain(A, B):
+''' + _MATMUL_BODY
+
+
+def _from_source(source: str, name: str):
+    """把源码形态 exec 成可调用形态, 并把源码挂在 `__source__` 上。
+
+    `__name__` 显式写回原样: `heartbeat` 的调用方 (以及 `_fixed_bench` 那类假 bench)
+    靠核名分辨好核/慢核, 而 exec 出来的函数一律叫 `kernel` —— 不改名会让「慢核」
+    被当成好核, 方向检查静默失效。
+    """
+    ns: dict = {}
+    exec(compile(source, f"<calibration:{name}>", "exec"), ns)
+    fn = ns["kernel"]
+    fn.__name__ = name
+    fn.__source__ = source
+    return fn
+
+
+known_good_kernel = _from_source(KNOWN_GOOD_SOURCE, "known_good_kernel")
+known_slow_kernel = _from_source(KNOWN_SLOW_SOURCE, "known_slow_kernel")
 
 
 def default_inputs(n=24):
@@ -75,6 +113,9 @@ def default_inputs(n=24):
 
 def default_bench_fn(code, inputs, warmup=1, samples=5):
     """默认 bench: 对可调用参照核计时, 返回中位毫秒 (cost, 越大越慢)。
+
+    ⚠️ 它只量**控制机**: 拿它当心跳的 bench_fn 时, 远端/runner 的计时通道坏了是
+    看不出来的。真机路径用 `backend_bench_fn`。保留它是为了离线单测与无后端场景。
 
     调用方注入的 `bench_fn(code, inputs) -> float` 同此签名: 返回值一律当 **cost**
     (median_ms) 解读。若你的 bench 报的是「越大越好」的 ratio, 请在包装层取倒数。
@@ -89,6 +130,42 @@ def default_bench_fn(code, inputs, warmup=1, samples=5):
         xs.append((time.perf_counter() - t0) * 1e3)
     xs.sort()
     return xs[len(xs) // 2]
+
+
+def backend_bench_fn(backend, *, warmup: int = 1, repeat: int = 3, repeats: int = 8):
+    """让**同一把尺子**量参照物: `heartbeat` 的 bench_fn 走 `backend.benchmark`。
+
+    与 `default_bench_fn` 的分工见上面源码形态那段的说明。`inputs` 是
+    `default_inputs()` 的元组形态, 这里转成调用约定要求的 dict。
+
+    读数不可用时**抛**而不是返回一个假数字 —— `heartbeat` 会把异常折成
+    `ok=False`(RULER_BROKEN): 「尺子读不出数」本来就该按坏处理, 不该静默放行。
+    """
+    def bench(kernel, inputs):
+        source = getattr(kernel, "__source__", None)
+        if not source:
+            raise ValueError(
+                f"参照核没有源码形态, 后端量不了它: {kernel!r} —— 只有由 "
+                "KNOWN_GOOD_SOURCE / KNOWN_SLOW_SOURCE 生成的核才带 __source__")
+        A, B = inputs
+        kwargs = {"A": A, "B": B}
+        if "repeats" in inspect.signature(kernel).parameters:
+            kwargs["repeats"] = repeats
+        payload = backend.benchmark(source, kwargs, warmup=warmup, repeat=repeat)
+        if not isinstance(payload, dict):
+            raise ValueError(f"后端没有回载荷: {payload!r}")
+        # `_transport_failure` 那类失败**以字典形态返回**而不是抛 (`remote_executor`),
+        # 所以这里必须显式看 success —— 否则「没听到回答」会被读成一次读数。
+        if payload.get("success") is False:
+            raise RuntimeError(f"后端基准失败: {payload.get('error') or payload!r}")
+        cost = payload.get("median_time_ms")
+        if cost is None:
+            cost = payload.get("avg_time_ms")
+        if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost <= 0:
+            raise ValueError(f"后端没回可用的计时: {payload!r}")
+        return float(cost)
+
+    return bench
 
 
 # ─── 结果与判定 ───────────────────────────────────────────────────────────────

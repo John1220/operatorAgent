@@ -261,6 +261,16 @@ class Conductor:
         # 采样→compile-gate 剪枝→修复→模板兜底, 把「留哪一个」的选择权交给验证侧
         # (决赛候选逐个跑 L1+L2, 见 _select_finalist)。单体路径保留为调试逃生门。
         use_coder_pipeline: bool = True,
+        # 标定心跳 (设计 §10.5-1): 每 N 次**真值测量**前塞一对已知参照核。
+        # 为什么是 N 而不是每次都塞: 心跳自身要花机时, 而它要抓的是「尺子随时间的
+        # 缓慢漂移 / 悄悄坏掉」, 不需要逐次; 短跑根本到不了期, 于是默认不会给已有
+        # 链路添任何行为变化。
+        heartbeat_interval: int = 5,
+        # 打开后: 进语料前**由本进程**补一次独立重测 (设计 §10.2 最后 10% 预算 /
+        # §10.5-4)。默认关, 因为它是**要花机时**的承诺: 每一份要记住的结论都要量两遍。
+        # 关键区别在于它不再是「开着就一律拒」—— 生产者 (`_produce_remeasure`) 与
+        # `_save_to_db` 的消费者成对存在, 打开这个开关是可用状态而不是自锁状态。
+        require_double_confirm: bool = False,
     ):
         # `is None` 而不是 `or`: `FailureDatabase` 定义了 `__len__`, 于是**一条记录都没有的
         # 注入实例是假的**, `failure_db or FailureDatabase()` 会把它丢掉换成一个默认实例 ——
@@ -281,6 +291,28 @@ class Conductor:
         #: 计数只在日志里活一次 (见 `_record_failure` 与结尾那行 `[FailureDB]`)。
         #: 不打印就等于没生效: 门挡掉的东西必须能被读者看见 (缺口 2 的失效方式)。
         self._reference_hold_rounds = 0
+
+        # 标定心跳的状态 (每次 `execute` 重置 —— 「每 N 次真值测量」的单位是**一次
+        # 运行**: 一个 Conductor 实例可以跑多个任务, 计数不许跨任务累计)。
+        # 非法 interval 在这里就响: `heartbeat_due` 会抛 ValueError, 与其在循环深处
+        # 炸掉一次真机运行, 不如构造时就拒绝。
+        if not isinstance(heartbeat_interval, int) or isinstance(heartbeat_interval, bool) \
+                or heartbeat_interval <= 0:
+            raise ValueError(f"heartbeat_interval 必须为正整数: {heartbeat_interval!r}")
+        self.heartbeat_interval = heartbeat_interval
+        #: 本次运行里**真值测量**(L3 读数)的累计条数 —— 心跳按它的倍数触发。
+        self._true_measurements = 0
+        self._heartbeat_epoch = 0
+        #: 已经为「第几次测量」跑过心跳了。防的是这一支: 计数停在第 5 次而 L3 一直没
+        #: 跑成 (L1/L2 挂了), 于是每一轮都重跑一次心跳。到位只跑一次, 之后的轮次复用
+        #: 同一次心跳 (同一扇窗)。
+        self._heartbeat_ran_for = 0
+        #: 最近一次心跳。只对它自己的 window 作数。
+        self._last_heartbeat = None
+
+        #: 永久结论要不要量两遍 (设计 §10.5-4)。消费者是 `_save_to_db`, 生产者是
+        #: `_produce_remeasure` —— 两边必须同时存在, 否则这个开关只有「一律拒」一档。
+        self.require_double_confirm = bool(require_double_confirm)
 
         # 初始化 Agent (注入 LLM + PromptManager)
         self.designer = DesignerAgent(self.kernel_db, llm=llm, prompt_manager=self.pm)
@@ -321,6 +353,49 @@ class Conductor:
             artifact.metadata = {}
         artifact.metadata["stop"] = {"reason": reason, "round": int(round_num),
                                      "detail": detail}
+
+    def _heartbeat_for_next_measurement(self):
+        """下一次真值测量是否该伴随标定心跳 —— 该跑就**现在**跑掉 (同一个窗口)。
+
+        返回 `(HeartbeatResult|None, expected)`。`expected=True` 而结果为 None 表示
+        「到期了但没跑成」, 由收口点按 RULER_BROKEN 处理 —— 不在这里吞掉, 否则
+        「忘了跑」就是一条静默放行通道 (spine-review P1-5)。
+
+        为什么在 L1/L2 之前跑: 心跳必须落在**与读数同一个窗口**里, 而窗口由这一轮的
+        测量流决定。等知道 L3 会不会跑就晚了 (收口点那时已经算完)。代价是 L1/L2 挂掉
+        的那一轮白跑一次心跳 —— `_heartbeat_ran_for` 保证「第 N 次测量」只白跑一次,
+        不会因为计数不前进而每轮重跑。
+        """
+        from .calibration import (backend_bench_fn, heartbeat as run_heartbeat,
+                                  heartbeat_due)
+        nxt = self._true_measurements + 1
+        if not heartbeat_due(nxt, self.heartbeat_interval):
+            return None, False
+        if self._heartbeat_ran_for == nxt:
+            # 已经为这一次测量跑过: 复用那一次 (同窗), 不重跑也不换窗。
+            return self._last_heartbeat, True
+        self._heartbeat_epoch += 1
+        epoch = self._heartbeat_epoch
+        window = f"hb-{epoch}"
+        self._heartbeat_ran_for = nxt
+        try:
+            result = run_heartbeat(
+                backend_bench_fn(self.backend), epoch=epoch, window_id=window,
+            )
+        except Exception as exc:  # noqa: BLE001 — 心跳炸了不挡主流程, 但必须留痕
+            # 清掉上一次的结果: 否则「没跑成」之后的轮次会复用**上一扇窗**的心跳,
+            # 而它恰好是 ok=True —— 那就把「心跳没跑成」洗成了「尺子是好的」。
+            self._last_heartbeat = None
+            print(f"[Heartbeat] 第 {nxt} 次测量到期, 心跳没跑成: "
+                  f"{type(exc).__name__}: {exc} —— 本次按 RULER_BROKEN 处理")
+            return None, True
+        self._last_heartbeat = result
+        verdict = "OK" if result.ok else "RULER_BROKEN"
+        print(f"[Heartbeat] 第 {nxt} 次测量前标定 ({window}): {verdict} "
+              f"好核比值={result.known_good_ratio:.3g} "
+              f"慢核比值={result.known_slow_ratio:.3g}"
+              + (f" {list(result.reasons)}" if result.reasons else ""))
+        return result, True
 
     def _select_finalist(self, current_code: str, finalists: list,
                          task, test_inputs, expected_output) -> tuple:
@@ -407,6 +482,12 @@ class Conductor:
         # 与水位线同一个理由: 一个 Conductor 实例可以跑多个任务, 落盘与打印的必须是
         # **本次**那一份, 不是「这个进程到现在为止」。
         self._reference_hold_rounds = 0
+        # 心跳计数同理: 「每 N 次真值测量」是**这一次运行**内的事, 跨任务累计会让
+        # 第二个任务在错误的位置插入参照对。
+        self._true_measurements = 0
+        self._heartbeat_epoch = 0
+        self._heartbeat_ran_for = 0
+        self._last_heartbeat = None
         with capture_execution(
             task_id=task.task_id,
             operator=operator_name,
@@ -768,28 +849,37 @@ class Conductor:
             # 同时也是喂 Fixer 的失败证据, 不必重算 (上一版丢掉它、重跑一遍真机 L2;
             # 旧注释写的「胜者的 L1 复检走 SHA256 编译缓存」其实不存在 —— 拼接路径
             # 根本不进 L1)。
+            # 标定心跳 (设计 §10.5-1): 到期就在**本窗口内**塞一对已知参照核。读数与心跳
+            # 同窗, 于是尺子坏了这条读数当场作废, 而不是等下一轮才发现。
+            # 放在「已知不跑 L3」的那一支**之后**: 那一支没有真值测量, 塞心跳纯属烧机时。
             if selected_l1_l2 is not None and l1_l2_is_final:
                 print(f"\n[Verifier] 复用候选选择中的 L1+L2 失败结果 (不重跑真机)...")
                 verify_results = selected_l1_l2
-            elif selected_l1_l2 is not None:
-                print(f"\n[Verifier] 执行 L3 验证 (L1+L2 已在候选选择中通过)...")
-                verify_results = selected_l1_l2 + self.verifier.verify_l3_only(
-                    kernel_code=current_code,
-                    test_inputs=test_inputs,
-                    target_gflops=target_gflops,
-                    task=task,
-                    environment_drift=verify_drift,
-                )
             else:
-                print(f"\n[Verifier] 执行三级验证...")
-                verify_results = self.verifier.verify(
-                    kernel_code=current_code,
-                    task=task,
-                    test_inputs=test_inputs,
-                    expected_output=expected_output,
-                    target_gflops=target_gflops,
-                    environment_drift=verify_drift,
-                )
+                heartbeat, heartbeat_expected = self._heartbeat_for_next_measurement()
+                if selected_l1_l2 is not None:
+                    print(f"\n[Verifier] 执行 L3 验证 (L1+L2 已在候选选择中通过)...")
+                    verify_results = selected_l1_l2 + self.verifier.verify_l3_only(
+                        kernel_code=current_code,
+                        test_inputs=test_inputs,
+                        target_gflops=target_gflops,
+                        task=task,
+                        environment_drift=verify_drift,
+                        heartbeat=heartbeat,
+                        heartbeat_expected=heartbeat_expected,
+                    )
+                else:
+                    print(f"\n[Verifier] 执行三级验证...")
+                    verify_results = self.verifier.verify(
+                        kernel_code=current_code,
+                        task=task,
+                        test_inputs=test_inputs,
+                        expected_output=expected_output,
+                        target_gflops=target_gflops,
+                        environment_drift=verify_drift,
+                        heartbeat=heartbeat,
+                        heartbeat_expected=heartbeat_expected,
+                    )
             all_verification_results = verify_results
 
             # P1-1 成本记账 (续): 非选择路径的 L2 次数直接从这一轮的验证结果里数 ——
@@ -809,6 +899,11 @@ class Conductor:
             l3_result = next(
                 (r for r in verify_results if r.level == VerificationLevel.L3_PERFORMANCE), None,
             )
+            # 「真值测量」= 这一轮真的产生了一条 L3 读数。只数它, 不数 L1/L2 —— 心跳
+            # 要盯的是「把时间换成数字」的那条通道; 而 L1/L2 失败的轮次不推进计数,
+            # 于是同一扇窗的参照对不会被反复重跑 (见 `_heartbeat_ran_for`)。
+            if l3_result is not None:
+                self._true_measurements += 1
 
             # 血缘记录: 每轮动作与结果
             artifact.iteration_history.append({
@@ -1355,6 +1450,11 @@ class Conductor:
             print(f"\n[Conductor] {self.llm.cost_tracker.pretty()}")
 
         if artifact.all_passed:
+            # 永久结论量两遍 (设计 §10.5-4): 只在**真会进语料**的这一支做重测。生产者与
+            # 消费者 (下面 `_save_to_db` 里那道门) 成对存在, 所以打开
+            # `require_double_confirm` 是可用状态, 不是「入库率归零」的自锁状态。
+            if self.require_double_confirm:
+                self._produce_remeasure(artifact, task, test_inputs, target_gflops)
             self._save_to_db(artifact, task)
         # 每次运行都在日志里报一句语料现状。这条的存在理由是缺口 2 的失效方式本身:
         # 「RAG 命中 N 个相似案例」以前只说明语料里有 N 条, 不说明它们是不是真的
@@ -1628,6 +1728,68 @@ class Conductor:
             vr_list,
         )
 
+    def _produce_remeasure(self, artifact, task, test_inputs, target_gflops: float) -> None:
+        """给「即将进长期记忆」的结论补一次**独立重测** (设计 §10.2 末 10% 预算 / §10.5-4)。
+
+        为什么在这里、而不是每轮都测: 只有 `all_passed` 的产物会进语料, 而确认的对象
+        正是「进语料」这个动作。对每一轮都重测等于机时翻倍, 而绝大多数轮次根本不会被
+        记住 —— 「最后 10% 预算」说的就是这个取舍。
+
+        独立性的**诚实边界**: 这里给的是「另跑一次 L3」—— 新的计时窗口 (新的 runner
+        调用、新的一段安静时间), 同一台机器、同一份输入、同一张卡。它抓得住「第一次
+        是侥幸」(单次快读数), 抓不住「这台机器的尺子系统性偏了」—— 后者是标定心跳的活。
+        `independent=True` 声称的只是前者。
+        """
+        from .confirm import ConfirmRecord
+        metrics_1 = artifact.benchmark_data or {}
+        # 重测也是一条 L3 读数, 所以同样过尺子检查 —— 否则「决定永久记忆的那一次测量」
+        # 恰好是唯一没被检查过的那一次。到期就用本层的判据 (不额外计数: 循环已结束,
+        # 计数的作用是循环内的节奏)。
+        heartbeat, heartbeat_expected = self._heartbeat_for_next_measurement()
+        try:
+            results = self.verifier.verify_l3_only(
+                kernel_code=artifact.code, test_inputs=test_inputs,
+                target_gflops=target_gflops, task=task,
+                heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
+            second = results[0] if results else None
+        except Exception as exc:  # noqa: BLE001 — 重测没跑成也是一种结论, 不许静默补 True
+            second = None
+            print(f"[Confirm] 重测没跑成: {type(exc).__name__}: {exc}")
+        m2 = ((getattr(second, "metrics", None) or {}) if second is not None else {})
+        obs2 = m2.get("observation") or {}
+        # `ok` 的含义是「这次重测本身是一条可用读数」, 不是「它赢了基线」—— 后者由
+        # `confirm_persist` 的 speedup 门槛判, 两件事混在一个布尔里就无从诊断。
+        # 尺子坏了的窗口里的读数**不能当确认**: 与 `admit_to_corpus` 对「该窗口内所有
+        # 数字不可用」的处理同一条道理, 只是这里是第二次确认那一侧。
+        usable = bool(second is not None and not obs2.get("refused")
+                      and str(m2.get("measurement_validity") or "") != "uninformative"
+                      and not m2.get("ruler_broken"))
+        if second is None:
+            reason = "重测没有结果 (没跑成)"
+        elif not usable:
+            bits = [f"refused={obs2.get('refused') or '无'}",
+                    f"validity={m2.get('measurement_validity') or '未报'}"]
+            if m2.get("ruler_broken"):
+                bits.append(f"ruler_broken: {m2.get('ruler_reason') or ''}".strip())
+            reason = "重测不可用: " + ", ".join(bits)
+        else:
+            reason = str(getattr(second, "message", "") or "")
+        artifact.remeasure = ConfirmRecord(
+            ok=usable,
+            speedup=m2.get("speedup_vs_baseline"),
+            validity=str(m2.get("measurement_validity") or ""),
+            reason=reason,
+            independent=True,
+            # **第二次**读数的那条契约, 不是第一次的: 判据在两次之间被改写时,
+            # 这个字段就是能证明它的东西 (见 `confirm_persist` 的同一性判据)。
+            contract_hash=str(m2.get("contract_hash") or ""),
+        )
+        first = metrics_1.get("speedup_vs_baseline")
+        print(f"[Confirm] 独立重测: "
+              f"首次 {first if first is not None else 'n/a'}x → "
+              f"重测 {artifact.remeasure.speedup if artifact.remeasure.speedup is not None else 'n/a'}x "
+              f"({artifact.remeasure.validity or '未报档位'})")
+
     def _save_to_db(self, artifact: KernelArtifact, task: TaskSchema):
         """把这次的核写进跨运行经验库 (缺口 2)。门不过就只进内存, 不落盘。
 
@@ -1663,6 +1825,8 @@ class Conductor:
                     first_validity=str(metrics.get("measurement_validity") or ""),
                     remeasure=remeasure,
                     min_speedup=float(task.constraints.min_speedup or 1.0),
+                    # 判据同一性: 首次那条读数在**哪条契约**下取得 (L3 每次都盖了戳)。
+                    first_contract_hash=str(metrics.get("contract_hash") or ""),
                 )
                 if not keep2 and remeasure is None:
                     reason = ("没有独立重测: 永久结论需要两次确认 (§10.5-4)"

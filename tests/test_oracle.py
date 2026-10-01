@@ -131,6 +131,78 @@ class TestHeartbeatWindowInvalidates(unittest.TestCase):
         self.assertTrue(obs.eligibility.can_persist)
 
 
+class TestHeartbeatDueButMissing(unittest.TestCase):
+    """spine-review P1-5: 「没做心跳」不许读成「心跳通过」
+
+    判据是**到期**(由拿着测量计数的那一层明说), 不是「永远要求」: 短跑/离线路径上
+    心跳本来就不到期, 一律要求会把每一次读数都降级 —— 与打开
+    `require_double_confirm` 就把入库率归零是同一个陷阱。
+    """
+
+    def test_due_but_missing_breaks_the_ruler(self):
+        obs = _eval(heartbeat=None, heartbeat_expected=True)
+        self.assertTrue(obs.ruler_broken)
+        self.assertFalse(obs.eligibility.can_verdict,
+                         "到期没跑心跳却仍然判决了 —— 「忘了跑」成了静默放行通道")
+        self.assertFalse(obs.eligibility.can_persist)
+        self.assertEqual("RULER_BROKEN",
+                         obs.provenance["heartbeat_reasons"][0].split(":")[0])
+        self.assertIsNotNone(obs.value, "数仍要记录 —— 只是不让它造成后果")
+
+    def test_not_due_and_missing_is_not_a_ruler_claim(self):
+        """没到期就没得说; 但也**不许**说成「检查过、是好的」"""
+        obs = _eval()
+        self.assertFalse(obs.ruler_broken)
+        self.assertTrue(obs.eligibility.can_verdict)
+        self.assertFalse(obs.provenance["heartbeat_checked"])
+        self.assertFalse(obs.provenance["heartbeat_expected"])
+
+    def test_checked_and_passed_says_so(self):
+        hb = HeartbeatResult(ok=True, epoch=1, reasons=[], known_good_ratio=1.0,
+                             known_slow_ratio=3.0, window_id="hb-1")
+        obs = _eval(heartbeat=hb, heartbeat_expected=True)
+        self.assertFalse(obs.ruler_broken)
+        self.assertTrue(obs.eligibility.can_verdict)
+        self.assertTrue(obs.provenance["heartbeat_checked"])
+        self.assertEqual("hb-1", obs.provenance["heartbeat_window_id"])
+
+    def test_a_broken_heartbeat_only_taints_its_own_window(self):
+        """§13.5: 一张卡/一扇窗的尺子坏了, 不牵连别的窗口"""
+        hb = HeartbeatResult(ok=False, epoch=1, reasons=["RULER_BROKEN: 分离度不足"],
+                             known_good_ratio=1.0, known_slow_ratio=1.0,
+                             window_id="hb-1")
+        same = _eval(heartbeat=hb, candidate_window="hb-1")
+        other = _eval(heartbeat=hb, candidate_window="hb-2")
+        self.assertTrue(same.ruler_broken)
+        self.assertFalse(other.ruler_broken,
+                         "跨窗仍被牵连 —— 窗口判据 (ruler_broken_window) 没有被派发")
+        self.assertTrue(other.eligibility.can_verdict)
+
+    def test_a_passing_heartbeat_from_another_window_backs_nothing(self):
+        """§13.5 的另一面: 别窗的绿也不许借 —— 本次读数没被检查过
+
+        「检查过」若按「收到过一张心跳」记, 递一张陈旧心跳就能把没被测过的窗口洗成
+        已检查 (报表上显示为已检查)。
+        """
+        hb = HeartbeatResult(ok=True, epoch=1, reasons=[], known_good_ratio=1.0,
+                             known_slow_ratio=3.0, window_id="hb-1")
+        obs = _eval(heartbeat=hb, candidate_window="hb-2")
+        self.assertFalse(obs.ruler_broken)
+        self.assertTrue(obs.eligibility.can_verdict)
+        self.assertFalse(obs.provenance["heartbeat_checked"],
+                         "别窗的心跳被记成了「本次检查过」")
+        self.assertEqual("hb-1", obs.provenance["heartbeat_window_id"])
+
+    def test_another_windows_heartbeat_does_not_satisfy_a_due_check(self):
+        """到期了却只递来别窗的读数 → 本窗仍算「到期没跑」, 按坏处理"""
+        hb = HeartbeatResult(ok=True, epoch=1, reasons=[], known_good_ratio=1.0,
+                             known_slow_ratio=3.0, window_id="hb-1")
+        obs = _eval(heartbeat=hb, heartbeat_expected=True, candidate_window="hb-2")
+        self.assertTrue(obs.ruler_broken, "别窗的心跳冒充了本窗的到期检查")
+        self.assertFalse(obs.eligibility.can_verdict)
+        self.assertIn("别窗", " ".join(obs.provenance["heartbeat_reasons"]))
+
+
 class TestEligibilityDrivesConsequences(unittest.TestCase):
     def test_degraded_cannot_persist_or_count_progress(self):
         obs = _eval(measure=lambda: _measure(1.2, "degraded", cv_exceeded=True))
@@ -160,10 +232,15 @@ class TestAdmitNeedsBothEligibilityAndConfirmation(unittest.TestCase):
     def _good_obs(self):
         return _eval(measure=lambda: _measure(1.3, "valid"))
 
+    def _remeasure(self, **kw):
+        """盖了契约戳的重测记录 —— 没戳的现在会被判「无从证明是同一条判据」"""
+        kw.setdefault("contract_hash", self._good_obs().provenance["contract_hash"])
+        return ConfirmRecord(**kw)
+
     def test_pass_with_independent_remeasure(self):
         ok, _ = admit_to_corpus(
             self._good_obs(), 1.3, "valid",
-            ConfirmRecord(ok=True, speedup=1.25, validity="valid"))
+            self._remeasure(ok=True, speedup=1.25, validity="valid"))
         self.assertTrue(ok)
 
     def test_refused_without_remeasure(self):
@@ -175,18 +252,36 @@ class TestAdmitNeedsBothEligibilityAndConfirmation(unittest.TestCase):
         obs = _eval(measure=lambda: _measure(1.3, "degraded", cv_exceeded=True))
         ok, msg = admit_to_corpus(
             obs, 1.3, "degraded",
-            ConfirmRecord(ok=True, speedup=1.2, validity="valid"))
+            ConfirmRecord(ok=True, speedup=1.2, validity="valid",
+                          contract_hash=obs.provenance["contract_hash"]))
         self.assertFalse(ok)
         self.assertIn("can_persist", msg)
 
     def test_direction_faster_second_pass_is_better(self):
         obs = self._good_obs()
         good = admit_to_corpus(obs, 1.2, "valid",
-                               ConfirmRecord(ok=True, speedup=1.4, validity="valid"))
+                               self._remeasure(ok=True, speedup=1.4, validity="valid"))
         bad = admit_to_corpus(obs, 1.2, "valid",
-                              ConfirmRecord(ok=True, speedup=0.5, validity="valid"))
+                              self._remeasure(ok=True, speedup=0.5, validity="valid"))
         self.assertTrue(good[0])
         self.assertFalse(bad[0])
+
+    def test_a_remeasure_without_the_contract_stamp_is_refused(self):
+        """判据同一性是两次确认的**前提**: 说不清就用不了 (spine-review P0-2 的残留)"""
+        ok, msg = admit_to_corpus(
+            self._good_obs(), 1.3, "valid",
+            ConfirmRecord(ok=True, speedup=1.25, validity="valid"))
+        self.assertFalse(ok, "没带契约哈希的重测被当成了有效的第二次确认")
+        self.assertIn("契约哈希", msg)
+
+    def test_a_remeasure_under_another_contract_is_refused(self):
+        """两次测量之间判据被改写 → 那不是「同一条断言量了两遍」"""
+        ok, msg = admit_to_corpus(
+            self._good_obs(), 1.3, "valid",
+            ConfirmRecord(ok=True, speedup=1.25, validity="valid",
+                          contract_hash="f" * 64))
+        self.assertFalse(ok)
+        self.assertIn("另一条契约", msg)
 
 
 if __name__ == "__main__":

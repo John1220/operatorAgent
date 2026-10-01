@@ -24,12 +24,18 @@ class ConfirmRecord:
     reason: str = ""
     #: 是否与首次测量独立 (不同窗口 / 不同随机种子)。False = 不能当第二次确认
     independent: bool = True
+    #: 这次重测是在**哪条契约**下取得的 (spine-review P0-2 的残留那个洞)。
+    #: 两次确认的意义是「同一条判据下量了两次」; 判据在两次之间被改写, 就成了两条不同
+    #: 断言各量一次 —— 那不是确认。空串 = 没带, 由 `confirm_persist` 按「无从证明」处理
+    #: (只在首次那头给了哈希时才判, 见那里的说明)。
+    contract_hash: str = ""
 
 
 def confirm_persist(first_speedup: float,
                     first_validity: str,
                     remeasure: Optional[ConfirmRecord],
-                    min_speedup: float = 1.0) -> Tuple[bool, str]:
+                    min_speedup: float = 1.0,
+                    first_contract_hash: str = "") -> Tuple[bool, str]:
     """设计 §10.5-4: 永久结论需两次确认。
 
     规则:
@@ -37,6 +43,7 @@ def confirm_persist(first_speedup: float,
       2. 必须有一次**独立**重测
       3. 重测不得比首次「明显劣化」—— 判为劣化的带宽用 validity 分档
          (DEGRADED 允许更宽的噪声, UNINFORMATIVE 直接不能当第二次)
+      4. 重测必须与首次在**同一条契约**下取得 (给了 `first_contract_hash` 时才判)
 
     没有重测记录 → **拒绝入库** (而不是「没有重测就当过了」)。这是 10% 预算
     存在的意义: 没留预算就等于没做完。
@@ -53,6 +60,18 @@ def confirm_persist(first_speedup: float,
 
     if not remeasure.independent:
         return False, "重测不是独立测量 (同窗口/同种子), 不能当第二次确认"
+
+    # 判据同一性 (spine-review P0-2 的残留): 两次确认的**前提**是同一条判据。首次那头
+    # 给了哈希才判 —— 库里/调用方没有这个信息时不能凭空造一条, 否则就是「恒真」的反面:
+    # 恒假。生产路径 (`_save_to_db`) 会给, 因为 L3 每条读数都盖了溯源戳。
+    if first_contract_hash:
+        second_hash = str(getattr(remeasure, "contract_hash", "") or "")
+        if not second_hash:
+            return False, ("重测没带契约哈希: 无从证明两次量的是同一条判据 "
+                           "(判据被改写时, 「两次确认」就退化成两次不同的确认)")
+        if second_hash != str(first_contract_hash):
+            return False, (f"重测在另一条契约下取得 ({second_hash[:12]}… != "
+                           f"{str(first_contract_hash)[:12]}…) —— 判据在两次测量之间变了")
     if not remeasure.ok:
         return False, f"重测失败: {remeasure.reason or 'ok=False'}"
     if remeasure.validity == "uninformative":
