@@ -14,6 +14,7 @@
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Optional, Union
 from .schemas import (
@@ -36,6 +37,7 @@ from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
 from .bandit import Bandit
+from .budget import BudgetLedger, BudgetPlan
 from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
                           LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
                           PERF_GATE_PARAM_KEYS, ROOFLINE_CONVERGED_PCT,
@@ -273,6 +275,10 @@ class Conductor:
         # 消费者 (`_save_to_db` → `oracle.admit_to_corpus` 的 `requires_remeasure`)
         # 成对存在, 打开这个开关是可用状态而不是自锁状态。
         require_double_confirm: bool = False,
+        # 设计 §10.2 的三种预算 (`operator_agent/budget.py`)。**默认全关**: 没设上限
+        # 就不拦, 也不假装拦过 —— 「本轮要不要花这次钱」是任务级的决定, 不是模块能替
+        # 调用方拍的 (`require_double_confirm` 那条同一个理由)。
+        budget: Optional[BudgetPlan] = None,
     ):
         # `is None` 而不是 `or`: `FailureDatabase` 定义了 `__len__`, 于是**一条记录都没有的
         # 注入实例是假的**, `failure_db or FailureDatabase()` 会把它丢掉换成一个默认实例 ——
@@ -286,6 +292,8 @@ class Conductor:
         self.store = ArtifactStore()
         self.router = Router()
         self.max_optimize_rounds = max_optimize_rounds
+        #: §10.2 的预算计划 (不含账本 —— 账本每次运行新建, 见 `_execute_inner`)。
+        self.budget_plan = budget if budget is not None else BudgetPlan()
         #: 本次运行开始时账本的长度, 每次进 `execute` 重新取。
         #: 写侧用它把口径从「这个进程到现在」换成「这一次」。
         self._cost_watermark = 0
@@ -304,6 +312,11 @@ class Conductor:
         self.heartbeat_interval = heartbeat_interval
         #: 本次运行里**真值测量**(L3 读数)的累计条数 —— 心跳按它的倍数触发。
         self._true_measurements = 0
+        #: §10.2 的账本。构造时就建一个 (与 `_true_measurements` 同一个理由: 只走
+        #: 收口点那条路之外的调用 —— 比如直接调心跳 —— 不许因为没有账本而炸),
+        #: 每次 `execute` 再新建一个, 使「这次运行花了多少」不跨任务累计。
+        self._budget = BudgetLedger(self.budget_plan)
+        self._run_started = time.monotonic()
         self._heartbeat_epoch = 0
         #: 已经为「第几次测量」跑过心跳了。防的是这一支: 计数停在第 5 次而 L3 一直没
         #: 跑成 (L1/L2 挂了), 于是每一轮都重跑一次心跳。到位只跑一次, 之后的轮次复用
@@ -341,7 +354,11 @@ class Conductor:
     #: 循环出口的词汇表。**每个词都要有写者** —— 多一个没写者的词就是「算了没人读」的副本,
     #: `tests/test_stop_reason.py` 按差集钉这条。
     STOP_REASONS = ("passed", "stagnant", "converged", "fix_error", "l1_l2_failed",
-                    "search_error", "rounds_exhausted", "infra_retry")
+                    "search_error", "rounds_exhausted", "infra_retry",
+                    # §10.2 的两条预算出口。与 `rounds_exhausted` 分开数: 那个是
+                    # 「轮次练够了」, 这两个是「钱花完了」—— 复盘时一个要调轮次上限,
+                    # 一个要调预算或缩小任务。
+                    "budget_exhausted", "wall_clock_exhausted")
 
     def _record_stop(self, artifact, round_num: int, reason: str, detail: str = "") -> None:
         """把「循环为什么停」记成数据, 而不是只留一行 print。
@@ -394,6 +411,10 @@ class Conductor:
                   f"{type(exc).__name__}: {exc} —— 本次按 RULER_BROKEN 处理")
             return None, True
         self._last_heartbeat = result
+        # §10.2 的 5% 预检标定: 心跳就是那个「预检」, 花掉的是一次机时预算。
+        # **只记账、不被拦** —— 让预算饿死标定, 等于把「尺子有没有坏」变成一件可以因为
+        # 缺钱而跳过的事 (§10.5-5 的同族病)。超支由 `calibration_over_plan` 留痕。
+        self._budget.note_calibration_run()
         verdict = "OK" if result.ok else "RULER_BROKEN"
         print(f"[Heartbeat] 第 {nxt} 次测量前标定 ({window}): {verdict} "
               f"好核比值={result.known_good_ratio:.3g} "
@@ -486,6 +507,10 @@ class Conductor:
         # 与水位线同一个理由: 一个 Conductor 实例可以跑多个任务, 落盘与打印的必须是
         # **本次**那一份, 不是「这个进程到现在为止」。
         self._reference_hold_rounds = 0
+        # §10.2 的账本同理: 「这次运行花了多少次真值测量」跨任务累计会让第二个任务
+        # 少花钱。起始时刻一起在这里取 —— 墙钟预算量的是**这一次运行**。
+        self._budget = BudgetLedger(self.budget_plan)
+        self._run_started = time.monotonic()
         # 心跳计数同理: 「每 N 次真值测量」是**这一次运行**内的事, 跨任务累计会让
         # 第二个任务在错误的位置插入参照对。
         self._true_measurements = 0
@@ -769,6 +794,31 @@ class Conductor:
             print(f"轮次 {round_num}/{self.max_optimize_rounds}")
             print(f"{'─'*40}")
 
+            # ── §10.2 的两道预算门, 放在轮次**最前面** ──
+            # 位置是判据的一部分: 放在 Coder/Planner 之后等于「先花完 LLM 与写代码的钱,
+            # 再说这次测量买不起」。两道门都是 fail-closed: 买不起就停, 不停在半路上。
+            #
+            # 为什么 oracle 这一格用 `"explore"` 而不是按 explore/refine 分: 本仓今天
+            # **没有**「参数搜索平台化」这条判据 (§10.3 的升级门, CHECKLOG I53), 分不出来
+            # 就如实只花一格; 预留 (`confirm`) 那一格一律不许碰 —— 那才是这条预算的意义。
+            if not self._budget.within_wall_clock(time.monotonic() - self._run_started):
+                _elapsed = time.monotonic() - self._run_started
+                _why = (f"墙钟预算用尽 ({_elapsed:.1f}s >= "
+                        f"{self._budget.plan.wall_clock_s}s) ⇒ 不再开新的一轮")
+                print(f"\n[Budget] {_why}")
+                self._budget.oracle_refuse("explore")
+                self._record_stop(artifact, round_num, "wall_clock_exhausted", _why)
+                break
+            if not self._budget.oracle_may("explore", 1):
+                _plan = self._budget.plan
+                _why = (f"真值测量预算用尽 (已花 {self._budget.spent_all}/"
+                        f"{_plan.oracle_total}, 其中 {self._budget.caps['confirm']} 次"
+                        f"留给最终确认不许挪用) ⇒ 不再开新的一轮")
+                print(f"\n[Budget] {_why}")
+                self._budget.oracle_refuse("explore")
+                self._record_stop(artifact, round_num, "budget_exhausted", _why)
+                break
+
             # P1-1 (generation-side-review): 本轮若走了候选选择, 已跑完的 L1+L2
             # 结果缓存在这里 —— Step 4 复用它, 不重复真机执行。
             # None = 本轮没有多候选 (单体路径 / 修复轮 / 名单里没有默认候选)。
@@ -914,6 +964,10 @@ class Conductor:
             # 于是同一扇窗的参照对不会被反复重跑 (见 `_heartbeat_ran_for`)。
             if l3_result is not None:
                 self._true_measurements += 1
+                # §10.2 的记账与这个计数**同点**发生 (一个地方决定「什么算一次真值测量」)。
+                # 放在这里而不是放在门那边: 门是「该不该花」, 这是「花了」—— 两者分开才
+                # 使得同一次测量不可能出现「记了两次」或「花了没记」。
+                self._budget.oracle_spend("explore")
 
             # 这一轮造成的**永久后果** —— 供设计 §14-9 的资格审计对照实验离线统计。
             #
@@ -1321,6 +1375,18 @@ class Conductor:
                 # 全 False 的读数照样被拼成 `perf_data` (gflops/speedup/`roofline_bound`
                 # 全在里面), 喂给邻居排序 (`agents.py:680` 读 roofline_bound 决定往大
                 # BLOCK_K 还是小 BLOCK_M/N 排) 与 LLM 先验 (`agents.py:708` 读 speedup)。
+                # §10.2 第三行: LLM token 独立管, 超了退化成纯数值搜索。口径是
+                # **本次运行**的用量 (`summary_since(水位线)`), 不是这个进程到现在的累计。
+                _tokens_used = 0
+                if self.llm is not None and hasattr(self.llm, "cost_tracker"):
+                    _tokens_used = int(
+                        self.llm.cost_tracker.summary_since(self._cost_watermark)
+                        .get("total_tokens", 0) or 0)
+                _llm_broke = self._budget.note_llm_usage(_tokens_used)
+                if _llm_broke:
+                    print(f"\n[Budget] LLM token 预算用尽 ({_tokens_used}/"
+                          f"{self._budget.plan.llm_tokens}) ⇒ 本轮退化成纯数值搜索 "
+                          f"(不问 LLM 要结构改动)")
                 _elig = l3_result.metrics.get("eligibility") or {}
                 _can_tune = _elig.get("can_tune") is True
                 if not _can_tune:
@@ -1363,6 +1429,10 @@ class Conductor:
                     # ---- 优化历史 ----
                     "optimization_history": optimization_history,
                 }
+                if _llm_broke:
+                    # 与 `tuning_refused` 走同一条通道 (perf_data), 不新增签名 ——
+                    # SearchAgent 见到它就跳过 `_llm_optimize` 走规则路径。
+                    perf_data["llm_budget_exhausted"] = True
                 if _can_tune:
                     # 有资格 ⇒ 这份读数进信念, 供后面的轮次沿用
                     last_tunable_perf = perf_data
@@ -1562,6 +1632,9 @@ class Conductor:
         if artifact.metadata is None:
             artifact.metadata = {}
         artifact.metadata["bandit"] = bandit.as_dict()
+        # §10.2 的账本同样落盘: 「计划是多少 / 花了多少 / 谁被挡住了」必须能被读到,
+        # 否则预算就是一个只在 `print` 里活过的装置。
+        artifact.metadata["budget"] = self._budget.as_dict()
 
         from .report import write_report
         _admission = (artifact.metadata or {}).get("corpus_admission") or {}
@@ -1879,6 +1952,9 @@ class Conductor:
                 kernel_code=artifact.code, test_inputs=test_inputs,
                 target_gflops=target_gflops, task=task,
                 heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
+            # §10.2 的「最后 10% 不可挪用」: 这一次重测花的是**预留**那一格。记账放在
+            # 调用之后 (它已经花了机时), 而且花的是 confirm —— 非 confirm 的开销碰不到它。
+            self._budget.oracle_spend("confirm")
             second = results[0] if results else None
         except Exception as exc:  # noqa: BLE001 — 重测没跑成也是一种结论, 不许静默补 True
             second = None

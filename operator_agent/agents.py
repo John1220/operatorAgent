@@ -555,12 +555,19 @@ class SearchAgent:
         if self.llm is None:
             raise RuntimeError("LLM 未配置，规则模板已移除")
 
-        try:
-            prior_sketch, suggestion = self._llm_optimize(sketch, perf_data)
-        except Exception as e:
-            # LLM 优化失败时回退到规则优化, 不中断整个任务
-            print(f"  [Search] LLM 优化失败 ({e}), 回退规则优化")
+        # §10.2 第三行: token 预算用尽 ⇒ **退化成纯数值搜索**, 不问 LLM 要结构改动。
+        # 注意这不是「LLM 不在」(那条路会 raise: 规则模板已不再是缺 LLM 时的替补),
+        # 而是「LLM 在, 但这一轮的额度花完了」—— 退化的后果正好是规则路径。
+        if perf_data.get("llm_budget_exhausted"):
             prior_sketch, suggestion = self._rule_optimize(sketch, perf_data)
+            print(f"  [Search] token 预算用尽 ⇒ 纯数值搜索 (规则模板): {suggestion}")
+        else:
+            try:
+                prior_sketch, suggestion = self._llm_optimize(sketch, perf_data)
+            except Exception as e:
+                # LLM 优化失败时回退到规则优化, 不中断整个任务
+                print(f"  [Search] LLM 优化失败 ({e}), 回退规则优化")
+                prior_sketch, suggestion = self._rule_optimize(sketch, perf_data)
 
         # P1-4: tiling 交给邻域搜索 (仅 triton —— python/cuda_c 的 block 参数
         # 不是真实旋钮, 轮换它们只会空烧轮次); 其余 DSL 维持「直接采纳」。
