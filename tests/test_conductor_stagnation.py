@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
+from operator_agent import hardware_caps as hc
 from operator_agent.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity,
     TaskSchema, TaskType,
@@ -143,6 +144,16 @@ class StagnationCase(unittest.TestCase):
                 # MockGPU 探测不到峰值 (hw_peak_gflops=0 → 利用率恒为 0), 所以
                 # roofline 相关的用例只能从这里注入。
                 conductor.verifier._theoretical_peak = dict(peak)
+                # ⚠️ §13.5: 「实测过」那一半的**真源是存放处**, 缓存里只有表那一半是
+                # 静态的 (verifier 每次调用都从存放处重读实测值)。所以钉「收敛出口开了」
+                # 必须走生产路径把值放进存放处 —— 手改 dict 里那两个字段会在下一跳 refresh
+                # 时被覆盖 (第一版就是这么写的, 用例红在「出口没开」, 而机制其实是对的)。
+                hc.forget_measured_peaks()
+                self.addCleanup(hc.forget_measured_peaks)
+                key = hc.device_key_of({"name": peak.get("name", ""),
+                                        "compute_capability": peak.get("compute_capability", "")})
+                for prec, value in (peak.get("measured_peak_tflops") or {}).items():
+                    hc.remember_measured_peak(key, prec, value, "用例注入的实测值")
             artifact = conductor.execute(task, inputs, target_gflops=0.0)
         return artifact, buf.getvalue(), backend
 
@@ -269,7 +280,11 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
             "launch_floor_us": None, "compute_capability": "",
             "device": "mock_gpu", "name": "MockGPU",
             "peak_table_key": "mock", "peak_source": "mock (口径已核)",
-            "peak_trusted": True, "peak_measured": True}
+            "peak_trusted": True, "peak_measured": True,
+            # §13.5 起实测峰值**按精度**发布 (`{"fp32": 0.02}`)。收敛出口读的是
+            # `_roofline_analysis` 里按这一轮分母的精度键取出来的那一位 —— fixture 少了
+            # 这一格就会「看着像机制生效, 其实是 fixture 落后了一格」(见上面那段告诫)。
+            "measured_peak_tflops": {"fp32": 0.02}}
 
     def test_compute_axis_converged_stops_early(self):
         """50% → 95% GFLOPS 利用率: 第 2 轮已达上界, 不该再跑第 3、4 轮"""
@@ -305,7 +320,7 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
         是两个问题, 而收敛要说的是「这张卡这一刻贴着上界了」。真机实测抓到的混同是:
         H20 那行的出处自己写着「无公开官方页 + 算术推导」, 却因为不带 ⚠️ 把出口开着。
         """
-        peak = dict(self.PEAK, peak_measured=False)
+        peak = dict(self.PEAK, peak_measured=False, measured_peak_tflops={})
         _, out, _ = self._run([10.0, 19.0, 40.0, 80.0], max_rounds=4, peak=peak)
         self.assertNotIn("判定已收敛", out)
         self.assertEqual(self._rounds_run(out, 4), 4)

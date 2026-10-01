@@ -25,7 +25,7 @@
 | §17「无法确立」 | `confirm.UnableToEstablish` + **`report.py` / `report.md` 产物** | ✅ 2026-10-01 补齐：第 3 件交付物此前完全没有产物（收集器只被两个 benchmark 调过）。空章节带依据、`can_persist=False` 单列一行、入库拒因随报告落盘 |
 | §14 验收八条 | `tests/test_stage1_acceptance.py`（离线） + `benchmarks/smoke_spine_h20.py`（真机 H20） | ✅ **真机已跑**（2026-10-01，8×H20 的 `algorithm-h20`，走生产 L3 入口）：0/1/2/3/7/8 绿、4 见下、5 未覆盖（需 LLM，`LLM_API_KEY` 未设）、6 纯离线。**真机抓出两处「算了但没接上」**（CHECKLOG I46 发布的资格位不是收口点算的那份 ⇒ §14-8 在生产上没生效；I48 远端运行时盾的证据不落地），都已修 + 守卫；§14-7 的运行时检查**已接上喂给者**（I47 同卡那半 2026-10-01 修：远端按臂采身份 ⇒ `measurement_scope` 由观测算出三态、跨卡时资格全 False 且 `passed=False`；**窗口那一半仍无喂给者**，明写在 I47）。见 [docs/research/63](../research/63-真机§14冒烟与它抓出来的两个真源.md) |
 | §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/竞争降级） | ✅ **同卡配对已有观测喂给者**（2026-10-01：远端逐臂报卡 ⇒ `observed_pairing` 三态 ⇒ oracle 拒评 + `passed=False`；`placement.plan_leases`/`DeviceLease` 仍**零生产调用者**，见 §15「没有实现物」表） |
-| §13.5 峰值实测（`probe_peak`） | `HardwareCaps.measured_peak_tflops`（位已就位，探测未做） | ⏳ **未做**：分母仍来自规格/推导表 ⇒ `peak_measured=False` ⇒ **收敛出口在真机上关闭**（设计要的方向，日志明写）。「口径核过」与「实测过」已分成两个位（[CHECKLOG I49](../research/CHECKLOG.md)） |
+| §13.5 峰值实测（`probe_peak`） | `operator_agent/peak_probe.py` + `hardware_caps` 存放处 + `verifier._publish_peak_probe`/按精度读取 | ✅ 2026-10-02：判据七条（仿真读数 / 精度键 / 出处 / 非有限正数 / 探针自己的档位 / 离散度未知 / 没打到算力峰值 / 高于规格 5%）+ **按精度**发布进 `HardwareCaps.measured_peak_tflops`（字典）+ 收敛出口按**这一轮分母的精度键**读取；零额外 GPU 秒（复用同一次 L3 的基线臂）。**边界**：发布的是**下界**（基线臂的实测可达值，不是器件极限）⇒ 出口偏松；只在**本进程**内生效（不跨运行）；`MockGPU` 一律拒发（无 `REAL_DEVICE`）；真机**未复跑**（本机无 GPU）—— 见 [doc 70](../research/70-实测峰值的判据与按精度发布.md) |
 | §10.2 三种预算 | `operator_agent/budget.py`（`BudgetPlan` + `BudgetLedger`）+ 轮次开头两道门 | ✅ 2026-10-02：oracle 次数（**预留不可挪用**）/ 墙钟 / token 三条接上并落 `artifact.metadata["budget"]`；心跳只记账不被拦。**边界**：`explore`/`refine` 不分相、按 GPU 秒未做、预算默认全关（opt-in）—— 见 [doc 67](../research/67-三种预算与不可挪用的预留.md) |
 | §10.3 候选选择 / LLM 升级门 | — | ⏳ **半片**：三条件升级门**已落地**（`escalation.py` + conductor 判决点接线 + SearchAgent 发布通道，13/13 变异红，CHECKLOG I53→I57/doc 69）—— 条件 2 今天只有 `smem-bound` 一条量具、且只在上界~×1.2 那条带里成立；`score = P(beats_best)×预期增益/预期GPU秒` 与 ε-greedy **未做**（要 GPU 秒口径） |
 | §5 bandit 调参 | `operator_agent/bandit.py`（确定性 UCB1）+ `Conductor` 信念门 | ✅ 2026-10-02：`perf_data` / `optimization_history` / 回报统计三条信念通道按 `can_tune` / `can_count_progress` 收口（CHECKLOG I52），prompt 不再把「没有读数」渲染成 `0.00`；状态落 `artifact.metadata["bandit"]`。**臂空间只有 tiling**、`c` 未标定、证据**不进快照**（只覆盖本次运行）；**真机未复跑** —— 见 [doc 66](../research/66-搜索侧的信念门与bandit.md) |
@@ -666,11 +666,31 @@ class Calibrator(Protocol):
   **收敛出口只认这一个位**（`measurement.roofline_converged`）。
 
   混成一个标志的实测后果：H20 上这两问答案不同（核过 + 从没探测），而出口因为前者被
-  **开着** —— 真机 4096³ 的 Roofline 行里那个分母就是这么来的。⇒ 今天**没有任何设备**
-  做过 `probe_peak`，所以收敛出口在所有真机上都是关的（日志里明写
+  **开着** —— 真机 4096³ 的 Roofline 行里那个分母就是这么来的。⇒ 在 `probe_peak` 落地
+  之前**没有任何设备**做过实测，收敛出口在所有真机上都是关的（日志里明写
   `⚠️未实测⇒收敛出口关闭`）。**这是设计要的方向，不是缺陷**：关着只少一条停止条件
   （停滞 / 预算 / 不安全中止三条仍在），而开着会把还能优化的核提前判成到顶。
-  `probe_peak` 落地时按精度发布实测值，**不许**把表里的数字改小来冒充实测。
+
+  **落地口径（2026-10-02）**：`operator_agent/peak_probe.py` 的判据 + 存放处 +
+  读取三层已接上，实现要点四条：
+
+  1. **样本是「已知好参考核」的基线臂，不是另一个 benchmark**：同一次 L3 调用里已经
+     跑过的那条臂（同机 / 同形状 / 同精度），实测可达值 = `flops / baseline_time_ms`
+     （分子就是 roofline 用的那一份，见 `_ai_numer_denom`）。**零额外 GPU 秒**，因此
+     不占 §10.2 那 5% 的标定额度（那个额度留给心跳）。
+  2. **它是下界，不是器件极限**：语义是「这台机器这个精度**至少**能跑这么快」⇒ 拿它当
+     分母，利用率偏大、出口偏松。约束靠判据那七条（尤其「样本必须 compute-bound」与
+     「探针自己必须是 valid 档」）；残余风险（参考核自己没打到顶）**明写**在模块里 ——
+     那时该修参考核，不是放宽判据。
+  3. **按精度发布与读取**：`measured_peak_tflops` 是 `{精度: TFLOPS}`，键由
+     `peak_probe.precision_key_of` 从**这一轮选分母用的那个** `compute_used` 得到；
+     取不到就当作未实测（**不许**借别的精度 —— tf32 与 fp32 差近一倍）。
+  4. **失败一律是「继续关着」**：仿真后端（无 `REAL_DEVICE`）、档位不是 valid、离散度
+     未知、AI < 脊点、高出规格 5% 以上 …… 每一条都拒绝并**把理由落进产物**
+     （`metrics["peak_probe"]`），于是「没标定」与「没接线」分得开。
+
+  **今天仍然关着的地方**（不许读成已开）：① 跨运行不持久（只在进程内，下一次运行重新
+  标定）；② 标定发生在第 1 轮 L3 之后 ⇒ 出口从**下一轮**起才可能开；③ 真机未复跑。
 - **`heartbeat` 逐卡独立**：一张卡被降频 / 被占，不代表别的卡坏。
   每个 `Observation` 记录自己的 `calibration_epoch`，失败窗口内的观测全部失效。
 
@@ -738,7 +758,7 @@ Stage 5  记忆与跨任务迁移（带两次确认）
 
 | 缺的东西 | 现在的真实状态 | 后果 |
 |---|---|---|
-| `probe_peak`（实测峰值） | 分母来自规格/推导表；`peak_measured=False` | §10.4 的 roofline 收敛出口**在所有真机上关闭**（设计要的方向） |
+| `probe_peak`（实测峰值） | ✅ **2026-10-02 已落地**（判据 + 按精度发布 + 按精度读取，零额外 GPU 秒）：`operator_agent/peak_probe.py` | 收敛出口不再是「永远关」：同一轮 L3 里基线臂过判据 ⇒ 下一轮起有分母。**仍受的约束**：分母是下界（出口偏松）、不跨运行、真机未复跑 —— [doc 70](../research/70-实测峰值的判据与按精度发布.md) |
 | `Placement.lease`（多卡放置） | `DeviceLease` 只有定义、无生产者；真机是**单卡串行 + 一次调用跑完两臂** | §11 的「异域并行省 wall clock」是**纸面承诺**；`pairing_conflict` 的跨卡检查没有生产喂给者 |
 
 两件都排进 Stage 3 之前 —— 前者决定停止条件能不能用，后者决定多卡是不是真的多卡。

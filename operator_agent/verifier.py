@@ -22,7 +22,11 @@ from . import measurement
 from .measurement import (GATE_PARAM_KEYS, PERF_CRITERION_ABSOLUTE_GFLOPS,
                           PERF_CRITERION_SPEEDUP, TRANSPORT_KEY, aggregate_l2_readings,
                           aggregate_note, single_ruler, transport_outcome_of_result)
-from .hardware_caps import detect_hardware_caps
+from .hardware_caps import (
+    detect_hardware_caps, device_key_of, measured_peak_record,
+    measured_peaks_for, remember_measured_peak,
+)
+from .peak_probe import precision_key_of, probe_peak, sample_from_l3_metrics
 from .placement import (observed_pairing, SCOPE_SAME, SCOPE_CROSS,
                         SCOPE_UNOBSERVED)
 from .backend_caps import Backend, Cap, CapabilityMissing
@@ -1245,6 +1249,10 @@ class Verifier:
         )
         metrics.update(assessment.as_metrics())
         metrics["benchmark_contaminated"] = assessment.contaminated
+        # §13.5: 拿**这一次**已经付过钱的基线臂做一次实测峰值标定 (零额外 GPU 秒,
+        # 也不占 §10.2 那 5% 的标定额度 —— 那个额度留给心跳)。产物里永远留下裁决
+        # (包括拒绝与拒绝的理由): 「没标定」与「没接线」必须分得开。
+        self._publish_peak_probe(metrics)
         # 离散度判据的**唯一**来源 (spine-review P1-6)。原先两处调用点各自写
         # `assessment.dispersion is not None and validity is not VALID` —— 那个式子
         # 从不与任何 CV 阈值比较, 只是把「档位不是 VALID」重编码了一遍, 于是污染 /
@@ -1385,9 +1393,32 @@ class Verifier:
 
     # ---- Roofline 分析 ----
 
+    def _refresh_measured_peak(self) -> None:
+        """把存放处里的实测峰值重新合并进已缓存的 peak 字典 (零成本, 不探硬件)
+
+        为什么需要: `_detect_theoretical_peak` 是缓存的, 而 `probe_peak` 的发布发生在
+        同一次运行的**第 1 轮** L3 之后 —— 不重读的话第 2 轮读到的还是「没实测」, 于是
+        标定永远只在下一个进程里生效, 而存放处明确不跨进程 (见 `hardware_caps` 那段)。
+        实测抓到过: 用例里第一轮 publish 成功, 第二轮的出口仍然关着。
+        """
+        peak = self._theoretical_peak or {}
+        key = device_key_of({"name": peak.get("name", ""),
+                             "compute_capability": peak.get("compute_capability", "")})
+        measured = measured_peaks_for(key)
+        peak["measured_peak_tflops"] = dict(measured)
+        peak["peak_measured"] = any(
+            isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
+            for x in measured.values())
+
     def _detect_theoretical_peak(self) -> dict:
-        """探测硬件理论峰值 (GFLOPS, 带宽)，优先按设备名匹配，回退 compute_capability"""
+        """探测硬件理论峰值 (GFLOPS, 带宽)，优先按设备名匹配，回退 compute_capability
+
+        ⚠️ 缓存的是**表那一半**; 实测峰值那一半会变 (§13.5: 同一次运行里第 1 轮的 L3 标定
+        完, 第 2 轮就该读到), 所以每次调用都从存放处重读。这里不重新探测硬件 ——
+        `get_hardware_info()` 在 SSH 路径上是一次真实往返, 而设备身份没变。
+        """
         if self._theoretical_peak is not None:
+            self._refresh_measured_peak()
             return self._theoretical_peak
 
         hw = {}
@@ -1451,8 +1482,15 @@ class Verifier:
         # 分母**实测过**没有 (设计 §13.5)。与 `peak_trusted` 刻意分开: 后者问的是「表行
         # 口径核过没有」(dense/sparse 没混、算术自洽), 前者问的是「有没有一次真探测」。
         # H20 今天两问的答案是「核过」+「从没探测」, 而收敛出口只认后者。
+        # §13.5 起 `measured_peak_tflops` 是**按精度**的字典 (`{"tf32": 68.1}`), 由
+        # `peak_probe` 判过、`hardware_caps` 存放处发布。这里的标量 `peak_measured`
+        # 只回答「这张卡**任何一个**精度有没有实测过」(透明用); 让收敛出口开的那一位是
+        # `_roofline_analysis` 里**按这一轮实际分母的精度键**算出来的那个 —— 两者混用
+        # 会拿 tf32 的实测值去开 fp32 那一轮的出口, 数值差近一倍而日志里长得一样。
         _mp = getattr(caps, "measured_peak_tflops", None)
-        peak_measured = bool(isinstance(_mp, (int, float)) and _mp and _mp > 0)
+        peak_measured = bool(_mp) and any(
+            isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
+            for x in _mp.values()) if isinstance(_mp, dict) else False
 
         self._theoretical_peak = {
             "fp32_tflops": fp32, "tf32_tflops": tf32,
@@ -1464,6 +1502,7 @@ class Verifier:
             # `probe_peak` 落地时: 按精度把实测值写进 HardwareCaps.measured_peak_tflops,
             # 这个位才会翻真 —— 在那之前出口是关的, 这是设计要的行为, 不是缺陷。
             "peak_measured": peak_measured,
+            "measured_peak_tflops": dict(_mp) if isinstance(_mp, dict) else {},
             "peak_table_key": matched_key or "",
             "launch_floor_us": launch_floor_us,
             # 每 SM 的 smem 上界: §12 的**便宜代理剪枝**要它 (不花 GPU 秒就能摘掉
@@ -1476,6 +1515,26 @@ class Verifier:
 
     @staticmethod
     def _compute_arithmetic_intensity(task: TaskSchema, inputs: dict) -> float:
+        """算术强度 = `_ai_numer_denom` 的比值。**唯一**实现仍在上面那一处分支逻辑里。
+
+        为什么不把比值也算在那个函数里返回: 探针只要分子/分母, 而比值有三个调用者
+        (roofline/血缘/用例)。两边各取所需, 分支逻辑只有一份 —— 比「返回一个三元组、
+        每个调用者自己拆」少一层出错的机会。
+        """
+        flops, bytes_transferred = Verifier._ai_numer_denom(task, inputs)
+        if flops is None or not bytes_transferred or bytes_transferred <= 0:
+            return 0.0
+        return flops / bytes_transferred
+
+    @staticmethod
+    def _ai_numer_denom(task: TaskSchema, inputs: dict):
+        """算术强度的**分子与分母**(flops, bytes); 认不出的算子返回 `(None, None)`。
+
+        §13.5 的 `probe_peak` 要拿「基线臂的实测可达值 = flops / baseline_ms」当分母,
+        而 flops 只在这里算过。于是把**这一处**的输入露出来给探针用 —— 另写一个
+        「算 flops」的函数就是第二个真源, 而漂移的症状恰好是「探针的分母与 roofline 的
+        分子不是同一个量」, 那种错在日志里看不出来 (两个数都长得像 FLOPS)。
+        """
         """计算算子的算数强度 (FLOPs / Bytes transferred)
         返回 FLOP/Byte 或 0 (无法计算时)
 
@@ -1497,10 +1556,10 @@ class Verifier:
                 M, K = a.shape[-2], a.shape[-1]
                 K2, N = b.shape[-2], b.shape[-1]
                 if K != K2:
-                    return 0.0
+                    return None, None
                 flops = 2.0 * M * N * K
                 bytes_transferred = (M * K + K * N + M * N) * nbytes
-                return flops / bytes_transferred if bytes_transferred > 0 else 0.0
+                return flops, bytes_transferred
 
         if "softmax" in kt:
             # Softmax: ~5*N FLOPs per element (exp, sum, div), memory: N * dtype
@@ -1509,7 +1568,7 @@ class Verifier:
                 n = int(np.prod(x.shape))
                 flops = 5.0 * n
                 bytes_transferred = 2.0 * n * nbytes  # read + write
-                return flops / bytes_transferred if bytes_transferred > 0 else 0.0
+                return flops, bytes_transferred
 
         if any(op in kt for op in ("relu", "gelu", "sigmoid", "add", "elementwise")):
             # Element-wise: ~1 FLOP per element, memory: 2-3 * N * dtype
@@ -1519,7 +1578,7 @@ class Verifier:
                     n = int(np.prod(x.shape))
                     flops = 1.0 * n
                     bytes_transferred = 2.0 * n * nbytes
-                    return flops / bytes_transferred if bytes_transferred > 0 else 0.0
+                    return flops, bytes_transferred
 
         if "layernorm" in kt or "layer_norm" in kt:
             # LayerNorm: ~7*N FLOPs (mean, var, norm, scale, shift), memory: ~2*N
@@ -1531,9 +1590,9 @@ class Verifier:
                     n = int(np.prod(x.shape))
                     flops = 7.0 * n
                     bytes_transferred = 2.0 * n * nbytes
-                    return flops / bytes_transferred if bytes_transferred > 0 else 0.0
+                    return flops, bytes_transferred
 
-        return 0.0
+        return None, None
 
     def _roofline_analysis(self, task: TaskSchema, bench_inputs: dict,
                            actual_gflops: float, actual_bandwidth_gbs: float) -> dict:
@@ -1573,7 +1632,30 @@ class Verifier:
                 hw_peak_gflops = peak.get("tf32_tflops", hw_peak_gflops / 1000) * 1000
                 compute_used = "tf32_tensor_core"
 
+        # §13.5: 这个精度的分母**实测过**没有 —— 只有这一位能让收敛出口开
+        # (`measurement.roofline_converged` 只认 `peak_measured`)。键必须与上面选分母
+        # 用的那个精度**同一个** (`compute_used`), 取不到就当作未实测: 不许借用别的
+        # 精度 (tf32 vs fp32 差近一倍, 借用会把还能优化的核提前判成到顶)。
+        peak_key = precision_key_of(compute_used)
+        _measured = peak.get("measured_peak_tflops") or {}
+        _measured_tflops = _measured.get(peak_key) if peak_key else None
+        peak_measured = bool(isinstance(_measured_tflops, (int, float))
+                             and not isinstance(_measured_tflops, bool)
+                             and _measured_tflops > 0)
+        if peak_measured:
+            hw_peak_gflops = float(_measured_tflops) * 1000.0
+        # 设备身份取 `_detect_theoretical_peak` 发布的那两个字段 (name/cc) ——
+        # 它是 `detect_hardware_caps` 认卡用的同一批字段, 也是存放处的分组键。
+        _dev_key = device_key_of({"name": peak.get("name", ""),
+                                  "compute_capability": peak.get("compute_capability", "")})
+        _measured_rec = (measured_peak_record(_dev_key, peak_key) if peak_measured
+                         else {"method": "", "evidence": {}})
+
         ai = self._compute_arithmetic_intensity(task, bench_inputs)
+        # 分子/分母走**同一个**静态方法 (纯函数, 再算一遍不会有第二种答案) —— 探针要的
+        # 那一份分子就是 roofline 用的那一份, 而不是另算一份。
+        _flops, _bytes = self._ai_numer_denom(task, bench_inputs)
+        _ai_inputs = {"flops": _flops, "bytes": _bytes}
 
         # Roofline 判定: AI * peak_bandwidth >= peak_gflops -> compute-bound
         # 即当 AI > peak_gflops / peak_bandwidth 时，性能受限于计算而非带宽
@@ -1602,6 +1684,10 @@ class Verifier:
 
         return {
             "hw_peak_gflops": round(hw_peak_gflops, 1),
+            # 分子也要发布: 「基线臂的实测可达值」是拿 `flops / baseline_ms` 算的
+            # (peak_probe 的装配点), 而 flops 只在 `_compute_arithmetic_intensity` 里
+            # 算过。这里记的是**它用过的那一份**, 不是重算的 (重算=第二个真源)。
+            "flops": (round(_ai_inputs["flops"], 1) if _ai_inputs.get("flops") else None),
             "hw_peak_bandwidth_gbs": round(hw_peak_bandwidth, 1),
             "compute_used": compute_used,
             "arithmetic_intensity": round(ai, 4),
@@ -1621,9 +1707,50 @@ class Verifier:
             # 收敛出口判停**只认这一个位** (设计 §13.5)。发布出去是必要的: 它不在这里,
             # 下游拿到的是一份「核过口径」的记录, 而「实测过没有」这件事实就丢了 ——
             # 与 I45/I46/I48 同族的「算了一处、判在另一处」。
-            "peak_measured": peak.get("peak_measured", False),
+            # **按精度**的那一位: 收敛出口读的就是它 (不是上面那个「任何精度都算」的标量)。
+            "peak_measured": peak_measured,
+            "peak_key": peak_key or "",
+            "peak_measured_source": _measured_rec.get("method", ""),
+            "peak_measured_evidence": _measured_rec.get("evidence", {}),
             "peak_table_key": peak.get("peak_table_key", ""),
         }
+
+    def _publish_peak_probe(self, metrics: dict) -> None:
+        """§13.5: 实测峰值标定 —— 判据在 `peak_probe.probe_peak`, 这里只装配与发布
+
+        样本来自同一次 L3 调用里的**基线臂**(同机、同形状、同精度的已知好参考核),
+        即「这台机器上这个精度**至少**能跑这么快」。它是下界 ⇒ 拿它当分母, 利用率偏大、
+        收敛出口偏松; 这条残余风险明写在 `peak_probe` 的模块 docstring 里(约束是
+        「样本自己必须 compute-bound 且 valid」两条), 这里不再复述一遍。
+
+        发布进 `hardware_caps` 的**进程级**存放处 ⇒ 下一次 `detect_hardware_caps` 才读得到,
+        于是收敛出口从下一轮开始有分母可用。**不现场改这一轮的分母**: 这一轮的 roofline
+        已经用表算了, 事后替换会让同一份产物里的分子分母来自两个时刻。
+        """
+        roofline = metrics.get("roofline_analysis") or {}
+        peak_key = precision_key_of(roofline.get("compute_used"))
+        table = self._theoretical_peak or {}
+        spec = table.get(f"{peak_key}_tflops") if peak_key else None
+        sample = sample_from_l3_metrics(
+            metrics, real_device=(Cap.REAL_DEVICE in self._caps),
+            spec_tflops=spec,
+            method=("L3 基线臂 (同机/同形状/同精度的已知好参考核): flops / baseline_ms"),
+            flops=roofline.get("flops"),
+            baseline_ms=metrics.get("baseline_time_ms"),
+        )
+        decision = probe_peak(sample)
+        metrics["peak_probe"] = decision.as_dict()
+        if not decision.measured:
+            print(f"  [Verifier] 峰值标定未成立 ⇒ 收敛出口继续关闭: "
+                  f"{decision.refusal_note()}")
+            return
+        profile = decision.profile
+        key = device_key_of({"name": table.get("name", ""),
+                             "compute_capability": table.get("compute_capability", "")})
+        remember_measured_peak(key, profile.precision, profile.tflops,
+                               profile.method, profile.evidence)
+        print(f"  [Verifier] 实测峰值标定: {profile.precision} = "
+              f"{profile.tflops:.2f} TFLOPS ({profile.method}) ⇒ 下一轮的收敛出口有分母了")
 
     def _build_reference_fn(self, task: TaskSchema, inputs: dict,
                             high_precision: bool = False):

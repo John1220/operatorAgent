@@ -17,7 +17,7 @@
 import copy
 import re
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 class UnknownHardware(KeyError):
@@ -84,6 +84,11 @@ class HardwareCaps:
 
     # **实测峰值** —— `probe_peak` 拿一个已知好 GEMM 打到真实峰值的结果 (设计 §13.5)。
     #
+    # **按精度发布** (`{"tf32": 68.1, "fp16": 140.0}`): 同一张卡上 fp32 与 tf32 的
+    # 分母差近一倍, 只存一个标量就必然有人拿另一个精度的数当分母 —— 而那正是设计里
+    # 「建立了错误的置信」那一族。键由 `peak_probe.precision_key_of` 给出 (唯一映射表),
+    # 读者按**这一轮实际用的**那个精度键取值, 取不到就当作未实测 (不借用别的精度)。
+    #
     # None = 该设备**从未探测过**, 于是 `roofline_converged` 那个收敛出口一律不开:
     # 收敛要说的是「这张卡**这一刻**贴着上界了」, 而分母只能来自实测。表里的规格行
     # (哪怕口径核过) 不是实测值 —— 它是 datasheet 推算, 与「这次测量的上限」之间隔了
@@ -93,7 +98,7 @@ class HardwareCaps:
     # 为什么另立一个字段而不是把表里的数字调小: 「口径核过」与「实测过」是**两个**问题
     # (见 `verifier._PEAK_SOURCE` 上方那段)。混成一个标志就会出现实测抓到的那种情形 ——
     # H20 那行的出处自己写着「无公开官方页 + 算术推导」, 却被当成可信分母**开了**收敛出口。
-    measured_peak_tflops: Optional[float] = None
+    measured_peak_tflops: Optional[Dict[str, float]] = None
 
     # ---- 执行模型 ----
     sm_count: int = 0               # SM/CU/计算单元数量
@@ -360,6 +365,73 @@ def sm_count_from(hw_info: dict) -> Optional[int]:
     return None
 
 
+# ---- 实测峰值存放处 (§13.5) ----
+#
+# ⚠️ 今天只在**本进程**内生效: 下一次运行从头再标定 (它花的是同一次 L3 里已经付过钱的
+# 基线臂, 所以「每次运行重标」不是浪费)。落盘要等真机跑通后再定 —— 峰值带时钟/温度/
+# 占用率, 把上一次会话的数字留给下一次会话, 正是「跨运行的环境漂移」那一族。
+#
+# 键用**归一化设备名**: `detect_hardware_caps` 是按 `get_hardware_info()` 的
+# name/device/cc 认卡的, 存放处也必须按同一把尺子分组, 否则同一张卡会有两个身份。
+_MEASURED_PEAKS: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+
+def device_key_of(hw_info: Dict[str, Any]) -> str:
+    """设备身份 (存放处的键)。与 `_match_known_key` 用的是同一批字段, 但**不**做成
+    命中才认 —— 没命中表的卡也可以有实测峰值, 反而是最需要实测的那些。"""
+    name = str((hw_info or {}).get("name", "") or "").strip().lower()
+    if name:
+        return name
+    dev = str((hw_info or {}).get("device", "") or "").strip().lower()
+    cc = str((hw_info or {}).get("compute_capability", "") or "").strip()
+    return dev or (f"cc{cc}" if cc else "unknown")
+
+
+def remember_measured_peak(device_key: str, precision: str, tflops: float,
+                           method: str = "", evidence: Optional[Dict[str, Any]] = None) -> None:
+    """记下一条实测峰值。**只由 `peak_probe.probe_peak` 判过的样本进来** ——
+    这个函数不做判据, 它是存放处; 判据在 `peak_probe` (一处判定一处实现)。"""
+    if not device_key or not precision:
+        return
+    _MEASURED_PEAKS[(device_key, precision)] = {
+        "tflops": float(tflops), "method": method,
+        "evidence": dict(evidence or {}),
+    }
+
+
+def measured_peaks_for(device_key: str) -> Dict[str, float]:
+    """这台设备已经实测过的精度 → 峰值。没有 ⇒ 空 dict (不是 0, 也不是仪表值)"""
+    return {prec: rec["tflops"] for (dev, prec), rec in _MEASURED_PEAKS.items()
+            if dev == device_key}
+
+
+def measured_peak_record(device_key: str, precision: str) -> Dict[str, Any]:
+    """某条实测峰值的**整条记录** (方法 + 证据) —— 分母要能回答「凭什么」。
+    返回浅拷贝: 存放处是进程级共享状态, 把内部 dict 交出去等于给了外部一个写入口。"""
+    rec = _MEASURED_PEAKS.get((device_key, precision), {})
+    return {"tflops": rec.get("tflops"), "method": rec.get("method", ""),
+            "evidence": dict(rec.get("evidence", {}))}
+
+
+def forget_measured_peaks() -> None:
+    """清空存放处 (用例用: 这是进程级状态, 不清就会串到别的用例)"""
+    _MEASURED_PEAKS.clear()
+
+
+def _with_measured_peak(caps: HardwareCaps, hw_info: dict) -> HardwareCaps:
+    """把存放处里的实测峰值合并进 caps。**两个出口都要走它**。
+
+    实测峰值是跨调用共享的一格 (§13.5): 同进程里已经跑过的那次 L3 标定写进
+    `_MEASURED_PEAKS`, 下一次 `detect_hardware_caps` 才读得到。这个函数有**两个**
+    出口 (命中表 / 没命中), 只在末尾合并的写法实测过 —— H20 这类命中表的卡永远读不到
+    实测值, 而它恰恰是最可能有实测值的那些。
+
+    没有实测 ⇒ `None` (从没探测过), 不是 `{}`: 空 dict 会让读者以为「探测过、没结果」。
+    """
+    caps.measured_peak_tflops = measured_peaks_for(device_key_of(hw_info)) or None
+    return caps
+
+
 def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
     """
     从 backend.get_hardware_info() 返回的 dict 自动推断硬件能力。
@@ -389,7 +461,7 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
         probed = sm_count_from(hw_info)
         if probed is not None:
             caps.sm_count = probed
-        return caps
+        return _with_measured_peak(caps, hw_info)
 
     # 未知硬件：从「什么都不承诺」起步, 往上只加能从手头的中立事实推出来的东西。
     #
@@ -444,7 +516,7 @@ def detect_hardware_caps(hw_info: dict) -> HardwareCaps:
         # 答应 —— 于是同一个分支一边说「这不是 GPU」一边宣称 has_shared_memory=True。
         caps.supported_dsls = {"python"}
 
-    return caps
+    return _with_measured_peak(caps, hw_info)
 
 
 def get_caps_for_target(target_hardware: str, dsl: str = "triton") -> HardwareCaps:

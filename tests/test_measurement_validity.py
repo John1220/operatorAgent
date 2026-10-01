@@ -1135,10 +1135,12 @@ class TestFourStateVerdict(unittest.TestCase):
         real = hc.detect_hardware_caps
         with mock.patch("operator_agent.verifier.detect_hardware_caps",
                         lambda hw: dataclasses.replace(
-                            real(hw), measured_peak_tflops=150.0)):
+                            real(hw), measured_peak_tflops={"tf32": 150.0})):
             peak2 = Verifier(fake)._detect_theoretical_peak()
         self.assertIs(peak2["peak_measured"], True,
                       "HardwareCaps 里放进实测值之后这个位没翻真 —— 接线断了")
+        self.assertEqual(peak2["measured_peak_tflops"], {"tf32": 150.0},
+                         "实测峰值要按精度原样发布 —— 标量会被读者当成「哪个精度都对」")
 
 
 if __name__ == "__main__":
