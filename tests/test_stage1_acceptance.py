@@ -21,6 +21,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 from operator_agent.calibration import (HeartbeatResult, heartbeat,
                                         ruler_broken_window)
 from operator_agent.confirm import ConfirmRecord
@@ -31,6 +33,10 @@ from operator_agent.eligibility import derive_eligibility
 from operator_agent.measurement import Validity, assess, verdict, Verdict
 from operator_agent.oracle import admit_to_corpus, evaluate
 from operator_agent.confirm import UnableToEstablish
+from operator_agent.mock_gpu import MockGPU
+from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+                                    TaskComplexity, TaskSchema, TaskType)
+from operator_agent.verifier import Verifier
 
 
 def _metrics_from(obs, **extra):
@@ -306,6 +312,40 @@ class Acceptance8_HeartbeatOffInvalidatesWindow(unittest.TestCase):
         self.assertFalse(ok, "坏窗口里的读数靠着两次确认进了长期记忆")
         self.assertIn("can_persist", msg)
         self.assertIn("RULER_BROKEN", msg, "拒因里没提尺子坏了 —— 那这条用例没证到窗口")
+
+    def test_published_eligibility_is_the_closure_points_answer(self):
+        """生产 L3 上「到期没跑心跳」必须让**发布出去的**资格位全 False
+
+        2026-10-01 真机 §14-8 抓到 (H20, 改动前): 同一个 metrics 里并排出现
+        `ruler_broken=True` 与 `can_persist=True` —— verifier 自己推一份资格 (读不到心跳
+        窗口) 并把它发布出去, oracle 收口点另算一份 (读得到心跳) 只写进 `observation`。
+        入库判据读的正是发布出去的那个 ⇒ 「关掉心跳该窗口不写长期记忆」在生产路径上
+        没生效 (那次真机没入库, 只是因为加速比 0.42x 被**另一道门**偶然挡住了)。
+
+        这条用例走**生产 L3 入口** (`_verify_performance`), 钉的就是「发布值 = 收口点的
+        答案」: 只测 `evaluate` 的话, 分叉正好落在两次调用**之间**, 测不到。
+        """
+        task = TaskSchema(
+            task_type=TaskType.OPERATOR_GENERATION,
+            source=SourceSpec(kernel_type="matmul", complexity=TaskComplexity.MEDIUM),
+            target=TargetSpec(hardware="mock_gpu", dsl="python"),
+            constraints=ConstraintSpec(precision=Precision.FP32, min_speedup=0.0,
+                                       max_error=1e-2))
+        src = ("import numpy as np\n\ndef kernel(A, B):\n"
+               "    return np.asarray(A) @ np.asarray(B)\n")
+        rng = np.random.default_rng(0)
+        xs = {"A": rng.standard_normal((16, 16)).astype(np.float32),
+              "B": rng.standard_normal((16, 16)).astype(np.float32)}
+        r = Verifier(MockGPU())._verify_performance(src, xs, 0.0, task,
+                                                   heartbeat=None,
+                                                   heartbeat_expected=True)
+        m = r.metrics
+        self.assertTrue(m.get("ruler_broken"), "到期没跑心跳却没标记尺子坏")
+        self.assertIn("observation", m, "收口点没产观测")
+        self.assertEqual(m["eligibility"], m["observation"]["eligibility"],
+                         "发布出去的资格位不是收口点算的那一份")
+        self.assertFalse(m["eligibility"]["can_persist"],
+                         "坏窗口的读数仍自称可入库 —— §14-8 在链路上没生效")
 
     def test_unable_to_establish_records_ruler_broken(self):
         u = UnableToEstablish()

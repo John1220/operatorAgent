@@ -560,14 +560,21 @@ class Verifier:
                     )
                 # message 只带首行, 全文放 error_log (见 failure_pair)
                 head, full = failure_pair(remote_verify.get("error", ""))
+                # 运行时盾的证据必须落地。盾跑在**远端进程**里 ⇒ 本地那个
+                # `take_lib_fallback()` 永远是空的, 不认错误文本的话这条库回退只在日志里
+                # 活一次, 而资格规则 4 恰恰是给「静态审计漏了、盾拦住了」这条路径准备的
+                # (真机 §14-3: 拼名字的 `torch.matmul` 被远端盾拦下, lib_fallback 却是 None)。
+                from .anticheat import lib_fallback_metrics
+                fail_metrics = ({TRANSPORT_KEY: remote_verify[TRANSPORT_KEY]}
+                                if TRANSPORT_KEY in remote_verify else {})
+                fail_metrics.update(lib_fallback_metrics(remote_error=full or head))
                 return VerificationResult(
                     level=VerificationLevel.L2_FUNCTION, passed=False,
                     message=f"远程执行失败: {head}",
                     error_log=full,
                     # 「没听到回答」与「听到了失败」要分开带着走 (#102 第 1 片) —— 只在载荷
                     # 真报了这一格时发布, 缺的键不填默认值 (与 aggregated_over 同一纪律)
-                    metrics=({TRANSPORT_KEY: remote_verify[TRANSPORT_KEY]}
-                             if TRANSPORT_KEY in remote_verify else {}))
+                    metrics=fail_metrics)
             return VerificationResult(
                 level=VerificationLevel.L2_FUNCTION, passed=True,
                 message=(f"远程全量比对通过 ({remote_verify.get('compared_elements', 0)} 元素), "
@@ -1207,30 +1214,21 @@ class Verifier:
         # 而且同一次调用里传了两遍。真正判过阈值的是 `measurement.assess`,
         # 结论现在以 `dispersion_exceeded` 暴露, 这里只搬运不重推。
         cv_exceeded = bool(assessment.dispersion_exceeded)
-        # 五位资格 (设计 §4.3 / oracle.py): 与三个 can_* 并列写进 metrics,
-        # 让 Conductor 不必自己重新解释分档表 —— 「资格决定这个数被允许造成什么后果」。
-        # ⚠️ **fail-closed** (spine-review P0-3): 推导抛错时写 all-False, 不许 pass。
-        # 原先 `except Exception: pass` 让守卫出 bug 时**守卫消失并放行** ——
-        # 资格键缺失 → conductor 的 `if elig and ...` 不成立 → 入库门整条跳过。
-        # 「没算出来」必须与「算出来不合格」在下游同样可见。
-        try:
-            from .eligibility import ALL_FALSE, derive_eligibility
-            elig = derive_eligibility(
-                validity=assessment.validity.value,
-                requires_real_device=Cap.REAL_DEVICE.value in required,
-                real_device=assessment.backend_real_device,
-                l3_pass_is_refused=assessment.l3_pass_is_refused,
-                lib_fallback=bool(metrics.get("lib_fallback")),
-                cv_exceeded=cv_exceeded,
-                launch_dominance_exceeded=(assessment.launch_dominance is not None
-                                           and assessment.launch_dominance > 0.5),
-                partition_drift=bool(assessment.environment_drift),
-            )
-            metrics["eligibility"] = elig.as_dict()
-        except Exception as exc:  # noqa: BLE001 — fail-closed
-            from .eligibility import ALL_FALSE
-            metrics["eligibility"] = ALL_FALSE.as_dict()
-            metrics["eligibility_derive_error"] = f"{type(exc).__name__}: {exc}"
+        # 五位资格 (设计 §4.3): 与三个 can_* 并列写进 metrics, 让 Conductor 不必自己
+        # 重新解释分档表 —— 「资格决定这个数被允许造成什么后果」。
+        #
+        # ⚠️ **唯一来源是收口点** (下面的 oracle 调用), 这里只写 fail-closed 的 all-False:
+        # 收口点没跑成, 就不许有任何一位自称有资格 (**fail-closed**, spine-review P0-3:
+        # 原先 `except Exception: pass` 让守卫出 bug 时「守卫消失并放行」)。
+        #
+        # 为什么**不再**在这里自己推一份 (2026-10-01 真机 §14-8 抓到): 那次推导拿不到
+        # 心跳窗口, 于是同一个 metrics 里 `ruler_broken=True` 与 `can_persist=True`
+        # 并排出现 —— 而入库判据读的正是 `metrics["eligibility"]`, 于是「关掉心跳该窗口
+        # 不写长期记忆」在真机路径上**没有生效** (那次没入库只是因为加速比 0.42x 被另一道
+        # 门偶然挡住了)。两份推导的差别只在心跳, 所以收口点的答案**严格更知情**: 同一组
+        # 输入 + 心跳, 且用的就是同一个 `derive_eligibility`。
+        from .eligibility import ALL_FALSE
+        metrics["eligibility"] = ALL_FALSE.as_dict()
 
         # ── Oracle 唯一收口点 (spine-review P0-1 / P0-2 / 设计 §13.4) ──
         # 每个 L3 读数都产一条 Observation: 资格决定它被允许造成什么后果。
@@ -1278,6 +1276,10 @@ class Verifier:
                     candidate_window=(heartbeat.window_id if heartbeat is not None else None),
                 )
                 metrics["observation"] = obs.as_dict()
+                # 收口点的答案就是**发布值**: 它读的是同一组输入加心跳窗口, 是严格更
+                # 知情的那一份。发布别的推导 = 让「记录里说 A、判定按 B」这种分叉在
+                # 生产上长期存在 (真机 §14-8 就是它)。
+                metrics["eligibility"] = obs.eligibility.as_dict()
                 # 让「契约被改写」这条结论真的有人读: `confirm.py` 的 UnableReport
                 # 一直在读 `contract_hash_mismatch`, 而此前**没有任何生产写入者**
                 # —— 那条「本次评测作废」的条目永远不会出现在报告里 (死读键)。

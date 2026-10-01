@@ -213,7 +213,9 @@ class TestTeardownReachesQuiescence(unittest.TestCase):
         self.assertEqual(["terminate", "wait(timeout=10.0)"], proc.calls,
                          "只 request 不等 = 留孤儿 (DSH :19)")
         self.assertEqual(3, len(remote.commands), "pkill + pgrep + rm 三步都要有")
-        self.assertIn("_contender-deadbeef.py", remote.commands[0])
+        # pattern 是「匹配不到自己」的形态 (末字符包成字符类), 所以断言的是那一段前缀 ——
+        # 目的仍然是「三个动作对着同一个不可预测落点」。
+        self.assertIn("_contender-deadbeef.p[y]", remote.commands[0])
         self.assertTrue(remote.commands[0].startswith("pkill -f "))
         self.assertTrue(remote.commands[2].startswith("rm -f "))
         self.assertEqual(0, ev["remote_still_running"])
@@ -247,6 +249,25 @@ class TestTeardownReachesQuiescence(unittest.TestCase):
         self.assertEqual(2, ev["remote_still_running"])
         self.assertNotIn("quiescent", ev, "还有残留却报成静默 = 下一次读数被当成安静值")
         self.assertIn("不干净", ev["warning"])
+
+    def test_the_kill_pattern_cannot_match_its_own_command_line(self):
+        """H5 的同一失效第二处: `pkill/pgrep -f <pattern>` 会匹配到**执行它的那个 shell**
+
+        真机实测 (2026-10-01 §14-4): 干扰进程早已死掉, 读回却永远报「远端仍有 1 个进程」,
+        因为 wrapper shell 自己的 cmdline 里就写着那个 pattern ⇒ `quiescent` 这条判据根本
+        立不起来。判据是**行为**: 拿生成出来的那条命令当 cmdline, 用它自己的正则去搜, 必须
+        搜不到; 同时它仍要能搜到真正的落点。
+        """
+        import re
+        remote = _FakeRemote()
+        path = "/tmp/_c-abcdefab.log"
+        stop_interferer(_FakeProc(), remote, path)
+        for cmd in (c for c in remote.commands if c.startswith(("pkill", "pgrep"))):
+            pattern = cmd.split("-f ", 1)[1].split(" ", 1)[0].strip("'")
+            self.assertIsNone(re.search(pattern, cmd),
+                              f"这条命令的正则匹配到它自己的 cmdline: {cmd}")
+            self.assertIsNotNone(re.search(pattern, f"python runner {path}"),
+                                 f"变换之后连真落点都搜不到了: {pattern}")
 
     def test_no_residue_claim_without_a_read_back(self):
         """反空转: `pgrep` 这一步不能省。少了它, 上面那条「有残留」的判据就无从成立。"""
@@ -340,9 +361,34 @@ class TestSmokeBurnerArm(unittest.TestCase):
         """
         import smoke_spine_h20 as smoke
         log = "/tmp/burner-1a2b3c4d.log"
-        cmd = smoke._burner_command(3, log)
+        cmd = smoke._burner_command(3, log, 30)
         self.assertIn(f'MARK="{log}"', cmd)
         self.assertIn(f"> {log} 2>&1", cmd)
+        # 第二处违规是**更安静**的那个: 老写法用 numpy 当占位负载, 而
+        # `CUDA_VISIBLE_DEVICES` 对 numpy 无效 ⇒ 它占的是 CPU 核, 不是卡。于是 §14-4
+        # 那一臂"造出的竞争"是假的 (util 没涨), 而脚本只会打印一句"这一臂不算数" ——
+        # 真机复跑 (2026-10-01) 才把它和"占位还没起来"分开。
+        # 启动命令必须**真脱离**: `nohup ... &` 仍占着 ssh 通道, 实测卡 30 秒直到超时
+        # (而那次超时把整个冒烟脚本掀翻了)。判据: setsid + stdin 归 /dev/null + 子 shell。
+        self.assertIn("setsid", cmd, "后台进程没另起会话, ssh 通道会被它占住")
+        # `CUDA_VISIBLE_DEVICES=N cd X && ... python` 是**前缀赋值**, 只作用于内建的 `cd`
+        # ⇒ 变量没进环境, python 落在 GPU 0 上 (真机实测: 卡 2 的 util 序列 23 个 0, 而
+        # 拆除还报 quiescent —— 一切自洽, 就是没测到东西)。判据: 用 `env` 显式传, 且占位
+        # 自己把 device_count() 打进日志 (钉住=1, 没钉住=8)。
+        self.assertIn("env CUDA_VISIBLE_DEVICES=", cmd, "前缀赋值钉不住卡")
+        self.assertFalse(cmd.lstrip().startswith("CUDA_VISIBLE_DEVICES="),
+                         "赋值又被写成只作用于某一条命令的前缀形态")
+        self.assertIn("cuda_devices", cmd, "占位没自报钉到了几张卡")
+        self.assertIn("< /dev/null", cmd, "stdin 没断开, ssh 仍会等这条通道")
+        self.assertTrue(cmd.rstrip().endswith("echo launched"), "启动没有回执, 调用方分不清起没起")
+        self.assertIn("torch", cmd, "占位负载不占卡 (numpy 不认 CUDA_VISIBLE_DEVICES)")
+        self.assertNotIn("numpy", cmd, "占位负载又退回 CPU 核了")
+        # 第三处 (真机实测): 循环体经 ssh → bash 单引号 → `python -c` 之后, `\n` 会变成
+        # **字面换行**, 而 Python 不许单行字符串字面量里有真换行 ⇒ 远端 SyntaxError, 占位
+        # 一启动就死, 而现场只剩「util 序列 23 个 0」。这条离线就能拦: 把 `-c` 那一段
+        # 抠出来交给 `ast.parse`。判据是**语法**, 所以不必真去连那台机器。
+        body = cmd.split("python -c '", 1)[1].rsplit("' >", 1)[0]
+        ast.parse(body)   # 语法错 → SyntaxError, 用例红
 
     def test_smoke_uses_the_helpers_not_ad_hoc_paths(self):
         """驱动不许绕开 helper 自己拼路径/拆除 (判据 = AST 里的调用, 非文本)"""

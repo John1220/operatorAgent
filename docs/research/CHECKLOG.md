@@ -920,6 +920,24 @@
   会让人去加一把没必要的远端 `pkill`，那才是真的会误伤同主机上别的会话
 - **类别**：H · **状态**：✅ 已修（判据换成不自匹配的两种：自报 pid + 方括号技巧）
 
+### H6 · 拆除的「读到静止」判据第三次自匹配（`pgrep -f` 数到了执行它的那个 shell）
+
+- **原话**：`stop_interferer` 的拆除必须**读到静止**（DSH `:19`：「dispose must reach quiescence」）
+- **实证**：2026-10-01 真机 §14-4：干扰进程**已经被杀**（`pkill_stdout` 空 = 成功且无匹配），
+  读回却报 `remote_still_running: 1` 并打出「这张卡在它们停之前不干净」，`quiescent` 永不成立。
+  现场自洽地骗人：那一次干扰器的 python 其实**因 SyntaxError 秒死**，卡上没有任何东西，
+  而读回仍然说「有 1 个」。根因与 **H5 完全相同**：`pgrep -f <pattern>` 的正则匹配到了
+  **执行它的那个 shell**（wrapper 的 cmdline 里就写着这个 pattern）。修法用 H5 已经用过的
+  方括号技巧：末字符包成字符类（`x.log` → `x.lo[g]`），目标进程照样匹配、pattern 文本自己
+  匹配不到自己。修后真机复跑：`remote_still_running: 0, quiescent: True`
+- **出处**：doc 63 §4.3；`benchmarks/_scratch.py::unmatchable`；
+  `tests/test_shared_host_scratch_paths.py::test_the_kill_pattern_cannot_match_its_own_command_line`
+  （判据是**行为**：拿生成出来的那条命令当 cmdline，用它自己的正则搜，必须搜不到）
+- **后果**：这是一条**恒不成立**的守卫 —— 它不会漏报，但它让「读回静止」这个动作永远拿不到结论，
+  于是真正该被注意的残留（下一次「安静」读数其实是别人的）与噪音混在一起
+- **类别**：H · **状态**：✅ 已修（同一个毛病第三次出现：H5 是自报 pid 那一处、doc 62 的
+  `ps | grep '[r]unner` 是第二处、这里是第三处 —— 凡是「用文本模式找自己」都要自问这一句）
+
 ---
 
 ### I45 · 「§10.5-4 两次确认 ✅」的判据函数零生产调用者，且默认不强制
@@ -938,6 +956,58 @@
 - **后果**：把「两次确认」读成已生效的护栏 —— 而它既没生效、也没被验收（§14 八条**不含**
   §10.5-4）。同族：P0-1「判据不在链路上」、P1-4「声明了没人派发」
 - **类别**：I · **状态**：✅ 已修（判据收口 + 状态表写明 opt-in + 允许入库的理由文本里注明）
+
+### I46 · §14-8「关掉心跳该窗口不写记忆」在生产路径上没生效
+- **原话**：设计 §14.8 表格第 8 行 —— 「关掉心跳 | 该窗口观测全部不可用, **不写记忆**」；
+  状态表把它记成 ✅（`calibration` 的判定 + oracle 的规则 2 与「到期没跑」）
+- **实证**：2026-10-01 真机 H20 (`benchmarks/smoke_spine_h20.py` 走**生产** L3 入口)：
+  同一次测量写出的 metrics 里并排出现
+  `ruler_broken=True, reason='RULER_BROKEN: 标定心跳到期, 但本次没有参照读数'`
+  与 `eligibility={'can_verdict': True, …, 'can_persist': True, …}`。根因是**两份资格推导**：
+  `_assess_measurement` 先自己 `derive_eligibility(...)` 并把它写进 `metrics["eligibility"]`
+  —— 那次调用**拿不到心跳窗口**；oracle 收口点随后又算一份（带心跳）只写进
+  `metrics["observation"]["eligibility"]`。入库判据读的是前一份 ⇒ 坏窗口的读数自称可入库。
+  那次真机没写进语料，只是因为加速比 0.42x 被 `persist_decision` **另一道门**偶然挡住了
+  （拒因原文: `相对同机基线没有加速 (speedup=0.4155)`）—— 换一条跑得赢的读数就会进去。
+  已修：发布值改为收口点的答案（`metrics["eligibility"] = obs.eligibility.as_dict()`），
+  本地推导删掉，只有「收口点没跑成」那条 fail-closed 的 all-False 保底
+- **出处**：`docs/research/63-*.md`（真机冒烟，run1 = 修前证据）；`operator_agent/verifier.py`
+  `_assess_measurement`；`tests/test_stage1_acceptance.py::test_published_eligibility_is_the_closure_points_answer`
+  （**对旧代码变红**）
+- **后果**：读「已检查」而护栏不生效 —— 与 P1-4「声明了没人派发」同族：这次是**算了、发布了、
+  但发布的是另一份**。同族条目 I45（判据零调用者）、I47（检查无喂给者）
+- **类别**：I · **状态**：✅ 已修（发布值 = 收口点答案 + 生产 L3 级别的守卫）
+
+### I47 · `pairing_conflict` 跨卡检查在生产路径上没有喂给者
+- **原话**：设计 §11-2 / §13.4 硬性语义 2 —— 「A 卡基线 vs B 卡候选的『加速比』直接作废」；
+  spine-review P3-16 把它记成已修（「搬进 `operator_agent/placement.py`」）
+- **实证**：`pairing_conflict` 在 oracle 里被调用（`oracle.py:154-155`），但它的输入
+  `candidate_device`/`baseline_device` 是 `evaluate(...)` 的**显式参数**，而全仓生产者搜索
+  （`grep -rn "candidate_device\|baseline_device" --include=*.py .`）在 `operator_agent/` 里
+  只有 oracle 与 placement **自己**，唯一调用者是测试 —— 生产无人喂。真机上「两臂同卡」是
+  **结构保证**：`benchmark_with_baselines` 在**一次**远端调用里跑完候选与基线，载荷只报一个
+  `selected_gpu`（`remote_scripts/run_kernel.py:1205-1207`），两臂没有各自的卡号键
+- **出处**：`docs/research/63-*.md` §真机事实；`operator_agent/oracle.py:88-89,154`
+- **后果**：这条检查今天只在离线用例里活着；真机正确性靠「一次调用一张卡」，一旦有人把
+  两次调用的读数拼成一个加速比（缓存基线 / 分轮拼接），没有任何东西会作废它
+- **类别**：I · **状态**：⚠️ 已知未修（方向: 远端逐臂报卡号 + verifier 传进 `evaluate`；
+  **不许**把同一个 `selected_gpu` 当两臂各自的值传 —— 那是恒真比较，P0-2 的教训）
+
+### I48 · 远端运行时盾的证据不落地（`lib_fallback` 对唯一需要它的那条路径恒 False）
+- **原话**：spine-review P1-4 —— 「反作弊命中必须把 `lib_fallback` 写进 metrics，否则资格
+  规则 4 恒 False」；状态 ✅
+- **实证**：2026-10-01 真机 §14-3：把名字拼出来的假候选
+  (`getattr(torch, "mat" + "mul")`) 静态审计**看不见**（实测 `static_audit` 返回 `[]`），
+  真机上是**远端进程里的盾**拦下的 —— L2 如实失败
+  (`CheatDetectedError: 反作弊: 验证执行期间禁止调用原生算子 torch.matmul()`)，但
+  `lib_fallback=None`：`take_lib_fallback()` 读的是**本地**全局变量，而盾跑在远端进程里。
+  证据只活在一句错误文本里
+- **出处**：`docs/research/63-*.md`；`operator_agent/anticheat.py`（`lib_fallback_from_error`）、
+  `operator_agent/verifier.py` 远端 L2 失败分支
+- **后果**：资格规则 4 恰是给「静态审计漏了、盾拦住了」准备的，而对这条路径恒 False ⇒
+  又一次「算了、没人读」。已修：错误文本按**自家文案常量**认领（不做模糊匹配，否则任何含
+  `matmul` 的报错都会被读成库回退），符号进 `lib_fallback_evidence` 的 `runtime:` 段
+- **类别**：I · **状态**：✅ 已修（+ 正反两条用例；摘掉喂给 → 对应用例变红）
 
 ## 使用约定
 
@@ -1002,6 +1072,9 @@
 | I43 | 报表的**解释**可以在读数之前就被写好：那句「一轮一个目录」被下一步的 `round_done` 读数打成 0（C9 只有 assertNotIn 杀得掉） | S/I | ✅ 已修 |
 | I44 | 输入线把标量也「按描述重新生成」：`causal=False` 到真机成了 `np.True_`，L2 验的是另一个算子 | I | ✅ 已修 |
 | I45 | 两次确认的判据零调用者 | I | ✅ 已修 |
+| I46 | §14-8 的资格位发布值不是收口点算的那份 | I | ✅ 已修 |
+| I47 | 跨卡配对检查在生产上没有喂给者 | I | ⚠️ 已知 |
+| I48 | 远端运行时盾的证据不落地 | I | ✅ 已修 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
@@ -1012,4 +1085,5 @@
 | H3 | 成本键名错 | H | ✅ |
 | H4 | 入库率分母不同源 | H | ✅ |
 | H5 | 存活判据自匹配 | H | ✅ |
+| H6 | 拆除读回的 pgrep 自匹配 (第三次) | H | ✅ 已修 |
 | M4 | 通过率把「本地做不到」与「做到了过不了性能门」折成一个数 | M/H | ✅ 报表侧 |

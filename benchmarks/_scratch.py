@@ -92,6 +92,24 @@ def remote_scratch_path(name: str) -> str:
     return f"{_REMOTE_DIR}/{stem}-{secrets.token_hex(4)}.{ext}"
 
 
+def unmatchable(pattern: str) -> str:
+    """把路径最后一个字符包成字符类 (`x.log` → `x.lo[g]`), 让 pattern 匹配不到**自己**。
+
+    WHY (CHECKLOG H5 的同一失效, 这里是第二处): `pkill -f <pattern>` / `pgrep -f <pattern>`
+    用的是**正则**, 而执行这条命令的那个 shell 自己的 cmdline 里就写着这个 pattern 文本 ⇒
+    它匹配到自己。实测后果 (2026-10-01 真机 §14-4): 干扰进程**早已死掉**, 读回却永远报
+    「远端仍有 1 个进程」⇒ `quiescent` 这个判据根本立不起来 (而它正是 DSH `:19`
+    「dispose must reach quiescence」要的那一步)。`pkill` 那一半同样会朝自己的 shell
+    发 SIGTERM —— 只是它被推迟到整条命令跑完, 所以 `rm` 侥幸跑到了。
+
+    包一个字符类之后, 那段 pattern **文本**不再被它自己的正则匹配到 (`lo[g]` 要求那里是个
+    `g`, 而 wrapper 的 cmdline 里那里是 `[`), 而目标进程那条真正的落点照样匹配 ✓。
+    """
+    if not pattern:
+        return pattern
+    return pattern[:-1] + "[" + pattern[-1] + "]"
+
+
 def stop_interferer(proc, run_remote, remote_path: str, grace_s: float = 10.0) -> dict:
     """终止本地 ssh 客户端**并确认远端那个工作也停了**, 返回可读回的证据。
 
@@ -122,9 +140,12 @@ def stop_interferer(proc, run_remote, remote_path: str, grace_s: float = 10.0) -
             evidence["local_returncode"] = proc.wait()
             evidence["local_wait"] = "terminate 超时, 已 kill 并等到退出"
 
+    # pattern 用「匹配不到自己」的形态 (见 `unmatchable`): 否则这两个动作都会命中执行它们
+    # 的那个 shell —— pkill 朝自己发信号, pgrep 把 wrapper 数成一个残留进程。
+    quoted_pattern = shlex.quote(unmatchable(remote_path))
     # sh 的 `pkill` 在没有匹配时返回 1 —— 那是**期望的结果**（没有残留）, 所以 `|| true`。
-    evidence["pkill_stdout"] = (run_remote(f"pkill -f {quoted} || true") or "").strip()[:200]
-    left = (run_remote(f"pgrep -f {quoted} || true") or "").strip()
+    evidence["pkill_stdout"] = (run_remote(f"pkill -f {quoted_pattern} || true") or "").strip()[:200]
+    left = (run_remote(f"pgrep -f {quoted_pattern} || true") or "").strip()
     evidence["remote_still_running"] = len([x for x in left.splitlines() if x.strip()])
     run_remote(f"rm -f {quoted}")
 

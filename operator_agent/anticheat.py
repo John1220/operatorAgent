@@ -52,7 +52,37 @@ def take_lib_fallback() -> Optional[str]:
     return hit
 
 
-def lib_fallback_metrics(violations: Optional[list] = None) -> dict:
+# 盾抛出来的那句话的**唯一**出处: 远端失败路径靠它把「真的发生了库回退」认回来。
+# 为什么需要认文本 (2026-10-01 真机 §14-3): `take_lib_fallback()` 读的是**本地**全局
+# 变量, 而盾跑在**远端进程**里 —— 把名字拼出来的假候选 (`getattr(torch, "mat"+"mul")`)
+# 静态审计看不见, 只有远端那把盾能拦, 可它的证据只活在一句错误文本里, 于是
+# `derive_eligibility(lib_fallback=...)` 规则 4 对唯一真正需要它的那条路径恒 False。
+_RUNTIME_CHEAT_MARK = "反作弊: 验证执行期间禁止调用原生算子 {name}()"
+
+
+def _runtime_cheat_message(qualified_name: str) -> str:
+    """盾的那句错误 —— 生产者与解析器共用这一个格式, 不许各写一遍。"""
+    return _RUNTIME_CHEAT_MARK.format(name=qualified_name)
+
+
+def lib_fallback_from_error(error_text: Optional[str]) -> Optional[str]:
+    """从**远端**回来的错误文本里认领一次运行时库回退, 返回被拦符号 (认不出 → None)。
+
+    只认自家文案 (前缀与 `_make_blocked` 同一个常量), 不做模糊匹配: 否则任何含
+    "matmul" 字样的报错都会被读成库回退, 而这一位会去驱动资格规则 4。
+    """
+    if not error_text:
+        return None
+    prefix = _RUNTIME_CHEAT_MARK.split("{name}", 1)[0]
+    if prefix not in error_text:
+        return None
+    tail = error_text.split(prefix, 1)[1].strip()
+    name = tail.split("(", 1)[0].strip()
+    return name or "unknown"
+
+
+def lib_fallback_metrics(violations: Optional[list] = None, *,
+                         remote_error: Optional[str] = None) -> dict:
     """生产者 (spine-review P1-4): 把反作弊命中写成 metrics 片段。
 
     两个来源:
@@ -67,6 +97,9 @@ def lib_fallback_metrics(violations: Optional[list] = None) -> dict:
     hit = take_lib_fallback()
     if hit:
         evidence.append(f"runtime:{hit}")
+    remote_hit = lib_fallback_from_error(remote_error)
+    if remote_hit:
+        evidence.append(f"runtime:{remote_hit}")
     for v in (violations or [])[:3]:
         evidence.append(f"static:{v}")
     if not evidence:
@@ -423,9 +456,7 @@ def _make_blocked(qualified_name: str):
         # 先记后抛: 异常可能被上游吞掉, 但 lib_fallback 生产者必须留下痕迹
         # (spine-review P1-4)。上游用 `lib_fallback_metrics()` 搬进 metrics。
         _record_lib_fallback(qualified_name)
-        raise CheatDetectedError(
-            f"反作弊: 验证执行期间禁止调用原生算子 {qualified_name}()"
-        )
+        raise CheatDetectedError(_runtime_cheat_message(qualified_name))
     _blocked.__name__ = f"blocked_{qualified_name}"
     return _blocked
 
