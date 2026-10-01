@@ -1004,6 +1004,37 @@
   **两臂真机对照 ⏳ 未跑**（同卡两次完整循环, 要 LLM）⇒ 「审计有收益」今天仍不许说
 - **类别**：I · **状态**：⚠️ 比较器 ✅ 已落地 / 两臂 ⏳ 未跑
 
+### I56 · §12 的 `Candidate` 联合类型不存在：链路上流动的候选就是源码字符串；那个开关零实现
+
+- **原话**：设计 §12 —— 「接入 TVM / CUTLASS 的最大风险是接口把"候选"硬编码成源码字符串——
+  那一刻起，模板型后端就无法接入，整条链路要重写。因此 `Candidate` 必须是**联合类型**」
+  以及「`Backend.param_space()` 返回 `None` 的后端 = **代码型后端**，控制器自动切换成
+  "LLM / 模板产出候选、bandit 只做局部精修"。这就是统一两类后端的那个开关。」
+- **实证**：改前全仓没有 `Candidate` / `SourceCandidate` / `TemplateCandidate` / `ParamSpace`
+  任何一个名字，也没有任何后端有 `param_space`；「候选」在链路上就是 `UnifiedSketch` 与
+  源码字符串，「辨别两类后端」这件事**没有任何判据**。附带证据：`backend_caps.Backend`
+  的可选方法一律「一调就 raise」，所以调用方要问「这个后端有没有参数空间」只能
+  `hasattr`/`getattr` 嗅探 —— 而 `tests/test_backend_caps.py` 的 AST 守卫**明令禁止**
+  对后端做这种分派（我第一版 `param_space_of` 就是 `getattr(backend, "param_space", None)`,
+  当场被它抓红）。
+- **出处**：`docs/design/autonomous-operator-agent-design.md` §12（状态表里那一行写「⏳ 未做」、
+  参数空间「仍未产物化」）、`operator_agent/backend_caps.py:94`（基类可选方法的处置口径）、
+  `tests/test_backend_caps.py:262-287`（禁止嗅探的判据）、`operator_agent/resource_check.py`
+  （smem 估算器与宽松系数 `_SLACK = 1.2`，此前**只有 L1 一个读者**）
+- **后果**：模板型后端（CUTLASS / TVM）接不进来这件事**今天无法被观测** —— 没有类型、没有
+  判据、没有拒绝路径，于是「接一个模板后端」会以「悄悄把参数点当成源码字符串」的方式失败，
+  而不是在边界上炸一次。smem 估算器同理只有编译前一个读者: 明明有**不花 GPU 秒**就能算的
+  资源上界, 却没有人在**选候选**时用它 ⇒ 一次真值测量会被花在一个必然编译失败的 tile 上。
+- **类别**：I · **状态**：✅ 2026-10-02 **枚举半片**（联合类型 / 去重口径 / `ParamSpace` 枚举 /
+  `prune_by_smem` / 开关 fail-closed；模板候选的**实例化 `build` 仍未实现**，声明了参数空间
+  的后端会被控制器拒绝而不是降级）。守卫 28 条（`test_candidates.py` 21 + `test_proxy_prune.py` 7），
+  **13 处变异全红**；其中「剪枝另立一个 1.0 系数」第一次**没红** —— 我原来只钉了 `smem_ok`
+  那条边界，剪枝自己的路径没人钉，补一条「1.0~1.2 之间必须放行」才红（记住：变异不变红时
+  先怀疑用例覆盖面）。修这一片时既有守卫抓到我两次：`int(kb)*1024` 改了上界取整口径
+  （`test_slack_boundary_is_not_a_hard_wall` 当场红）、以及上面那条嗅探禁令。
+
+---
+
 ### I55 · `exceeds_measured_peak` 的 docstring 说 `×(1+slack)`、代码做 `×slack`（默认值让两者巧合相等）
 
 - **原话**：spine-review P2-9 —— 「`eligibility.py:73-86`：`"""value > 实测峰值 × (1+slack)`? ..."""`
@@ -1314,6 +1345,7 @@
 | I53 | §10.3 的 LLM 升级门 (三条件同时满足) 零实现, 每轮都在问 LLM 要结构改动 | I | ⚠️ 已知未修 |
 | I54 | §10.2 的真值 oracle 次数没有预算语义, 预留只是 opt-in | I | ✅ 2026-10-02: 三条预算接上 (分相/GPU 秒仍 ⏳) |
 | I55 | exceeds_measured_peak 的 docstring 说 ×(1+slack), 代码做 ×slack | M | ✅ 2026-10-02 修 (常数改余量比例 + 单一真源) |
+| I56 | §12 的 Candidate 联合类型不存在, 候选就是源码字符串; 开关零实现 | I | ✅ 2026-10-02 枚举半片 (模板实例化仍 ⏳) |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

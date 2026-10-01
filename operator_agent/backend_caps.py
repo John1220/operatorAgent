@@ -25,7 +25,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:                      # 只给注解用: 运行时不导入, 免得与 candidates 成环
+    from .candidates import ParamSpace
 
 
 class Cap(str, Enum):
@@ -130,6 +133,21 @@ class Backend(ABC):
         基类默认 `None` 而不是抛: 这是一个**读值**, 不是一次能力调用; 而且「不固定」对
         CPU 后端是诚实答案。提供方要覆写它, 不许在这里加哨兵值 (如 `-1`) —— 那会让
         「没有卡」与「第 -1 号卡」共用一个数。
+        """
+        return None
+
+    def param_space(self, contract: object = None) -> "Optional[ParamSpace]":
+        """§12 的参数空间: **返回 None 的后端是代码型** —— 基类默认就是它
+
+        与上面那些「一调就 raise」的存根**刻意不同**, 因为 None 在这里是一个**有意义
+        的答案**, 不是「缺能力」: 设计 §12 原话「`Backend.param_space()` 返回 `None`
+        的后端 = **代码型后端**，控制器自动切换成 "LLM / 模板产出候选、bandit 只做局部
+        精修"」。基类若 raise, 今天每一个后端 (全是代码型) 都会在第一次搜索时炸。
+
+        模板型后端覆写它并返回 `candidates.ParamSpace`; 那一刻控制器会 **fail-closed
+        拒绝** (`candidates.require_supported_space`) —— 模板候选的实例化还没实现,
+        声明的参数空间不许被无声丢掉。方法先立在基类上 (而不是让调用方 `hasattr` 嗅探)
+        是同一个模块开头第 1 条的理由: 「静默 no-op」在这个设计下不可表达。
         """
         return None
 

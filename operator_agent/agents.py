@@ -6,6 +6,7 @@ prompt 模板均从 prompts/ 目录加载，支持热更新"""
 
 import json
 from typing import Optional
+from .candidates import TemplateCandidate, prune_by_smem
 from .schemas import (
     TaskSchema, UnifiedSketch, TilingStrategy, MemoryPlan,
     PipelineStage, TaskComplexity,
@@ -602,6 +603,10 @@ class SearchAgent:
             self._variant_of(prior, t) for t in self._lattice_neighbors(center)
             if (t.block_m, t.block_n, t.block_k) != origin_key
         ]
+        # §12 的**便宜代理剪枝** (不花 GPU 秒): 把 smem 明显放不下的邻域点先摘掉,
+        # 否则它会占掉一轮真值测量去买一个必然失败的 launch。上界取不到时不剪, 且
+        # 留一句「未生效」——「没有上界」不许被读成「剪过了没事」(三态)。
+        neighbor_sketches, prune_note = self._prune_by_smem(neighbor_sketches, perf_data)
         pool = [prior] + neighbor_sketches
         # 先验没动 tiling 且有别的可试: 再选它等于原样重跑一轮, 让位给邻域
         prior_key = (center.block_m, center.block_n, center.block_k)
@@ -617,7 +622,37 @@ class SearchAgent:
             t, c = chosen.tiling, center
             note = (f"邻域排序选中 {t.block_m}x{t.block_n}x{t.block_k}, "
                     f"LLM 先验 {c.block_m}x{c.block_n}x{c.block_k} 降为候选")
+        if prune_note:
+            note = f"{note} | {prune_note}" if note else prune_note
         return chosen, alternatives, note
+
+    @staticmethod
+    def _prune_by_smem(sketches: list, perf_data: dict) -> tuple:
+        """按每 SM smem 上界摘掉明显放不下的邻域点; 返回 (保留的, 说明)
+
+        三态处置: 上界取不到 / 精度不知道 ⇒ **不剪**并明说「未生效」。
+        全摘光时同样一个都不摘 (剪枝是「少花冤枉钱」, 不是「让这一轮没得跑」)。
+        """
+        points = []
+        for i, s in enumerate(sketches):
+            t = s.tiling
+            points.append(TemplateCandidate(
+                backend="lattice", template_id="tiling",
+                params={"BLOCK_M": t.block_m, "BLOCK_N": t.block_n,
+                        "BLOCK_K": t.block_k, "_idx": i}))
+        class _Caps:
+            shared_mem_per_sm_kb = int(perf_data.get("shared_mem_per_sm_kb") or 0)
+        elem = perf_data.get("elem_bytes")
+        if not isinstance(elem, int) or isinstance(elem, bool) or elem <= 0:
+            elem = 4      # 认不出来时按最窄的常见类型算: 宁可漏拦 (与预检同一条原则)
+        res = prune_by_smem(points, _Caps(), elem)
+        if res.no_limit:
+            return list(sketches), ""
+        kept = [sketches[c.params["_idx"]] for c in res.kept]
+        note = res.as_note()
+        if not note and res.kept_all_to_avoid_starvation:
+            note = res.as_note()
+        return kept, note
 
     @staticmethod
     def _variant_of(prior: UnifiedSketch, tiling: "TilingStrategy") -> UnifiedSketch:

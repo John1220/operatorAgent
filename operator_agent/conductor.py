@@ -37,6 +37,7 @@ from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
 from .bandit import Bandit
+from .candidates import param_space_of, require_supported_space
 from .budget import BudgetLedger, BudgetPlan
 from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
                           LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
@@ -1426,6 +1427,12 @@ class Conductor:
                     "name_bound": l3_result.metrics.get("name_bound", "unknown"),
                     "hw_name": l3_result.metrics.get("hw_name", "unknown"),
                     "hw_compute_capability": l3_result.metrics.get("hw_compute_capability", "unknown"),
+                    # ---- §12 便宜代理剪枝的输入 (不花 GPU 秒) ----
+                    # 上界由 Verifier 从 caps 发布 (0 = 不知道); elem_bytes 取**任务声明
+                    # 精度**的字节数 —— 与 smem 估算、AI 分母同一个口径 (核根本见不到
+                    # 控制端手里那份 float32 数组, 见 verifier._compute_arithmetic_intensity)。
+                    "shared_mem_per_sm_kb": l3_result.metrics.get("shared_mem_per_sm_kb", 0),
+                    "elem_bytes": task.constraints.precision.itemsize,
                     # ---- 优化历史 ----
                     "optimization_history": optimization_history,
                 }
@@ -1459,6 +1466,13 @@ class Conductor:
                     print(f"\n[Search] 轮换邻域候选: tiling={t.block_m}x{t.block_n}x{t.block_k} "
                           f"(队列剩 {len(search_alternatives)} 个)")
                 else:
+                    # ── §12 的开关: 后端声明了参数空间 ⇒ 模板型 ──
+                    # 控制器「自动切换成 LLM/模板产出候选、bandit 只做局部精修」这件事,
+                    # 今天只有代码型那一半有实现 (bandit 精修 = P1-4 邻域)。模板型那一半
+                    # (由参数空间枚举候选并实例化) 还没落地 ⇒ 在这里 fail-closed, 而不是
+                    # 把它降级成代码型继续跑: §12 点名的风险正是「把候选悄悄当成源码字符串」。
+                    # 放在真值测量**之前** (这一处是每轮搜索的入口), 因为拒绝要发生在花钱之前。
+                    require_supported_space(param_space_of(self.backend, task), self.backend)
                     try:
                         current_sketch, suggestion = self.search.run(current_sketch, perf_data)
                     except Exception as e:

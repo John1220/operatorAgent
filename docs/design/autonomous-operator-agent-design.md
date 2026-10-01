@@ -29,7 +29,7 @@
 | §10.2 三种预算 | `operator_agent/budget.py`（`BudgetPlan` + `BudgetLedger`）+ 轮次开头两道门 | ✅ 2026-10-02：oracle 次数（**预留不可挪用**）/ 墙钟 / token 三条接上并落 `artifact.metadata["budget"]`；心跳只记账不被拦。**边界**：`explore`/`refine` 不分相、按 GPU 秒未做、预算默认全关（opt-in）—— 见 [doc 67](../research/67-三种预算与不可挪用的预留.md) |
 | §10.3 候选选择 / LLM 升级门 | — | ⏳ **未做**：`score = P(beats_best)×预期增益/预期GPU秒` 要 GPU 秒口径；「三条件同时满足才许升级到 LLM 结构改动」那个门**零实现**（CHECKLOG I53） |
 | §5 bandit 调参 | `operator_agent/bandit.py`（确定性 UCB1）+ `Conductor` 信念门 | ✅ 2026-10-02：`perf_data` / `optimization_history` / 回报统计三条信念通道按 `can_tune` / `can_count_progress` 收口（CHECKLOG I52），prompt 不再把「没有读数」渲染成 `0.00`；状态落 `artifact.metadata["bandit"]`。**臂空间只有 tiling**、`c` 未标定、证据**不进快照**（只覆盖本次运行）；**真机未复跑** —— 见 [doc 66](../research/66-搜索侧的信念门与bandit.md) |
-| §12 模板后端 / `param_space()` | — | ⏳ **未做**：参数空间 (stages/warps/向量宽度/layout/split-K) 仍未产物化，今天的「参数化」= LLM 出 tiling + 确定性格点邻域 |
+| §12 模板后端 / `param_space()` | `operator_agent/candidates.py` + `backend_caps.Backend.param_space` + 便宜代理剪枝 | ✅ 2026-10-02 **枚举半片**：候选联合类型、分开写的去重口径（α-等价签名 / 模板参数+实例化器版本）、`ParamSpace` 确定性枚举、`prune_by_smem`（复用 L1 的 smem 估算器与同一个 `SMEM_SLACK`）、开关 `param_space_of` + fail-closed。**边界**：模板候选的**实例化 `build` 未实现**（声明了参数空间 ⇒ 控制器拒绝，不降级）；剪枝只估单缓冲；上界缺 ⇒ 三态不剪；参数轴只有 tiling 三维有产出者 —— 见 [doc 68](../research/68-候选联合类型与便宜代理剪枝.md) |
 
 **审查**：`spine-review.md` 记了 P0–P3；P0 三项、P1-4/P1-5/P1-6/P2-8/P2-9/P2-10 与 P3-11/12/13/15/16/18 已修；P3-14/P3-17 仍未修。**入库判据只有一处**（`oracle.admit_to_corpus`，2026-10-01 收口：此前它零生产调用者，`_save_to_db` 自己又写了一遍那三道门且口径不同）。  
 **尚未宣称收益的那道门已过**（§19.4）：设计原文是「真机 §14 冒烟之前，不对外说资格审计带来收益」——
@@ -485,6 +485,27 @@ Candidate = SourceCandidate | TemplateCandidate
 
 `Backend.param_space()` 返回 `None` 的后端 = **代码型后端**，控制器自动切换成
 "LLM / 模板产出候选、bandit 只做局部精修"。这就是统一两类后端的那个开关。
+
+> **实现状态（2026-10-02，第一片 = 枚举半片）**：`operator_agent/candidates.py` 立了
+> 联合类型（`SourceCandidate` / `TemplateCandidate`）、**分开写的去重口径**
+> （源码型走 α-等价结构签名，与 `iteration_history` 同一个 `novelty.signature_of`；
+> 模板型走 `template_id + instantiator_ver + 排序后的参数` —— 模板候选没有源码可签名）、
+> 参数空间枚举（`ParamSpace.points()`，轴序即枚举序、顺序确定）、
+> **便宜代理剪枝**（`prune_by_smem`：复用 `resource_check` 的 smem 估算器与**同一个**
+> 宽松系数 `SMEM_SLACK = 1.2`，不花 GPU 秒就能摘掉「明显放不下」的点）、
+> 以及那个开关（`param_space_of` + `require_supported_space`）。协议方法
+> `param_space()` 立在 `backend_caps.Backend` 上，默认返回 `None` = 代码型 ——
+> 于是「没有这个方法」按设计**不可表达**（不靠 `hasattr` 嗅探）。
+> 上界由 Verifier 从 `HardwareCaps` 发布进 L3 metrics（`shared_mem_per_sm_kb`），
+> 与 L1 资源预检**同一个真源**。
+> **边界**：① **模板候选的实例化（`build`）未实现** ⇒ 后端若声明了参数空间，控制器
+> **fail-closed 拒绝**（`NotImplementedError`，点名模板）而不是降级成代码型继续跑 ——
+> §12 要挡的正是「把候选悄悄当成源码字符串」；② 剪枝只估**单缓冲**（不含 `num_stages`
+> 的多缓冲）⇒ 只砍明显超限的点，边界交给远端；③ 上界取不到时**返回 None（三态）**，
+> 剪枝**不生效**且明说，不当成「剪过了没事」；④ 全摘光时**一个都不摘**（剪枝是省冤枉钱，
+> 不是让这一轮没得跑）；⑤ 参数轴今天只有 tiling 三维用得上（`stages` / `warps` /
+> 向量宽度 / `layout` / split-K 还没有产出者 —— 它们要等模板实例化）。见
+> [CHECKLOG I56](../research/CHECKLOG.md) 与 [doc 68](../research/68-候选联合类型与便宜代理剪枝.md)。
 
 ---
 

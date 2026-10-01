@@ -1004,6 +1004,9 @@ class Verifier:
             "roofline_bound": roofline["roofline_bound"],
             "hw_name": roofline["hw_name"],
             "hw_compute_capability": roofline["hw_compute_capability"],
+            # 代理剪枝的上界 (0 = 不知道)。跟着 roofline 一起发布, 因为它们的来源
+            # 是同一个 caps; 分成两条路发布迟早会出现「峰值有、上界没有」的读数。
+            "shared_mem_per_sm_kb": roofline.get("shared_mem_per_sm_kb", 0),
         })
 
         if roofline["hw_peak_gflops"] > 0 and roofline["hw_peak_bandwidth_gbs"] > 0:
@@ -1463,6 +1466,10 @@ class Verifier:
             "peak_measured": peak_measured,
             "peak_table_key": matched_key or "",
             "launch_floor_us": launch_floor_us,
+            # 每 SM 的 smem 上界: §12 的**便宜代理剪枝**要它 (不花 GPU 秒就能摘掉
+            # 「这套 tile 根本放不下」的点)。走 caps 这一处 —— 与 L1 资源预检同一个
+            # 真源, 不在这里另抄一个数字; 取不到时 0 (= 不知道), 下游必须显式处理。
+            "shared_mem_per_sm_kb": int(getattr(caps, "shared_mem_per_sm_kb", 0) or 0),
             "compute_capability": cc, "device": device, "name": name,
         }
         return self._theoretical_peak
@@ -1606,6 +1613,7 @@ class Verifier:
             "bandwidth_utilization_pct": round(bw_util, 1),
             "hw_name": peak.get("name", "unknown"),
             "hw_compute_capability": peak.get("compute_capability", "unknown"),
+            "shared_mem_per_sm_kb": peak.get("shared_mem_per_sm_kb", 0),
             # 分母的出处跟着分母走。缺口 3 的病根不是某个数字错, 而是**用这个数字的人
             # 看不出它有多可信**: 138.2 和 1979 在日志里长得一模一样。
             "peak_source": peak.get("peak_source", ""),

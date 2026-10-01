@@ -25,6 +25,25 @@ from typing import Optional
 # 保守放行的倍数: 估出 1.2× 上限以内都不拦
 _SLACK = 1.2
 
+#: 同上, **公开名** —— §12 的便宜代理剪枝 (`candidates.prune_by_smem`) 用同一个常数。
+#: 为什么要共用而不是各写一个: 两套阈值会长成「预检放行、剪枝拒绝」这种自相矛盾的
+#: 行为, 而两处的估算用的是同一个公式 ⇒ 没有理由有两个系数。
+SMEM_SLACK = _SLACK
+
+
+def smem_limit_bytes(caps) -> Optional[int]:
+    """每 SM 的 smem 上界 (字节)。`caps` 缺这个字段 / 为 0 ⇒ **None (缺 ≠ 无上限)**
+
+    None 与 0 必须分开: 0 会被读成「一点都放不下」(把所有点都拒掉), 而事实是
+    「这个设备的 smem 上界我们不知道」。调用方 (预检 / 剪枝) 各自显式处理 None。
+    """
+    limit_kb = getattr(caps, "shared_mem_per_sm_kb", 0) or 0
+    if limit_kb <= 0:
+        return None
+    # 取整口径与重构前**逐字节一致**: int(kb * 1024), 不是 int(kb) * 1024
+    # —— 小数 KB 时两者差一整 KB, 而既有用例正是钉在边界上的。
+    return int(limit_kb * 1024)
+
 
 @dataclass
 class ResourceReport:
@@ -105,13 +124,13 @@ def check_resource_feasibility(code: str, caps, kernel_type: str = "") -> Resour
     if not code or not code.strip():
         return rep
 
-    limit_kb = getattr(caps, "shared_mem_per_sm_kb", 0) or 0
-    if limit_kb <= 0:
+    limit = smem_limit_bytes(caps)
+    if limit is None:
         rep.notes.append("caps 没有 shared_mem_per_sm_kb, 跳过 smem 预检")
         return rep
     # 每 block 的 optin 上限通常 ≤ 每 SM 的总量; 用 SM 总量当上界是**宽松**的
     # (Triton 还会留静态 smem), 这里故意不更严 —— 宁可漏拦。
-    rep.limit_bytes = int(limit_kb * 1024)
+    rep.limit_bytes = limit
 
     pairs = _extract_block_sizes(code)
     if not pairs:
@@ -132,7 +151,7 @@ def check_resource_feasibility(code: str, caps, kernel_type: str = "") -> Resour
         rep.notes.append("smem 估算缺维 (BLOCK_M/N/K 不全), 交给远端")
         return rep
 
-    if est > rep.limit_bytes * _SLACK:
+    if est > rep.limit_bytes * SMEM_SLACK:
         rep.feasible = False
         rep.reason = "资源预检: 共享内存放不下这套 tile"
     return rep
