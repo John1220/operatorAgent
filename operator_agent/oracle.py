@@ -263,6 +263,13 @@ def evaluate(contract: FrozenContract,
     # provenance 覆盖; 能改写「为什么判成这样」的记录等于没有记录。
     prov["rule_inputs"] = dict(rule_inputs)
 
+    # 规则 1~5 命中时把档位一并记成 `uninformative`: 那些规则说的是「这个数不能支撑
+    # **任何**结论」(出处不对 / 测的是别的库 / 超峰值), 而档位的定义正是「这个数能支撑
+    # 到什么程度」。不这么做的话会出现 `can_verdict=False` 配 `validity="valid"` 的自相
+    # 矛盾记录, 而 `confirm_persist` 那类读者只看档位 —— 两处说法必须一致。
+    # 「为什么」没有被丢掉: 档位说的是结论强度, 成因在 `reasons` 与 `rule_inputs` 里。
+    # 规则 6~7 (DEGRADED) **不**走这一支: `can_verdict` 仍为 True, 档位照实记 degraded
+    # —— 低资格不等于没测准 (设计 §4.3 的两条设计意图)。
     return Observation(
         metric=metric,
         value=value if isinstance(value, (int, float)) and not isinstance(value, bool) else None,

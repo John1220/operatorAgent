@@ -167,8 +167,9 @@ if heartbeat is not None:      # ← 不传心跳 = 尺子健康
   在 `heartbeat_due(n, interval)` 成立时**当场**跑一对已知参照（`heartbeat_interval`
   默认 5，非法值构造时就拒）。到位只跑一次（`_heartbeat_ran_for`）—— 否则 L1/L2 挂掉、
   计数不前进的那些轮次会每轮重跑一次心跳。心跳读数走 `calibration.backend_bench_fn`
-  → `backend.benchmark`，与候选**同一条计时通道**；只在控制机 `perf_counter` 上计时
-  的 `default_bench_fn` 测不出远端尺子坏了，只留给离线单测。
+  → `backend.benchmark`，即**远端那条路**（部署 → runner → exec → 计时 → JSON 回传）；
+  只在控制机 `perf_counter` 上计时的那种 bench 测不出远端尺子坏了，只留给离线单测。
+  ⚠️ 但它**不等于**「与候选完全同一条计时通道」，边界见本节末。
 - **判据**：`oracle.evaluate` 收 `heartbeat_expected`。到期而 `heartbeat is None` →
   RULER_BROKEN（全资格 False）；没到期且没传 → 不作尺子声明。`ruler_broken_window`
   终于被派发（同一扇窗才牵连，§13.5）。
@@ -184,10 +185,20 @@ if heartbeat is not None:      # ← 不传心跳 = 尺子健康
 - **`heartbeat_due` 的死 import 已删**：它现在活在真正需要它的那一层（Conductor 拿得到
   累计计数，oracle 拿不到）。
 
-真正的边界（写在用例里，不藏着）：默认参照对是纯 Python 小 matmul 与重复 8 遍的慢核，
-所以它证明的是「计时通道还能分辨快慢 + 后端量得出参照物」，**不是**绝对锚点——没有
-`expected_good` 时只做分离度检查。真机要连绝对偏置一起抓，得由调用方注入硬件的
-`expected_good` 与自己的参照核源码（`calibration` 的注入点一直留着）。
+**真正的边界（三条，都写在代码注释与用例里，不藏着）**：
+
+1. **不是绝对锚点**。默认参照对是纯 Python 小 matmul 与重复 8 遍的慢核，所以它证明的是
+   「计时通道还能分辨快慢 + 后端量得出参照物」，没有 `expected_good` 时只做分离度检查。
+   真机要连绝对偏置一起抓，得由调用方注入硬件的 `expected_good`（注入点一直留着）。
+2. **只覆盖 runner 的 Python 计时分支**（勘误，2026-10-01 读 `run_kernel.py` 时发现）：
+   参照核不带 triton/torch import → `_detect_language` 判成 `numpy` → 走
+   `_benchmark_torch_numpy` 的 else 分支 → `_timed_runs(..., device_is_cuda=False)`
+   → **远端 `perf_counter`**，回传 `"device": "cpu"`。triton/torch 候选走的是 CUDA event
+   那条分支。所以它抓得住部署/回传/exec/时钟/顺序坏掉，以及**在 Python 分支上**计时已经
+   分不出快慢；**抓不住 CUDA event 分支坏掉**。本轮提交信息与初版注释说的「与候选同一条
+   计时通道」是过头话，已就地改掉。要覆盖后者得按任务 DSL 塞一对 triton 参照核 —— **没做**。
+3. **不许给它加「自报 `device=cpu` 就判坏」的检查**：参照核本来就该在 CPU 上跑，加了会变成
+   每次心跳都误报 RULER_BROKEN（把「本就不该是 GPU 数」读成「出处不对」）。
 
 ### P1-6 `cv_exceeded` 名不副实
 

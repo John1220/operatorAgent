@@ -42,11 +42,21 @@ RULER_BROKEN = "RULER_BROKEN"
 # ─── 默认参照对: 纯 Python 小 matmul (好核) vs 多算几遍的慢核 ─────────────────
 #
 # 参照核的**源码形态**为什么必须存在 (而不是只留可调用形态):
-# 真机路径要让**同一把尺子**去量参照物 —— 走 `backend.benchmark(code, inputs)`, 与
-# 候选同一条计时通道 (部署 / runner / 计时循环 / JSON 回传)。只用 `default_bench_fn`
-# 在控制机上计时, 测的是**控制机的 `perf_counter`**: 远端的尺子坏了它照样报绿, 那是
-# 「报表上显示为已检查」的变体。`backend_bench_fn` 就是走这条路的那把尺子。
+# 真机路径要让参照物走**远端那把尺子**—— `backend.benchmark(code, inputs)`, 也就是
+# 部署 → runner → exec → 计时 → JSON 回传这一整条路。只用 `default_bench_fn` 在控制机
+# 上计时, 测的是**控制机的 `perf_counter`**: 远端的尺子坏了它照样报绿, 那是「报表上
+# 显示为已检查」的变体。`backend_bench_fn` 就是走这条路的那把尺子。
 #
+# ⚠️ 它**不是**「与候选完全同一条计时通道」—— 说清楚边界:
+# `run_kernel.py:_detect_language` 看 import 分派; 参照核不带 triton/torch import →
+# 判成 `numpy` → 走 `_benchmark_torch_numpy` 的 else 分支 → `_timed_runs(..., False)`
+# → 远端 `perf_counter`, 回传 `"device": "cpu"`。triton/torch 候选走的是 CUDA event
+# 那条分支。所以这一对参照抓得住的是: 部署/回传/exec/时钟/顺序坏掉, 以及**在 Python
+# 分支上**「计时已经分不出快慢」; 抓不住**CUDA event 分支**坏掉。要覆盖后者得塞一对
+# triton 参照核 (按任务的 DSL 选), 目前**没做** —— 见 docs/design/spine-review.md P1-5。
+#
+# 也别给这里加「payload 自报 device=cpu 就判坏」的检查: 参照核本来就该在 CPU 上跑,
+# 加了会变成每次心跳都误报 RULER_BROKEN (把「本就不该是 GPU 数」读成「出处不对」)。
 # 两种形态由**同一个定义体** `_MATMUL_BODY` 生成, 不并存两份会各自漂的拷贝。
 
 _MATMUL_BODY = """\
@@ -133,9 +143,10 @@ def default_bench_fn(code, inputs, warmup=1, samples=5):
 
 
 def backend_bench_fn(backend, *, warmup: int = 1, repeat: int = 3, repeats: int = 8):
-    """让**同一把尺子**量参照物: `heartbeat` 的 bench_fn 走 `backend.benchmark`。
+    """让**远端那把尺子**量参照物: `heartbeat` 的 bench_fn 走 `backend.benchmark`。
 
-    与 `default_bench_fn` 的分工见上面源码形态那段的说明。`inputs` 是
+    与 `default_bench_fn` 的分工、以及它覆盖到哪/覆盖不到哪 (Python 计时分支 vs
+    triton 候选的 CUDA event 分支), 见上面源码形态那段的说明。`inputs` 是
     `default_inputs()` 的元组形态, 这里转成调用约定要求的 dict。
 
     读数不可用时**抛**而不是返回一个假数字 —— `heartbeat` 会把异常折成
