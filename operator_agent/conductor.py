@@ -269,7 +269,8 @@ class Conductor:
         # 打开后: 进语料前**由本进程**补一次独立重测 (设计 §10.2 最后 10% 预算 /
         # §10.5-4)。默认关, 因为它是**要花机时**的承诺: 每一份要记住的结论都要量两遍。
         # 关键区别在于它不再是「开着就一律拒」—— 生产者 (`_produce_remeasure`) 与
-        # `_save_to_db` 的消费者成对存在, 打开这个开关是可用状态而不是自锁状态。
+        # 消费者 (`_save_to_db` → `oracle.admit_to_corpus` 的 `requires_remeasure`)
+        # 成对存在, 打开这个开关是可用状态而不是自锁状态。
         require_double_confirm: bool = False,
     ):
         # `is None` 而不是 `or`: `FailureDatabase` 定义了 `__len__`, 于是**一条记录都没有的
@@ -310,8 +311,10 @@ class Conductor:
         #: 最近一次心跳。只对它自己的 window 作数。
         self._last_heartbeat = None
 
-        #: 永久结论要不要量两遍 (设计 §10.5-4)。消费者是 `_save_to_db`, 生产者是
-        #: `_produce_remeasure` —— 两边必须同时存在, 否则这个开关只有「一律拒」一档。
+        #: 永久结论要不要量两遍 (设计 §10.5-4)。生产者是 `_produce_remeasure`, 消费者是
+        #: 入库判据 (`oracle.admit_to_corpus` 的 `requires_remeasure`) —— 两边必须同时
+        #: 存在, 否则这个开关只有「一律拒」一档。默认 `False` = **不花这份机时**,
+        #: 于是默认配置下**单次读数即可入库** (判据的允许理由里会写明这一点)。
         self.require_double_confirm = bool(require_double_confirm)
 
         # 初始化 Agent (注入 LLM + PromptManager)
@@ -1793,45 +1796,28 @@ class Conductor:
     def _save_to_db(self, artifact: KernelArtifact, task: TaskSchema):
         """把这次的核写进跨运行经验库 (缺口 2)。门不过就只进内存, 不落盘。
 
-        三道门, 缺一不可 (设计 §10.5-4 / oracle.admit_to_corpus):
-          1. `persist_decision` —— 这一次读数够不够格 (can_gate / REAL_DEVICE / 有加速)
-          2. 资格位 `can_persist` —— DEGRADED 不许写长期记忆
-          3. **两次独立重测确认** (可选, `require_double_confirm` 打开时强制)
+        判据**只有一处** (`oracle.admit_to_corpus`, 设计 §10.5-4): 三道门 (读数够不够格 /
+        资格位 can_persist / 两次独立确认) 的顺序与理由文本都在那里。这里以前自己又写了
+        一遍这三道门 —— 2026-10-01 核实: 那个判据函数全仓没有生产调用者, 而两份实现的口径
+        并不一样 (`admit_to_corpus` 永远要求重测, 这里默认不要求), 用例测的是前者。同一个
+        决定两个实现, 就是「判据不在链路上」的同族 (spine-review P0-1)。
 
         刻意放在 `artifact.all_passed` 那一支里、但**再**过门: all_passed 只说明
         「三级验证都点了通过」, 而缺口 1 的真机数据证明那个通过可以是被 launch 地板
         或邻居抢占造出来的 (doc 31/32/33)。一次侥幸读数不能变成永久真理。
         """
         from .kernel_db import KernelRecord
-        from .measurement import persist_decision
+        from .oracle import admit_to_corpus
 
         metrics = artifact.benchmark_data or {}
-        keep, reason = persist_decision(metrics)
-        if keep:
-            # 资格位 + 两次确认 (设计 §10.5-4)。没有 remeasure 记录时:
-            # 默认行为保持「一次即可」以免打断现有链路; 打开
-            # `require_double_confirm` 后则**拒绝入库** —— 10% 确认预算存在
-            # 的意义就是「没留预算就等于没做完」。
-            elig = metrics.get("eligibility") or {}
-            if elig and not elig.get("can_persist", True):
-                keep = False
-                reason = (f"资格位 can_persist=False (validity="
-                          f"{metrics.get('measurement_validity')}): {reason}")
-            elif getattr(self, "require_double_confirm", False):
-                from .confirm import confirm_persist
-                remeasure = getattr(artifact, "remeasure", None)
-                keep2, reason = confirm_persist(
-                    first_speedup=metrics.get("speedup_vs_baseline"),
-                    first_validity=str(metrics.get("measurement_validity") or ""),
-                    remeasure=remeasure,
-                    min_speedup=float(task.constraints.min_speedup or 1.0),
-                    # 判据同一性: 首次那条读数在**哪条契约**下取得 (L3 每次都盖了戳)。
-                    first_contract_hash=str(metrics.get("contract_hash") or ""),
-                )
-                if not keep2 and remeasure is None:
-                    reason = ("没有独立重测: 永久结论需要两次确认 (§10.5-4)"
-                              f" —— {reason}")
-                keep = keep2
+        keep, reason = admit_to_corpus(
+            metrics,
+            getattr(artifact, "remeasure", None),
+            min_speedup=float(task.constraints.min_speedup or 1.0),
+            # 第 3 道门是不是强制, 是**机时承诺**而不是判据细节: 见 `admit_to_corpus`
+            # 的 docstring 与 `require_double_confirm` 的声明处。
+            requires_remeasure=bool(getattr(self, "require_double_confirm", False)),
+        )
         record = KernelRecord(
             kernel_id=artifact.kernel_id,
             algorithm=task.source.kernel_type,

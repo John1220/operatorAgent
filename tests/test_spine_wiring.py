@@ -5,6 +5,7 @@
 """
 import dataclasses
 import unittest
+from unittest import mock
 
 from operator_agent.confirm import ConfirmRecord
 from operator_agent.conductor import Conductor
@@ -91,6 +92,69 @@ class TestSaveToDbGates(unittest.TestCase):
         slow.remeasure = ConfirmRecord(ok=True, speedup=0.9, validity="valid")
         self.assertTrue(self.cond._save_to_db(fast, _task()))
         self.assertFalse(self.cond._save_to_db(slow, _task()))
+
+
+class TestTheGateHasExactlyOneImplementation(unittest.TestCase):
+    """入库判据只许有一个实现 (2026-10-01, spine-review ①)
+
+    WHY: `oracle.admit_to_corpus` 一直是「入库门」的规范实现, 但 `_save_to_db` **自己又写了
+    一遍**那三道门, 而且两份口径不同 (前者永远要求重测, 后者默认不要求)。断言库函数的行为
+    证明不了生产路径的行为 —— 这正是「判据不在链路上」那一族的形状 (P0-1)。
+
+    所以这里不测判据的语义 (那在 `test_oracle.py`), 只钉**接线**:
+      1. 生产路径必须调它, 且把 `keep` 当成自己的结论 (两个方向都验, 免得只测「调了」);
+      2. 传进去的 `requires_remeasure` 必须来自 `require_double_confirm` —— 那是机时承诺,
+         不许在接线处被写死。
+    """
+
+    def setUp(self):
+        self.cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
+
+    def _spy(self, verdict, seen):
+        def spy(metrics, remeasure, **kw):
+            seen.append({"metrics": metrics, "remeasure": remeasure, "kw": kw})
+            return verdict
+        return spy
+
+    def test_a_refusing_gate_actually_blocks_persistence(self):
+        """判据说拒, 生产路径就必须不入库 —— 不许它自己另判一遍"""
+        seen = []
+        with mock.patch("operator_agent.oracle.admit_to_corpus",
+                        side_effect=self._spy((False, "哨兵: 判据拒了"), seen)):
+            ok = self.cond._save_to_db(_artifact(_good_metrics()), _task())
+        self.assertEqual(1, len(seen), "入库门没有走 oracle.admit_to_corpus")
+        self.assertFalse(ok, "判据说拒, 生产路径却入库了 —— 它有自己的第二套判据")
+
+    def test_an_allowing_gate_actually_allows_persistence(self):
+        """反方向也要: 判据说行, 生产路径不许自己加门"""
+        seen = []
+        with mock.patch("operator_agent.oracle.admit_to_corpus",
+                        side_effect=self._spy((True, "哨兵: 判据放行"), seen)):
+            ok = self.cond._save_to_db(_artifact(_good_metrics()), _task())
+        self.assertEqual(1, len(seen))
+        self.assertTrue(ok, "判据说行, 生产路径却入不了库 —— 门在外面又加了一道")
+
+    def test_the_machine_time_policy_is_passed_not_hardcoded(self):
+        seen = []
+        with mock.patch("operator_agent.oracle.admit_to_corpus",
+                        side_effect=self._spy((True, "哨兵"), seen)):
+            self.cond._save_to_db(_artifact(_good_metrics()), _task())
+            self.cond.require_double_confirm = True
+            self.cond._save_to_db(_artifact(_good_metrics()), _task())
+        self.assertEqual([False, True],
+                         [c["kw"].get("requires_remeasure") for c in seen],
+                         "requires_remeasure 没跟着 require_double_confirm 走")
+        self.assertEqual(float(_task().constraints.min_speedup or 1.0),
+                         seen[0]["kw"].get("min_speedup"))
+
+    def test_the_gate_gets_the_metrics_the_artifact_carries(self):
+        """判据的输入就是产物携带的那份读数 (不是重新拼一份)"""
+        seen = []
+        m = _good_metrics()
+        with mock.patch("operator_agent.oracle.admit_to_corpus",
+                        side_effect=self._spy((True, "哨兵"), seen)):
+            self.cond._save_to_db(_artifact(m), _task())
+        self.assertIs(seen[0]["metrics"], m, "判据拿到的不是产物里那份 metrics")
 
 
 class TestRemeasureField(unittest.TestCase):

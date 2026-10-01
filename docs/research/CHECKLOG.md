@@ -922,6 +922,23 @@
 
 ---
 
+### I45 · 「§10.5-4 两次确认 ✅」的判据函数零生产调用者，且默认不强制
+- **原话**：`docs/design/autonomous-operator-agent-design.md` 状态表 ——
+  「§10.5-4 两次确认 | `operator_agent/confirm.py`（`require_double_confirm` 开关） | ✅」
+- **实证**：`oracle.admit_to_corpus`（那个把「资格 `can_persist` **且** 两次确认」写成判据的
+  函数）**全仓零生产调用者** —— `grep -rn "admit_to_corpus" --include=*.py operator_agent/`
+  只命中注释与 docstring，唯一调用者是测试。生产路径 `Conductor._save_to_db` 自己又写了一遍
+  三道门，而且两份口径不同：判据函数**永远**要求重测，内联那份只在 `require_double_confirm`
+  为真时才要求（默认 `False`）⇒ 默认配置下**一次读数即可进语料**，而没有任何用例钉住
+  生产路径（测的是没人调的那个函数）。2026-10-01 收口：判据改吃生产路径真正持有的序列化
+  `metrics`（原先要 `Observation` 对象，而 `VerificationResult.metrics` 只能搬 JSON 化的
+  东西 —— 这正是调用方被迫重写一遍的原因），`_save_to_db` 只留一次调用，补 4 条接线守卫
+  （对旧实现 **4/4 变红**）
+- **出处**：`docs/design/spine-review.md` P2-8 节末（2026-10-01 落地注）；设计 §10.5-4 / §10.2
+- **后果**：把「两次确认」读成已生效的护栏 —— 而它既没生效、也没被验收（§14 八条**不含**
+  §10.5-4）。同族：P0-1「判据不在链路上」、P1-4「声明了没人派发」
+- **类别**：I · **状态**：✅ 已修（判据收口 + 状态表写明 opt-in + 允许入库的理由文本里注明）
+
 ## 使用约定
 
 1. **检索侧**（Designer/Coder/Search/Fixer）注入 prompt 时，只取 `状态=⚠️` 且与当前
@@ -984,6 +1001,7 @@
 | I42 | 判据读的是**属性名**而不是事实：同一个退出码在不同出口挂在不同名字上（scp 的 255 被读成「听到了回答」） | S/I | ✅ 已修 |
 | I43 | 报表的**解释**可以在读数之前就被写好：那句「一轮一个目录」被下一步的 `round_done` 读数打成 0（C9 只有 assertNotIn 杀得掉） | S/I | ✅ 已修 |
 | I44 | 输入线把标量也「按描述重新生成」：`causal=False` 到真机成了 `np.True_`，L2 验的是另一个算子 | I | ✅ 已修 |
+| I45 | 两次确认的判据零调用者 | I | ✅ 已修 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

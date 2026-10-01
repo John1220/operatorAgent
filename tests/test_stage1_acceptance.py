@@ -33,6 +33,32 @@ from operator_agent.oracle import admit_to_corpus, evaluate
 from operator_agent.confirm import UnableToEstablish
 
 
+def _metrics_from(obs, **extra):
+    """verifier 写进 `metrics` 的那几格 —— 入库判据的输入就是这个形状
+
+    入库判据 (`oracle.admit_to_corpus`) 吃的是**序列化过的读数**而不是 `Observation`
+    对象: 生产路径 (`VerificationResult.metrics`) 手里只有能 JSON 化的东西, 判据原先
+    要对象 ⇒ 调用方自己又写了一遍三道门 (2026-10-01 消掉两个真源)。验收用例跟着走
+    生产形状, 免得「测的判据」与「用的判据」又不是同一个。
+
+    `measurement_can_gate` 固定给 `True`, 因为它是**另一层**的判据: 那个键是
+    `measurement.assess()` 的「这一次量得准不准」, 而 `eligibility` 是 oracle 的
+    「这个数能造成什么后果」。本题这三条验收要证的恰恰是**后果那一层**拒了
+    (假候选 / DEGRADED / 坏窗口), 若这里顺手把 `can_gate` 也填成 False, 门 1 会抢在
+    门 2 前面拒 —— 用例仍然绿, 却不再证明它声称的那件事 (guard 静默改义)。
+    """
+    m = {
+        "speedup_vs_baseline": obs.value,
+        "measurement_validity": obs.validity,
+        "eligibility": obs.eligibility.as_dict(),
+        "observation": obs.as_dict(),
+        "measurement_can_gate": True,
+        "backend_real_device": True,
+    }
+    m.update(extra)
+    return m
+
+
 def _contract():
     return freeze(
         kernel_type="matmul",
@@ -104,9 +130,13 @@ class Acceptance3_LibFallbackIsRejected(unittest.TestCase):
                                 "lib_fallback": True}, record_hash=c.hash)
         self.assertFalse(obs.eligibility.can_persist)
         self.assertFalse(obs.eligibility.can_verdict)
-        ok, msg = admit_to_corpus(obs, 5.0, "valid",
-                                  ConfirmRecord(ok=True, speedup=5.0, validity="valid"))
-        self.assertFalse(ok)
+        ok, msg = admit_to_corpus(
+            _metrics_from(obs),
+            ConfirmRecord(ok=True, speedup=5.0, validity="valid"))
+        self.assertFalse(ok, "库回退的假候选竟然能入库")
+        # 拒因必须**点名**是库回退, 而不是笼统的「资格位不够」: 只看五个布尔读不出
+        # 是哪条规则, 而命名靠的是 `provenance.rule_inputs`。
+        self.assertIn("lib_fallback", msg)
 
 
 # ─── §14-4 占卡任务 → DEGRADED 而不是错误通过 ───────────────────
@@ -128,8 +158,9 @@ class Acceptance4_InterferenceIsDegradedNotPass(unittest.TestCase):
         c = _contract()
         obs = evaluate(c, lambda: {"value": 1.2, "validity": "degraded",
                                 "cv_exceeded": True}, record_hash=c.hash)
-        ok, msg = admit_to_corpus(obs, 1.2, "degraded",
-                                  ConfirmRecord(ok=True, speedup=1.15, validity="valid"))
+        ok, msg = admit_to_corpus(
+            _metrics_from(obs),
+            ConfirmRecord(ok=True, speedup=1.15, validity="valid"))
         self.assertFalse(ok)
         self.assertIn("can_persist", msg)
 
@@ -270,9 +301,11 @@ class Acceptance8_HeartbeatOffInvalidatesWindow(unittest.TestCase):
         obs = evaluate(c, lambda: {"value": 1.5, "validity": "valid"},
                        record_hash=c.hash, heartbeat=r)
         ok, msg = admit_to_corpus(
-            obs, 1.5, "valid",
+            _metrics_from(obs),
             ConfirmRecord(ok=True, speedup=1.4, validity="valid"))
-        self.assertFalse(ok)
+        self.assertFalse(ok, "坏窗口里的读数靠着两次确认进了长期记忆")
+        self.assertIn("can_persist", msg)
+        self.assertIn("RULER_BROKEN", msg, "拒因里没提尺子坏了 —— 那这条用例没证到窗口")
 
     def test_unable_to_establish_records_ruler_broken(self):
         u = UnableToEstablish()

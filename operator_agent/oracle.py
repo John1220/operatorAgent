@@ -30,6 +30,7 @@ from .confirm import ConfirmRecord, confirm_persist
 from .contract import ContractError, FrozenContract, assert_hash
 from .eligibility import ALL_FALSE as ELIG_ALL_FALSE
 from .eligibility import Eligibility, derive_eligibility
+from .measurement import persist_decision
 from .placement import pairing_conflict
 
 
@@ -284,25 +285,83 @@ def evaluate(contract: FrozenContract,
     )
 
 
-def admit_to_corpus(obs: Observation,
-                    first_speedup: Optional[float],
-                    first_validity: str,
+def admit_to_corpus(metrics: Mapping,
                     remeasure: Optional[ConfirmRecord],
-                    min_speedup: float = 1.0) -> tuple:
-    """入库门 = 资格 `can_persist` **且** 两次确认 (设计 §10.5-4)。
+                    *,
+                    min_speedup: float = 1.0,
+                    requires_remeasure: bool = True) -> tuple:
+    """入库判据 —— **唯一**一处决定「这次读数能不能进长期记忆」(设计 §10.5-4)。
 
-    返回 (允许?, 理由)。任一关不过就拒 —— 没有「没有重测就当过了」。
+    三道门, 顺序即短路顺序:
+      1. `persist_decision(metrics)` —— 这一次读数够不够格 (缺证据 / 不是真卡 / 被抢占)
+      2. 资格位 `can_persist` —— DEGRADED 不许写长期记忆
+      3. (可选) 两次独立确认 —— `requires_remeasure=True` 时由 `confirm_persist` 判
+
+    返回 (允许?, 理由)。任一关不过就拒。
+
+    **为什么吃 `metrics` 而不是 `Observation`** (2026-10-01): 生产路径手里只有**序列化过的**
+    读数 (`VerificationResult.metrics` 搬的是能 JSON 化的东西), 而判据原先要一个 `Observation`
+    对象 ⇒ 调用方只能**自己再写一遍**这三道门, 于是同一个决定有了两个实现、两种理由文本,
+    而用例测的是没有生产调用者的那一个 —— 「判据不在链路上」的同族 (spine-review P0-1)。
+    现在判据的输入就是生产路径真正持有的东西: 同一份 metrics, 同一处产出理由。
+    形状与 `measurement.persist_decision` 一致 (它也是吃 metrics 的判据), 两道门不再各说各话。
+
+    **两处三态, 都是刻意的** (缺键 ≠ 判过且不合格):
+      - `metrics["eligibility"]` **缺失** = 这条读数没经过收口点 (老产物) ⇒ 不做追溯性重判;
+        有键而 `can_persist` 缺失 ⇒ 判**不合格** (五位掩码缺一位就没有「能入库」的凭据);
+      - `metrics["observation"]` 缺失 = 没有评测记录 ⇒ 两次确认那条判据拿不到判据戳,
+        按 `confirm_persist` 的既有规矩「无从证明两次量的是同一条判据」时**没带就拒**
+        (它只在首次那头给了哈希时才判同一性 —— 这里退化成不判, 不是判过)。
+
+    ⚠️ 第 3 道门默认**开**, 但生产路径把它接到 `Conductor.require_double_confirm` (默认
+    **False**) —— 多量一遍等于每个要入库的产物多付一次 L3, 那是机时承诺, 所以要显式打开。
+    代价必须写清楚: **默认配置下单次读数即可入库**, 理由文本里会写明本次没要求两次确认,
+    免得日后有人把「入库了」读成「两次确认通过了」。
     """
-    if not obs.eligibility.can_persist:
-        return False, (
-            f"资格不足 (can_persist=False, validity={obs.validity}): "
-            f"{'; '.join(obs.reasons) or '见 eligibility 规则'}")
-    ok, why = confirm_persist(first_speedup if first_speedup is not None else obs.value,
-                              first_validity or obs.validity,
-                              remeasure,
-                              min_speedup=min_speedup,
-                              # 两次确认的**前提**是同一条判据。观测自己带着它取得时
-                              # 的那条契约的戳, 不必再让调用方传一遍 (P0-2 的同款理由:
-                              # 能由记录携带的, 就不要让调用方随手给)。
-                              first_contract_hash=str(obs.provenance.get("contract_hash") or ""))
-    return ok, why
+    allow, why = persist_decision(metrics)
+    if not allow:
+        return False, why
+
+    elig = metrics.get("eligibility")
+    if isinstance(elig, Mapping):
+        if not elig.get("can_persist", False):
+            obs = metrics.get("observation") or {}
+            causes = [str(r) for r in (obs.get("reasons") or [])]
+            # 资格位只回五个布尔, 从中读不出**是哪条规则**拒的 —— 而「资格位不够」这句话
+            # 对着一屏日志等于没说。判据的原料在 `provenance.rule_inputs` 里 (P1-6 留它
+            # 就是为了这件事), 把真正触发的那几项命名出来。
+            # 只认「True 即拒」的六项: `real_device`/`require_real_device` 不能照套
+            # —— 那两个为 True 表示**要求被满足**, 列成触发项会说反话。
+            ri = (obs.get("provenance") or {}).get("rule_inputs") or {}
+            hits = [k for k in ("lib_fallback", "peak_exceeded", "cv_exceeded",
+                                "launch_dominance_exceeded", "partition_drift",
+                                "l3_pass_is_refused") if ri.get(k) is True]
+            if ri.get("require_real_device") and ri.get("real_device") is False:
+                hits.append("real_device=缺失 (任务要求 REAL_DEVICE)")
+            if hits:
+                causes.append("触发项: " + ", ".join(hits))
+            if not causes:
+                causes.append("见 eligibility 规则")
+            return False, (f"资格位 can_persist=False (validity="
+                           f"{metrics.get('measurement_validity') or '未报'}): "
+                           + "; ".join(causes))
+
+    if not requires_remeasure:
+        return True, (f"{why} —— 本次**未要求**两次确认 (requires_remeasure=False): "
+                      f"单次读数即可入库, 这不是「两次确认已通过」")
+
+    obs = metrics.get("observation") or {}
+    prov = obs.get("provenance") or {}
+    ok, why2 = confirm_persist(
+        metrics.get("speedup_vs_baseline"),
+        str(metrics.get("measurement_validity") or ""),
+        remeasure,
+        min_speedup=min_speedup,
+        # 两次确认的**前提**是同一条判据。优先取评测器自己盖的那个戳 (它记录的是
+        # 「这条读数在哪条契约下取得」), 没有评测记录时退回 metrics 上的那个 (P0-2 的
+        # 同款理由: 能由记录携带的, 就不要让调用方随手给)。
+        first_contract_hash=str(prov.get("contract_hash")
+                                or metrics.get("contract_hash") or ""))
+    if not ok:
+        return False, why2
+    return True, f"{why} —— 两次确认: {why2}"

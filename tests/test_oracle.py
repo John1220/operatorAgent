@@ -229,8 +229,30 @@ class TestEligibilityDrivesConsequences(unittest.TestCase):
 
 
 class TestAdmitNeedsBothEligibilityAndConfirmation(unittest.TestCase):
-    def _good_obs(self):
-        return _eval(measure=lambda: _measure(1.3, "valid"))
+    """入库判据的输入是**生产路径真正持有的东西**: 序列化的 metrics + 重测记录
+
+    WHY (2026-10-01, spine-review ①): 判据原先要一个 `Observation` 对象, 而生产路径
+    (`VerificationResult.metrics`) 手里只有 JSON 化的读数 ⇒ 调用方只能自己再写一遍三道门,
+    于是同一个决定有两个实现、两种理由文本, 用例测的是没有生产调用者的那一个。
+    现在这里的输入形状与 `Conductor._save_to_db` 传进去的完全一致 —— 包括
+    `eligibility` 与 `observation` 两个键都由 verifier 写入这一事实。
+    """
+
+    def _good_obs(self, **kw):
+        return _eval(measure=lambda: _measure(1.3, "valid", **kw))
+
+    def _metrics(self, obs, **extra):
+        """verifier 写进 metrics 的那几格 (production shape)"""
+        m = {
+            "speedup_vs_baseline": obs.value,
+            "measurement_validity": obs.validity,
+            "eligibility": obs.eligibility.as_dict(),
+            "observation": obs.as_dict(),
+            "measurement_can_gate": True,
+            "backend_real_device": True,
+        }
+        m.update(extra)
+        return m
 
     def _remeasure(self, **kw):
         """盖了契约戳的重测记录 —— 没戳的现在会被判「无从证明是同一条判据」"""
@@ -239,37 +261,74 @@ class TestAdmitNeedsBothEligibilityAndConfirmation(unittest.TestCase):
 
     def test_pass_with_independent_remeasure(self):
         ok, _ = admit_to_corpus(
-            self._good_obs(), 1.3, "valid",
+            self._metrics(self._good_obs()),
             self._remeasure(ok=True, speedup=1.25, validity="valid"))
         self.assertTrue(ok)
 
     def test_refused_without_remeasure(self):
-        ok, msg = admit_to_corpus(self._good_obs(), 1.3, "valid", None)
+        ok, msg = admit_to_corpus(self._metrics(self._good_obs()), None)
         self.assertFalse(ok)
         self.assertIn("两次确认", msg)
+
+    def test_the_not_required_mode_says_so_in_the_reason(self):
+        """默认关的那道门必须在**理由里**留下痕迹
+
+        否则「入库了」会被读成「两次确认通过了」—— 而实际是一次读数。"""
+        ok, msg = admit_to_corpus(self._metrics(self._good_obs()), None,
+                                  requires_remeasure=False)
+        self.assertTrue(ok)
+        self.assertIn("未要求", msg)
+        self.assertIn("不是「两次确认已通过」", msg)
 
     def test_refused_when_eligibility_blocks_even_if_two_passes(self):
         obs = _eval(measure=lambda: _measure(1.3, "degraded", cv_exceeded=True))
         ok, msg = admit_to_corpus(
-            obs, 1.3, "degraded",
+            self._metrics(obs),
             ConfirmRecord(ok=True, speedup=1.2, validity="valid",
                           contract_hash=obs.provenance["contract_hash"]))
+        self.assertFalse(ok, "can_persist=False 却因为两次确认过了就入库")
+        self.assertIn("can_persist", msg)
+
+    def test_the_first_gate_fires_before_the_others(self):
+        """门 1 (读数够不够格) 短路 —— 它拒了就不该走到确认那一步"""
+        obs = self._good_obs()
+        ok, msg = admit_to_corpus(
+            self._metrics(obs, measurement_can_gate=False),
+            self._remeasure(ok=True, speedup=1.25, validity="valid"))
+        self.assertFalse(ok)
+        self.assertIn("can_gate=False", msg)
+
+    def test_a_legacy_reading_without_eligibility_is_not_re_judged(self):
+        """缺键 ≠ 判过且不合格: 老产物没经过收口点, 不做追溯性重判
+
+        (与 `persist_decision` 对 `backend_real_device` 的 `is False` 同一条纪律。)
+        """
+        m = {"speedup_vs_baseline": 1.3, "measurement_validity": "valid",
+             "measurement_can_gate": True, "backend_real_device": True}
+        ok, _ = admit_to_corpus(m, None, requires_remeasure=False)
+        self.assertTrue(ok, "老产物被新门追溯性拒了")
+
+    def test_a_present_but_incomplete_eligibility_mask_refuses(self):
+        """有键而掩码缺一位 ⇒ 没有「能入库」的凭据 (fail-closed)"""
+        m = {"speedup_vs_baseline": 1.3, "measurement_validity": "valid",
+             "measurement_can_gate": True, "backend_real_device": True,
+             "eligibility": {"can_verdict": True, "can_tune": True}}
+        ok, msg = admit_to_corpus(m, None, requires_remeasure=False)
         self.assertFalse(ok)
         self.assertIn("can_persist", msg)
 
     def test_direction_faster_second_pass_is_better(self):
         obs = self._good_obs()
-        good = admit_to_corpus(obs, 1.2, "valid",
-                               self._remeasure(ok=True, speedup=1.4, validity="valid"))
-        bad = admit_to_corpus(obs, 1.2, "valid",
-                              self._remeasure(ok=True, speedup=0.5, validity="valid"))
+        m = self._metrics(obs)
+        good = admit_to_corpus(m, self._remeasure(ok=True, speedup=1.4, validity="valid"))
+        bad = admit_to_corpus(m, self._remeasure(ok=True, speedup=0.5, validity="valid"))
         self.assertTrue(good[0])
         self.assertFalse(bad[0])
 
     def test_a_remeasure_without_the_contract_stamp_is_refused(self):
         """判据同一性是两次确认的**前提**: 说不清就用不了 (spine-review P0-2 的残留)"""
         ok, msg = admit_to_corpus(
-            self._good_obs(), 1.3, "valid",
+            self._metrics(self._good_obs()),
             ConfirmRecord(ok=True, speedup=1.25, validity="valid"))
         self.assertFalse(ok, "没带契约哈希的重测被当成了有效的第二次确认")
         self.assertIn("契约哈希", msg)
@@ -277,7 +336,7 @@ class TestAdmitNeedsBothEligibilityAndConfirmation(unittest.TestCase):
     def test_a_remeasure_under_another_contract_is_refused(self):
         """两次测量之间判据被改写 → 那不是「同一条断言量了两遍」"""
         ok, msg = admit_to_corpus(
-            self._good_obs(), 1.3, "valid",
+            self._metrics(self._good_obs()),
             ConfirmRecord(ok=True, speedup=1.25, validity="valid",
                           contract_hash="f" * 64))
         self.assertFalse(ok)

@@ -8,7 +8,7 @@
 | 测试状态 | `113 passed in 1.46s`（7 个 spine 测试文件） |
 | 设计出处 | `docs/design/autonomous-operator-agent-design.md` §3 / §4 / §10.5 / §13 / §14 |
 | 审查结论 | **§14 验收未通过** —— 实现是一个库，不是一条链路 |
-| 落地状态 | **2026-09-30 已落地**：P0-1 / P0-3 / P1-4 由 spine 修复批次落地（`2d37625` / `4b427a1` / `aa9b5bc`）；P0-2 / P1-6（`57dd970`）与 **P1-5 / P2-10 + P3-11/12/13**（本轮）随后落地，各节末尾有「落地」注。唯一**未做**的是 10% 预算的**账本**（见 P2-10 节末）。**2026-10-01 补真机证据**：P1-5 的参照对在 `algorithm-h20` 上首跑（doc 61），当场抓出两个 bug 并修掉 |
+| 落地状态 | **2026-09-30 已落地**：P0-1 / P0-3 / P1-4 由 spine 修复批次落地（`2d37625` / `4b427a1` / `aa9b5bc`）；P0-2 / P1-6（`57dd970`）与 **P1-5 / P2-10 + P3-11/12/13**（本轮）随后落地，各节末尾有「落地」注。唯一**未做**的是 10% 预算的**账本**（见 P2-10 节末）。**2026-10-01 补真机证据**：P1-5 的参照对在 `algorithm-h20` 上首跑（doc 61），当场抓出两个 bug 并修掉。**2026-10-01 入库判据收口**：P2-8 与 P0-1 的同族问题 —— `oracle.admit_to_corpus` **全仓零生产调用者**，而 `_save_to_db` 自己又写了一遍那三道门（两份口径还不同：前者永远要求重测，后者默认不要求）⇒ 同一决定两个实现、用例测的是没人调的那个。已收成一处（判据吃生产路径真正持有的序列化读数），并补 4 条**接线**守卫；同时核实 P2-7 / P3-15 / P3-16 / P3-18 也已修（下表与各节补注） |
 
 ## 结论摘要
 
@@ -20,8 +20,8 @@
 | **P1** | 4 | `lib_fallback` **全仓无生产者** → 规则 4 恒为 False |
 | **P1** | 5 | 资格推导默认值全绿；`heartbeat=None` 被读成心跳通过 |
 | **P1** | 6 | `cv_exceeded` 从不与任何 CV 阈值比较 |
-| **P2** | 7 | 所有 `ALL_FALSE` 压成 `validity="uninformative"` → 规则 3/6 被合并 |
-| **P2** | 8 | `admit_to_corpus` 与 `confirm_persist` 对"重测可 DEGRADED"互相矛盾 |
+| **P2** | 7 | 所有 `ALL_FALSE` 压成 `validity="uninformative"` → 规则 3/6 被合并 → **已按「有理由的合并」处理**（成因进 `reasons`/`rule_inputs`） |
+| **P2** | 8 | `admit_to_corpus` 与 `confirm_persist` 对"重测可 DEGRADED"互相矛盾 → **已修**（改委托），且 2026-10-01 收掉了它零调用者这件事 |
 | **P2** | 9 | `exceeds_measured_peak` docstring 与代码不一致（潜伏陷阱） |
 | **P2** | 10 | `require_double_confirm` 默认关；打开则**入库率归零** |
 | **P3** | 11–18 | 死代码、只存在于测试里的被测函数、`load_dict` 不校验载荷哈希 |
@@ -267,6 +267,15 @@ validity="uninformative" if not elig.can_verdict else validity,
 现在下游只读 `validity` 分不出这两者，必须回头重新解释 eligibility。
 **这正是设计文档警告过的合并。**
 
+**落地（2026-10-01，按「有理由的合并」处理，不是照原样留着）**：档位仍然只表示
+「这个数能支撑到什么程度」，规则 1~5 命中时合并成 `uninformative` 是**刻意的** ——
+否则会出现 `can_verdict=False` 配 `validity="valid"` 的自相矛盾记录，而只看档位的读者
+（`confirm_persist` 那类）会被那个 `valid` 骗过去。**成因没有被丢掉**：`reasons` 里逐条
+写着是规则 1/2/3/4/5 里的哪一条，`Observation.provenance.rule_inputs` 留着**判据的原料**
+（五个布尔与 `real_device` 等），`rejected`/`refused` 文案也在。于是「降级（数不可信）」
+与「溯源缺失（数不存在）」在**记录里**仍然可分，只是不必从档位这一个字段上分 ——
+原条目担心的「必须回头重新解释 eligibility」正是现在这条设计。
+
 ### P2-8 两次确认的互相矛盾
 
 `admit_to_corpus`（`oracle.py:145-162`）要求**重测那次**也 `can_persist`；
@@ -275,6 +284,29 @@ validity="uninformative" if not elig.can_verdict else validity,
 但 DEGRADED 的位型是 `can_persist=False`（`eligibility.py:68`）——
 所以 `confirm_persist` 那条宽容在 `admit_to_corpus` 路径上**永远走不到**。
 两者必有一个是错的。
+
+**落地（2026-10-01）**：两条一起改。
+
+- **矛盾本身**：`admit_to_corpus` 不再自己复述「重测也要 `can_persist`」，而是整条委托
+  `confirm_persist`（DEGRADED 走更宽噪声带的规则就在那里）。于是「重测可以 DEGRADED」
+  与「入库判据」不再互相打架 —— 只有一处判。
+- **更要紧的那件事（本轮核实出来的）**：`admit_to_corpus` 当时**全仓零生产调用者** ——
+  `Conductor._save_to_db` 自己又写了一遍三道门，而且两份实现口径不同（判据函数**永远**
+  要求重测；内联那份默认**不**要求）。用例测的是判据函数，生产走的是内联那份，所以
+  「两次确认」在生产里既不是它测的样子、也没有任何用例钉住。这是 P0-1「判据不在链路上」
+  的同族，只是换了个门。**修法**：判据的输入换成生产路径真正持有的东西 —— 序列化的
+  `metrics` + `ConfirmRecord`（原先要一个 `Observation` 对象，而 `VerificationResult.metrics`
+  只能搬 JSON 化的东西，这正是调用方被迫重写一遍的**原因**）；三道门的顺序、短路与理由
+  文本都收在 `oracle.admit_to_corpus` 一处，`_save_to_db` 只留一次调用。
+- **4 条接线守卫**（`tests/test_spine_wiring.py::TestTheGateHasExactlyOneImplementation`）：
+  判据说拒就必须不入库、判据说行就必须入库（两个方向都验，免得只测「调了」）、
+  `requires_remeasure` 必须跟着 `require_double_confirm` 走（机时承诺不许在接线处写死）、
+  判据拿到的必须是产物里那份 metrics（不许重新拼一份）。**对旧实现 4/4 变红**（实测）。
+- **口径仍然是一个显式参数**：`requires_remeasure` 默认 `True`（设计 §10.5-4 要的是
+  「永久结论量两遍」），生产路径把它接到 `require_double_confirm`（默认 `False`，机时承诺）。
+  于是**默认配置下单次读数即可入库** —— 这一点现在写在判据的 docstring 里、也写进允许入库
+  时的那句理由（「本次**未要求**两次确认……这不是『两次确认已通过』」），免得日后把
+  「入库了」读成「两次确认通过了」。
 
 ### P2-9 `exceeds_measured_peak` 的 docstring 与代码不一致
 
@@ -348,10 +380,10 @@ elif getattr(self, "require_double_confirm", False):
 | ~~12~~ | ~~`calibration.py:218`~~ | ~~`heartbeat_due` / `ruler_broken_window` 除测试外无读者~~ **已修**：两者都有了生产读者（计数与到位判定在 `Conductor`，窗口判据在 `oracle.evaluate`）。仍**未做**：§10.6 那个 `abort` —— 心跳失败目前只作废那一扇窗的读数，不终止整轮运行 |
 | ~~13~~ | ~~`oracle.py:65`~~ | ~~`remeasure` 参数声明了、从不使用~~ **已修**：死形参删除（全仓无人传；确认逻辑本来就在 `admit_to_corpus`）。`oracle.evaluate` 的 docstring 不再声称它做确认 |
 | 14 | `contract.py:31` | `_DTYPE_KEYS` 定义了、从未使用 |
-| 15 | `contract.py:194-214` | **`load_dict()` 忽略载荷里的 `hash`**，重新 `freeze()` 算一个新哈希 → 被改过的载荷得到合法新哈希；续跑若拿内嵌 hash 当期望值，改写检测不出来 |
-| 16 | `tests/test_stage1_acceptance.py:204` | **`pairing_conflict()` 只存在于测试文件里**，库里没有 → §14-7「跨卡配对拒绝」测的是一个不会发布的函数 |
+| ~~15~~ | ~~`contract.py:194-214`~~ | ~~**`load_dict()` 忽略载荷里的 `hash`**~~ **已修（2026-10-01 核实）**：现在重算后与载荷自带的 `hash` 比对，不符抛 `ContractError`（「判据被改写过」）|
+| ~~16~~ | ~~`tests/test_stage1_acceptance.py:204`~~ | ~~`pairing_conflict()` 只存在于测试文件里~~ **已修（2026-10-01 核实）**：搬进 `operator_agent/placement.py`，`oracle.admit_to_corpus` 路径在读它，测试改为从库里 import |
 | 17 | `contract.py:47` | `accum` 允许 `"tf32"`——TF32 是输入格式，不是累加精度；`dtype` 是不校验的自由字符串，与"显式钉死数值语义"的意图有落差 |
-| 18 | `contract.py:83` | `for shape, w in self.entries` 遇畸形项抛**裸 `ValueError`**，不是 `ContractError`（它是子类，捕获 `ContractError` 的调用方抓不到） |
+| ~~18~~ | ~~`contract.py:83`~~ | ~~遇畸形项抛裸 `ValueError`~~ **已修（2026-10-01 核实）**：`load_dict` 把 `KeyError/TypeError/ValueError` 统一包成 `ContractError`；`ShapeDist.validate()` 改为收集错误而不是就地抛 |
 
 ---
 

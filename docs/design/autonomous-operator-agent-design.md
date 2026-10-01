@@ -18,7 +18,7 @@
 | §3 契约冻结 + 哈希 | `operator_agent/contract.py`（含 `freeze_from_task` / `load_dict` 校验载荷 hash） | ✅ |
 | §4.3 五位资格 | `operator_agent/eligibility.py` | ✅ |
 | §10.5-1 标定心跳 | `operator_agent/calibration.py`（成对参照双比值） | ✅ |
-| §10.5-4 两次确认 | `operator_agent/confirm.py`（`require_double_confirm` 开关） | ✅ |
+| §10.5-4 两次确认 | `operator_agent/confirm.py` + 唯一判据 `oracle.admit_to_corpus` | ✅ **但是 opt-in**：判据默认要求重测，生产把它接到 `require_double_confirm`（默认 `False`，机时承诺）⇒ **默认配置下单次读数即可入库**；理由文本里会写明本次没要求 |
 | §13.4 Oracle 收口 | `operator_agent/oracle.py`，已接 **L3 出口**（`verifier._assess_measurement`） | ✅ |
 | §8 失败分类路由 | `operator_agent/failure_route.py`（五路 + `fix_not_rewrite`） | ✅ |
 | §17「无法确立」 | `confirm.UnableToEstablish` + 量具报表章节 | ✅ |
@@ -26,7 +26,7 @@
 | §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/竞争降级） | ✅ |
 | §5 bandit 调参 / §12 模板后端 | — | ⏳ 未做 |
 
-**审查**：`spine-review.md` 记了 P0–P3；P0 三项与 P1-4/P2-10 已修。  
+**审查**：`spine-review.md` 记了 P0–P3；P0 三项、P1-4/P1-5/P1-6/P2-8/P2-10 与 P3-11/12/13/15/16/18 已修；P2-9/P3-14/P3-17 仍未修。**入库判据只有一处**（`oracle.admit_to_corpus`，2026-10-01 收口：此前它零生产调用者，`_save_to_db` 自己又写了一遍那三道门且口径不同）。  
 **尚未宣称收益**（§19.4）：真机 §14 冒烟之前，不对外说资格审计带来收益。
 
 ---
