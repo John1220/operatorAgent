@@ -36,9 +36,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 # §4.3 第 5 条的常数: value > 实测峰值 × 1.05 判为「测量错了」而不是「很棒」。
-# 这里只钉住常数本身; 阈值比较在调用方 (或 exceeds_measured_peak) 做, 免得资格推导
-# 再去读硬件数据。
-PEAK_SLACK = 1.05
+#
+# 语义是**余量比例** (0.05 = 5% 余量), 阈值 = `峰值 × (1 + PEAK_SLACK)`, 不是乘数。
+# 这一格踩过一次坑 (spine-review P2-9): 常数取名 `slack`、docstring 写 `×(1+slack)`,
+# 而代码写的是 `×slack` —— 默认值 1.05 让两种语义**数值上巧合相等**, 于是测试全绿;
+# 第二个调用方按 docstring 传 `0.05` (意为「5% 余量」) 时阈值变成 `峰值 × 0.05`,
+# 几乎所有读数都会被判成「超上界」。现在常数与判据只有这一个真源, 调用方一律走
+# `exceeds_measured_peak` (oracle 里那句手写 `* 1.05` 已删)。
+PEAK_SLACK = 0.05
 
 
 @dataclass(frozen=True)
@@ -83,7 +88,7 @@ def exceeds_measured_peak(value: Optional[float],
         return False
     if measured_peak <= 0:
         return False
-    return value > measured_peak * slack
+    return value > measured_peak * (1.0 + slack)
 
 
 def _tier(validity) -> Optional[str]:

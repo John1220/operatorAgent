@@ -189,15 +189,41 @@ class TestEligibilityShape(unittest.TestCase):
 
 
 class TestPeakHelper(unittest.TestCase):
-    """exceeds_measured_peak: 阈值常数与缺证据不触发"""
+    """exceeds_measured_peak: 阈值常数与缺证据不触发 (spine-review P2-9)"""
 
     def test_slack_constant_matches_design(self):
-        self.assertEqual(PEAK_SLACK, 1.05)
+        """常数是**余量比例**, 设计的乘数由 `1 + 余量` 得到 —— 两句话都要钉住
+
+        P2-9 的坑: 常数叫 `slack`、docstring 写 `×(1+slack)`, 代码却写 `×slack`;
+        默认值 1.05 让两种语义数值巧合相等, 于是这套"绿"里藏着一个会吃人的参数。
+        """
+        self.assertEqual(PEAK_SLACK, 0.05, "余量比例 (5%)")
+        self.assertEqual(1 + PEAK_SLACK, 1.05, "设计 §4.3 第 5 条的乘数")
 
     def test_triggers_above_slack(self):
         self.assertTrue(exceeds_measured_peak(106.0, 100.0))
         self.assertFalse(exceeds_measured_peak(105.0, 100.0))   # 边界不触发 (严格大于)
         self.assertFalse(exceeds_measured_peak(104.0, 100.0))
+
+    def test_a_second_caller_passing_the_margin_gets_the_margin(self):
+        """P2-9 点名的那个第二调用方: 按 docstring 传 0.05 必须得到 5% 余量, 不是 ×0.05
+
+        旧代码在这里会把 50 > 100×0.05=5 判成 True —— 一条假警报发生器。
+        """
+        self.assertFalse(exceeds_measured_peak(50.0, 100.0, slack=0.05),
+                         "把「5% 余量」当成了「乘 0.05」⇒ 正常读数被判成超上界")
+        self.assertTrue(exceeds_measured_peak(106.0, 100.0, slack=0.05))
+        self.assertFalse(exceeds_measured_peak(105.0, 100.0, slack=0.05))
+
+    def test_the_threshold_has_exactly_one_source(self):
+        """同一阈值两个真源会漂 (P2-9 的附带发现): oracle 里那句手写 `* 1.05` 不许回来"""
+        src = (Path(__file__).resolve().parents[1] / "operator_agent"
+               / "oracle.py").read_text(encoding="utf-8")
+        # 只看**代码**, 不看注释: 注释里当然可以写设计的那个乘数 (解释用),
+        # 会漂的是能被执行的阈值。这个粒度是刻意的 —— 一把连注释都砍的刀,
+        # 下一次有人想解释这条设计时会先来改这个守卫。
+        code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+        self.assertNotIn("1.05", code, "阈值被抄成了字面量 ⇒ 迟早与资格层漂开")
 
     def test_missing_evidence_does_not_trigger(self):
         """缺峰值 / 缺读数时不猜「超了」—— 缺证据 ≠ 超上界"""

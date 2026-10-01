@@ -29,7 +29,7 @@ from .calibration import RULER_BROKEN, HeartbeatResult, ruler_broken_window
 from .confirm import ConfirmRecord, confirm_persist
 from .contract import ContractError, FrozenContract, assert_hash
 from .eligibility import ALL_FALSE as ELIG_ALL_FALSE
-from .eligibility import Eligibility, derive_eligibility
+from .eligibility import Eligibility, derive_eligibility, exceeds_measured_peak
 from .measurement import persist_decision
 from .placement import pairing_conflict
 
@@ -211,9 +211,11 @@ def evaluate(contract: FrozenContract,
     # 为什么必须留下: 这一族反复出现的失效是「上游传了个错的值, 下游无从分辨」
     # (spine-review P1-6 就是 `cv_exceeded` 被传成「档位不是 VALID」的重编码,
     #  而资格位只回五个布尔, 从中看不出到底哪个输入说它不合格)。
-    peak_exceeded = bool(raw.get("peak_exceeded")) or (
-        peak is not None and isinstance(value, (int, float))
-        and not isinstance(value, bool) and value > peak * 1.05)
+    # 走资格层那一个判据 (`exceeds_measured_peak`), 不在这里再抄一遍阈值 ——
+    # spine-review P2-9 的附带发现就是这里抄了字面量 `1.05`: 同一阈值两个真源, 会漂。
+    peak_exceeded = bool(raw.get("peak_exceeded")) or exceeds_measured_peak(
+        value if isinstance(value, (int, float)) and not isinstance(value, bool) else None,
+        peak)
     rule_inputs = {
         "lib_fallback": bool(raw.get("lib_fallback")),
         "peak_exceeded": peak_exceeded,
