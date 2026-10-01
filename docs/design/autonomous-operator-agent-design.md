@@ -21,7 +21,7 @@
 | §10.5-4 两次确认 | `operator_agent/confirm.py` + 唯一判据 `oracle.admit_to_corpus` | ✅ **但是 opt-in**：判据默认要求重测，生产把它接到 `require_double_confirm`（默认 `False`，机时承诺）⇒ **默认配置下单次读数即可入库**；理由文本里会写明本次没要求 |
 | §13.4 Oracle 收口 | `operator_agent/oracle.py`，已接 **L3 出口**（`verifier._assess_measurement`） | ✅ |
 | §8 失败分类路由 | `operator_agent/failure_route.py`（五路 + `fix_not_rewrite`） | ✅ |
-| §17「无法确立」 | `confirm.UnableToEstablish` + 量具报表章节 | ✅ |
+| §17「无法确立」 | `confirm.UnableToEstablish` + **`report.py` / `report.md` 产物** | ✅ 2026-10-01 补齐：第 3 件交付物此前完全没有产物（收集器只被两个 benchmark 调过）。空章节带依据、`can_persist=False` 单列一行、入库拒因随报告落盘 |
 | §14 验收八条 | `tests/test_stage1_acceptance.py`（离线） + `benchmarks/smoke_spine_h20.py`（真机 H20） | ✅ **真机已跑**（2026-10-01，8×H20 的 `algorithm-h20`，走生产 L3 入口）：0/1/2/3/7/8 绿、4 见下、5 未覆盖（需 LLM，`LLM_API_KEY` 未设）、6 纯离线。**真机抓出两处「算了但没接上」**（CHECKLOG I46 发布的资格位不是收口点算的那份 ⇒ §14-8 在生产上没生效；I48 远端运行时盾的证据不落地），都已修 + 守卫；§14-7 的运行时检查**生产上无喂给者**（I47，已知未修）。见 [docs/research/63](../research/63-真机§14冒烟与它抓出来的两个真源.md) |
 | §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/竞争降级） | ✅ |
 | §13.5 峰值实测（`probe_peak`） | `HardwareCaps.measured_peak_tflops`（位已就位，探测未做） | ⏳ **未做**：分母仍来自规格/推导表 ⇒ `peak_measured=False` ⇒ **收敛出口在真机上关闭**（设计要的方向，日志明写）。「口径核过」与「实测过」已分成两个位（[CHECKLOG I49](../research/CHECKLOG.md)） |
@@ -701,6 +701,19 @@ Stage 5  记忆与跨任务迁移（带两次确认）
 
 第 3 条的"无法确立"章节是自动跑系统的信誉所在。
 **一个从不说"我测不准"的自动系统，它的所有数字都不可信。**
+
+落地口径（2026-10-01 补齐）：第 3 件以前**完全没有产物** —— 收集器
+（`confirm.UnableToEstablish`）早就写好了，但产品链路跑完一次只留下 JSON 与 print。
+现在由 `operator_agent/report.py` 写 `report.md` 到产物目录（best-known-good +
+逐轮证据链 + "我无法确立的事" + 指纹/续跑入口），在 `Conductor` 循环结束、**入库判定
+之后**写出。两条形状上的纪律：
+
+- **空章节必须带依据。** 空清单有两种来源（"都站得住" / "压根没收集"），在产物里长得
+  一样；所以为空时要把逐项核过的那张清单印出来（有过 L3 读数 / `can_gate` / 档位 /
+  **心跳检查过且是好的** / 未被抢占 / **峰值已实测** / 环境漂移已比较 / 契约哈希核过）。
+  核不过的项不会消失，它们变成章节里的条目——"没检查"不许伪装成"检查过且好"。
+- **`can_persist=False` 不是"测不准"，是"不许记住"。** 它不进无法确立章节，而是在
+  best-known-good 里明写一行"这条没有进长期记忆"。
 
 ---
 

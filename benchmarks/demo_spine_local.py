@@ -4,12 +4,13 @@
 
     python3 benchmarks/demo_spine_local.py
 
-四个场景回答的是**同一个问题**: 这个数字被允许造成什么后果。
+五个场景回答的是**同一个问题**: 这个数字被允许造成什么后果。
 
   1. 同一条读数, 出处不同 → 后果不同 (五位资格掩码)
   2. 尺子自己坏了 (标定心跳) → 该窗口的读数全部失效, 但数仍被记录
   3. 判据被改写 → 拒评, 并且进「我无法确立的事」报告
   4. 永久结论量两遍 → 两次确认; 判据在两次之间变了 → 拒
+  5. 报告产物 (设计 §17 第 3 件): 空章节必须带依据, 差一位就是「没能确立已到顶」
 
 真机版 (要 GPU + `~/.ssh/config` 里的 algorithm-h20):
 
@@ -278,12 +279,53 @@ def scene_4():
         print("     " + reason[-1].strip())
 
 
+# ── 场景 5: 报告产物 (设计 §17 第 3 条) ──────────────────────────────────
+def scene_5():
+    head("场景 5  报告产物: best-known-good + 证据链 + 「我无法确立的事」(设计 §17)")
+    print("  §17 的第 3 件交付物是「报告 (含『我无法确立的事』)」, 设计把它写成")
+    print("  「自动跑系统的信誉所在」。看两份读数怎么变成两份不同的报告。\n")
+    from operator_agent.report import build_report
+    from operator_agent.schemas import KernelArtifact
+
+    def _art(**m):
+        a = KernelArtifact(kernel_id="demo0001", code="def kernel(A, B):\n    return A @ B\n")
+        a.benchmark_data = dict({
+            "measurement_can_gate": True, "measurement_validity": "valid",
+            "speedup_vs_baseline": 1.31, "gflops": 210.0, "ruler_broken": False,
+            "benchmark_contaminated": False,
+            "roofline_analysis": {"peak_measured": True, "peak_source": "实测探测"},
+            "eligibility": {"can_verdict": True, "can_tune": True, "can_persist": True,
+                            "can_report": True, "can_count_progress": True},
+        }, **m)
+        a.environment_drift = {"comparable": True, "drifted": False, "changed": []}
+        a.iteration_history = [{"round": 1, "action": "generate",
+                                "levels_passed": {"L1": True, "L2": True, "L3": True},
+                                "speedup": 1.31, "gflops": 210.0,
+                                "measurement_validity": "valid", "recipes_applied": []}]
+        return a
+
+    def _section3(art):
+        txt = build_report(artifact=art, generated_at="2026-01-01 00:00:00")
+        body = txt.split("## 3. 我无法确立的事")[1].split("## 4.")[0]
+        return "\n".join("  " + l for l in body.strip().strip("`").strip().splitlines()
+                          if l.strip() and l.strip() != "```")
+
+    print("  ── ① 全项核过的读数 ──")
+    print(_section3(_art()))
+    print("\n  ── ② 同一条 1.31x, 但峰值分母从没实测过 (今天所有真机的状态) ──")
+    print(_section3(_art(roofline_analysis={"peak_measured": False,
+                                            "peak_source": "规格表推导"})))
+    print("\n  差别只有一位。这一位开着 ⇒ 收敛出口开着; 关着 ⇒ 除了「没测出上限」")
+    print("  之外, 报告还得明说「这一轮没能确立『已经到顶』」。\n")
+
+
 def main():
     print(__doc__.strip().split("\n\n")[0])
     scene_1()
     scene_2()
     scene_3()
     scene_4()
+    scene_5()
     print(f"\n{'=' * 78}")
     print("  一句话: 上面每一个「拒 / 失效」都不是为了保守, 而是为了让")
     print("  写进长期记忆的那句话**只能是同一把尺子量出来的**。")

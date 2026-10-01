@@ -102,6 +102,14 @@ class UnableItem:
 @dataclass
 class UnableToEstablish:
     items: List[UnableItem] = field(default_factory=list)
+    #: 「这一节为空」本身也是一个**断言**, 所以它必须带依据。
+    #:
+    #: 为什么不能像以前那样直接印一个 `(无)` 就过去: 空清单有两种来源 —— 「全部读数都
+    #: 站得住」与「压根没收集」, 在产物里两者长得一模一样。这与 `measurement.assess()`
+    #: 里「地板未知 ⇒ 记录『未做检查』而不是默认放行」是同一条纪律: 缺证据不是有效证据。
+    #: 由 `report.collect_unable()` 在逐项核过之后填写; 手工构造的对象不填就会在 render
+    #: 里被点名。
+    absence_basis: Optional[str] = None
 
     def add(self, claim: str, reason: str, kind: str = "other", evidence: str = "") -> None:
         self.items.append(UnableItem(claim=claim, reason=reason, kind=kind, evidence=evidence))
@@ -124,10 +132,44 @@ class UnableToEstablish:
             self.add("契约被改写, 本次评测作废", "contract hash mismatch", kind="contract")
         if metrics.get("benchmark_contaminated"):
             self.add("测量窗口被抢占, 加速比不可比", "util 超阈值", kind="measurement")
+        # 下面三条 (峰值未实测 / 该测的键缺了 / 资格位不许入库) 是 2026-10-01 补的:
+        # 它们此前**没有任何读者** —— 判据算了、日志也打了, 但没人把它收进「说不清」
+        # 这一节, 于是报告里读起来像是「这一轮一切正常」。
+        _rl = metrics.get("roofline_analysis") or {}
+        if _rl and _rl.get("peak_measured") is not True:
+            # 与 measurement.roofline_converged 同一个位: 分母没实测 ⇒ 收敛出口关闭,
+            # 于是「已经贴着上界了」这句话这一轮**没有**获得资格 (设计 §13.5)。
+            self.add("无法宣布已到 roofline 上界", "峰值分母未实测 (probe_peak 未落地)",
+                     kind="measurement",
+                     evidence=f"peak_source={_rl.get('peak_source', '')!r}")
+        _elig = metrics.get("eligibility")
+        if isinstance(_elig, dict) and _elig.get("can_persist") is False:
+            self.add("该轮读数不足以支撑永久结论 (不进长期记忆)",
+                     "资格位 can_persist=False",
+                     kind="measurement",
+                     evidence=f"eligibility={_elig}")
+        # 三态: **缺键 ≠ 没加速**。只在「这明显是一份 L3 读数」时才这么问, 否则
+        # 别的调用方 (传小字典进来的量具) 会被这句话淹没。
+        # `can_gate is False` 那条**已经**说过这句话了 (「该轮加速比不足以支撑结论」),
+        # 再加一条只是同一件事数两遍 —— 这一节一旦开始复读就会被跳过不读。
+        if (metrics and metrics.get("measurement_can_gate") is not False
+                and "speedup_vs_baseline" not in metrics
+                and any(k in metrics for k in ("measurement_validity", "gflops",
+                                               "measurement_can_gate", "roofline_analysis"))):
+            self.add("这一轮没有可比加速比", "缺 speedup_vs_baseline 键 (缺键 ≠ 没加速)",
+                     kind="measurement")
 
     def render(self) -> str:
         if not self.items:
-            return "【我无法确立的事】(无)"
+            if self.absence_basis:
+                return ("【我无法确立的事】(无)\n"
+                        f"  依据: {self.absence_basis}\n"
+                        "  ⚠️ 「无」是一个断言, 上面这条依据就是它的证据 —— "
+                        "缺任何一项, 这一节就不该印成空的。")
+            return ("【我无法确立的事】⚠️ 无法确立「没有无法确立的事」\n"
+                    "  原因: 这一节是空的, 但没有任何依据说明它为什么是空的\n"
+                    "  (空清单的两种来源 —— 「都站得住」与「压根没收集」—— 在产物里长得一样; "
+                    "缺证据不是有效证据。)")
         lines = ["【我无法确立的事】(设计 §17 —— 一等公民, 不是附注)"]
         for i, it in enumerate(self.items, 1):
             lines.append(f"  {i}. [{it.kind}] {it.claim}")

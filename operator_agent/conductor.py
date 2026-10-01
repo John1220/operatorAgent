@@ -1459,6 +1459,20 @@ class Conductor:
             if self.require_double_confirm:
                 self._produce_remeasure(artifact, task, test_inputs, target_gflops)
             self._save_to_db(artifact, task)
+
+        # ── 报告产物 (设计 §17 第 3 条) ──
+        # 位置是刻意的: **必须在 `store.save()` 与 `_save_to_db()` 之后**。前者给出产物
+        # 目录, 后者落进「这条结论有没有进长期记忆 + 为什么」—— 那是报告里最要紧的一句
+        # 之一, 而它此刻才存在。报告写失败不让这次实验失败 (write_report 内部把异常写进
+        # 那个文件), 所以这里不需要再兜一层。
+        from .report import write_report
+        _admission = (artifact.metadata or {}).get("corpus_admission") or {}
+        _refusals = ([_admission.get("reason")]
+                     if _admission.get("kept") is False and _admission.get("reason")
+                     else None)
+        write_report(saved_dir, artifact=artifact, task=task, refusals=_refusals)
+        print(f"[Conductor] 报告已写出: {saved_dir}/report.md")
+
         # 每次运行都在日志里报一句语料现状。这条的存在理由是缺口 2 的失效方式本身:
         # 「RAG 命中 N 个相似案例」以前只说明语料里有 N 条, 不说明它们是不是真的
         # 从上一次运行继承下来的 (答案曾经是「不是」)。
@@ -1831,6 +1845,12 @@ class Conductor:
             score=float(metrics.get("speedup_vs_baseline") or 0.0),
             measurement_validity=str(metrics.get("measurement_validity") or ""),
         )
+        # 「有没有进语料 + 为什么」以前只 print 一次就没了, 于是同一份产物里
+        # 「没入库」与「入库了」在 result.json 上长得一样 (写入时机见下面那段: 落盘与
+        # 快照都发生在这个判定**之前**, 所以它只能靠报告这一件产物带走)。
+        if artifact.metadata is None:
+            artifact.metadata = {}
+        artifact.metadata["corpus_admission"] = {"kept": bool(keep), "reason": str(reason)}
         if not keep:
             print(f"[KernelDB] 未入库 (只留在本次进程): {reason}")
             self.kernel_db.add(record)

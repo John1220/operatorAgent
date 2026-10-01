@@ -961,6 +961,29 @@
   这是设计要的方向。`probe_peak` 仍未实现，已写进设计 §15 的「没有实现物」表
 - **类别**：I · **状态**：✅ 已修（口径拆开 + 出口只认实测 + 守卫成对）；`probe_peak` 本体 ⏳ 未做
 
+### I50 · 设计 §17 的第 3 件交付物（报告）此前没有任何产物
+
+- **原话**：设计 §17 —— 「**报告**：结论 + 证据链 + **"我无法确立的事"**（一等公民章节）
+  … 第 3 条的"无法确立"章节是自动跑系统的信誉所在。**一个从不说"我测不准"的自动系统，
+  它的所有数字都不可信。**」
+- **实证**：`confirm.UnableToEstablish`（收集器）实现完整, 但产品链路上**零调用** ——
+  全仓只有 `benchmarks/demo_spine_local.py` 与 `benchmarks/harness_pass_rate.py` 调它;
+  `ArtifactStore.save()` 只写 `code.*` / `sketch.json` / `result.json` /
+  `verification.json` / `benchmark.json`, 全仓没有任何报告产物模块。跑完一次真实验,
+  没有任何文件能回答「这一轮哪些事**没能**确立」。
+  同一族的另一个: 入库判据的拒因 (`oracle.admit_to_corpus` 的 reason)
+  在 `conductor._save_to_db` 里只被 `print` 一次, 产物里读不到。
+- **出处**：`operator_agent/report.py`（新）; `operator_agent/conductor.py`
+  （`_execute_inner` 结尾写报告 + `_save_to_db` 落 `metadata["corpus_admission"]`）;
+  `operator_agent/confirm.py`（空清单必须带依据 + 三条新信号）;
+  `tests/test_report_deliverable.py`（A 组纯函数逐条成对 + B 组真跑断言产物存在）;
+  `benchmarks/demo_spine_local.py` 场景 5
+- **后果**：信誉所在的那一件交付物缺席, 「数不可信」这件事在产物侧没有承载物。
+  已修: `report.md` (best-known-good + 逐轮证据链 + 我无法确立的事 + 指纹/续跑入口)
+  随每次运行落盘; 空章节必须带逐项依据 (否则 render 明写「无法确立『没有无法确立的事』」);
+  入库拒因随报告带走。真跑一次的变异 (删掉那次 `write_report`) 让 B 组两条红、A 组全绿
+- **类别**：I · **状态**：✅ 已修
+
 ---
 
 ### I45 · 「§10.5-4 两次确认 ✅」的判据函数零生产调用者，且默认不强制
@@ -1099,6 +1122,7 @@
 | I47 | 跨卡配对检查在生产上没有喂给者 | I | ⚠️ 已知 |
 | I48 | 远端运行时盾的证据不落地 | I | ✅ 已修 |
 | I49 | 峰值「实测」被「口径核过」顶替, 收敛出口因此开着 | I | ✅ 已修 |
+| I50 | 设计 §17 第 3 件交付物(报告)此前没有产物 | I | ✅ 已修 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
