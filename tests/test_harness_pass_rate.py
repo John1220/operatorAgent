@@ -53,6 +53,8 @@ def _round(n, l1=True, l2=None, l3=None, validity=None, speedup=None, action="op
             "template_selection": None,
             # 这一轮的回报记到哪个臂头上 (模板点去重键 / tiling 三元组 / None)
             "bandit_arm": None,
+            # §10.3: 这一轮的选择 (模式/抽签/分数/顺序) 与它花的预算相位, 以及分母原料
+            "selection": None, "phase": None, "measurement_wall_s": None,
             "permanent_effects": {"best_updated": False, "recipes_disabled": [],
                                   "stagnation_counted": False}}
 

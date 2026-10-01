@@ -505,9 +505,21 @@ class TemplateSelection:
         }
 
 
+def template_points(space: ParamSpace, caps: Any = None,
+                    elem_bytes: int = 4) -> PruneResult:
+    """这一轮**真正可枚举的候选** = 参数空间的点 + 便宜代理剪枝 (§9)。
+
+    为什么把它单列出来: 上游的选择器 (`selection.choose`) 必须拿**同一批**候选来做决定 ——
+    否则它会把已经被剪掉的点排进顺位 (而队列随后把它们过滤掉), 于是「选择器想干什么」与
+    「实际用了哪个」分叉, 连**花哪一格预算**都会跟着错 (真机上这是常态: 剪枝常常只留一个点)。
+    剪枝本身只有 `prune_by_smem` 一处实现, 这里只是「枚举 + 剪枝」这一对的名字。
+    """
+    return prune_by_smem(space.points(), caps, elem_bytes)
+
+
 def select_template_candidate(space: ParamSpace, backend: Any, *,
                               caps: Any = None, elem_bytes: int = 4,
-                              bandit: Any = None,
+                              order: Optional[List[TemplateCandidate]] = None,
                               contract: Any = None) -> TemplateSelection:
     """§12 的「模板产出候选」: 剪枝 → bandit 排序 → **按顺位取第一个建得出来的点**
 
@@ -515,16 +527,24 @@ def select_template_candidate(space: ParamSpace, backend: Any, *,
 
     * 剪枝 (`prune_by_smem`) 是**便宜代理** (§9): 不花 GPU 秒就能摘掉明显放不下的点,
       但它只砍明显超限的, 边界留给远端;
-    * 排序交给**已有的** bandit (`Bandit.order`) —— 它的口径是「**无观测的先试**,
-      各自保持先验顺序 (枚举序); 有观测的按 UCB1 分数排」。这个方向是那个模块定死的
-      (广度优先的探索), 这里不另写一套排序、也不翻转它;
+    * 排序**由调用方给** (`order`): 那是 §10.3 的选择器 (`selection.choose`) 的产物 ——
+      一个候选只有一个排序权威, 这里不自己再排一遍。没给就按**枚举序** (单元测试与
+      「还没接过选择器」的调用方);
     * 实例化**按顺位惰性进行**: 建不出来的点继续往下走 (逐条记理由), 因为「实例化器在
       某类参数上一直失败」不该让这一轮没得跑 —— 但它必须**看得见**。
     """
-    points = space.points()
-    pruned = prune_by_smem(points, caps, elem_bytes)
-    ranked = (bandit.order(pruned.kept, key=template_arm) if bandit is not None
-              else list(pruned.kept))
+    pruned = template_points(space, caps, elem_bytes)
+    if order is None:
+        ranked = list(pruned.kept)
+    else:
+        # 调用方给的顺序必须覆盖剪枝后的**全部**点 (漏一个 = 悄悄少一个候选)
+        given = list(order)
+        missing = [c for c in pruned.kept if c not in given]
+        if missing:
+            raise ValueError(
+                f"选择器给的顺序漏了剪枝后的 {len(missing)} 个点 "
+                f"(例如 {point_label(missing[0])}) —— 顺序必须覆盖全部候选")
+        ranked = [c for c in given if c in pruned.kept]
     sel = TemplateSelection(ranked=ranked, pruned_note=pruned.as_note(),
                             no_limit=pruned.no_limit)
     for cand in ranked:

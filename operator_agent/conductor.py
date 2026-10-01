@@ -37,13 +37,14 @@ from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
 from .bandit import Bandit
+from .selection import DEFAULT_EPSILON, choose, explore_draw, phase_of
 from .escalation import (
     EscalationInputs, decide, smem_bound_evidence, untried_directions,
 )
 from .hardware_caps import detect_hardware_caps
 from .resource_check import caps_from_metrics, check_resource_feasibility
 from .candidates import (param_space_of, point_label, require_supported_space,
-                        select_template_candidate, template_arm)
+                        select_template_candidate, template_arm, template_points)
 from .budget import BudgetLedger, BudgetPlan
 from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
                           LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
@@ -296,6 +297,10 @@ class Conductor:
         # 就不拦, 也不假装拦过 —— 「本轮要不要花这次钱」是任务级的决定, 不是模块能替
         # 调用方拍的 (`require_double_confirm` 那条同一个理由)。
         budget: Optional[BudgetPlan] = None,
+        # §10.3 的 ε (探索概率)。设计没给具体数 ⇒ `selection.DEFAULT_EPSILON` (偏探索)。
+        # 做成构造参数是为了 §14-9 的对照实验: ε=0 就是「纯利用」那条基线 —— 而把它
+        # 放在 `execute()` 的局部状态里 (像 `max_stagnant_rounds` 那样) 就没法做对照。
+        selection_epsilon: float = DEFAULT_EPSILON,
     ):
         # `is None` 而不是 `or`: `FailureDatabase` 定义了 `__len__`, 于是**一条记录都没有的
         # 注入实例是假的**, `failure_db or FailureDatabase()` 会把它丢掉换成一个默认实例 ——
@@ -327,6 +332,9 @@ class Conductor:
                 or heartbeat_interval <= 0:
             raise ValueError(f"heartbeat_interval 必须为正整数: {heartbeat_interval!r}")
         self.heartbeat_interval = heartbeat_interval
+        #: §10.3 的 ε。抽签值本身是 (seed, 轮次) 的纯函数, 不用随机数发生器 —— 于是
+        #: ε-greedy 与「跑完能离线复算」不冲突 (见 `selection` 模块注释)。
+        self.selection_epsilon = float(selection_epsilon)
         #: 本次运行里**真值测量**(L3 读数)的累计条数 —— 心跳按它的倍数触发。
         self._true_measurements = 0
         #: §10.2 的账本。构造时就建一个 (与 `_true_measurements` 同一个理由: 只走
@@ -681,6 +689,9 @@ class Conductor:
         # 运行据此比较)、打进日志、以及作为 L3 测量有效性的一个输入 (漂移 ⇒ 降到
         # DEGRADED, 不禁用配方也不计停滞, 但**不**据此判核失败)。
         hw_info = self.backend.get_hardware_info()
+        # §10.3 的 ε 抽签种子: 一次运行一个。抽签值是它的纯函数, 而它自己落进产物 ⇒
+        # 「第 3 轮为什么走了探索那一支」跑完可以逐位复算 (不必记下每个随机数)。
+        _selection_seed = f"{task.task_id}|{self.backend.label}"
         fingerprint = fingerprint_of(hw_info, self.backend.label)
         # 挂在实例上而不是加到 `_flush_snapshot` 的 12 个形参里: 它在一次运行内是常量,
         # 而 `_flush_snapshot` 有 7 个调用点 (与 `capture_execution` 写 `self._log_path`
@@ -900,10 +911,40 @@ class Conductor:
                 param_space_of(self.backend, task), self.backend)
             template_choice = None
             _template_sel = None
+            # §10.3 这一轮的选择 (模式/抽签/分数/顺序)。模板型 = 本轮用的候选就是它选的;
+            # 代码型 = 它在轮末选的是**下一轮**的候选 (`applies_to` 说明是哪一种)。
+            # ⚠️ 初值必须在**选择之前**: 第一版把它放在模板选择之后, 于是刚选出来的那份
+            # 记录被擦成 None (产物里每一轮都是 `selection: null`, 用例红了才发现)。
+            _round_selection = None
+            _draw = explore_draw(_selection_seed, round_num)
             if _space is not None:
+                # §10.3 的选择: 候选 = 参数空间的点。`allowed` 是「还有计划格子的相位」
+                # (分相预算) —— 它**约束**这一轮是探索还是精修, 于是 55%/30% 那个计划
+                # 真的体现在花的钱上, 而不只是一行注释。
+                # 候选 = **剪枝后**的点 (与队列同一批): 否则选择器会把剪掉的点排进顺位,
+                # 队列再过滤掉 ⇒ 「想选谁」与「用了谁」分叉, 连花哪一格预算都跟着错。
+                _universe = template_points(
+                    _space, _mem_caps, task.constraints.precision.itemsize)
+                _sel = choose(_universe.kept, bandit, template_arm,
+                              epsilon=self.selection_epsilon, draw=_draw,
+                              phases=self._plan_phases())
+                if _sel is None:
+                    _room = self._budget.as_dict()["phase_room"]
+                    _why = (f"探索与精修两格的计划额度都用完了 (剩余 {_room}) ⇒ 不再开"
+                            "新的一轮")
+                    print(f"\n[Template] {_why}")
+                    self._budget.oracle_refuse("explore")
+                    self._record_stop(artifact, round_num, "budget_exhausted", _why)
+                    break
+                # `chosen_label` 是「想选谁」的人读名字 (臂是去重键,留给 bandit 的统计);
+                # 它与队列最终用的那个点可能不同 (顺位回退), 所以两者都要在产物里。
+                _round_selection = dict(_sel.as_dict(), applies_to="this_round",
+                                        chosen_label=point_label(_sel.chosen))
+                print(f"\n[Selection] {_sel.note}")
                 _template_sel = select_template_candidate(
                     _space, self.backend, caps=_mem_caps,
-                    elem_bytes=task.constraints.precision.itemsize, bandit=bandit)
+                    elem_bytes=task.constraints.precision.itemsize,
+                    order=_sel.ranking)
                 template_choice = _template_sel.chosen
                 print(f"\n[Template] {_template_sel.note()}")
                 if template_choice is None:
@@ -927,6 +968,10 @@ class Conductor:
             bandit_arm = (template_arm(template_choice.candidate)
                           if template_choice is not None
                           else self._arm_of(current_sketch))
+            # 这一轮的候选值哪一相预算 (§10.3 的分相): 没观测过 ⇒ 探索, 观测过 ⇒ 精修。
+            # 它与 `Selection.mode` 是同一件事的两半 (探索那一支只取未观测的候选), 所以
+            # 「记的相位 = 当时选的模式」是一条可被测试钉住的不变量。
+            round_phase = phase_of(bandit, bandit_arm)
 
             # P1-1 (generation-side-review): 本轮若走了候选选择, 已跑完的 L1+L2
             # 结果缓存在这里 —— Step 4 复用它, 不重复真机执行。
@@ -1031,6 +1076,10 @@ class Conductor:
             # 标定心跳 (设计 §10.5-1): 到期就在**本窗口内**塞一对已知参照核。读数与心跳
             # 同窗, 于是尺子坏了这条读数当场作废, 而不是等下一轮才发现。
             # 放在「已知不跑 L3」的那一支**之后**: 那一支没有真值测量, 塞心跳纯属烧机时。
+            # §10.3 分数(c) 的分母: 「预期 GPU 秒」的口径 = **控制端观测到的测量墙钟**。
+            # 与 §10.2 的墙钟预算同一个货币 (同一个进程、同一个 `time.monotonic()`),
+            # 于是「这一轮把秒换成数字花了多少」与预算拦人的口径是同一个。它不是卡上时间。
+            _meas_started = time.monotonic()
             if selected_l1_l2 is not None and l1_l2_is_final:
                 print(f"\n[Verifier] 复用候选选择中的 L1+L2 失败结果 (不重跑真机)...")
                 verify_results = selected_l1_l2
@@ -1075,6 +1124,7 @@ class Conductor:
             if correctness_verified(verify_results):
                 verified_parent = current_code
                 verified_parent_round = round_num
+            _measure_s = time.monotonic() - _meas_started
             l3_result = next(
                 (r for r in verify_results if r.level == VerificationLevel.L3_PERFORMANCE), None,
             )
@@ -1086,7 +1136,10 @@ class Conductor:
                 # §10.2 的记账与这个计数**同点**发生 (一个地方决定「什么算一次真值测量」)。
                 # 放在这里而不是放在门那边: 门是「该不该花」, 这是「花了」—— 两者分开才
                 # 使得同一次测量不可能出现「记了两次」或「花了没记」。
-                self._budget.oracle_spend("explore")
+                # 花的是**这一相**那一格 (§10.3 的分相): 相位由这一轮的候选决定 ——
+                # 未观测的候选花「探索」, 已观测的花「精修」。`oracle_spend` 只记账不拦,
+                # 计划格子被突破时账本里 `over_plan` 会涨 (与标定超支同一处置)。
+                self._budget.oracle_spend(round_phase)
 
             # 这一轮造成的**永久后果** —— 供设计 §14-9 的资格审计对照实验离线统计。
             #
@@ -1156,6 +1209,15 @@ class Conductor:
                 # 没有这一格, 「这个 tiling 更好」与「这个模板点更好」在产物里长得一样。
                 "template_selection": (_template_sel.as_dict()
                                        if _template_sel is not None else None),
+                # §10.3 这一轮的选择: 模式 / 抽签值 / 每个候选的分数 / 顺序 / 被计划格子
+                # 逼成什么样。模板型轮 `applies_to="this_round"`, 代码型轮是给下一轮选的。
+                "selection": _round_selection,
+                # 这一轮的候选花的是哪一格预算 (§10.3 的分相)。与 `selection.mode` 是同一个
+                # 事实的两处写法 —— 测试钉住它们相等, 于是「记的相位」不会漂。
+                "phase": round_phase,
+                # §10.3 分数(c) 分母的原料: 控制端观测到的这一轮测量墙钟 (秒)。
+                # `None` = 这一轮没有真值测量 (L1/L2 就挂了), 不是 0。
+                "measurement_wall_s": (round(_measure_s, 3) if l3_result is not None else None),
                 # 本轮候选属于哪个臂 (§5 的排序器吃的就是它)。注意这一格说的是
                 # 「候选是谁」, 不是「这一轮有没有更新统计」—— 后者的读法是
                 # `metadata["bandit"].arms[arm]`: `pulls` 涨了才算这一轮的回报进过账,
@@ -1569,7 +1631,10 @@ class Conductor:
                         and isinstance(best_gflops, (int, float)) and best_gflops > 0):
                     _reward = (float(_cur) - float(best_gflops)) / float(best_gflops)
                 bandit.update(bandit_arm, _reward,
-                              eligible=_elig.get("can_count_progress") is True)
+                              eligible=_elig.get("can_count_progress") is True,
+                              # §10.3 的分母原料: 这一轮把秒换成数字花了多少。只有真跑出
+                              # L3 读数才算 (L1/L2 就挂掉的轮次没有测量秒可言 ⇒ None)。
+                              cost_s=_measure_s if l3_result is not None else None)
                 perf_data = {
                     "gflops": l3_result.metrics.get("gflops", 0),
                     "speedup": l3_result.metrics.get("speedup_vs_baseline", 0),
@@ -1639,7 +1704,26 @@ class Conductor:
                         # P1-4: 上一轮排好的邻域候选按序轮换 —— 系统搜索代替「每轮
                         # 重新问一次 LLM 直觉」。轮换候选已带结构 (hints/memory_plan),
                         # 只换了 tiling, 不需要再过 Search。
-                        current_sketch = search_alternatives.pop(0)
+                        #
+                        # 选**哪一个**交给 §10.3 的选择器 (`choose`): ε 那一支去未探索的
+                        # 区域, 1-ε 那一支去分数最高的; 计划格子 (分相预算) 约束模式。
+                        _nsel = choose(search_alternatives, bandit, self._arm_of,
+                                       epsilon=self.selection_epsilon,
+                                       draw=explore_draw(_selection_seed, round_num),
+                                       phases=self._plan_phases())
+                        if _nsel is None:
+                            _room = self._budget.as_dict()["phase_room"]
+                            _why = (f"探索/精修两格的计划额度都用完了 (剩余 {_room}) 且"
+                                    "邻域队列里没有符合模式的候选 ⇒ 不再开新的一轮")
+                            self._budget.oracle_refuse("explore")
+                            self._record_stop(artifact, round_num, "budget_exhausted", _why)
+                            break
+                        current_sketch = _nsel.chosen
+                        search_alternatives = [x for x in _nsel.ranking
+                                               if x is not _nsel.chosen]
+                        _round_selection = dict(_nsel.as_dict(), applies_to="next_round",
+                                                chosen_label=self._arm_of(_nsel.chosen))
+                        print(f"\n[Selection] {_nsel.note}")
                         t = current_sketch.tiling
                         suggestion = "P1-4 邻域候选轮换"
                         print(f"\n[Search] 轮换邻域候选: tiling={t.block_m}x{t.block_n}x{t.block_k} "
@@ -1678,9 +1762,12 @@ class Conductor:
                         # §5: 顺序交给 bandit (本轮累积的证据优先, 无观测的保持先验顺序),
                         # 而不是纯 FIFO —— 后者对脏数据免疫但也无知: 哪个候选上次变快了,
                         # 队列不知道。资格门在这层之外 (没资格的数根本没进来)。
-                        search_alternatives = bandit.order(
-                            list(getattr(self.search, "last_alternatives", [])),
-                            key=self._arm_of)
+                        # 队列在这里**只入队不排序** (保持先验顺序): 排序与「取哪一个」
+                        # 是同一个判断, 它发生在**消费那一轮** (`choose`) —— 那时证据最新,
+                        # 而且一次判断只有一个地方做。这里再排一遍会让同一个选择器对同一批
+                        # 候选跑两次 (真实 bandit 是幂等的, 但那是巧合, 不是设计)。
+                        search_alternatives = list(
+                            getattr(self.search, "last_alternatives", []))
                         if bandit.total_scored or bandit.unscored_updates:
                             print(f"  [Bandit] 队列按证据重排: 已采纳 {bandit.total_scored} 个回报, "
                                   f"没采纳 {bandit.unscored_updates} 个")
@@ -1824,6 +1911,13 @@ class Conductor:
         if artifact.metadata is None:
             artifact.metadata = {}
         artifact.metadata["bandit"] = bandit.as_dict()
+        # §10.3 的选择策略: ε 与抽签种子落盘, 于是逐轮那个抽签值可以**离线复算**
+        # (`selection.explore_draw(seed, round)`), 而不必把每个随机数都记下来。
+        artifact.metadata["selection_policy"] = {
+            "epsilon": self.selection_epsilon, "seed": _selection_seed,
+            "rule": "score(c) = P(beats_best) × 预期增益 / 预期测量秒",
+            "seconds_source": "控制端测量墙钟 (§10.2 墙钟预算同一个货币, 不是卡上时间)",
+        }
         # §10.2 的账本同样落盘: 「计划是多少 / 花了多少 / 谁被挡住了」必须能被读到,
         # 否则预算就是一个只在 `print` 里活过的装置。
         artifact.metadata["budget"] = self._budget.as_dict()
@@ -1875,6 +1969,19 @@ class Conductor:
             print(f"\n[Conductor] ⚠️ 本次执行已降级: 主模型 [{self.llm.model}] 失败, "
                   f"实际使用 [{self.llm._active_model}] @ {self.llm._active_base_url}")
         return artifact
+
+    def _plan_phases(self):
+        """§10.3 的「计划约束选择」: 调 `selection.choose` 时该传什么**预算相位**。
+
+        两件事在这里定死, 免得两个调用点各解释一遍:
+
+        * 还有计划格子 ⇒ 传 `("explore", ...)` 那一族,**计划就真的限制选择**;
+        * 计划格子**一个都没有** ⇒ 传 `None` = **不拿计划当约束**, 而不是传空元组。
+          两者不同: 空元组在 `choose` 里意为「没有可选的相位 ⇒ 不许选」, 而这里要说的是
+          「这份计划没有可分配的空间」(总数太小, 5%/55%/30% 被 `int()` 抹平成 0)。那时硬
+          边界只剩总数与预留那一条, 超计划由账本 `over_plan` 记账 —— 不假装有计划。
+        """
+        return self._budget.phases_with_room() or None
 
     @staticmethod
     def _arm_of(sketch) -> str:

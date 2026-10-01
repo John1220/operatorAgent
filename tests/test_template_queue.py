@@ -137,41 +137,31 @@ class TestTheRanking(unittest.TestCase):
         self.assertEqual(dedup_key(point), template_arm(point))
         self.assertNotEqual(template_arm(point), template_arm(_SPACE.points()[1]))
 
-    def test_no_evidence_keeps_the_prior_order(self):
-        """无观测 ⇒ bandit 保持**先验顺序** (枚举序), 不重排 (别把未知读成好)"""
+    def test_no_order_keeps_the_enumeration_order(self):
+        """调用方不给顺序 ⇒ 枚举序 (选择器是**上面**那一层的事, 这里不自己排)"""
         backend = _TemplateBackend()
-        sel = select_template_candidate(_SPACE, backend, caps=MemCaps(228),
-                                        bandit=Bandit())
+        sel = select_template_candidate(_SPACE, backend, caps=MemCaps(228))
         self.assertEqual([point_label(c) for c in _SPACE.points()],
                          [point_label(c) for c in sel.ranked])
 
-    def test_unexplored_points_are_tried_before_explored_ones(self):
-        """排序方向由**已有的** bandit 定死: 无观测的先试 (广度优先), 不另翻转"""
+    def test_a_caller_order_is_honoured_and_must_be_complete(self):
+        """调用方给的顺序说了算 (排序权威在 `selection`); 漏点当场炸, 不悄悄少候选"""
         backend = _TemplateBackend()
-        target = _SPACE.points()[2]
-        bandit = Bandit()
-        bandit.update(template_arm(target), 0.5, eligible=True)
-        sel = select_template_candidate(_SPACE, backend, caps=MemCaps(228), bandit=bandit)
-        self.assertEqual(point_label(target), point_label(sel.ranked[-1]),
-                         "试过的点排在无观测的点之后 (bandit.order 的口径)")
-        self.assertNotEqual(point_label(target), point_label(sel.ranked[0]))
-
-    def test_among_explored_points_the_better_score_comes_first(self):
-        """有观测的点之间按 UCB1 排序 —— 这就是「哪个点上次更好」进排序的地方"""
-        backend = _TemplateBackend()
-        good, bad = _SPACE.points()[1], _SPACE.points()[2]
-        bandit = Bandit()
-        bandit.update(template_arm(good), 0.9, eligible=True)
-        bandit.update(template_arm(bad), -0.9, eligible=True)
-        sel = select_template_candidate(_SPACE, backend, caps=MemCaps(228), bandit=bandit)
-        order = [point_label(c) for c in sel.ranked]
-        self.assertLess(order.index(point_label(good)), order.index(point_label(bad)))
+        points = _SPACE.points()
+        wanted = [points[2], points[0], points[3], points[1]]
+        sel = select_template_candidate(_SPACE, backend, caps=MemCaps(228), order=wanted)
+        self.assertEqual([point_label(c) for c in wanted],
+                         [point_label(c) for c in sel.ranked])
+        self.assertEqual(point_label(points[2]), point_label(sel.chosen.candidate))
+        with self.assertRaises(ValueError) as ctx:
+            select_template_candidate(_SPACE, backend, caps=MemCaps(228),
+                                      order=wanted[:2])
+        self.assertIn("漏了", str(ctx.exception))
 
     def test_the_choice_is_the_first_point_that_builds(self):
         """排在第一的点建不出来 ⇒ 跳过它试下一个, 并**逐条留痕**"""
         backend = _TemplateBackend(fail_on=(64,))
-        sel = select_template_candidate(_SPACE, backend, caps=MemCaps(228),
-                                        bandit=Bandit())
+        sel = select_template_candidate(_SPACE, backend, caps=MemCaps(228))
         self.assertIsNotNone(sel.chosen)
         self.assertEqual(128, sel.chosen.candidate.params["BLOCK_M"],
                          "BLOCK_M=64 那两个点建不出来, 顺位应该走到 128")

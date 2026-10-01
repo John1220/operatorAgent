@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 
 from operator_agent.agents import SearchAgent
+from operator_agent.bandit import Bandit
 from operator_agent.conductor import Conductor
 from operator_agent.kernel_db import KernelDatabase
 from operator_agent.mock_gpu import MockGPU
@@ -250,7 +251,9 @@ class TestTheGateOnTheRealLoop(unittest.TestCase):
         self.assertGreaterEqual(st.get("total_scored", 0), 1, f"统计没吃进回报: {st}")
 
 
-class _ReversingBandit:
+class _ReversingBandit(Bandit):
+    """只覆写 `order` 的真 Bandit: §10.3 的选择器要读它的证据 (`pulls` 等), 而「顺序来自
+    排序器」这条接线**恰恰**要由一个会反转的排序器来证 —— 子类化而不是打桩全部方法。"""
     """桩 (只验接线): 队列真的过了 `bandit.order` 的话, 消费顺序就该被它反转。
 
     为什么不拿真 bandit 测端到端顺序: 一个 3 轮的运行里, 臂要**再次**被量到才拿得到
@@ -262,13 +265,13 @@ class _ReversingBandit:
     instances = []
 
     def __init__(self, *a, **k):
-        self.total_scored = 1
+        super().__init__(*a, **k)
+        # `total_scored` 在真 Bandit 里是**只读属性** ⇒ 这个桩不去覆写它, 而是拿一次
+        # 真回报把「有证据」这条状态造出来 (桩只覆写 `order`, 其余口径仍是真件的)。
+        self.update("__warm__", 0.1, eligible=True)
         self.unscored_updates = 0
         self.ordered = []
         _ReversingBandit.instances.append(self)
-
-    def update(self, *a, **k):
-        pass
 
     def order(self, items, key=None):
         out = list(reversed(list(items)))

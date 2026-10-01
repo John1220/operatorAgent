@@ -131,6 +131,11 @@ class BudgetLedger:
     spent: Dict[str, int] = field(default_factory=lambda: {p: 0 for p in PHASES})
     #: 超计划的标定次数（心跳不被拦，但超了要看得出）。
     calibration_over_plan: int = 0
+    #: 计划格子被**突破**的次数（按相计）。计划是计划，不是硬边界 —— §10.3 的选择器
+    #: 拿它决定这一轮探索还是精修，但真到了「只剩一格有额度」的时候，硬停整个运行比
+    #: 超一格更坏（§10.4 的「交付 best-known-good，不装作成功」说的是没得花，不是计划用完）。
+    #: 记下来是为了让「计划被突破了几次」在产物里可读 —— 与 `calibration_over_plan` 同一处置。
+    over_plan: Dict[str, int] = field(default_factory=dict)
     #: 因为没额度而**没花**的那几次（复盘用：谁被预算挡住了）。
     refusals: Dict[str, int] = field(default_factory=dict)
     wall_clock_checked_s: float = 0.0
@@ -162,6 +167,30 @@ class BudgetLedger:
         # 非 confirm：一律不许碰预留 —— 这就是「最后 10% 不可挪用」。
         return self.spent_all + n <= self.plan.oracle_total - caps["confirm"]
 
+    def phase_room(self, kind: str = "explore") -> Optional[int]:
+        """**这一相自己的计划格子**还剩几次。`None` = 没有计划 (无上限)。
+
+        与 `oracle_may` 是**两个问题**, 刻意不合成一个名字:
+
+        * `oracle_may(kind)` = 「现在能不能花」—— 总池 + 不可挪用的预留 (硬边界);
+        * `phase_room(kind)` = 「这个**计划格子**还剩多少」—— 计划, §10.3 拿它来决定
+          这一轮该**探索**还是**精修** (计划里 55% / 30% 要真的体现在花的钱上)。
+
+        合成一个名字的代价在 I63 那一片里是具体的: 用 `oracle_may` 当计划格子会得到
+        「探索用完 ⇒ 整个运行停」, 而设计要的是「探索用完 ⇒ 后面都去精修」。
+        """
+        if kind not in PHASES:
+            raise ValueError(f"相位词汇外的 kind: {kind!r} (词汇表 {PHASES})")
+        caps = self.caps
+        if caps is None:
+            return None
+        return int(caps[kind]) - int(self.spent[kind])
+
+    def phases_with_room(self) -> tuple:
+        """还剩计划格子的可用相位 (探索/精修那两个 —— 标定与预留不参与选择)。"""
+        return tuple(p for p in ("explore", "refine")
+                     if self.phase_room(p) is None or self.phase_room(p) > 0)
+
     def oracle_spend(self, kind: str = "explore", n: int = 1) -> None:
         """记账。**不检查**放行 —— 检查是 `oracle_may` 的事。
 
@@ -171,6 +200,9 @@ class BudgetLedger:
         if kind not in PHASES:
             raise ValueError(f"相位词汇外的 kind: {kind!r} (词汇表 {PHASES})")
         self.spent[kind] += n
+        caps = self.caps
+        if caps is not None and self.spent[kind] > caps[kind]:
+            self.over_plan[kind] = self.over_plan.get(kind, 0) + n
 
     def oracle_refuse(self, kind: str = "explore") -> None:
         self.refusals[kind] = self.refusals.get(kind, 0) + 1
@@ -215,6 +247,8 @@ class BudgetLedger:
         """落进产物。读者要能回答三个问题：计划是什么、花了多少、谁被挡住了。"""
         return {"plan": self.plan.as_dict(), "spent": dict(self.spent),
                 "spent_all": self.spent_all,
+                "phase_room": {p: self.phase_room(p) for p in PHASES},
+                "over_plan": dict(self.over_plan),
                 "refusals": dict(self.refusals),
                 "calibration_over_plan": self.calibration_over_plan,
                 "wall_clock_checked_s": round(self.wall_clock_checked_s, 3),

@@ -135,7 +135,12 @@ class TestAuditability(unittest.TestCase):
         d = b.as_dict()
         self.assertEqual(1, d["total_scored"])
         self.assertEqual(1, d["unscored_updates"])
-        self.assertEqual({"pulls": 2, "scored": 1, "mean": 0.1, "score": d["arms"]["a"]["score"]},
+        # 2026-10-02: §10.3 的分数原料 (wins / P(beats_best) / 赢了能拿多少 / 测量秒)
+        # 也落在这一格 —— 它们是「为什么先试它」的复算原料, 不是新的口径。
+        self.assertEqual({"pulls": 2, "scored": 1, "mean": 0.1,
+                          "score": d["arms"]["a"]["score"], "wins": 1,
+                          "p_beats_best": 0.75, "gain_if_win": 0.1,
+                          "mean_cost_s": None},
                          d["arms"]["a"])
 
 

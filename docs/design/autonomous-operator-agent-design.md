@@ -27,7 +27,7 @@
 | §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/观测租约） | ✅ **同卡配对已有观测喂给者**（2026-10-01：远端逐臂报卡 ⇒ `observed_pairing` 三态 ⇒ oracle 拒评 + `passed=False`）；✅ 2026-10-02 **观测租约有了生产者**：`DeviceLease` 三态（`exclusive=None`/`external_load=None`/`source`）由 `observed_lease` 从**与档位判决同一份载荷**装出、落 `metrics["device_lease"]`；原先放置模块那份 `degraded_by_competition`/`lease_notes` 是**同一判定的第二处实现**（阈值 `>0` vs `>5%`）已被收掉，降级判决只在 `measurement.assess`。✅ 2026-10-02 **窗口那半也接上了观测**：runner 每扇交错调用生成窗口 id、两臂各自带回 ⇒ `observed_windows` 三态 ⇒ 观测到不同窗即拒评 + `passed=False`（与跨卡同族）；oracle 的进入条件改成**两个观测各自成立**（此前一个观测的缺席会掐掉另一个的判决），测量窗与心跳窗**分成两组参数** —— 见 [doc 72](../research/72-同一时间窗那一半的观测与拒评.md)。**边界**：多卡并行（`lease_waves` 无多卡消费者）、`interference_domain` 无可观测来源、真机上「同窗」由构造保证（`cross_window_refused` 尚不可能出现） —— 见 [doc 71](../research/71-观测租约与它的生产者.md) |
 | §13.5 峰值实测（`probe_peak`） | `operator_agent/peak_probe.py` + `hardware_caps` 存放处 + `verifier._publish_peak_probe`/按精度读取 | ✅ 2026-10-02：判据七条（仿真读数 / 精度键 / 出处 / 非有限正数 / 探针自己的档位 / 离散度未知 / 没打到算力峰值 / 高于规格 5%）+ **按精度**发布进 `HardwareCaps.measured_peak_tflops`（字典）+ 收敛出口按**这一轮分母的精度键**读取；零额外 GPU 秒（复用同一次 L3 的基线臂）。**边界**：发布的是**下界**（基线臂的实测可达值，不是器件极限）⇒ 出口偏松；只在**本进程**内生效（不跨运行）；`MockGPU` 一律拒发（无 `REAL_DEVICE`）；真机**未复跑**（本机无 GPU）—— 见 [doc 70](../research/70-实测峰值的判据与按精度发布.md) |
 | §10.2 三种预算 | `operator_agent/budget.py`（`BudgetPlan` + `BudgetLedger`）+ 轮次开头两道门 | ✅ 2026-10-02：oracle 次数（**预留不可挪用**）/ 墙钟 / token 三条接上并落 `artifact.metadata["budget"]`；心跳只记账不被拦。**边界**：`explore`/`refine` 不分相、按 GPU 秒未做、预算默认全关（opt-in）—— 见 [doc 67](../research/67-三种预算与不可挪用的预留.md) |
-| §10.3 候选选择 / LLM 升级门 | — | ⏳ **半片**：三条件升级门**已落地**（`escalation.py` + conductor 判决点接线 + SearchAgent 发布通道，13/13 变异红，CHECKLOG I53→I57/doc 69）—— 条件 2 今天只有 `smem-bound` 一条量具、且只在上界~×1.2 那条带里成立；`score = P(beats_best)×预期增益/预期GPU秒` 与 ε-greedy **未做**（要 GPU 秒口径） |
+| §10.3 候选选择 / LLM 升级门 | `operator_agent/selection.py`（`score_candidate` + `choose`） + `bandit.py` 的 `p_beats_best`/`gain_if_win`/`mean_cost*` + `budget.py` 的 `phase_room`/`phases_with_room` + conductor 轮首选择 | ⏳ **两半都在，各有边界**：①`score(c) = P(beats_best)×预期增益/预期测量秒` 与 ε-greedy **已落地**（抽签是 `(seed,轮次)` 的纯函数 ⇒ 逐轮值可离线复算；分母 = **控制端测量墙钟**，与 §10.2 墙钟同一货币，不是卡上时间），**分相预算已是选择的约束**（`_plan_phases()`：有格子 ⇒ 约束，一格都没有 ⇒ 不拿计划当约束，突破记 `over_plan`）；19/19 变异红，CHECKLOG I63/doc 75；②三条件升级门**已落地**（`escalation.py` + conductor 判决点接线 + SearchAgent 发布通道，13/13 变异红，CHECKLOG I53→I57/doc 69）—— 条件 2 今天只有 `smem-bound` 一条量具、且只在上界~×1.2 那条带里成立。**边界**：没有真模板后端（选择器只在假后端上跑）、参数轴仍只有 tiling 三维、`phase_caps` 之外没有「按 GPU 秒」的预算 |
 | §5 bandit 调参 | `operator_agent/bandit.py`（确定性 UCB1）+ `Conductor` 信念门 | ✅ 2026-10-02：`perf_data` / `optimization_history` / 回报统计三条信念通道按 `can_tune` / `can_count_progress` 收口（CHECKLOG I52），prompt 不再把「没有读数」渲染成 `0.00`；状态落 `artifact.metadata["bandit"]`。**臂空间只有 tiling**、`c` 未标定、证据**不进快照**（只覆盖本次运行）；**真机未复跑** —— 见 [doc 66](../research/66-搜索侧的信念门与bandit.md) |
 | §12 模板后端 / `param_space()` | `operator_agent/candidates.py` + `backend_caps.Backend.param_space`/`instantiate` + 便宜代理剪枝 | ✅ 2026-10-02 **枚举半片**（候选联合类型、分开写的去重口径、`ParamSpace` 确定性枚举、`prune_by_smem`、开关 `param_space_of`）+ ✅ 2026-10-02 **实例化半片**（`Instantiation` / `Backend.instantiate` 默认 raise / `BuiltCandidate` 身份**委派给模板点** / `source_hash` 跨语言 + `struct_sig` Python AST / 五道守卫 / 批量 `refusals` 留痕）+ ✅ 2026-10-02 **消费半片**（轮首 `select_template_candidate`：剪枝 → bandit 排序 → 按顺位取第一个建得出来的点；`action="template"` 跳过 Coder；L3 失败后整条 LLM/邻域搜索不走；`bandit_arm` = 点的去重键；全建不出来 ⇒ `template_no_candidate` 停机，不退回代码型；上界载体收成 `resource_check.caps_from_metrics`）。**边界**：L1 两道静态守卫是 Python 形状的（对 C++/CUDA 模板源空转）；剪枝只估单缓冲；参数轴只有 tiling 三维有产出者；没有真模板后端 —— 见 [doc 68](../research/68-候选联合类型与便宜代理剪枝.md) / [doc 73](../research/73-模板候选的实例化与身份.md) |
 
@@ -314,12 +314,16 @@ INTAKE ──► CONTRACT_LINT ──► PREFLIGHT ──► EXPLORE ──► E
 > `artifact.metadata["budget"]`。**「不可挪用」的实现**：非 confirm 的开销只许花到
 > `总数 - 预留份额`，`confirm` 只能花自己那一格；份额**先切预留**（余数归 refine），
 > 四格之和恒等于总数。
-> **边界**：`explore` / `refine` 今天**不分相**（那需要 §10.3 的「平台化」判据 —— 该判据已落地
-> （doc 69），但分相本身仍未做；见
-> [CHECKLOG I53](../research/CHECKLOG.md)）⇒ 被强制执行的只有「总数 - 预留」与「预留专属
-> confirm」两条，`phase_caps` 是计划；三种预算**默认全关**（opt-in —— 默认生效的机时承诺
-> 会改变每一次真机运行）；按 GPU **秒**的预算**未做**（今天只有次数）。见
-> [CHECKLOG I54](../research/CHECKLOG.md) 与 [doc 67](../research/67-三种预算与不可挪用的预留.md)。
+> **边界（2026-10-02 修）**：`phase_caps` 早先是**计划**（只在 `spent` 的键上出现）—— 现在它
+> 是**选择的约束**：`BudgetLedger.phase_room`/`phases_with_room` 交给 §10.3 的选择器
+> （`Conductor._plan_phases()`：两格都有 ⇒ 都可以选，只剩一格 ⇒ 只许那一相，两格都空 ⇒
+> **不拿计划当约束**，`over_plan` 记账），于是 55%/30% 真的体现在花的钱上；被**强制**执行的
+> 仍是「总数 - 预留」与「预留专属 confirm」两条硬边界（计划被突破只留痕，不停运行 ——
+> 交付 best-known-good 优先）。三种预算**默认全关**（opt-in —— 默认生效的机时承诺会改变
+> 每一次真机运行）；按 GPU **秒**的预算**未做**（今天只有次数；§10.3 的分母用的是**控制端
+> 测量墙钟**，那是选择用的口径，不是预算额度）。见
+> [CHECKLOG I54](../research/CHECKLOG.md) / [I63](../research/CHECKLOG.md) 与
+> [doc 67](../research/67-三种预算与不可挪用的预留.md) / [doc 75](../research/75-分数与ε-greedy与分相预算.md)。
 
 ### 10.3 每轮的决策策略
 
@@ -332,6 +336,26 @@ score(c) = P(beats_best | 观测) × 预期增益 / 预期 GPU 秒
   ε 概率 → 最不确定 / 未探索区域（信息优先）
   1-ε    → 期望增益最高（收益优先）
 ```
+
+> **实现状态（2026-10-02）**：选择器落在 `operator_agent/selection.py`。
+> * **抽签不需要随机源**：`explore_draw(seed, round)` = `sha256(f"{seed}|{round}")` 前 8 字节；种子
+>   （`task_id|backend.label`）与 ε 落 `artifact.metadata["selection_policy"]` ⇒ 逐轮抽签值
+>   **可离线复算**（用例就是拿产物里的 seed + 血缘里的 round 算回来比对）。
+> * **分数的三块原料各自三态**：`P(beats_best)` 用 Jeffreys `(wins+0.5)/(scored+1)`（没观测 ⇒ `None`；
+>   观测过但一次没赢 ⇒ **0.25，不是 0**）；预期增益 = `win_sum/wins`（只从**赢**的那些轮算 —— 把负回报
+>   摊进来等于把负证据读成正证据；一次没赢 ⇒ `None`）；预期秒 = 本臂平均测量秒，没有就用全局均值兜底
+>   （并说明），全局也没有 ⇒ `score=None` 且 `missing` 写明是哪一块缺。
+> * **分母的货币** = 控制端观测到的**测量墙钟**（`time.monotonic()` 包住 L3 那一段），与 §10.2 的墙钟
+>   预算同一个货币；**不是卡上时间**（那是探针/心跳那些量具的事）。
+> * **分相预算是选择的输入**：相位 = `phase_of(bandit, 这一轮的候选)`（未观测 ⇒ 探索，已观测 ⇒ 精修）；
+>   模式与相位**不是同一个词表**（`MODE_TO_PHASE`：`exploit → refine`），混用当场 `ValueError`。
+> * **一个例外要看得见**：队列按顺位实例化，排第一的点建不出来时会顺位回退 ⇒ `phase`（实际花了哪一格）
+>   与 `selection.mode`（选择器想干什么）可能不同，两者的差异由 `chosen_label` 与
+>   `template_selection.chosen` 显式区分。
+> * **边界**：`stages`/`warps`/向量宽度/layout/split-K 这些轴还没有产出者（今天只有 tiling 三维）；
+>   没有真模板后端 ⇒ 选择器只在假后端上跑；ε 的取值设计没给（默认 `DEFAULT_EPSILON=0.2`，构造参数，
+>   为了 §14-9 的 ε=0 基线对照）。见 [CHECKLOG I63](../research/CHECKLOG.md) 与
+>   [doc 75](../research/75-分数与ε-greedy与分相预算.md)。
 
 **何时才升级到 LLM 做结构性改动**（三条件同时满足，否则不许调用）：
 
@@ -771,7 +795,7 @@ class Calibrator(Protocol):
 Stage 0  契约冻结 + 只读哈希护栏 + 预检 / 峰值标定
 Stage 1  评测器 + 资格模型 + 标定心跳 + checkpoint/幂等/续跑   ← 尺子（含尺子的自检）
 Stage 2  多卡放置：干扰域 + 同卡配对（若一开始就多卡，则与 1 并行）
-Stage 3  参数模板 + bandit 搜索 + 停止条件   ← 参数模板：枚举 ✅ / 实例化 ✅ / 候选队列 ✅（ε-greedy 与分相预算 ⏳）
+Stage 3  参数模板 + bandit 搜索 + 停止条件   ← 参数模板：枚举 ✅ / 实例化 ✅ / 候选队列 ✅；§10.3 选择器（score(c) + ε-greedy + 分相预算）✅；停止条件：达标/预算/不安全 ✅、可靠停滞半片 ⏳（「有希望的区域已穷尽」未做）
 Stage 4  LLM 结构提议（带三条件门禁）
 Stage 5  记忆与跨任务迁移（带两次确认）
 ```
