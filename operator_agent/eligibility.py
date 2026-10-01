@@ -110,6 +110,7 @@ def derive_eligibility(
     real_device: Optional[bool] = None,
     l3_pass_is_refused: bool = False,
     lib_fallback: bool = False,
+    static_guards: Optional[bool] = None,
     peak_exceeded: bool = False,
     cv_exceeded: bool = False,
     launch_dominance_exceeded: bool = False,
@@ -126,7 +127,11 @@ def derive_eligibility(
     5  value > 实测峰值 × 1.05 / 档位已是 uninformative → 全 False
     6  cv 超阈值 或 launch 下限占比超阈值          → DEGRADED (判决/调参/报数, 不持久化/不计进度)
     7  partition 漂移 / 档位已是 degraded          → DEGRADED (同 6 的位)
-    8  其余                                       → VALID, 全 True
+    8  静态守卫**不适用**于这份源码 (`static_guards=False`) → DEGRADED (CHECKLOG I65)
+       「查不了」不是「没有问题」: 反作弊与接口契约两道守卫都是 Python 形状的, 对一份
+       C++/CUDA 模板源它们判不了。数字本身照旧可判、可调、可报, 但**不许进长期记忆、
+       不许计进度** —— 与 6/7 同族: 低资格 ≠ 没测准, 而是这个数不足以支撑**永久**结论。
+    9  其余                                       → VALID, 全 True
 
     `validity` 是**桥接**入参: 调用方若已经有 `MeasurementAssessment.validity`,
     直接传进来, 污染、出处矛盾等没单列成布尔的信号也会落到正确的位型上。
@@ -164,5 +169,10 @@ def derive_eligibility(
     if cv_exceeded or launch_dominance_exceeded or partition_drift or tier == "degraded":
         return DEGRADED
 
-    # 规则 8
+    # 规则 8: 静态守卫不适用 (CHECKLOG I65)。三态 —— `None` (无法确立/没观测) **不改判**:
+    # 与 `real_device=None` 同一边界 (缺键 ≠ 检查过且不合格)。只有明确的 False 才降级。
+    if static_guards is False:
+        return DEGRADED
+
+    # 规则 9
     return ALL_TRUE

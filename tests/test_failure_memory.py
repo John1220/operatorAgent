@@ -108,7 +108,7 @@ class TestFailureSignature(unittest.TestCase):
         """
         from operator_agent.interface_contract import check_kernel_interface
         text = check_kernel_interface("def kernel(X, weight):\n    return X\n",
-                                      {"X", "weight", "bias"})
+                                      {"X", "weight", "bias"}).problem
         self.assertIsNotNone(text, "前提: 这份代码确实与调用契约不符")
         self.assertEqual("L1|interface_mismatch|-", failure_signature("L1", text))
         self.assertNotEqual(

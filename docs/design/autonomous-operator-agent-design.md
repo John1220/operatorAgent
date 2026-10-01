@@ -29,6 +29,7 @@
 | §10.2 三种预算 | `operator_agent/budget.py`（`BudgetPlan` + `BudgetLedger`）+ 轮次开头两道门 | ✅ 2026-10-02：oracle 次数（**预留不可挪用**）/ 墙钟 / token 三条接上并落 `artifact.metadata["budget"]`；心跳只记账不被拦。**边界**：`explore`/`refine` 不分相、按 GPU 秒未做、预算默认全关（opt-in）—— 见 [doc 67](../research/67-三种预算与不可挪用的预留.md) |
 | §10.3 候选选择 / LLM 升级门 | `operator_agent/selection.py`（`score_candidate` + `choose`） + `bandit.py` 的 `p_beats_best`/`gain_if_win`/`mean_cost*` + `budget.py` 的 `phase_room`/`phases_with_room` + conductor 轮首选择 | ⏳ **两半都在，各有边界**：①`score(c) = P(beats_best)×预期增益/预期测量秒` 与 ε-greedy **已落地**（抽签是 `(seed,轮次)` 的纯函数 ⇒ 逐轮值可离线复算；分母 = **控制端测量墙钟**，与 §10.2 墙钟同一货币，不是卡上时间），**分相预算已是选择的约束**（`_plan_phases()`：有格子 ⇒ 约束，一格都没有 ⇒ 不拿计划当约束，突破记 `over_plan`）；19/19 变异红，CHECKLOG I63/doc 75；②三条件升级门**已落地**（`escalation.py` + conductor 判决点接线 + SearchAgent 发布通道，13/13 变异红，CHECKLOG I53→I57/doc 69）—— 条件 2 今天只有 `smem-bound` 一条量具、且只在上界~×1.2 那条带里成立。**边界**：没有真模板后端（选择器只在假后端上跑）、参数轴仍只有 tiling 三维、`phase_caps` 之外没有「按 GPU 秒」的预算 |
 | §10.4 停止条件 | `operator_agent/exhaustion.py`（覆盖判据三态 + 逐轮/运行级账本） + conductor 停滞出口（两条件**同时**成立才停） | ✅ 2026-10-02：**「有希望的区域已穷尽」落地** —— `exhausted`（可枚举全集且每点观测过）/`unexplored`（还有没试的 ⇒ 不停，`declined` 记账）/`unknown`（无法确立 ⇒ 停滞条件不成立）；模板型可判、代码型恒 `unknown`（候选按需产生，收口靠轮次与 §10.2 预算）；空集不算已穷尽。14/14 变异红，CHECKLOG I64/doc 76 |
+| §4.3 资格位 / §19.3 静态守卫 | `operator_agent/source_lang.py`（适用性三态 + `coverage`） + `eligibility.py` 规则 8 + `oracle.rule_inputs` + `anticheat.AuditVerdict` / `interface_contract.InterfaceVerdict` | ✅ 2026-10-02：**「查不了」不再被读成「没问题」** —— 两道守卫都是 Python 形状的, 对 C++/CUDA 模板源判不了, 而旧返回值只有一个「有/没有问题」的通道（空违规列表 / `None`）⇒ fail-open。现在适用性三态（覆盖 / 明确没规则 / 无法确立）由**一处**判定、两个守卫消费, 随**那一份源码**走到资格层：明确不适用 ⇒ DEGRADED（可判/可调/可报,**不持久化、不计进度**），未观测 ⇒ 不改判。18/18 变异红，CHECKLOG I65/doc 77 |
 | §5 bandit 调参 | `operator_agent/bandit.py`（确定性 UCB1）+ `Conductor` 信念门 | ✅ 2026-10-02：`perf_data` / `optimization_history` / 回报统计三条信念通道按 `can_tune` / `can_count_progress` 收口（CHECKLOG I52），prompt 不再把「没有读数」渲染成 `0.00`；状态落 `artifact.metadata["bandit"]`。**臂空间只有 tiling**、`c` 未标定、证据**不进快照**（只覆盖本次运行）；**真机未复跑** —— 见 [doc 66](../research/66-搜索侧的信念门与bandit.md) |
 | §12 模板后端 / `param_space()` | `operator_agent/candidates.py` + `backend_caps.Backend.param_space`/`instantiate` + 便宜代理剪枝 | ✅ 2026-10-02 **枚举半片**（候选联合类型、分开写的去重口径、`ParamSpace` 确定性枚举、`prune_by_smem`、开关 `param_space_of`）+ ✅ 2026-10-02 **实例化半片**（`Instantiation` / `Backend.instantiate` 默认 raise / `BuiltCandidate` 身份**委派给模板点** / `source_hash` 跨语言 + `struct_sig` Python AST / 五道守卫 / 批量 `refusals` 留痕）+ ✅ 2026-10-02 **消费半片**（轮首 `select_template_candidate`：剪枝 → bandit 排序 → 按顺位取第一个建得出来的点；`action="template"` 跳过 Coder；L3 失败后整条 LLM/邻域搜索不走；`bandit_arm` = 点的去重键；全建不出来 ⇒ `template_no_candidate` 停机，不退回代码型；上界载体收成 `resource_check.caps_from_metrics`）。**边界**：L1 两道静态守卫是 Python 形状的（对 C++/CUDA 模板源空转）；剪枝只估单缓冲；参数轴只有 tiling 三维有产出者；没有真模板后端 —— 见 [doc 68](../research/68-候选联合类型与便宜代理剪枝.md) / [doc 73](../research/73-模板候选的实例化与身份.md) |
 
@@ -169,7 +170,10 @@
         can_verdict = can_tune = can_report = True
         can_persist = can_count_progress = False          ← 关键
 7  partition 漂移（驱动/库/卡变了）               → DEGRADED，跨漂移比较一律作废
-8  其余                                         → VALID，全 True
+8  静态守卫**不适用**于这份源码                   → DEGRADED（同 6/7 的位）：
+        「查不了」不是「没有问题」—— 反作弊与接口契约两道守卫都是 Python 形状的，
+        对一份 C++/CUDA 模板源判不了（判据：`source_lang.classify`，三态，见 §19.3）
+9  其余                                         → VALID，全 True
 ```
 
 两条设计意图：
@@ -178,6 +182,10 @@
   只在 VALID 放开，因此一次噪声读数**永远不能永久拉黑一个配方，也永远不能算作收敛证据**。
 - **第 3 条与第 6 条刻意不同**：降级是"数不可信"，第 3 条是"数不存在"。
   后者必须直接拒绝 `passed`，因为它测的根本不是契约要求的东西。
+- **第 8 条为什么排在 3/4/5 之后**（CHECKLOG I65）：「这份源码没被静态守卫查过」不比
+  「测的是别的库」更严重 —— 数字本身是真的，不足以支撑的只是**永久**结论（同 6/7：
+  低资格 ≠ 没测准）。三态：只有**明确**「不适用」才降级；「未观测」（老路径没带这个值）
+  **不改判** —— 缺键 ≠ 判过且不合格（同 `real_device=None` 那一边界）。
 
 > **核心原则：资格决定"这个数被允许造成什么后果"，而不只是"过没过"。**
 
@@ -814,7 +822,7 @@ class Calibrator(Protocol):
 Stage 0  契约冻结 + 只读哈希护栏 + 预检 / 峰值标定
 Stage 1  评测器 + 资格模型 + 标定心跳 + checkpoint/幂等/续跑   ← 尺子（含尺子的自检）
 Stage 2  多卡放置：干扰域 + 同卡配对（若一开始就多卡，则与 1 并行）
-Stage 3  参数模板 + bandit 搜索 + 停止条件   ← 参数模板：枚举 ✅ / 实例化 ✅ / 候选队列 ✅；§10.3 选择器（score(c) + ε-greedy + 分相预算）✅；§10.4 停止条件：达标/预算/不安全 ✅、roofline 前置 ✅、可靠停滞 ✅（第二半「有希望的区域已穷尽」已落地：模板型可判 / 代码型恒为「无法确立」⏳）
+Stage 3  参数模板 + bandit 搜索 + 停止条件   ← 参数模板：枚举 ✅ / 实例化 ✅ / 候选队列 ✅；§10.3 选择器（score(c) + ε-greedy + 分相预算）✅；§10.4 停止条件：达标/预算/不安全 ✅、roofline 前置 ✅、可靠停滞 ✅（第二半「有希望的区域已穷尽」已落地：模板型可判 / 代码型恒为「无法确立」⏳）；**跨阶段补的洞**：§19.3 的静态守卫对非 Python 源码原本空转（fail-open）⇒ 适用性三态 + §4.3 规则 8 已落地（CHECKLOG I65/doc 77），非 Python 端到端仍 ⏳（无后端可执行）
 Stage 4  LLM 结构提议（带三条件门禁）
 Stage 5  记忆与跨任务迁移（带两次确认）
 ```
@@ -970,6 +978,17 @@ Stage 5  记忆与跨任务迁移（带两次确认）
    （省 92.8% token，且方法效应大于模型效应）。
 3. **全覆盖守卫是有效组件。** 去掉后 12/27（Don't Regenerate）→ 支持 §13.2 的能力声明 + §4.3 的
    静态审计 / 反作弊**必须保留**，不能作为"简化"砍掉。
+
+   > **实现状态（2026-10-02，CHECKLOG I65）**：这一条原本只落在 Python 源码上 —— 两道守卫
+   > 都是 Python 形状的，对一份 C++/CUDA 模板源**判不了**，而返回值只有一个「有/没有问题」
+   > 的通道（空违规列表 / `None`），于是「查不了」被读成「没问题」：**fail-open**，模板源
+   > 一开始真执行，守卫就在它最需要生效的那条路上空转。现在适用性是一个**有名字的三态**
+   > （`operator_agent/source_lang.py`：覆盖 / 明确没规则 / 无法确立，附 `coverage` =
+   > `ast`/`regex_only`/`none`），由**一处**判定、两个守卫只消费结论；它随**那一份源码**
+   > 走到收口点（L1 发布 → Conductor → `verify_l3_only` 参数 → L3 → oracle 的
+   > `rule_inputs`），并按 §4.3 规则 8 收口（明确不适用 ⇒ DEGRADED）。**边界**：今天
+   > **没有任何后端能执行非 Python 源**，所以端到端不可观察；`cuda_c` 只有文本覆盖
+   > （看不穿宏与头文件）；接口契约对非 AST 语言恒不适用。
 4. **"换 harness > 换强模型"意味着预算分配要偏向 harness 工程**，而不是偏向换更大的模型。
 
 ### 19.4 两条必须保留的怀疑

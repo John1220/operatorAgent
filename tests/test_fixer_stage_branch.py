@@ -201,9 +201,11 @@ _GATE_INPUTS = ["X", "Y", "bias"]   # 与 `input_key_sets` 给门的那份同形
 def _interface_gate_text() -> str:
     from operator_agent.interface_contract import check_kernel_interface
 
-    text = check_kernel_interface(_GATE_SRC, _GATE_INPUTS)
+    verdict = check_kernel_interface(_GATE_SRC, _GATE_INPUTS)
+    text = verdict.problem
     # 夹具自己先过一道: 门哪天不再拦这个形状, 后面所有用例就都在测一份假的错误原文
     assert text is not None, "夹具那份代码不该被门放过 —— 否则下面的用例失去被测对象"
+    assert verdict.applicable is True, "夹具是 Python 源码, 这道守卫必须适用"
     assert "签名与之对不上" in text, "门的话改了 ⇒ 归类词表与第三路取向都哑了"
     return text
 

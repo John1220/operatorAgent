@@ -760,6 +760,10 @@ class SSHExecutor(Backend):
             # L2 数值门的容差表与判定式, runner 以同级模块 import
             (repo_root / "operator_agent" / "tolerance.py",
              f"{remote_dir}/tolerance.py"),
+            # 静态守卫的「适用性」判据 (CHECKLOG I65): anticheat 顶层 import 它,
+            # 所以必须排在 anticheat **前面** —— 否则远端会得到「新 anticheat + 缺依赖」
+            (repo_root / "operator_agent" / "source_lang.py",
+             f"{remote_dir}/source_lang.py"),
             # 运行时反作弊屏蔽, 与控制端 static_audit 共用同一份禁用清单
             (repo_root / "operator_agent" / "anticheat.py",
              f"{remote_dir}/anticheat.py"),

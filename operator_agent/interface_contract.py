@@ -31,7 +31,10 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import dataclass, replace
 from typing import Optional
+
+from .source_lang import LangVerdict, classify
 
 
 def _find_kernel_def(tree: ast.Module) -> Optional[ast.FunctionDef]:
@@ -142,27 +145,69 @@ def broadcast_calling_convention(test_inputs) -> str:
             "计划 JSON 里的 `kernel_signature` 只是 Planner 的建议, **以本节为准**。")
 
 
-def check_kernel_interface(source: str, input_keys) -> Optional[str]:
-    """签名对不上就返回一句处方式说明, 对得上或看不准返回 None
+@dataclass(frozen=True)
+class InterfaceVerdict:
+    """接口契约的判定 = 问题描述 + **适用性**（CHECKLOG I65）
+
+    三个值原来压在一个 `Optional[str]` 里: `None` 既是「签名对得上」也是「看不出来」。
+    现在 `problem` 只表示真的对不上; 「判不了」由 `lang.applicable` 与 `reason` 说。
+    """
+
+    problem: Optional[str]
+    lang: "LangVerdict"
+
+    @property
+    def applicable(self):
+        return self.lang.applicable
+
+    def as_metrics(self) -> dict:
+        return {"static_guard_lang": self.lang.as_dict(),
+                "static_guard_applicable": self.lang.applicable,
+                "static_guard_reason": self.lang.reason}
+
+
+def check_kernel_interface(source: str, input_keys,
+                           language: str = "") -> InterfaceVerdict:
+    """签名对不上就给出处方式说明; 对得上放 `problem=None`; **判不了**会说判不了
 
     input_keys: 调用方这次会作为关键字传进去的名字 (即 L2 用的那份输入的键)。
+    `language`: 这份源码声明的语言/DSL (空 = 没声明 ⇒ 只做一条推断, 见 `source_lang`)。
     """
+    lang = classify(source, language)
+    if lang.applicable is False:
+        return InterfaceVerdict(problem=None, lang=lang)
+    if lang.coverage != "ast":
+        # 有覆盖 (文本模式) 但**这道**守卫要的是 `def kernel` (Python AST) ⇒ 对这份源码
+        # 明确不适用。与「签名对得上」必须分得开 (CHECKLOG I65)。
+        return InterfaceVerdict(problem=None, lang=replace(
+            lang, applicable=False,
+            reason=f"接口契约要 `def kernel` (Python AST), 而 "
+                   f"{lang.language or '未声明的语言'} 的覆盖强度是 {lang.coverage} ⇒ "
+                   f"这道守卫不适用 (不是「签名对得上」)"))
     keys = {str(k) for k in (input_keys or ())}
     if not keys:
-        return None                       # 没有输入信息 = 没有可判的对象
+        return InterfaceVerdict(problem=None, lang=lang)   # 没有输入信息 = 没有可判的对象
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return None                       # 语法错由 L1 的预检负责, 这里不抢话
+        # 语法错由 L1 的预检负责, 这里不抢话 —— 但「解析不了」这件事要说出来:
+        # 语言声明是 Python 却解析不了 ⇒ 适用性从「适用」降成「无法确立」。
+        return InterfaceVerdict(problem=None, lang=replace(
+            lang, applicable=None, family="unknown", coverage="none",
+            reason="声明/推断为 Python, 但源码解析不了 (语法错由 L1 预检负责) ⇒ "
+                   "接口契约这一道判不了"))
     fn = _find_kernel_def(tree)
     if fn is None:
-        return None
+        return InterfaceVerdict(problem=None, lang=replace(
+            lang, applicable=None, family="unknown", coverage="none",
+            reason="找不到 `def kernel` 入口 ⇒ 这道契约检查对本轮候选判不了 "
+                   "(不是「签名对得上」)"))
     a = _arg_names(fn.args)
     named = set(a["posonly"]) | set(a["poskw"]) | set(a["kwonly"])
 
     problems = []
     if a["kwarg"]:
-        return None                       # **kwargs: 传什么都接得住
+        return InterfaceVerdict(problem=None, lang=lang)   # **kwargs: 传什么都接得住
     # positional-only 的参数**无法**用关键字传 → 必填的那些必然撞上
     blocked = [n for n in a["posonly"] if n in a["no_default"]]
     if blocked:
@@ -178,10 +223,10 @@ def check_kernel_interface(source: str, input_keys) -> Optional[str]:
     if extra:
         problems.append(f"调用方会传、但 kernel() 没收的参数: {', '.join(extra)}")
     if not problems:
-        return None
+        return InterfaceVerdict(problem=None, lang=lang)
 
     declared = ", ".join(a["posonly"] + a["poskw"] + a["kwonly"]) or "(无参数)"
-    return (
+    return InterfaceVerdict(problem=(
         "根因: 调用方固定以 `kernel(**输入)` 的**全关键字**方式调用核函数, 而这份代码的 "
         "kernel() 签名与之对不上 —— 真跑起来必然抛 "
         "`TypeError: kernel() got an unexpected keyword argument ...`。\n"
@@ -193,4 +238,4 @@ def check_kernel_interface(source: str, input_keys) -> Optional[str]:
           "(或整体写成 `def kernel(*args, **kwargs)` 再自己取)。"
           "注意不要改输入名 —— 那是任务侧给的。\n"
           f"位置: 第 {fn.lineno} 行的 `def kernel`。"
-    )
+    ), lang=lang)

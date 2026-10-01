@@ -89,13 +89,13 @@ class TestStaticAuditCatchesBothDSL(unittest.TestCase):
     def test_triton(self):
         for name, code in CAUGHT_BOTH_DSL.items():
             with self.subTest(case=name):
-                self.assertTrue(static_audit(code, "triton"),
+                self.assertTrue(static_audit(code, "triton").violations,
                                 f"{name} 本该被拦下, 现在漏过了 (回归)")
 
     def test_python(self):
         for name, code in CAUGHT_BOTH_DSL.items():
             with self.subTest(case=name):
-                self.assertTrue(static_audit(code, "python"),
+                self.assertTrue(static_audit(code, "python").violations,
                                 f"{name} 本该被拦下, 现在漏过了 (回归)")
 
 
@@ -105,12 +105,12 @@ class TestStaticAuditCatchesGpuDSL(unittest.TestCase):
     def test_triton(self):
         for name, code in CAUGHT_GPU_DSL_ONLY.items():
             with self.subTest(case=name):
-                self.assertTrue(static_audit(code, "triton"), f"{name} 漏过 (回归)")
+                self.assertTrue(static_audit(code, "triton").violations, f"{name} 漏过 (回归)")
 
     def test_cuda_c(self):
         for name, code in CAUGHT_GPU_DSL_ONLY.items():
             with self.subTest(case=name):
-                self.assertTrue(static_audit(code, "cuda_c"), f"{name} 漏过 (回归)")
+                self.assertTrue(static_audit(code, "cuda_c").violations, f"{name} 漏过 (回归)")
 
 
 class TestStaticAuditNoFalsePositive(unittest.TestCase):
@@ -118,7 +118,7 @@ class TestStaticAuditNoFalsePositive(unittest.TestCase):
 
     def test_legit_triton_kernel_passes(self):
         """`tl.dot` 与 `torch.empty` 都是合法用法，不得被误拦"""
-        self.assertEqual(static_audit(LEGIT_TRITON, "triton"), [])
+        self.assertEqual(static_audit(LEGIT_TRITON, "triton").violations, [])
 
     def test_python_dsl_allows_numpy_at_operator(self):
         """python DSL 下 numpy 的 `@` 是实现介质
@@ -126,17 +126,17 @@ class TestStaticAuditNoFalsePositive(unittest.TestCase):
         若将来为拦 torch 的 `A @ B` 而把 @ 运算符一律禁掉, 这个用例会失败 ——
         那是有意的。
         """
-        self.assertEqual(static_audit(LEGIT_PYTHON_NUMPY, "python"), [])
+        self.assertEqual(static_audit(LEGIT_PYTHON_NUMPY, "python").violations, [])
 
     def test_python_dsl_allows_numpy_dot_method(self):
         """`.dot()` 是 numpy 数组的合法方法, python DSL 下不得拦"""
         code = "import numpy as np\n\ndef kernel(A,B):\n    return A.dot(B)\n"
-        self.assertEqual(static_audit(code, "python"), [])
+        self.assertEqual(static_audit(code, "python").violations, [])
 
     def test_numpy_fallback_still_blocked_under_gpu_dsl(self):
         """同一份代码换到 GPU DSL 下就该拦 —— 证明按 DSL 分流真的在起作用"""
         code = "import numpy as np\n\ndef kernel(A,B):\n    return np.matmul(A,B)\n"
-        self.assertTrue(static_audit(code, "triton"))
+        self.assertTrue(static_audit(code, "triton").violations)
 
     def test_docstring_mention_not_flagged(self):
         """docstring 里提到 torch.matmul 不算调用
@@ -147,7 +147,7 @@ class TestStaticAuditNoFalsePositive(unittest.TestCase):
         code = ('"""本 kernel 用 tl.dot 实现，参考结果用 torch.matmul 验证。"""\n'
                 "import triton.language as tl\n\n"
                 "def kernel(A,B):\n    return tl.dot(A,B)\n")
-        self.assertEqual(static_audit(code, "triton"), [])
+        self.assertEqual(static_audit(code, "triton").violations, [])
 
     def test_main_block_not_flagged(self):
         """`if __name__ == "__main__":` 里的自测代码不算 kernel 实现"""
@@ -155,7 +155,7 @@ class TestStaticAuditNoFalsePositive(unittest.TestCase):
                 'if __name__ == "__main__":\n'
                 "    import torch\n"
                 "    ref = torch.matmul(A, B)\n")
-        self.assertEqual(static_audit(code, "triton"), [])
+        self.assertEqual(static_audit(code, "triton").violations, [])
 
 
 class TestHardwareWhitelist(unittest.TestCase):
@@ -167,18 +167,18 @@ class TestHardwareWhitelist(unittest.TestCase):
 
     def test_ascend_python_dsl_allows_torch_matmul(self):
         code = "import torch\n\ndef kernel(A,B):\n    return torch.matmul(A,B)\n"
-        self.assertEqual(static_audit(code, "python", hardware="Ascend910"), [])
+        self.assertEqual(static_audit(code, "python", hardware="Ascend910").violations, [])
 
     def test_ascend_triton_dsl_allows_torch_but_blocks_numpy(self):
         torch_code = "import torch\n\ndef kernel(A,B):\n    return torch.matmul(A,B)\n"
-        self.assertEqual(static_audit(torch_code, "triton", hardware="ascend"), [])
+        self.assertEqual(static_audit(torch_code, "triton", hardware="ascend").violations, [])
         np_code = "import numpy as np\n\ndef kernel(A,B):\n    return np.matmul(A,B)\n"
-        self.assertTrue(static_audit(np_code, "triton", hardware="ascend"),
+        self.assertTrue(static_audit(np_code, "triton", hardware="ascend").violations,
                         "白名单只放开 torch, 用 NumPy 在 host 侧算出结果仍然是作弊")
 
     def test_nvidia_not_whitelisted(self):
         code = "import torch\n\ndef kernel(A,B):\n    return torch.matmul(A,B)\n"
-        self.assertTrue(static_audit(code, "python", hardware="nvidia_gpu"))
+        self.assertTrue(static_audit(code, "python", hardware="nvidia_gpu").violations)
 
 
 class TestSyntaxErrorFailClosed(unittest.TestCase):
@@ -187,7 +187,7 @@ class TestSyntaxErrorFailClosed(unittest.TestCase):
     def test_broken_code_still_audited_by_regex(self):
         # 括号未闭合 → ast.parse 抛 SyntaxError；正则仍应抓到 torch.matmul
         code = "def kernel(A,B:\n    import torch\n    return torch.matmul(A,B\n"
-        self.assertTrue(static_audit(code, "triton"),
+        self.assertTrue(static_audit(code, "triton").violations,
                         "AST 解析失败时必须退回正则, 不能直接返回空列表")
 
 

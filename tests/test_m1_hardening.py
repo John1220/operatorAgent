@@ -124,24 +124,24 @@ class TestCleanCodeSafety(unittest.TestCase):
 
 class TestStaticAudit(unittest.TestCase):
     def test_detects_torch_matmul_in_triton(self):
-        violations = static_audit(TRITON_CHEAT, "triton")
+        violations = static_audit(TRITON_CHEAT, "triton").violations
         self.assertTrue(any("torch" in v for v in violations))
 
     def test_clean_triton_passes(self):
-        self.assertEqual(static_audit(TRITON_CLEAN, "triton"), [])
+        self.assertEqual(static_audit(TRITON_CLEAN, "triton").violations, [])
 
     def test_python_dsl_allows_numpy(self):
-        self.assertEqual(static_audit(PYTHON_MATMUL, "python"), [])
+        self.assertEqual(static_audit(PYTHON_MATMUL, "python").violations, [])
 
     def test_python_dsl_blocks_torch(self):
         code = "import torch\ndef kernel(A, B):\n    return torch.matmul(A, B)"
-        self.assertTrue(static_audit(code, "python"))
+        self.assertTrue(static_audit(code, "python").violations)
 
     def test_detects_functional_and_numpy_fallback(self):
         code = "import torch.nn.functional as F\nimport numpy as np\ndef kernel(X):\n    return F.softmax(X, dim=-1)"
-        self.assertTrue(static_audit(code, "triton"))
+        self.assertTrue(static_audit(code, "triton").violations)
         np_code = "import numpy as np\ndef kernel(A, B):\n    return np.matmul(A, B)"
-        self.assertTrue(static_audit(np_code, "triton"))
+        self.assertTrue(static_audit(np_code, "triton").violations)
 
 
 # ─── P0-4: 运行时屏蔽 ────────────────────────────────────────

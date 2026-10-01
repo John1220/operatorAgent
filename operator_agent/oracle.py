@@ -74,6 +74,18 @@ class Observation:
         }
 
 
+def _tri_state(value):
+    """`True`/`False`/`None` 的三态: 缺键与 `None` 都是「没观测」, 不许被读成 False。
+
+    `bool("false")` 与 `bool("")` 这类字符串/空值的歧义在这里一并收掉: 只认真正的布尔。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return None
+
+
 def evaluate(contract: FrozenContract,
              measure: Callable[[], Mapping[str, Any]],
              *,
@@ -240,6 +252,9 @@ def evaluate(contract: FrozenContract,
         "l3_pass_is_refused": bool(raw.get("l3_pass_is_refused")),
         "real_device": raw.get("real_device"),
         "require_real_device": bool(require_real_device),
+        # 静态守卫的**适用性** (CHECKLOG I65): 三态, 缺键时是 None = 没观测 ⇒ 不改判。
+        # 只有明确的 False («这两道守卫对这份源码判不了») 才降级。
+        "static_guards": _tri_state(raw.get("static_guards")),
     }
     elig = derive_eligibility(
         validity=validity,
@@ -253,7 +268,16 @@ def evaluate(contract: FrozenContract,
         launch_dominance_exceeded=rule_inputs["launch_dominance_exceeded"],
         partition_drift=rule_inputs["partition_drift"],
         l3_pass_is_refused=rule_inputs["l3_pass_is_refused"],
+        static_guards=rule_inputs["static_guards"],
     )
+    if rule_inputs["static_guards"] is False:
+        reasons.append(
+            "静态守卫对这份源码**不适用** (语言不在守卫覆盖内, 见 "
+            "static_guards_lang): 「没有违规」不是「查过了没有违规」⇒ 这个数可判、可调、"
+            "可报, 但不得进长期记忆、不得计进度")
+    elif rule_inputs["static_guards"] is None:
+        reasons.append("静态守卫的适用性**未观测** (调用方没带 static_guards): 不改判, "
+                       "但这一格空着不等于查过")
     if not hb_ok:
         reasons.append(f"{RULER_BROKEN}: 标定心跳失败, 同窗观测全资格 False")
         reasons.extend(hb_reasons)

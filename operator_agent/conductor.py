@@ -40,6 +40,7 @@ from .bandit import Bandit
 from .exhaustion import (FROM_LLM_ON_DEMAND, FROM_TEMPLATE_SPACE,
                           CoverageLedger, assess_coverage, undeclared)
 from .selection import DEFAULT_EPSILON, choose, explore_draw, phase_of
+from .source_lang import flag_from_metrics
 from .escalation import (
     EscalationInputs, decide, smem_bound_evidence, untried_directions,
 )
@@ -1109,6 +1110,11 @@ class Conductor:
                         environment_drift=verify_drift,
                         heartbeat=heartbeat,
                         heartbeat_expected=heartbeat_expected,
+                        # 静态守卫的适用性来自**这次胜者**的 L1/L2 结果, 不是 Verifier
+                        # 的实例状态 (一个实例连验多个候选, 存字段就是「记录说 A、
+                        # 判定按 B」)—— CHECKLOG I65。
+                        static_guards=flag_from_metrics(
+                            *(r.metrics for r in selected_l1_l2 or [])),
                     )
                 else:
                     print(f"\n[Verifier] 执行三级验证...")
@@ -2297,7 +2303,11 @@ class Conductor:
             results = self.verifier.verify_l3_only(
                 kernel_code=artifact.code, test_inputs=test_inputs,
                 target_gflops=target_gflops, task=task,
-                heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
+                heartbeat=heartbeat, heartbeat_expected=heartbeat_expected,
+                # 重测也是一次资格判定: 适用性从**产物里记的那几级结果**里读
+                # (`flag_from_metrics` 取最保守的一档; 一条都没有 ⇒ None = 不改判)。
+                static_guards=flag_from_metrics(
+                    *(r.metrics for r in (artifact.verification_results or []))))
             # §10.2 的「最后 10% 不可挪用」: 这一次重测花的是**预留**那一格。记账放在
             # 调用之后 (它已经花了机时), 而且花的是 confirm —— 非 confirm 的开销碰不到它。
             self._budget.oracle_spend("confirm")

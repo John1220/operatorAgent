@@ -23,6 +23,13 @@ import re
 from contextlib import contextmanager
 from typing import Optional
 
+from dataclasses import dataclass
+
+try:                                    # 包内导入 (控制端)
+    from .source_lang import LangVerdict, classify
+except ImportError:                     # 远端脚本把本文件当**顶层模块**加载
+    from source_lang import LangVerdict, classify   # type: ignore[no-redef]
+
 
 class CheatDetectedError(RuntimeError):
     """验证期间检测到禁用的原生算子调用"""
@@ -398,7 +405,41 @@ def _audit_by_regex(code: str, rules) -> list:
     return violations
 
 
-def static_audit(code: str, dsl: str = "python", hardware: Optional[str] = None) -> list[str]:
+class AuditVerdict(list):
+    """静态审计的结果 = 违规列表 + **适用性**（CHECKLOG I65）
+
+    「空列表」原来有两个意思: 查过了没有违规 / 根本没查成。现在后者由 `applicable` 与
+    `lang.reason` 说出来 —— 判据在 `source_lang.classify` 一处, 这里只消费。
+
+    为什么是 `list` 的**子类**而不是一个带 `violations` 字段的 dataclass: 这个返回值会
+    跨进程 (远端 `run_kernel.py` 把它塞进 JSON) 也要被旧读法消费 (`len` / 切片 / `== []` /
+    `bool`)。子类让这些读法**一个字都不用改** —— 而「查不了」这件事是**新增**的一位,
+    新读者读 `.applicable` 即可。⚠️ 边界: `bool(verdict)` 只表示「有违规」, **不**表示
+    「查过」—— 空列表既可能是「查过没违规」也可能是「不适用」。
+    """
+
+    __slots__ = ("lang",)
+
+    def __init__(self, violations, lang: "LangVerdict"):
+        super().__init__(violations)
+        self.lang = lang
+
+    @property
+    def violations(self) -> list:
+        """旧名字的视图 (与自身等值的新列表 —— 不是第二份判定)"""
+        return list(self)
+
+    @property
+    def applicable(self):
+        return self.lang.applicable
+
+    def as_metrics(self) -> dict:
+        return {"static_guards": self.lang.applicable,
+                "static_guards_lang": self.lang.as_dict()}
+
+
+def static_audit(code: str, dsl: str = "python",
+                 hardware: Optional[str] = None) -> AuditVerdict:
     """
     静态审计: 扫描代码中禁用的原生算子调用
 
@@ -408,8 +449,12 @@ def static_audit(code: str, dsl: str = "python", hardware: Optional[str] = None)
         hardware: 目标硬件 (新增, 可选)；用于对白名单自研加速卡放开 torch.* 计算
 
     Returns:
-        违规描述列表 (空列表 = 通过)
+        `AuditVerdict`: 违规列表 + 适用性。**不适用的源码不会被读成「没有违规」** ——
+        返回的 `violations` 仍是空, 但 `applicable` 是 False/None。
     """
+    lang = classify(code, dsl)
+    if lang.applicable is False:
+        return AuditVerdict([], lang)
     normalized_dsl = (dsl or "").lower()
     is_python_dsl = normalized_dsl == "python"
 
@@ -422,13 +467,13 @@ def static_audit(code: str, dsl: str = "python", hardware: Optional[str] = None)
     whitelisted = _hardware_allows_torch_compute(hardware)
     numpy_only = whitelisted and normalized_dsl not in ("python", "cuda_c")
     if whitelisted and not numpy_only:
-        return []
+        return AuditVerdict([], lang)
 
     violations = _audit_by_ast(code, normalized_dsl)
     if violations is not None:
         if not numpy_only:
-            return violations
-        return [v for v in violations if "NumPy" in v]
+            return AuditVerdict(list(violations), lang)
+        return AuditVerdict([v for v in violations if "NumPy" in v], lang)
 
     # AST 解析失败 (代码有语法错) → 退回正则。宁可两套都跑也不要因为解析不出
     # 就放行: L1 的 compile() 预检通常会先拦下语法错，但 static_audit 是公开
@@ -437,7 +482,7 @@ def static_audit(code: str, dsl: str = "python", hardware: Optional[str] = None)
         rules = [_NUMPY_RULES]
     else:
         rules = _PYTHON_DSL_RULES if is_python_dsl else _GPU_DSL_RULES
-    return _audit_by_regex(code, rules)
+    return AuditVerdict(_audit_by_regex(code, rules), lang)
 
 
 # ─── 运行时屏蔽 ──────────────────────────────────────────────

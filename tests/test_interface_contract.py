@@ -12,7 +12,9 @@ from operator_agent.verifier import Verifier
 
 
 def _msg(src, keys):
-    return check_kernel_interface(src, keys)
+    # 判定对象现在带**适用性** (CHECKLOG I65): 本文件测的是「问题描述」那一半,
+    # 所以统一取 `problem`。适配性那一半在 tests/test_guard_applicability.py。
+    return check_kernel_interface(src, keys).problem
 
 
 class TestContractChecker(unittest.TestCase):
@@ -86,7 +88,7 @@ class TestContractChecker(unittest.TestCase):
         """多组输入套件要逐组判: 第 2 组多带一个键, 那一组运行时就会炸"""
         src = "def kernel(A, B):\n    return A\n"
         sets = [["A", "B"], ["A", "B", "scale"]]
-        msgs = [check_kernel_interface(src, k) for k in sets]
+        msgs = [check_kernel_interface(src, k).problem for k in sets]
         self.assertIsNone(msgs[0])
         self.assertIsNotNone(msgs[1], "只看第一组会把后面几组的不匹配整个漏掉")
 

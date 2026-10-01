@@ -165,7 +165,7 @@ class TestBroadcastAndGateAgree(unittest.TestCase):
             names = _broadcast_names(text)
             self.assertTrue(names, f"广播没列出名字: {text}")
             for keys in input_key_sets(inputs):
-                self.assertIsNone(check_kernel_interface(self._kernel_source(names), keys),
+                self.assertIsNone(check_kernel_interface(self._kernel_source(names), keys).problem,
                                   f"照广播写的核被 L1 契约门拦下了: {sorted(names)} vs {keys}")
 
     def test_dropping_one_broadcasted_name_is_caught(self):
@@ -173,13 +173,13 @@ class TestBroadcastAndGateAgree(unittest.TestCase):
         names = sorted(_broadcast_names(broadcast_calling_convention(LAYERNORM_INPUTS)))
         self.assertEqual(3, len(names), names)
         short = self._kernel_source(names[:2])
-        self.assertIsNotNone(check_kernel_interface(short, names),
+        self.assertIsNotNone(check_kernel_interface(short, names).problem,
                              "照广播少写一个参数却没被 L1 拦住 ⇒ 广播与判据不同源")
 
     def test_the_planners_guess_would_have_failed(self):
         """缺陷存在性的证据: Planner 那句猜测对 layernorm 就是错的契约"""
         msg = check_kernel_interface("def kernel(A, B):\n    return A @ B\n",
-                                     list(LAYERNORM_INPUTS))
+                                     list(LAYERNORM_INPUTS)).problem
         self.assertIsNotNone(msg, "如果这句变成 None, 那「模型在猜错的契约」这个前提没了, "
                                   "本文件的用例需要重读")
 

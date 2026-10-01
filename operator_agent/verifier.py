@@ -16,6 +16,20 @@ from .schemas import (
     VerificationResult, VerificationLevel, TaskSchema, Precision,
 )
 from .anticheat import static_audit
+from .source_lang import classify
+
+
+def _l1_guard_metrics(lang) -> dict:
+    """把静态守卫的**适用性**搬进 metrics (CHECKLOG I65)。
+
+    这一段是**搬运**不是判定 (判据在 `source_lang.classify`): 产物里要能读到「两道静态
+    守卫对这份源码适用吗」, 而不是只有一个空的违规列表。三态照记 —— 「无法确立」与
+    「不适用」与「适用」在产物里必须分得开 (资格层读的就是这个值)。
+    """
+    if lang is None:
+        return {}
+    return {"static_guards": lang.applicable,
+            "static_guards_lang": lang.as_dict()}
 from .interface_contract import check_kernel_interface, input_key_sets
 from . import tolerance
 from . import measurement
@@ -279,29 +293,45 @@ class Verifier:
         l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
                                       environment_drift=environment_drift,
                                       heartbeat=heartbeat,
-                                      heartbeat_expected=heartbeat_expected)
+                                      heartbeat_expected=heartbeat_expected,
+                                      static_guards=l1.metrics.get("static_guards"))
         results.append(l3)
         return results
 
     def verify_l3_only(self, kernel_code: str, test_inputs, target_gflops: float,
                        task: TaskSchema, environment_drift=None,
                        heartbeat=None, heartbeat_expected: bool = False,
+                       static_guards: Optional[bool] = None,
                        ) -> list[VerificationResult]:
         """只跑 L3 (P1-1): 胜出候选已带 L1+L2 结果时的续接入口
 
         读者是 Conductor 的候选选择: 决赛候选在 `verify(stop_after=L2)` 里真机
         定过胜负后, 胜者用本方法补跑 L3 —— 真机 L2 不重复执行。返回单元素列表,
         由调用方与已有的 L1+L2 结果拼接成完整三级。
+
+        `static_guards`: 胜者那份源码的静态守卫适用性, 从它的 L1 结果里读出来
+        (`metrics["static_guards"]`)。为什么必须由调用方传: 它属于**那一份源码**, 而
+        Verifier 一个实例会连着验多个候选 —— 存成实例字段就是「记录说 A、判定按 B」
+        那个坑 (CHECKLOG I65)。None = 没观测 ⇒ 不改判。
         """
         l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
                                       environment_drift=environment_drift,
                                       heartbeat=heartbeat,
-                                      heartbeat_expected=heartbeat_expected)
+                                      heartbeat_expected=heartbeat_expected,
+                                      static_guards=static_guards)
         return [l3]
 
     def _verify_compile(self, kernel_code: str, dsl: str = "python",
                         input_key_sets=None) -> VerificationResult:
         print("  [Verifier] L1: 编译验证...")
+        # 静态守卫的适用性: 两道守卫 (接口契约 / 反作弊) 都是 Python 形状的, 对一份 C++/CUDA
+        # 模板源它们「判不了」—— 而旧的返回值形状只有一个「有/没有问题」的通道, 于是
+        # 「查不了」被读成「没问题」(fail-open)。判据只有一处 (`source_lang.classify`),
+        # 结论随 L1 的 metrics 走, 由资格层收口 (CHECKLOG I65)。
+        _guard_lang = classify(kernel_code, dsl)
+        _guard_metrics = _l1_guard_metrics(_guard_lang)
+        if _guard_lang.applicable is not True:
+            print(f"  [Verifier] L1 静态守卫**不适用/无法确立**: {_guard_lang.reason}")
         # 本地语法预检: 截断/缩进/未终结字面量等 SyntaxError 直接判失败,
         # 避免把明知无效的代码发去远程编译 (省 SSH 往返, 错误更清晰)
         # cuda_c (PyTorch C++ Extension): 代码内含 C++ 源码字符串, Python compile() 可能
@@ -327,11 +357,9 @@ class Verifier:
         # 连烧 3 轮在 `kernel() got an unexpected keyword argument 'causal'`)。
         # 放在缓存之前: 这是本地 AST 遍历, 微秒级, 而缓存键只看代码哈希 —— 同一份代码
         # 配不同的输入集, 契约结论可以不同, 不能让缓存把它吞掉。
-        mismatch = None
-        for keys in (input_key_sets or []):
-            mismatch = check_kernel_interface(kernel_code, keys)
-            if mismatch:
-                break
+        verdicts = [check_kernel_interface(kernel_code, keys, language=dsl)
+                    for keys in (input_key_sets or [])]
+        mismatch = next((v.problem for v in verdicts if v.problem), None)
         if mismatch:
             print("  [Verifier] L1 FAILED: 核函数接口与调用契约不符 (未动 GPU)")
             return VerificationResult(
@@ -339,7 +367,8 @@ class Verifier:
                 message="编译失败: " + mismatch.split("\n")[0],
                 error_log=mismatch,
                 metrics={"compile_status": "interface_mismatch",
-                         "backend": str(self.backend)},
+                         "backend": str(self.backend),
+                         **_guard_metrics},
             )
         # 资源可行性预检 (LeetCUDA bench/utils.cu 的 smem 预检同款):
         # 这套 BLOCK 放不下时, 真启动只会给一句 `out of resource`, 看不出是哪个
@@ -374,19 +403,25 @@ class Verifier:
         cache_key = hashlib.sha256(kernel_code.encode("utf-8")).hexdigest()
         if cache_key in self._compile_cache:
             print("  [Verifier] L1 PASSED: 编译缓存命中")
-            return VerificationResult(level=VerificationLevel.L1_COMPILE, passed=True, message="编译验证通过 (缓存命中)", metrics={"compile_status": "cached", "backend": str(self.backend)})
+            return VerificationResult(level=VerificationLevel.L1_COMPILE, passed=True, message="编译验证通过 (缓存命中)", metrics={"compile_status": "cached", "backend": str(self.backend),
+                             **_guard_metrics})
         try:
             self.backend.compile(kernel_code)
             self._compile_cache[cache_key] = True
             print("  [Verifier] L1 PASSED: 编译成功")
-            return VerificationResult(level=VerificationLevel.L1_COMPILE, passed=True, message="编译验证通过", metrics={"compile_status": "success", "backend": str(self.backend)})
+            return VerificationResult(level=VerificationLevel.L1_COMPILE, passed=True,
+                                      message="编译验证通过",
+                                      metrics={"compile_status": "success",
+                                               "backend": str(self.backend),
+                                               **_guard_metrics})
         except Exception as e:
             print(f"  [Verifier] L1 FAILED: {e}")
             # 远程编译错误全文可达上千字符 (gcc/Triton 会回显源码), 只把首行放进 message,
             # 否则 Fixer prompt 里同一份全文会出现两遍
             head, full = failure_pair(e)
             return VerificationResult(level=VerificationLevel.L1_COMPILE, passed=False,
-                                      message=f"编译失败: {head}", error_log=full)
+                                      message=f"编译失败: {head}", error_log=full,
+                                      metrics=dict(_guard_metrics))
 
     def _verify_function(self, kernel_code: str, test_inputs, expected_output, task: TaskSchema) -> VerificationResult:
         print("  [Verifier] L2: 功能验证...")
@@ -394,7 +429,8 @@ class Verifier:
         # 反作弊静态审计: 执行前先检查是否存在原生算子回退调用
         #   注意: 昇腾等自研加速卡白名单放开 torch.matmul 等 (因为它们的 Tensor Core
         #   只能通过厂商的 torch 后端下放激活)
-        violations = static_audit(kernel_code, task.target.dsl, hardware=task.target.hardware)
+        audit = static_audit(kernel_code, task.target.dsl, hardware=task.target.hardware)
+        violations = audit.violations
         if violations:
             print(f"  [Verifier] L2 FAILED: 反作弊静态审计未通过 ({len(violations)} 处违规)")
             from .anticheat import lib_fallback_metrics
@@ -403,8 +439,13 @@ class Verifier:
                 message=f"反作弊: 检测到禁用的原生算子回退调用 ({len(violations)} 处)",
                 error_log="\n".join(violations),
                 # lib_fallback 生产者 (spine-review P1-4): 静态审计命中也是库回退
-                metrics=lib_fallback_metrics(violations=violations),
+                metrics=dict(lib_fallback_metrics(violations=violations),
+                             **_l1_guard_metrics(audit.lang)),
             )
+        if audit.applicable is not True:
+            # 「查不了」必须说出来 (CHECKLOG I65): 空的违规列表在这里**不表示**没有违规。
+            # 不拦这一轮 (守卫不是判据, 判据是它的适用性 —— 由资格层收口), 但不许静默。
+            print(f"  [Verifier] L2 反作弊静态审计**不适用**: {audit.lang.reason}")
 
         # 支持单组输入 (dict) 或多组输入套件 (list[dict])
         input_sets = test_inputs if isinstance(test_inputs, list) else [test_inputs]
@@ -909,6 +950,7 @@ class Verifier:
                             task: TaskSchema,
                             environment_drift: Optional[list] = None,
                             heartbeat=None, heartbeat_expected: bool = False,
+                            static_guards: Optional[bool] = None,
                             ) -> VerificationResult:
         min_required = task.constraints.min_speedup
         print(f"  [Verifier] L3: 性能验证 (要求加速比 >= {min_required:.2f}x vs baseline)...")
@@ -1009,6 +1051,13 @@ class Verifier:
         metrics["device_lease"] = dict(lease.as_dict(), evidence=lease_text,
                                        competition=lease_state)
         metrics["device_lease_text"] = lease_text
+
+        # 静态守卫的适用性**发布** (CHECKLOG I65): `_assess_measurement` 是另一个方法,
+        # 它拿不到这里的局部量 —— 所以判定要读的那一份必须先发布进 metrics (与
+        # `arm_device_labels`/`arm_windows` 同一写法)。三态: `None` (没观测) **不写键**,
+        # 「观测了但没有值」与「没观测」在产物里必须分得开。
+        if static_guards is not None:
+            metrics["static_guards"] = bool(static_guards)
 
         # ---- 注入 Roofline 指标, 供 SearchAgent 做结构化优化决策 ----
         metrics.update({
@@ -1356,6 +1405,11 @@ class Verifier:
                             assessment.launch_dominance is not None
                             and assessment.launch_dominance > 0.5),
                         "partition_drift": bool(assessment.environment_drift),
+                        # 静态守卫的适用性 (CHECKLOG I65): 读**已经发布进 metrics 的
+                        # 那一份** —— 判定看的必须就是产物里记的 (与 arm_device_labels /
+                        # arm_windows 同一个写法)。它由 `_verify_performance` 从 L1 结果
+                        # 搬进来, 不是 Verifier 实例字段 (一个实例验多个候选)。
+                        "static_guards": metrics.get("static_guards"),
                     },
                     record_hash=carried or None,
                     fresh=not carried,
