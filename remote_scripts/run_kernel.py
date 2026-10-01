@@ -365,10 +365,16 @@ def run_compile(code: str) -> dict:
 
 
 def _deserialize_inputs(inputs: dict) -> dict:
-    """反序列化输入。支持两种格式:
-    - 轻量模式: {"_generate": true, "specs": {"A": {"shape": [...], "dtype": "...", "seed": N}}}
+    """反序列化输入。支持三种格式:
+    - 轻量模式: {"_generate": true, "specs": {...}, "scalars": {...}}
     - 完整模式 (legacy): {"A": {"shape": [...], "dtype": "...", "data": [...]}}
     - 标量/布尔直通 (如 causal=False): 不具有 "shape"/"data" 键者原样透传
+
+    `scalars` 是 2026-10-01 补的: 在它之前, 轻量模式把**标量也**按
+    「shape+dtype+seed 重新生成」处理, 于是 `causal=False` 变成一个 `astype(bool)`
+    之后的 N(0,1) 抽样 —— 实测几乎总是 `True`, `eps=1e-5` 变成 `-0.0223`,
+    `repeats=8` 变成 `0`。带标量参数的候选核因此在真机上验的是另一个算子 (而 L2
+    会照样给出通过/不通过)。标量按值直传才与上面第三条「原样透传」的承诺一致。
     """
     if inputs.get("_generate"):
         out = {}
@@ -378,6 +384,9 @@ def _deserialize_inputs(inputs: dict) -> dict:
             dtype = spec["dtype"]
             # 生成与 controller 端一致的随机数据 (正态分布 × 0.1)
             out[k] = (rng.standard_normal(shape, dtype=np.float32) * 0.1).astype(dtype)
+        # 标量不在 specs 里 (没有 shape/seed 可言), 按值收下。
+        for k, v in (inputs.get("scalars") or {}).items():
+            out[k] = v
         return out
 
     # Legacy: 完整 JSON 数据 + 标量透传

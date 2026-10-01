@@ -39,6 +39,14 @@ from _scratch import remote_scratch_path, stop_interferer  # noqa: E402
 
 # ── 参照核: 同一算子, 一个快一个慢 ─────────────────────────────
 # 取 matmul 1024³: 足够大到 launch 地板不支配 (doc 31), 但一轮 <1s。
+#
+# ⚠️ 2026-10-01 实测 (doc 61 §二): 下面三个核**都是 numpy**, 于是被 `_detect_language`
+# 判成 `numpy` → `_benchmark_torch_numpy` 的 else 分支 → 量在**远端 CPU** 上
+# (`device='cpu'`, 256³ 实测 0.0751 ms)。所以这份脚本验的是「部署/传输/执行/计时」这条
+# 通路, §14-1/§14-2 里关于 **GPU** 的那两问它今天答不了; BURNER 那路虽然写着
+# `CUDA_VISIBLE_DEVICES={gpu}`, numpy 不认这个变量 ⇒ 它占的是 CPU 核而不是卡。
+# 要真的量 GPU, 按 doc 61 §二⑤ 换成 triton 那对 (真机 0.1057 ms vs 0.8193 ms = 7.75×;
+# 注意参照核必须自己 `A.float()` —— fp64 输入会让 `tl.dot` 编不过)。
 GOOD = """
 import numpy as np
 def kernel(A, B):

@@ -874,19 +874,31 @@ class SSHExecutor(Backend):
         seed 用 zlib.crc32 而非内建 hash(): 后者受 PYTHONHASHSEED 随机化, 每次进程
         都不同, 会让跨运行的输入不可复现、L3 加速比不可比。键名必须参与派生, 否则
         同 shape+dtype 的两个输入 (方阵 matmul 的 A/B) 会生成出同一份数据。
+
+        ⚠️ **标量 / 布尔 / 字符串走 `scalars` 按值直传**, 不进 `specs`。这不是优化,
+        是修一个真机实测到的静默错值 (2026-10-01, algorithm-h20): 标量若也按
+        「shape+dtype+seed 重新生成」, 它的**值会被一个 N(0,1) 抽样顶掉**再按 dtype
+        截断 —— `causal=False` 到远端成了 `np.True_` (布尔被翻转), `eps=1e-5` 成了
+        `-0.0223`, `repeats=8` 成了 `0`。后果不是「数不好看」: 带 `causal`/`eps`
+        这类标量参数的候选核在真机上验的是**另一个算子**, 而 L2 会照样给出通过/不通过。
         """
         import zlib
         import numpy as np
-        specs = {}
+        specs, scalars = {}, {}
         for k, v in inputs.items():
             arr = np.asarray(v)
+            if arr.ndim == 0:
+                # 0 维没有「数据」可言 (形状为空), 按值直传才是它本来该有的语义。
+                # `np.generic` 要落到 Python 标量才能过 JSON; str/float/bool 原样。
+                scalars[k] = v.item() if hasattr(v, "item") else v
+                continue
             ident = f"{k}|{arr.shape}|{arr.dtype}".encode()
             specs[k] = {
                 "shape": list(arr.shape),
                 "dtype": str(arr.dtype),
                 "seed": zlib.crc32(ident) % (2 ** 31 - 1),
             }
-        return {"_generate": True, "specs": specs}
+        return {"_generate": True, "specs": specs, "scalars": scalars}
 
 
 class HTTPExecutor(Backend):

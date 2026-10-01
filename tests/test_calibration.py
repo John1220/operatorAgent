@@ -17,10 +17,11 @@ import math
 import unittest
 
 from operator_agent.calibration import (
-    KNOWN_GOOD_SOURCE, KNOWN_SLOW_SOURCE, HeartbeatResult, RULER_BROKEN, _from_source,
-    backend_bench_fn, default_bench_fn, default_inputs, heartbeat, heartbeat_due,
-    known_good_kernel, known_slow_kernel, ruler_broken_window,
+    KNOWN_GOOD_SOURCE, KNOWN_SLOW_SOURCE, SLOW_REPEATS, HeartbeatResult, RULER_BROKEN,
+    _from_source, backend_bench_fn, default_bench_fn, default_inputs, heartbeat,
+    heartbeat_due, known_good_kernel, known_slow_kernel, ruler_broken_window,
 )
+from tests.backend_fakes import fake_backend
 
 
 def _fixed_bench(good_cost, slow_cost):
@@ -161,7 +162,7 @@ class TestDefaultPairIsRunnable(unittest.TestCase):
     def test_default_kernels_agree_numerically(self):
         """慢核只是多算几遍, 结果必须与好核一致 —— 参照物自己不能是错核。"""
         A, B = default_inputs(n=8)
-        self.assertEqual(known_good_kernel(A, B), known_slow_kernel(A, B, repeats=3))
+        self.assertEqual(known_good_kernel(A, B), known_slow_kernel(A, B))
 
     def test_default_inputs_shape(self):
         A, B = default_inputs(n=8)
@@ -174,7 +175,8 @@ class TestBackendMeasuredPair(unittest.TestCase):
 
     只用 `default_bench_fn` 在控制机上计时, 测的是**控制机的 `perf_counter`**: 远端 /
     runner 的计时通道坏了它照样报绿 —— 那是「报表上显示为已检查」的变体。所以真机
-    路径走 `backend_bench_fn` → `backend.benchmark(code, inputs)`, 与候选同一条通道。
+    路径走 `backend_bench_fn` → `backend.benchmark(code, inputs)`, 即远端那条路
+    (边界: 参照核走 runner 的 Python/perf_counter 分支, 见 `calibration.py` 的说明)。
     """
 
     def test_source_and_callable_forms_agree(self):
@@ -182,8 +184,8 @@ class TestBackendMeasuredPair(unittest.TestCase):
         A, B = default_inputs(n=8)
         self.assertEqual(known_good_kernel(A, B),
                          _from_source(KNOWN_GOOD_SOURCE, "g")(A, B))
-        self.assertEqual(known_slow_kernel(A, B, repeats=3),
-                         _from_source(KNOWN_SLOW_SOURCE, "s")(A, B, repeats=3))
+        self.assertEqual(known_slow_kernel(A, B),
+                         _from_source(KNOWN_SLOW_SOURCE, "s")(A, B))
         self.assertTrue(getattr(known_good_kernel, "__source__", ""))
         self.assertTrue(getattr(known_slow_kernel, "__source__", ""))
 
@@ -191,6 +193,27 @@ class TestBackendMeasuredPair(unittest.TestCase):
         """exec 出来的函数一律叫 `kernel` —— 不改名会让慢核被当成好核"""
         self.assertEqual("known_good_kernel", known_good_kernel.__name__)
         self.assertEqual("known_slow_kernel", known_slow_kernel.__name__)
+
+    def test_the_pair_sends_no_scalar_kwargs(self):
+        """参照核的常数必须**烘进源码**: 标量走 `inputs` 会在真机上被重新生成
+
+        2026-10-01 真机实测 (algorithm-h20): `SSHExecutor._serialize_inputs` 把每个输入
+        都变成「shape+dtype+seed, 远端重新生成」, 于是 `repeats=8` 到远端是一个按 int64
+        截断的随机标量 —— **恒为 0**。慢核只跑 1 遍 → 比值 1.0 → 健康的真机上心跳宣布
+        RULER_BROKEN (探针实测 `repeats=np.int64(0)`: 慢核 2.15ms vs 好核 2.09ms,
+        而单独量慢核是 16.7ms)。这条钉住那个入口不许回来。
+        """
+        import inspect
+        seen = {}
+        backend = fake_backend(
+            benchmark=lambda code, inputs, warmup, repeat: (
+                seen.update(inputs) or {"median_time_ms": 1.0}))
+        backend_bench_fn(backend)(known_slow_kernel, default_inputs())
+        self.assertEqual({"A", "B"}, set(seen),
+                         f"参照对往 inputs 里放了非数组输入: {sorted(seen)}")
+        self.assertNotIn("repeats", inspect.signature(known_slow_kernel).parameters,
+                         "慢核的遍数又变成形参了 —— 那个值到不了远端")
+        self.assertIn(f"range({SLOW_REPEATS})", KNOWN_SLOW_SOURCE)
 
     def test_backend_measured_pair_separates(self):
         """经后端量参照对: 诚实路径 ok, 且慢核显著更慢 (设计分离度 ≈8×)"""

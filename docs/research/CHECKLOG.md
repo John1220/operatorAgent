@@ -784,6 +784,22 @@
   推翻的。同类记录：I40、#81（默认值造证据）、I42（读属性名而不读事实来源）
 - **类别**：S/I · **状态**：✅ 已修（两个来源各一格 + 那条恒等式 + C9 那条反向断言）
 
+### I44 · 输入线把标量也「按描述重新生成」⇒ `causal=False` 到真机成了 `np.True_`
+- **原话**：`remote_scripts/run_kernel.py:_deserialize_inputs` 的 docstring 写着
+  「标量/布尔直通 (如 causal=False): 不具有 "shape"/"data" 键者原样透传」
+- **实证**：轻量模式的 `specs` 收的是 `shape+dtype+seed`，而
+  `SSHExecutor._serialize_inputs`（`remote_executor.py:869` 一带）把**标量也**塞了进去
+  ⇒ 远端 `rng.standard_normal(()).astype(dtype)` 出一个按 dtype 截断的随机数。真机探针
+  实测（2026-10-01，algorithm-h20，4 个值一次问出来）：`causal=False`→`np.True_`、
+  `eps=1e-5`→`-0.0223`、`repeats=8`→`0`、`scale=2.5`→`0.0771`。seed 只由
+  `键|shape|dtype` 派生、与**值**无关 ⇒ `repeats=8` 与 `repeats=3` 得到同一个数
+- **出处**：doc 61 §三（真机探针与复现命令）；`tests/test_input_wire_format.py`（新守卫，
+  4/5 条对旧代码变红）；起因是 doc 61 §二 的标定心跳在健康真机上自判 RULER_BROKEN
+- **后果**：带标量/布尔参数的候选核在真机上**验的是另一个算子**（attention 的 causal 掩码
+  被静默打开、`eps` 变成随机数），而 L2 会照常给出通过/不通过 —— 错值发生在门**之前**，
+  门看不出。修法：标量走新的 `scalars` 字段按值直传（数组仍按描述生成，那是刻意的取舍）
+- **类别**：I · **状态**：✅ 已修（真机复验：远端收到 `causal=False eps=1e-05 repeats=8 scale=2.5`）
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -952,6 +968,7 @@
 | I41 | 「记下判决用过的那个量」必须由判决**返回**：调用方再查一次表 ⇒ 记下的不是用过的（B10 打的就是本片第一版的真红法） | S/I | ✅ 已修 |
 | I42 | 判据读的是**属性名**而不是事实：同一个退出码在不同出口挂在不同名字上（scp 的 255 被读成「听到了回答」） | S/I | ✅ 已修 |
 | I43 | 报表的**解释**可以在读数之前就被写好：那句「一轮一个目录」被下一步的 `round_done` 读数打成 0（C9 只有 assertNotIn 杀得掉） | S/I | ✅ 已修 |
+| I44 | 输入线把标量也「按描述重新生成」：`causal=False` 到真机成了 `np.True_`，L2 验的是另一个算子 | I | ✅ 已修 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

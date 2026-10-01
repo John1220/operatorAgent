@@ -29,7 +29,6 @@
 """
 from __future__ import annotations
 
-import inspect
 import math
 import time
 from dataclasses import dataclass
@@ -72,27 +71,34 @@ _MATMUL_BODY = """\
     return out
 """
 
+#: 慢核比好核多算几遍。**烘进源码**, 不作为 `inputs` 里的标量传 —— 2026-10-01 真机
+#: 实测抓到的: `SSHExecutor._serialize_inputs` 把每个输入都变成「shape+dtype+seed,
+#: 远端按 seed 重新生成」, 于是 `repeats=8` 到了远端是一个**按 int64 截断的随机标量**
+#: (实测恒为 0), 慢核只跑 1 遍 → 比值 1.0 → 健康的真机上心跳宣布 RULER_BROKEN。
+#: 烘进源码之后参照对只依赖数组输入, 三个后端 (ssh/local/http) 行为一致。
+SLOW_REPEATS = 8
+
 KNOWN_GOOD_SOURCE = '''\
 def kernel(A, B):
     """已知好参照核: 小矩阵乘。故意朴素但正确 —— 它是尺子的「准星」。"""
 ''' + _MATMUL_BODY
 
-#: 故意写慢的参照核: 同样的 matmul 重复算 `repeats` 遍, 只留最后一遍。
-#: 分离度是**设计出来的**, 不是测出来的期望 —— `repeats=8` 时慢核读数应约 8× 好核,
+#: 故意写慢的参照核: 同样的 matmul 重复算 `SLOW_REPEATS` 遍, 只留最后一遍。
+#: 分离度是**设计出来的**, 不是测出来的期望 —— 重复 8 遍时慢核读数应约 8× 好核,
 #: 远超默认下界 `min_slow_ratio=2.0`, 于是「带内」判据对计时噪声不敏感。
-#: `repeats` 是形参而非写死的常量: 调用约定是 `kernel(**inputs)`, 后端路径把它放进
-#: `inputs` 就能调, 于是不必再存一个迟早与调用方漂开的数字。
+#: 遍数写死在源码里 (见 `SLOW_REPEATS` 的说明): 走 `inputs` 传标量在 SSH 后端上会被
+#: 重新生成, 那是「参照对静默退化成一个核」的入口。
 KNOWN_SLOW_SOURCE = '''\
-def kernel(A, B, repeats=8):
-    """故意写慢的参照核: 同样的 matmul 重复算 `repeats` 遍, 只留最后一遍。"""
+def kernel(A, B):
+    """故意写慢的参照核: 同样的 matmul 重复算 {repeats} 遍, 只留最后一遍。"""
     out = None
-    for _ in range(max(1, int(repeats))):
+    for _ in range({repeats}):
         out = _plain(A, B)
     return out
 
 
 def _plain(A, B):
-''' + _MATMUL_BODY
+'''.format(repeats=SLOW_REPEATS) + _MATMUL_BODY
 
 
 def _from_source(source: str, name: str):
@@ -142,12 +148,14 @@ def default_bench_fn(code, inputs, warmup=1, samples=5):
     return xs[len(xs) // 2]
 
 
-def backend_bench_fn(backend, *, warmup: int = 1, repeat: int = 3, repeats: int = 8):
+def backend_bench_fn(backend, *, warmup: int = 1, repeat: int = 3):
     """让**远端那把尺子**量参照物: `heartbeat` 的 bench_fn 走 `backend.benchmark`。
 
     与 `default_bench_fn` 的分工、以及它覆盖到哪/覆盖不到哪 (Python 计时分支 vs
     triton 候选的 CUDA event 分支), 见上面源码形态那段的说明。`inputs` 是
-    `default_inputs()` 的元组形态, 这里转成调用约定要求的 dict。
+    `default_inputs()` 的元组形态, 这里转成调用约定要求的 dict —— **只放数组**:
+    标量走 `inputs` 在 SSH 后端上会被重新生成 (见 `SLOW_REPEATS` 那段), 参照核
+    需要的常数一律烘进源码。
 
     读数不可用时**抛**而不是返回一个假数字 —— `heartbeat` 会把异常折成
     `ok=False`(RULER_BROKEN): 「尺子读不出数」本来就该按坏处理, 不该静默放行。
@@ -160,8 +168,6 @@ def backend_bench_fn(backend, *, warmup: int = 1, repeat: int = 3, repeats: int 
                 "KNOWN_GOOD_SOURCE / KNOWN_SLOW_SOURCE 生成的核才带 __source__")
         A, B = inputs
         kwargs = {"A": A, "B": B}
-        if "repeats" in inspect.signature(kernel).parameters:
-            kwargs["repeats"] = repeats
         payload = backend.benchmark(source, kwargs, warmup=warmup, repeat=repeat)
         if not isinstance(payload, dict):
             raise ValueError(f"后端没有回载荷: {payload!r}")
