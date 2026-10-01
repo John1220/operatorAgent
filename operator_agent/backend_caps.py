@@ -25,7 +25,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
 if TYPE_CHECKING:                      # 只给注解用: 运行时不导入, 免得与 candidates 成环
     from .candidates import ParamSpace
@@ -94,6 +95,28 @@ class CapabilityMissing(RuntimeError):
         super().__init__(msg)
 
 
+@dataclass(frozen=True)
+class Instantiation:
+    """模板候选**实例化**的产物 (§12): 一份可以交给评测器的源码 + 它的出处
+
+    为什么实例化器要报 `instantiator_ver`: 参数空间的身份是
+    `(template_id, instantiator_ver, 参数)` (`candidates.dedup_key`) —— 同一个点位由
+    不同版本的实例化器产出的是**不同的构建**。若实例化器悄悄换了版本却不说, 去重键会
+    把两个不同的构建读成同一个候选; 所以这里要求它**自报家门**, 由调用方比对。
+    `""` = 没自报 (三态里的「不知道」)—— 调用方必须显式决定怎么处理, 不许当成匹配。
+
+    `evidence` 是人读的一行出处 (模板名/参数/编译器版本之类), 落进产物便于复核。
+    """
+
+    source: str
+    instantiator_ver: str = ""
+    evidence: str = ""
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"source": self.source, "instantiator_ver": self.instantiator_ver,
+                "evidence": self.evidence}
+
+
 class Backend(ABC):
     """执行后端的 Service Definition (DSH 三角色里的第一个)
 
@@ -150,6 +173,24 @@ class Backend(ABC):
         是同一个模块开头第 1 条的理由: 「静默 no-op」在这个设计下不可表达。
         """
         return None
+
+    def instantiate(self, template_id: str, params: "Mapping[str, Any]",
+                    contract: object = None) -> Instantiation:
+        """把一个**参数点**实例化成源码 (§12 的 `TemplateCandidate` 那一半)
+
+        基类默认 **raise**: 「声明了参数空间、却没有实例化器」不许被读成「实例化出一个
+        空的候选」。这与 `param_space` 默认返回 `None` 是**刻意相反**的两个默认 ——
+        `None` 在那里是有意义的答案 (代码型), 而这里没有「默认实例化」这种东西。
+
+        模板型后端覆写它, 返回 `Instantiation(source=…, instantiator_ver=…, …)`。
+        调用方 `candidates.instantiate_candidate` 会比对 `instantiator_ver` 与那个点
+        在参数空间里的版本: 不一致 ⇒ 拒绝 (去重键会因此指称另一个构建)。
+        """
+        raise NotImplementedError(
+            f"{self.label!r} 没有实现模板实例化 (Backend.instantiate): "
+            f"模板 {template_id!r} 的参数 {dict(params)!r} 无法变成源码。"
+            "声明了参数空间的后端必须自己实现它 —— §12 要挡的正是「把候选悄悄当成"
+            "源码字符串」。")
 
     def lock_identity(self) -> str:
         """**同一个执行侧**的后端必须返回同一个串 —— 进程内串行锁按它取键

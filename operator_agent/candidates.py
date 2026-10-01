@@ -35,11 +35,12 @@
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from itertools import product
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
-from .backend_caps import Backend
+from .backend_caps import Backend, Instantiation
 from .novelty import signature_of
 from .resource_check import (
     SMEM_SLACK, estimate_matmul_smem_bytes, smem_limit_bytes,
@@ -234,24 +235,234 @@ def space_origin(backend: Any) -> str:
     return "inherited" if type(backend).param_space is base else "overridden"
 
 
-def require_supported_space(space: Optional[ParamSpace], backend: Any) -> Optional[ParamSpace]:
-    """模板型后端（声明了非空参数空间）今天**不支持** ⇒ fail-closed
+def require_supported_space(space: Optional[ParamSpace],
+                            backend: Any) -> Optional[ParamSpace]:
+    """§12 那条开关的**后半**: 声明了参数空间的后端, 我们能不能真的用它
 
-    为什么宁可炸也不降级: 设计 §12 点名的风险就是「把候选悄悄当成源码字符串」。
-    今天 `TemplateCandidate` 的 `build()` 还不存在（没有实例化器），若在这里返回
-    `None` 假装成代码型, 后端声明的参数空间会被无声丢弃 —— 那是「接口说谎」，
-    而诚实的行为是把「我们还不支持这条路」说清楚。
+    三种情形:
+      * `space is None` ⇒ 代码型 (今天全部后端), 正常走 LLM/邻域那条路;
+      * 有空间 + 有实例化器 ⇒ **返回空间** (2026-10-02 起, 「点 → 源码」那段已就绪:
+        `instantiate_points`)。**但仍要调用方自己决定怎么消费** —— 控制器的候选队列
+        还没接上参数空间, 那一半在 conductor 里 fail-closed (`_refuse_unconsumed_space`);
+      * 有空间 + **没有**实例化器 ⇒ raise: 这是**后端**的缺口, 不许把它读成代码型
+        (设计 §12 点名的风险就是「把候选悄悄当成源码字符串」, 声明的空间不许被无声丢掉)。
     """
     if space is None:
         return None
+    if instantiator_available(backend):
+        return space
     raise NotImplementedError(
-        "模板型后端 (§12) 尚未支持: "
+        "模板型后端 (§12) 的这个后端还没就绪: "
         # 用基类上的 `label` 而不是嗅探 `name`: 各提供方的 `name` 有的是属性、
         # 有的是 property, 而 `label` 是**声明好的**那个统一叫法。
         f"{backend.label!r} 声明了参数空间 "
-        f"{space.template_id!r} ({space.size()} 个点), 但模板候选的实例化 "
-        "(TemplateCandidate.build) 还没实现。当前链路只认源码型候选 —— "
-        "不许把它降级成代码型后继续跑 (那正是 §12 要挡的失效)。")
+        f"{space.template_id!r} ({space.size()} 个点), 却没有实现模板实例化 "
+        "(Backend.instantiate) —— 点建不成源码。当前链路只认源码型候选, 不许把它"
+        "降级成代码型后继续跑 (那正是 §12 要挡的失效)。")
+
+
+# ─────────────────────── 模板候选的实例化 (§12 的 `build`) ───────────────────────
+#
+# 设计 §12 的两类候选里, 模板型那半在 2026-10-02 只有**枚举**(第一片)。这一节补上
+# 「点 → 源码」那一步, 并且把三件事钉死在一处:
+#
+#   1. **身份不跟着代码走**。`BuiltCandidate.dedup_key` 直接委派给那个 `TemplateCandidate`
+#      —— 同一个点位由不同实例化器版本产出的两份源码, 是**同一个点的两次构建**, 不是两个
+#      候选。反过来, 两个不同的点即使碰巧产出同一份源码, 也仍然是两个候选 (设计 §12 的
+#      全部要点就是「候选不是源码字符串」)。
+#   2. **版本必须自报并核对**。参数空间的身份含 `instantiator_ver`; 实例化器换版本却不说
+#      ⇒ 去重键会把两个不同的构建读成同一个候选。
+#   3. **有点没实例化必须看得见**。「N 个点里成功了 M 个」不许塌成「这一轮有 M 个候选」
+#      —— 拒绝的每一条都留理由 (`InstantiationBatch.refusals`), 与「缺 ≠ 0」同族。
+
+@dataclass(frozen=True)
+class BuiltCandidate:
+    """一个参数点**实例化后**的候选: 源码 + 出处, 身份仍是那个模板点
+
+    `struct_sig` 是产出源码的 α-等价签名 —— 它是**证据**, 不是身份: 同一个点换一版
+    实例化器 (版本号却没变) 会让它变, 而候选**还是那个点**。把它记下来, 正是为了让
+    「同一版本、同一点位、源码却变了」这件事在血缘里看得见, 而不是被去重键吞掉。
+    """
+
+    candidate: TemplateCandidate
+    source: str
+    instantiator_ver: str = ""
+    evidence: str = ""
+    #: 产出源码的**内容哈希** (前 16 位)。跨语言都算得出来 —— 模板后端产出的多半是
+    #: C++/CUDA, 而 `struct_sig` 那个量具是 Python AST 的 (`novelty.signature_of`),
+    #: 对 C++ 源恒为空串。只靠它会把「源码变了」这件事在模板路径上整个看不见。
+    source_hash: str = ""
+    #: Python 源的 α-等价签名。**空串 = 量具不适用** (不是「没有源码」)。
+    struct_sig: str = ""
+
+    @property
+    def params(self) -> Mapping[str, Any]:
+        return self.candidate.params
+
+    def dedup_key(self) -> Tuple:
+        """**委派给模板候选**: 身份 = 点, 不是这份源码"""
+        return dedup_key(self.candidate)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, BuiltCandidate):
+            return NotImplemented
+        return self.dedup_key() == other.dedup_key()
+
+    def __hash__(self) -> int:
+        return hash(self.dedup_key())
+
+    def as_lineage(self) -> Dict[str, Any]:
+        out = as_lineage(self.candidate)
+        # 源码签名只作为**证据**进血缘 (`build_struct_sig`), 不去替换 `struct_sig`
+        # 那个属于源码型候选的身份字段 —— 两类候选的血缘字段不许互相冒名。
+        out["build_source_hash"] = self.source_hash
+        # 空串在这里是**三态里的「量具不适用」** (C++/CUDA 源没有 Python AST), 不是
+        # 「没有源码」—— 判读的时候别把两者读成同一件事。
+        out["build_struct_sig"] = self.struct_sig
+        out["build_evidence"] = self.evidence
+        return out
+
+
+def source_hash(source: str) -> str:
+    """源码内容哈希 (前 16 位)。**跨语言**都能算 —— 与 `struct_sig` 的分工:
+
+    * `struct_sig` (Python AST α-等价) 回答「结构变没变」, 但它**只对 Python 源有效**;
+    * `source_hash` 回答「内容是不是同一份」, 对 C++/CUDA 源一样有效。
+
+    两个都记, 因为它们会独立变化: 换个变量名 ⇒ 哈希变、结构签名不变; 换编译宏里的
+    常量 ⇒ 哈希变、结构也变。只记一个必然丢掉一半信息。
+    """
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+
+
+def instantiator_available(backend: Any) -> bool:
+    """调用 `backend.instantiate` 会不会走到**真实现** (而不是基类那条 raise)
+
+    问法与 `space_origin` 刻意不同: 那个问「这个**类**覆写了没有」, 这个问「这一**次**
+    调用会不会落到真实现上」。差别在**实例级替换** —— 测试假件 (`DeclaredFakeBackend`)
+    正是把方法挂到实例上的, 只比类属性会把「能建出来」读成「没有实例化器」, 而
+    `require_supported_space` 会据此拒绝一个其实能用的后端 (一个问题的两个答案)。
+
+    为什么不留「后端根本没有这个方法」这个状态: 方法立在基类上 (默认 raise), 所以
+    「没有」按设计不可表达 —— 有意义的只剩「这次调用有没有真实现」。
+    """
+    # 类上的实现: 协议默认 (那条 raise) 与覆写在这里就能分开。
+    if type(backend).instantiate is not Backend.instantiate:
+        return True
+    # 实例级替换: 测试假件 (`DeclaredFakeBackend`) 是把方法挂到**实例**上的。
+    # ⚠️ 这里刻意不用 `getattr(backend, …)`: `operator_agent/` 里禁止按方法名嗅探能力
+    # (`tests/test_backend_caps.py::TestNoCapabilitySniffing` 按 AST 拦它, doc 49 §4.1
+    # 第 3 条)。`vars()` 读的是实例字典, 不是「试一下这个方法在不在」。
+    try:
+        own = vars(backend).get("instantiate")
+    except TypeError:            # `__slots__` 之类没有实例字典
+        own = None
+    return callable(own)
+
+
+def instantiate_candidate(cand: TemplateCandidate, backend: Any,
+                          contract: Any = None) -> BuiltCandidate:
+    """`TemplateCandidate` → `BuiltCandidate`。四处 fail-closed (见下)
+
+    拒绝用异常而不是「返回 None」: 这四处都是**调用方或后端的错**, 不是「这一轮没有
+    候选」这种可继续的状态。批量那一层 (`instantiate_points`) 会把异常收成带理由的
+    `refusals`, 所以「有点没建成」在整条链路上仍然看得见。
+    """
+    if not is_template(cand):
+        raise TypeError("instantiate_candidate 只吃模板候选; 源码候选不许走这条路 "
+                        "(§12: 两类候选的构建路径必须分开)")
+    if not instantiator_available(backend):
+        # 与 `Backend.instantiate` 基类那条 raise 同一个判据, 但更早、更点题: 这里能
+        # 说清「哪个模板、哪个后端」, 而不是等到进去才炸。
+        raise NotImplementedError(
+            f"后端 {backend.label!r} 没有实现模板实例化 "
+            f"(Backend.instantiate), 无法构建 {cand.template_id!r} 的参数 "
+            f"{dict(cand.params)!r}")
+    out = backend.instantiate(cand.template_id, dict(cand.params), contract)
+    if not isinstance(out, Instantiation):
+        raise TypeError(
+            f"Backend.instantiate 必须返回 Instantiation, 拿到 "
+            f"{type(out).__name__} —— 返回值形状不定会让下游各自解释")
+    source = out.source
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError(
+            f"实例化器返回了空源码 ({cand.template_id!r} {dict(cand.params)!r}) —— "
+            "「实例化失败」不许被读成「产出了一个空候选」")
+    ver = out.instantiator_ver or ""
+    if cand.instantiator_ver and ver and ver != cand.instantiator_ver:
+        raise ValueError(
+            f"实例化器版本不一致: 参数空间里是 {cand.instantiator_ver!r}, 实例化器自报 "
+            f"{ver!r} —— 去重键 (template_id, instantiator_ver, 参数) 会把两个不同的"
+            "构建读成同一个候选")
+    return BuiltCandidate(
+        candidate=cand, source=source,
+        # 自报为空时**保留参数空间里的那个版本**, 而不是把它抹成空串: 空串会在血缘里
+        # 读成「没有版本」, 而事实是「实例化器没说话, 我们知道的是空间里那个」。
+        instantiator_ver=ver or cand.instantiator_ver,
+        evidence=out.evidence or "", source_hash=source_hash(source),
+        struct_sig=signature_of(source) or "")
+
+
+@dataclass
+class InstantiationBatch:
+    """一批点的实例化结果: 建成的 / 拒绝的(带理由) / 有没有真建过
+
+    `refusals` 是**一等公民**: 「12 个点建了 11 个」与「12 个点建了 12 个」在报告里
+    必须分得开, 否则「实例化器在某类参数上一直失败」会变成「这一轮候选变少了」。
+    """
+
+    built: List[BuiltCandidate] = field(default_factory=list)
+    refusals: List[Tuple[TemplateCandidate, str]] = field(default_factory=list)
+    #: 入参为空 ⇒ 没建过任何东西 (与「建了 0 个」不是一回事)
+    empty_input: bool = False
+
+    def as_note(self) -> str:
+        if self.empty_input:
+            return "模板实例化: 没有点可建"
+        note = f"模板实例化: 建成 {len(self.built)} 个"
+        if self.refusals:
+            head = "; ".join(f"{dict(c.params)}({why})" for c, why in self.refusals[:3])
+            more = f" 等 {len(self.refusals)} 条" if len(self.refusals) > 3 else ""
+            note += f", 拒绝 {len(self.refusals)} 个: {head}{more}"
+        return note
+
+    def lineage(self) -> List[Dict[str, Any]]:
+        return [b.as_lineage() for b in self.built]
+
+
+def instantiate_points(points: List[TemplateCandidate], backend: Any,
+                       contract: Any = None) -> InstantiationBatch:
+    """把一批点逐点实例化; **单点失败不打断**其余点, 但要留理由"""
+    batch = InstantiationBatch()
+    if not points:
+        batch.empty_input = True
+        return batch
+    for cand in points:
+        try:
+            batch.built.append(instantiate_candidate(cand, backend, contract))
+        except Exception as exc:            # noqa: BLE001 — 单点失败要留痕, 不许吞
+            batch.refusals.append((cand, f"{type(exc).__name__}: {exc}"))
+    return batch
+
+
+def refuse_unconsumed_space(space: Optional[ParamSpace], backend: Any) -> None:
+    """§12 那条路的**控制器侧**缺口: 点建得出来, 但还没有消费它的候选队列
+
+    与 `require_supported_space` 的分工是刻意的 —— 两条缺口各有主人:
+
+    * 后端侧 (没有实例化器) ⇒ `require_supported_space` 拒绝;
+    * 控制器侧 (没有候选队列) ⇒ 这里拒绝。
+
+    为什么不合成一条消息: 「后端没实现」与「控制器没接上」在报告里必须分得开 ——
+    合成一条会让这两种状态都变成同一句「模板不支持」, 而它们的下一步动作完全不同。
+    """
+    if space is None:
+        return
+    raise NotImplementedError(
+        f"模板型后端 {backend.label!r} 的参数空间 {space.template_id!r} "
+        f"({space.size()} 个点) 现在**建得出源码** (candidates.instantiate_points), "
+        "但控制器的候选队列还没接上参数空间 (§12 的「LLM / 模板产出候选」那一半)。"
+        "当前这条搜索路径只认代码型候选 —— 不许把声明的空间降级成「没声明」后继续跑。")
 
 
 # ─────────────────────── 便宜代理剪枝 (不花 GPU 秒) ───────────────────────

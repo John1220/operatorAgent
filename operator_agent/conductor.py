@@ -41,7 +41,8 @@ from .escalation import (
     EscalationInputs, decide, smem_bound_evidence, untried_directions,
 )
 from .resource_check import check_resource_feasibility
-from .candidates import param_space_of, require_supported_space
+from .candidates import (param_space_of, refuse_unconsumed_space,
+                        require_supported_space)
 from .budget import BudgetLedger, BudgetPlan
 from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
                           LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
@@ -1571,7 +1572,14 @@ class Conductor:
                     # (由参数空间枚举候选并实例化) 还没落地 ⇒ 在这里 fail-closed, 而不是
                     # 把它降级成代码型继续跑: §12 点名的风险正是「把候选悄悄当成源码字符串」。
                     # 放在真值测量**之前** (这一处是每轮搜索的入口), 因为拒绝要发生在花钱之前。
-                    require_supported_space(param_space_of(self.backend, task), self.backend)
+                    # 两条缺口各有主人, 所以是两个判据: 后端没实现实例化器
+                    # (`require_supported_space` 拒绝) / 控制器没接上候选队列
+                    # (`refuse_unconsumed_space` 拒绝)。实例化那一段 2026-10-02 已就绪,
+                    # 把它的产物接进这个循环要动候选队列的形状 —— 那一片还没落地。
+                    refuse_unconsumed_space(
+                        require_supported_space(
+                            param_space_of(self.backend, task), self.backend),
+                        self.backend)
                     try:
                         current_sketch, suggestion = self.search.run(current_sketch, perf_data)
                     except Exception as e:
