@@ -561,13 +561,46 @@ def select_template_candidate(space: ParamSpace, backend: Any, *,
 #: matmul 模板参数轴到 smem 估算器键名的约定 (与 `resource_check` 解析源码时的键名一致)
 BLOCK_KEYS = ("BLOCK_M", "BLOCK_N", "BLOCK_K")
 
+#: 多缓冲那一轴的名字 (同一个东西在不同模板里的叫法; 只认这几个, 认不出算「未观测」)
+STAGE_KEYS = ("stages", "num_stages", "STAGES")
+
+
+def stages_of(params: Mapping[str, Any]) -> Tuple[Optional[int], str]:
+    """从参数里读出「几份 A/B 缓冲」。返回 `(stages, 说明)`。
+
+    **三态**: 读出正整数 ⇒ 那个数; 没有这一轴 ⇒ `None` + 空说明 (未观测);
+    有这一轴但值不可用 (字符串/0/布尔/负数) ⇒ `None` + 说明 —— 最后那一档**不是**
+    「等于 1」: 一个改不动的值是「没观测到」, 不是「观测到了 1」。
+    """
+    for key in STAGE_KEYS:
+        if key in params:
+            value = params[key]
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+                return value, ""
+            return None, f"{key}={value!r} 不是 >=1 的整数 ⇒ 按未观测处理"
+    return None, ""
+
 
 def tile_smem_bytes(block_m: int, block_n: int, block_k: int,
-                    elem_bytes: int) -> Optional[int]:
-    """一套 tile 的 smem 估算 (复用 `resource_check` 的公式与口径)"""
-    return estimate_matmul_smem_bytes(
+                    elem_bytes: int, *, stages: Optional[int] = None) -> Optional[int]:
+    """一套 tile 的 smem 估算 (复用 `resource_check` 的公式与口径)。
+
+    `stages` = 软件流水的**缓冲份数** (`num_stages` 口径): A/B 那两块 tile 会被复制
+    `stages` 份, 而**累加器/输出那块 (BM*BN) 不随流水翻倍** —— 所以是
+    `BM*BN*elem + (BM*BK + BK*BN)*elem*stages`。`stages=None` (未观测) 按 1 份算,
+    于是这个值是**下界**; 下界超上界仍可放心摘点 (真的只会更大), 但它**不等于**
+    「放得下」(见 `prune_by_smem` 的 `stages_unobserved`)。
+    """
+    if stages is None:
+        stages = 1
+    tiles = estimate_matmul_smem_bytes(
         {"BLOCK_M": block_m, "BLOCK_N": block_n, "BLOCK_K": block_k},
         int(elem_bytes))
+    if tiles is None:
+        return None
+    # 拆出口径: `estimate_matmul_smem_bytes` = (AB 两块 + 累加器那块) * elem
+    ab = (block_m * block_k + block_k * block_n) * int(elem_bytes)
+    return tiles + ab * (stages - 1)
 
 
 def smem_ok(estimated_bytes: Optional[int], caps: Any) -> Optional[bool]:
@@ -592,18 +625,29 @@ class PruneResult:
     no_limit: bool = False
     #: 全被摘光 ⇒ 一个都没摘 (剪枝不是「让这一轮没得跑」)。理由仍留在 `dropped` 里。
     kept_all_to_avoid_starvation: bool = False
+    #: 有几点的估算是**下界** (没有 `stages` 那一轴或值不可用 ⇒ 按 1 份缓冲算)。
+    #: 「下界」不是一个可以忽略的细节: 它意味着**没摘**的那些点里可能仍有放不下的。
+    stages_unobserved: int = 0
+    #: 认出来的 `stages` 取值 (用于产物/日志: 乘了几倍是可以被复算的)
+    stages_seen: Tuple[int, ...] = ()
 
     def as_note(self) -> str:
         if self.no_limit:
             return "smem 代理剪枝: 未生效 (没有每 SM 上界)"
+        suffix = ""
+        if self.stages_seen and max(self.stages_seen) > 1:
+            suffix += f" [已按 stages={{{','.join(str(x) for x in sorted(set(self.stages_seen)))}}} 倍算 A/B 缓冲]"
+        if self.stages_unobserved:
+            suffix += (f" [⚠️ {self.stages_unobserved} 点的估算**不含**多缓冲 ⇒ 是下界,"
+                       f" 没摘不等于放得下]")
         if not self.dropped:
-            return ""
+            return suffix.strip()
         parts = [f"{c.params.get('BLOCK_M')}x{c.params.get('BLOCK_N')}"
                  f"x{c.params.get('BLOCK_K')}({why})" for c, why in self.dropped]
         if self.kept_all_to_avoid_starvation:
             return (f"smem 代理剪枝: 邻域 {len(self.dropped)} 点全超上界 "
                     f"⇒ 全部保留待远端判定 " + "/".join(parts))
-        return f"smem 代理剪枝: 摘掉 {len(self.dropped)} 点 " + "/".join(parts)
+        return f"smem 代理剪枝: 摘掉 {len(self.dropped)} 点 " + "/".join(parts) + suffix
 
 
 def prune_by_smem(points: List[TemplateCandidate], caps: Any,
@@ -622,13 +666,23 @@ def prune_by_smem(points: List[TemplateCandidate], caps: Any,
     kept: List[TemplateCandidate] = []
     for c in points:
         try:
+            stages, why = stages_of(c.params)
             est = tile_smem_bytes(c.params["BLOCK_M"], c.params["BLOCK_N"],
-                                  c.params["BLOCK_K"], elem_bytes)
+                                  c.params["BLOCK_K"], elem_bytes, stages=stages)
         except (KeyError, TypeError, ValueError):
             kept.append(c)          # 认不出的参数轴 ⇒ 不剪 (宁可漏拦)
             continue
+        if stages is None:
+            # 下界口径: 没观测到多缓冲 ⇒ 这个数只会偏小 ⇒ 没摘**不是**放得下
+            res.stages_unobserved += 1
+        else:
+            res.stages_seen = res.stages_seen + (stages,)
         if est is not None and est > limit * SMEM_SLACK:
-            res.dropped.append((c, f"≈{est / 1024:.0f}KiB>{limit / 1024:.0f}KiB"))
+            extra = f", ×{stages} 缓冲" if stages and stages > 1 else ""
+            reason = f"≈{est / 1024:.0f}KiB>{limit / 1024:.0f}KiB{extra}"
+            if why:
+                reason += f" ({why})"
+            res.dropped.append((c, reason))
         else:
             kept.append(c)
     if not kept and res.dropped:

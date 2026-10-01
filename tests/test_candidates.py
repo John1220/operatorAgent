@@ -191,7 +191,9 @@ class TestProxyPrune(unittest.TestCase):
         self.assertEqual(1, len(res.kept))
         self.assertEqual([], res.dropped)
         self.assertFalse(res.no_limit)
-        self.assertEqual("", res.as_note(), "没摘任何点 ⇒ 没有可报的事")
+        #: 「没摘」不再必然等于「没有可报的事」: 估算是**下界**时, 这句提示必须出来
+        #: (否则读者会把「没摘」读成「放得下」)。CHECKLOG I66。
+        self.assertIn("下界", res.as_note())
 
     def test_the_oversized_point_is_named_and_dropped(self):
         res = prune_by_smem(self._points((64, 64, 32), (512, 512, 128)), _Caps(64))
