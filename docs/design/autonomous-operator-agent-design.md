@@ -26,7 +26,8 @@
 | §14 验收八条 | `tests/test_stage1_acceptance.py`（离线） + `benchmarks/smoke_spine_h20.py`（真机 H20） | ✅ **真机已跑**（2026-10-01，8×H20 的 `algorithm-h20`，走生产 L3 入口）：0/1/2/3/7/8 绿、4 见下、5 未覆盖（需 LLM，`LLM_API_KEY` 未设）、6 纯离线。**真机抓出两处「算了但没接上」**（CHECKLOG I46 发布的资格位不是收口点算的那份 ⇒ §14-8 在生产上没生效；I48 远端运行时盾的证据不落地），都已修 + 守卫；§14-7 的运行时检查**已接上喂给者**（I47 同卡那半 2026-10-01 修：远端按臂采身份 ⇒ `measurement_scope` 由观测算出三态、跨卡时资格全 False 且 `passed=False`；**窗口那一半仍无喂给者**，明写在 I47）。见 [docs/research/63](../research/63-真机§14冒烟与它抓出来的两个真源.md) |
 | §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/竞争降级） | ✅ **同卡配对已有观测喂给者**（2026-10-01：远端逐臂报卡 ⇒ `observed_pairing` 三态 ⇒ oracle 拒评 + `passed=False`；`placement.plan_leases`/`DeviceLease` 仍**零生产调用者**，见 §15「没有实现物」表） |
 | §13.5 峰值实测（`probe_peak`） | `HardwareCaps.measured_peak_tflops`（位已就位，探测未做） | ⏳ **未做**：分母仍来自规格/推导表 ⇒ `peak_measured=False` ⇒ **收敛出口在真机上关闭**（设计要的方向，日志明写）。「口径核过」与「实测过」已分成两个位（[CHECKLOG I49](../research/CHECKLOG.md)） |
-| §5 bandit 调参 / §12 模板后端 | — | ⏳ 未做 |
+| §5 bandit 调参 | `operator_agent/bandit.py`（确定性 UCB1）+ `Conductor` 信念门 | ✅ 2026-10-02：`perf_data` / `optimization_history` / 回报统计三条信念通道按 `can_tune` / `can_count_progress` 收口（CHECKLOG I52），prompt 不再把「没有读数」渲染成 `0.00`；状态落 `artifact.metadata["bandit"]`。**臂空间只有 tiling**、`c` 未标定、证据**不进快照**（只覆盖本次运行）；**真机未复跑** —— 见 [doc 66](../research/66-搜索侧的信念门与bandit.md) |
+| §12 模板后端 / `param_space()` | — | ⏳ **未做**：参数空间 (stages/warps/向量宽度/layout/split-K) 仍未产物化，今天的「参数化」= LLM 出 tiling + 确定性格点邻域 |
 
 **审查**：`spine-review.md` 记了 P0–P3；P0 三项、P1-4/P1-5/P1-6/P2-8/P2-10 与 P3-11/12/13/15/16/18 已修；P2-9/P3-14/P3-17 仍未修。**入库判据只有一处**（`oracle.admit_to_corpus`，2026-10-01 收口：此前它零生产调用者，`_save_to_db` 自己又写了一遍那三道门且口径不同）。  
 **尚未宣称收益的那道门已过**（§19.4）：设计原文是「真机 §14 冒烟之前，不对外说资格审计带来收益」——
@@ -390,6 +391,13 @@ while not stop(contract):
 
 report(best, log, unable_to_establish=[...])           # 显式列出没确立的东西
 ```
+
+> **实现状态（2026-10-02）**：`belief.update` 那一格已落地 —— `can_tune=False` 的读数
+> **不进信念**（`Conductor` 的 `last_tunable_perf` 门），下一轮提议只能从上一次**有资格**的
+> 读数出发；`optimization_history`（会印进 prompt 的历史）与 bandit 回报统计按同一判据收口，
+> prompt 层不许把「没有读数」渲染成 `0.00`。**它不是「停下来」**：`can_tune=False` 的轮次
+> 照样跑满预算、不许提前终止（真机用例守着这一条）。见 [CHECKLOG I52](../research/CHECKLOG.md)
+> 与 [doc 66](../research/66-搜索侧的信念门与bandit.md)。
 
 ---
 

@@ -6,13 +6,13 @@
 {{sketch}}
 
 ## 性能数据
-
+{{perf_availability}}
 | 指标 | 当前值 | 硬件理论峰值 | 利用率 |
 |------|--------|-------------|--------|
-| GFLOPS | {{current_gflops}} | {{hw_peak_gflops}} | {{gflops_utilization_pct}}% |
-| 内存带宽 | {{memory_bandwidth_gbs}} GB/s | {{hw_peak_bandwidth_gbs}} GB/s | {{bandwidth_utilization_pct}}% |
+| GFLOPS | {{current_gflops}} | {{hw_peak_gflops}} | {{gflops_utilization_pct}} |
+| 内存带宽 | {{memory_bandwidth_gbs}} GB/s | {{hw_peak_bandwidth_gbs}} GB/s | {{bandwidth_utilization_pct}} |
 | 算数强度 | {{arithmetic_intensity}} FLOP/Byte | Roofline拐点: {{ridge_point}} | - |
-| 加速比 | {{speedup}}x (目标 {{target_speedup}}x) | - | {{achieve_ratio}}% |
+| 加速比 | {{speedup}}x (目标 {{target_speedup}}x) | - | {{achieve_ratio}} |
 
 **Roofline 判定**: {{roofline_bound}} (算子名分类: {{name_bound}})
 **硬件**: {{hw_name}} (CC {{hw_compute_capability}})

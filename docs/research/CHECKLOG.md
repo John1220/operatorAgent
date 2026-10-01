@@ -1028,8 +1028,36 @@
   `measurement_ok`（`conductor.py` 多处）、`measurement_can_*`（`:1551`）、`eligibility.can_*`
   三套写法并存。今天三者都由同一个 validity 派生所以不会打架，但设计 §4.3 的五位是**唯一
   契约**，三套并存正是 I46（发布值不是收口点那份）能发生的土壤
-- **类别**：I · **状态**：⚠️ 已知未修（方向：`perf_data` 按 `can_tune` 设门 —— 没资格就不许
-  用它的数字挑方向；并与 §5 bandit 的奖励门（`can_count_progress`）**同一处收口**）
+- **类别**：I · **状态**：✅ **2026-10-02 修**（`can_report` 那半仍零读者 —— 见下）
+  - **修法与判据**：设计 §10.4 的伪码就是判据 —— `can_tune` 门的是 **`belief.update`**，
+    不是「停循环」（第一版我写成记停因 + `break`，被 7 条既有用例按红：「不可信测量不得
+    被当成性能未改善 / 不许禁用配方 / 跑满预算」是早已定下的取向；伪码读对后改动反而更小）。
+  - **四条通道一处不漏**（漏一条门就形同虚设）：① `perf_data` 按 `can_tune` 进/不进信念
+    （没资格 ⇒ 沿用 `last_tunable_perf`；本次运行还没有过有资格读数 ⇒ 只给一个**不含任何
+    数字**的结构先验 + `tuning_refused`，`conductor.py:1366-1381`）；② `optimization_history`
+    （会印进下一轮 prompt ⇒ 它是信念的另一种写法）只在有资格时累加（`:1431`）；
+    ③ bandit 回报统计按 `can_count_progress`（`:1343`，§10.5-3 在搜索侧的唯一实现）；
+    ④ prompt 数字槽在 `tuning_refused` 时印「无可用读数」，**不许** `.get(k, 0)` 编 `0.00`
+    （`agents.py:714-760`）——上游挡住数字、prompt 再发明一个「不存在的 0.00」，门就白修了。
+  - **产物**：`operator_agent/bandit.py`（确定性 UCB1 + 冷启动，无 RNG：同血缘必须同序；
+    `update(arm, reward, *, eligible)` 收布尔不收档位串，档位→后果只许有一处解释）
+    + `artifact.metadata["bandit"]`（`total_scored`/`unscored_updates` 可审计，否则排序是没有
+    出处的黑箱）+ 队列过 `bandit.order`（`:1419`；bandit 只改**顺序**，真机 L3 仍是裁判）。
+  - **守卫**：20 条用例（`tests/test_bandit.py` 11 + `tests/test_search_belief_gate.py` 9，
+    后者含 6 条走真 `Conductor.execute` 的生产链路用例）+ **8 处变异全红**（撤信念门 / 撤
+    history 门 / bandit 忽略资格 / prompt 回 `.get(k,0)` / 队列不过 bandit / 臂名退化成
+    `id()` / `None` 当 0 / 冷启动丢先验序）。观测口本身修了两处：假 Search 必须**拷**
+    `optimization_history`（原样存引用会让首轮快照跟着长）、验 history 门要跑 4 轮
+    （3 轮时 append 发生在最后一次问话之后，不可见）。
+  - **边界明写**：证据**不进快照**（只覆盖本次运行；跨运行臂统计要 §7 记忆层）、`c` 未标定、
+    **臂空间只有 tiling**（§12 `param_space()` 仍零实现）、没资格的那一轮**照样花机时**
+    （本次改动减的是「拿撑不住结论的数指挥搜索」，不是机时）、**真机未复跑**。
+    → 见 [doc 66](../research/66-搜索侧的信念门与bandit.md)
+  - **仍未做的同族一件**：`can_report` **仍零生产读者**（`grep -rn "can_report" operator_agent/`
+    除 `eligibility.py` 自身外零命中）；报告问的是「资格位在不在」（收口点跑过的证据），
+    不是这一位。**消费端三套词汇**（`measurement_validity`→`measurement_ok`、
+    `measurement_can_*`、`eligibility.can_*`）也仍并存（三者同源所以不打架，但 §4.3 的五位
+    是唯一契约）。
 
 ---
 
@@ -1186,7 +1214,7 @@
 | I49 | 峰值「实测」被「口径核过」顶替, 收敛出口因此开着 | I | ✅ 已修 |
 | I50 | 设计 §17 第 3 件交付物(报告)此前没有产物 | I | ✅ 已修 |
 | I51 | 「不许声称审计有收益」这道门后面没有路 | I | ⚠️ 比较器已落地 / 两臂未跑 |
-| I52 | 五位资格里 can_tune/can_report 零读者, 而搜索吃没有资格的数 | I | ⚠️ 已知未修 |
+| I52 | 五位资格里 can_tune/can_report 零读者, 而搜索吃没有资格的数 | I | ✅ 2026-10-02: 信念门 4 条通道收口 (can_report 那半仍零读者) |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

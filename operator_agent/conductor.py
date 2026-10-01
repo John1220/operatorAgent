@@ -35,6 +35,7 @@ from .llm_client import LLMClient
 from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
+from .bandit import Bandit
 from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
                           LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
                           PERF_GATE_PARAM_KEYS, ROOFLINE_CONVERGED_PCT,
@@ -756,6 +757,12 @@ class Conductor:
         # 改进即停 (stagnation 逻辑照旧)。不进快照: 断点续跑时机器状态已变,
         # 旧排序作废, 重新让 Search 出一轮队列。
         search_alternatives: list = []
+        # §5 bandit: 让队列顺序吃本轮累积的证据, 而不是纯 FIFO。与上面那条注释同一个
+        # 理由 —— 证据只覆盖本次运行, 机器状态一变就作废, 所以同样不进快照。
+        bandit = Bandit()
+        #: 最近一次**有调参资格**的读数构成的信念 (设计 §10.4 伪码里的 `belief`)。
+        #: `can_tune=False` 的轮次不许覆盖它, 只许沿用它。
+        last_tunable_perf: Optional[dict] = None
 
         for round_num in range(start_round, self.max_optimize_rounds + 1):
             print(f"\n{'─'*40}")
@@ -1301,7 +1308,40 @@ class Conductor:
                 break
 
             if l3_result and not l3_result.passed and round_num < self.max_optimize_rounds:
+                # ── 资格门: `can_tune` 管的是 **belief**, 不是「停循环」 ──
+                # 设计 §10.4 的伪码就是这条:
+                #     obs = oracle.evaluate(c, contract)
+                #     if obs.eligibility.can_tune: belief.update(c, obs)
+                #     if obs.eligibility.can_count_progress: stagnation.update(belief)
+                # 也就是说没资格的那个数**不进信念**, 于是 `propose()` 只能从**上一次
+                # 有资格的读数**构成的信念出发 —— 循环照常跑满预算 (那条策略另有真机
+                # 用例守着: `uninformative` 轮次必须跑满、不许提前终止)。
+                #
+                # 此前这里**没有任何门** (CHECKLOG I52): 一个档位 `uninformative`、五位
+                # 全 False 的读数照样被拼成 `perf_data` (gflops/speedup/`roofline_bound`
+                # 全在里面), 喂给邻居排序 (`agents.py:680` 读 roofline_bound 决定往大
+                # BLOCK_K 还是小 BLOCK_M/N 排) 与 LLM 先验 (`agents.py:708` 读 speedup)。
+                _elig = l3_result.metrics.get("eligibility") or {}
+                _can_tune = _elig.get("can_tune") is True
+                if not _can_tune:
+                    print(f"\n[Search] 本轮读数无调参资格 "
+                          f"(can_tune=False; 档位="
+                          f"{l3_result.metrics.get('measurement_validity')!r})"
+                          f" ⇒ 不进信念")
                 print(f"\n[Search] L3 性能未达标，启动优化...")
+                # ── bandit 记账 (§5 / §10.5-3) ──
+                # 回报口径 = 相对**本轮之前**最好 gflops 的改进 —— 与 `best_gflops` /
+                # 停滞判定同一个量, 不另立一个口径。资格位决定这次回报算不算数:
+                # `can_count_progress=False` 的那一轮只记「试过」, 回报不进均值
+                # (「试过但没数」既不是「没试过」, 也不是「试过且不好」)。
+                _arm = self._arm_of(current_sketch)
+                _cur = l3_result.metrics.get("gflops")
+                _reward = None
+                if (isinstance(_cur, (int, float)) and not isinstance(_cur, bool)
+                        and isinstance(best_gflops, (int, float)) and best_gflops > 0):
+                    _reward = (float(_cur) - float(best_gflops)) / float(best_gflops)
+                bandit.update(_arm, _reward,
+                              eligible=_elig.get("can_count_progress") is True)
                 perf_data = {
                     "gflops": l3_result.metrics.get("gflops", 0),
                     "speedup": l3_result.metrics.get("speedup_vs_baseline", 0),
@@ -1323,6 +1363,22 @@ class Conductor:
                     # ---- 优化历史 ----
                     "optimization_history": optimization_history,
                 }
+                if _can_tune:
+                    # 有资格 ⇒ 这份读数进信念, 供后面的轮次沿用
+                    last_tunable_perf = perf_data
+                elif last_tunable_perf is not None:
+                    # 没资格 ⇒ 沿用**上一次有资格读数**构成的信念 (伪码里的 `belief`)
+                    perf_data = last_tunable_perf
+                else:
+                    # 本次运行还没有任何一次有资格的读数: 给一个**不含任何数字**的
+                    # 结构先验。`tuning_refused` 是给 SearchAgent 的信号 —— 它必须
+                    # 把「没有读数」如实写进 prompt, 不许用 `.get(k, 0)` 编一个 0 出来
+                    # (`_llm_optimize` 原来正是那样: 缺键 ⇒ 0.00 印进 prompt)。
+                    perf_data = {
+                        "target_speedup": task.constraints.min_speedup,
+                        "tuning_refused": "can_tune=False",
+                        "optimization_history": [],
+                    }
                 if search_alternatives:
                     # P1-4: 上一轮排好的邻域候选按序轮换 —— 系统搜索代替「每轮
                     # 重新问一次 LLM 直觉」。轮换候选已带结构 (hints/memory_plan),
@@ -1357,18 +1413,29 @@ class Conductor:
 
                         break
                     # P1-4: 排队下一轮的轮换候选 (SearchAgent 只在 triton 路径产出)
-                    search_alternatives = list(getattr(self.search, "last_alternatives", []))
+                    # §5: 顺序交给 bandit (本轮累积的证据优先, 无观测的保持先验顺序),
+                    # 而不是纯 FIFO —— 后者对脏数据免疫但也无知: 哪个候选上次变快了,
+                    # 队列不知道。资格门在这层之外 (没资格的数根本没进来)。
+                    search_alternatives = bandit.order(
+                        list(getattr(self.search, "last_alternatives", [])),
+                        key=self._arm_of)
+                    if bandit.total_scored or bandit.unscored_updates:
+                        print(f"  [Bandit] 队列按证据重排: 已采纳 {bandit.total_scored} 个回报, "
+                              f"没采纳 {bandit.unscored_updates} 个")
                 print(f"  优化建议: {suggestion}")
                 print(f"  新 Sketch 版本: v{current_sketch.version}")
 
                 # ---- 记录本轮优化历史 (供后续轮次参考) ----
-                optimization_history.append({
-                    "tiling": f"{current_sketch.tiling.block_m}x{current_sketch.tiling.block_n}x{current_sketch.tiling.block_k}",
-                    "gflops": l3_result.metrics.get("gflops", 0),
-                    "stage": "algorithm",  # 由 SearchAgent 返回实际 stage
-                    "outcome": f"GFLOPS={l3_result.metrics.get('gflops', 0):.2f}, "
-                               f"加速比={l3_result.metrics.get('speedup_vs_baseline', 0):.2f}x",
-                })
+                # 只在有资格时累加: 这份 history 会印进下一轮的 prompt, 也就是**信念**的
+                # 一部分。把没有调参资格的那一轮数字写进去, 等于换个通道让它指挥搜索。
+                if _can_tune:
+                    optimization_history.append({
+                        "tiling": f"{current_sketch.tiling.block_m}x{current_sketch.tiling.block_n}x{current_sketch.tiling.block_k}",
+                        "gflops": l3_result.metrics.get("gflops", 0),
+                        "stage": "algorithm",  # 由 SearchAgent 返回实际 stage
+                        "outcome": f"GFLOPS={l3_result.metrics.get('gflops', 0):.2f}, "
+                                   f"加速比={l3_result.metrics.get('speedup_vs_baseline', 0):.2f}x",
+                    })
 
             # ── 可复现性 Harness: 循环走到末尾 (没走 break/continue) 时统一 flush 一次快照 ──
             snapshot_target_dir = _snap()
@@ -1490,6 +1557,12 @@ class Conductor:
         # 目录, 后者落进「这条结论有没有进长期记忆 + 为什么」—— 那是报告里最要紧的一句
         # 之一, 而它此刻才存在。报告写失败不让这次实验失败 (write_report 内部把异常写进
         # 那个文件), 所以这里不需要再兜一层。
+        # bandit 状态落盘: 「有几轮的数进了统计」这件事必须能在产物里读到, 否则
+        # 排序就成了一个没有出处的黑箱 (与 `selection_rejections`/`stop` 同一处置)。
+        if artifact.metadata is None:
+            artifact.metadata = {}
+        artifact.metadata["bandit"] = bandit.as_dict()
+
         from .report import write_report
         _admission = (artifact.metadata or {}).get("corpus_admission") or {}
         _refusals = ([_admission.get("reason")]
@@ -1534,6 +1607,19 @@ class Conductor:
             print(f"\n[Conductor] ⚠️ 本次执行已降级: 主模型 [{self.llm.model}] 失败, "
                   f"实际使用 [{self.llm._active_model}] @ {self.llm._active_base_url}")
         return artifact
+
+    @staticmethod
+    def _arm_of(sketch) -> str:
+        """bandit 的臂 = tiling 三元组, 写法与 `optimization_history`/血缘里那个一致。
+
+        为什么用 tiling 而不是候选签名: 搜索真正要选的**就是** tiling (其余结构由 LLM
+        先验与配方决定), 拿签名当臂会把「同一个 tiling 被不同先验包装」拆成两个臂 ——
+        而我们要问的问题是「这个 tiling 上次有没有变快」。
+        """
+        t = getattr(sketch, "tiling", None)
+        if t is None:
+            return "unknown"
+        return f"{t.block_m}x{t.block_n}x{t.block_k}"
 
     @staticmethod
     def _measurement_drives_loop(l3_result: VerificationResult, round_num: int) -> bool:

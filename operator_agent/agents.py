@@ -705,6 +705,18 @@ class SearchAgent:
         return sorted(pool, key=key)
 
     def _llm_optimize(self, sketch, perf_data) -> tuple[UnifiedSketch, str]:
+        # ── 没有调参资格的那一轮: **不许编数字** ──
+        # 上游按设计 §10.4 的伪码把没资格的数挡在信念之外, 于是这里可能拿到一个
+        # **不含任何性能数字**的 perf_data。原来的 `.get(k, 0)` 会把 0.00 印进 prompt,
+        # LLM 拿到一个不存在的"事实"再据此改方向 —— 与「缺键 ≠ 0」是同一件事,
+        # 只是发生在 prompt 里 (而 prompt 是唯一保证被模型看到的通道)。
+        # `tuning_refused` 是上游显式给的信号, 不是靠「键少」猜出来的。
+        refused = perf_data.get("tuning_refused")
+        _NONE = "无可用读数"
+
+        def _num(value, fmt="{:.2f}"):
+            return _NONE if refused else fmt.format(value)
+
         speedup = perf_data.get("speedup", 0)
         target_speedup = perf_data.get("target_speedup", 1.0)
         achieve_pct = speedup / target_speedup * 100 if target_speedup > 0 else 0.0
@@ -740,18 +752,25 @@ class SearchAgent:
             _agent_role=self._agent_role,
             _skill_name=effective_skill,
             sketch=json.dumps(sketch.to_dict(), ensure_ascii=False, indent=2),
-            speedup=f"{speedup:.2f}",
+            # `target_speedup` 是**任务常量**不是读数 ⇒ 照常印 (它给模型一个标尺)
+            perf_availability=(
+                "⚠️ **本轮没有任何可用的性能读数**（上一次测量没有调参资格，"
+                "按设计 §4.3 不得驱动调参）。下面表里的数字一律不可用 —— "
+                "请不要假设任何性能事实，只做**结构性**改进（访存/流水/融合/hints），"
+                "并把 `new_tiling` 留空。"
+                if refused else ""),
+            speedup=_num(speedup),
             target_speedup=f"{target_speedup:.2f}",
-            achieve_ratio=f"{achieve_pct:.1f}",
-            current_gflops=f"{perf_data.get('gflops', 0):.2f}",
-            memory_bandwidth_gbs=f"{perf_data.get('memory_bandwidth_gbs', 0):.2f}",
+            achieve_ratio=_num(achieve_pct, "{:.1f}%"),
+            current_gflops=_num(perf_data.get("gflops", 0)),
+            memory_bandwidth_gbs=_num(perf_data.get("memory_bandwidth_gbs", 0)),
             # ---- Roofline 数据 ----
-            hw_peak_gflops=f"{hw_peak_gflops:.1f}",
-            hw_peak_bandwidth_gbs=f"{hw_peak_bandwidth:.1f}",
-            gflops_utilization_pct=f"{gflops_util:.1f}",
-            bandwidth_utilization_pct=f"{bw_util:.1f}",
-            arithmetic_intensity=f"{ai:.4f}",
-            ridge_point=f"{ridge_point:.2f}",
+            hw_peak_gflops=_num(hw_peak_gflops, "{:.1f}"),
+            hw_peak_bandwidth_gbs=_num(hw_peak_bandwidth, "{:.1f}"),
+            gflops_utilization_pct=_num(gflops_util, "{:.1f}%"),
+            bandwidth_utilization_pct=_num(bw_util, "{:.1f}%"),
+            arithmetic_intensity=_num(ai, "{:.4f}"),
+            ridge_point=_num(ridge_point),
             roofline_bound=roofline_bound,
             name_bound=perf_data.get("name_bound", "unknown"),
             hw_name=hw_name,
