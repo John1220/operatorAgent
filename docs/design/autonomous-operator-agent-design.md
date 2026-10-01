@@ -27,7 +27,7 @@
 | §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/竞争降级） | ✅ **同卡配对已有观测喂给者**（2026-10-01：远端逐臂报卡 ⇒ `observed_pairing` 三态 ⇒ oracle 拒评 + `passed=False`；`placement.plan_leases`/`DeviceLease` 仍**零生产调用者**，见 §15「没有实现物」表） |
 | §13.5 峰值实测（`probe_peak`） | `HardwareCaps.measured_peak_tflops`（位已就位，探测未做） | ⏳ **未做**：分母仍来自规格/推导表 ⇒ `peak_measured=False` ⇒ **收敛出口在真机上关闭**（设计要的方向，日志明写）。「口径核过」与「实测过」已分成两个位（[CHECKLOG I49](../research/CHECKLOG.md)） |
 | §10.2 三种预算 | `operator_agent/budget.py`（`BudgetPlan` + `BudgetLedger`）+ 轮次开头两道门 | ✅ 2026-10-02：oracle 次数（**预留不可挪用**）/ 墙钟 / token 三条接上并落 `artifact.metadata["budget"]`；心跳只记账不被拦。**边界**：`explore`/`refine` 不分相、按 GPU 秒未做、预算默认全关（opt-in）—— 见 [doc 67](../research/67-三种预算与不可挪用的预留.md) |
-| §10.3 候选选择 / LLM 升级门 | — | ⏳ **未做**：`score = P(beats_best)×预期增益/预期GPU秒` 要 GPU 秒口径；「三条件同时满足才许升级到 LLM 结构改动」那个门**零实现**（CHECKLOG I53） |
+| §10.3 候选选择 / LLM 升级门 | — | ⏳ **半片**：三条件升级门**已落地**（`escalation.py` + conductor 判决点接线 + SearchAgent 发布通道，13/13 变异红，CHECKLOG I53→I57/doc 69）—— 条件 2 今天只有 `smem-bound` 一条量具、且只在上界~×1.2 那条带里成立；`score = P(beats_best)×预期增益/预期GPU秒` 与 ε-greedy **未做**（要 GPU 秒口径） |
 | §5 bandit 调参 | `operator_agent/bandit.py`（确定性 UCB1）+ `Conductor` 信念门 | ✅ 2026-10-02：`perf_data` / `optimization_history` / 回报统计三条信念通道按 `can_tune` / `can_count_progress` 收口（CHECKLOG I52），prompt 不再把「没有读数」渲染成 `0.00`；状态落 `artifact.metadata["bandit"]`。**臂空间只有 tiling**、`c` 未标定、证据**不进快照**（只覆盖本次运行）；**真机未复跑** —— 见 [doc 66](../research/66-搜索侧的信念门与bandit.md) |
 | §12 模板后端 / `param_space()` | `operator_agent/candidates.py` + `backend_caps.Backend.param_space` + 便宜代理剪枝 | ✅ 2026-10-02 **枚举半片**：候选联合类型、分开写的去重口径（α-等价签名 / 模板参数+实例化器版本）、`ParamSpace` 确定性枚举、`prune_by_smem`（复用 L1 的 smem 估算器与同一个 `SMEM_SLACK`）、开关 `param_space_of` + fail-closed。**边界**：模板候选的**实例化 `build` 未实现**（声明了参数空间 ⇒ 控制器拒绝，不降级）；剪枝只估单缓冲；上界缺 ⇒ 三态不剪；参数轴只有 tiling 三维有产出者 —— 见 [doc 68](../research/68-候选联合类型与便宜代理剪枝.md) |
 
@@ -314,7 +314,8 @@ INTAKE ──► CONTRACT_LINT ──► PREFLIGHT ──► EXPLORE ──► E
 > `artifact.metadata["budget"]`。**「不可挪用」的实现**：非 confirm 的开销只许花到
 > `总数 - 预留份额`，`confirm` 只能花自己那一格；份额**先切预留**（余数归 refine），
 > 四格之和恒等于总数。
-> **边界**：`explore` / `refine` 今天**不分相**（那需要 §10.3 的「平台化」判据，见
+> **边界**：`explore` / `refine` 今天**不分相**（那需要 §10.3 的「平台化」判据 —— 该判据已落地
+> （doc 69），但分相本身仍未做；见
 > [CHECKLOG I53](../research/CHECKLOG.md)）⇒ 被强制执行的只有「总数 - 预留」与「预留专属
 > confirm」两条，`phase_caps` 是计划；三种预算**默认全关**（opt-in —— 默认生效的机时承诺
 > 会改变每一次真机运行）；按 GPU **秒**的预算**未做**（今天只有次数）。见

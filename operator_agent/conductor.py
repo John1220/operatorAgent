@@ -37,6 +37,10 @@ from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
 from .bandit import Bandit
+from .escalation import (
+    EscalationInputs, decide, smem_bound_evidence, untried_directions,
+)
+from .resource_check import check_resource_feasibility
 from .candidates import param_space_of, require_supported_space
 from .budget import BudgetLedger, BudgetPlan
 from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
@@ -243,6 +247,16 @@ def _round_transport(verify_results: list):
 _PERF_ADVICE = ("门槛或判据换了去查部署; 只有绑定轴换了通常是候选自己变了形状")
 
 
+#: 连续无改善上限 (轮)。它同时是 §10.3 条件 1 里的那个 K。
+#:
+#: 为什么必须是**同一个数**: 两个独立的数会长成两种谁也没设计过的行为 ——
+#: K 比它大 ⇒ 循环先停了, 升级门**永远开不了** (第一版 K=3 对着它=2, 实测撞到);
+#: K 比它小 ⇒ 在同一段平台上反复放行。取「相等」时语义是清楚的: **循环准备放弃的
+#: 那一轮**, 正是唯一一次问 LLM 要不要做结构性跳跃的机会 —— 而升级买到的是 K 轮
+#: (停滞计数清零, 因为那段平坦区是对**旧结构**的陈述)。
+MAX_STAGNANT_ROUNDS = 2
+
+
 class Conductor:
     """
     Conductor - 任务编排器
@@ -318,6 +332,9 @@ class Conductor:
         #: 每次 `execute` 再新建一个, 使「这次运行花了多少」不跨任务累计。
         self._budget = BudgetLedger(self.budget_plan)
         self._run_started = time.monotonic()
+        # §10.3 升级门的运行态: 判决词尾巴 (只进 valid 轮) 与逐轮裁决日志
+        self._verdict_tail = []
+        self._escalation_log = []
         self._heartbeat_epoch = 0
         #: 已经为「第几次测量」跑过心跳了。防的是这一支: 计数停在第 5 次而 L3 一直没
         #: 跑成 (L1/L2 挂了), 于是每一轮都重跑一次心跳。到位只跑一次, 之后的轮次复用
@@ -375,6 +392,46 @@ class Conductor:
             artifact.metadata = {}
         artifact.metadata["stop"] = {"reason": reason, "round": int(round_num),
                                      "detail": detail}
+
+    @staticmethod
+    def _denied_escalation():
+        """没有证据时的裁决: **拒绝**（三条件一条都不成立）。
+
+        不用 `None` 表示「没判过」: 下游要的是「这一轮能不能升级」这个答案,
+        而 `None` 会逼每个读者各自决定怎么解释它 (必然有人解释成放行)。
+        """
+        return decide(EscalationInputs(k_valid_rounds=MAX_STAGNANT_ROUNDS))
+
+    def _escalation_decision(self, plan, applied_recipes, disabled_recipes,
+                             metrics, current_code, task=None):
+        """§10.3 三条件的输入装配 (判据本体在 `operator_agent/escalation.py`)
+
+        三条输入各自的出处:
+          * 条件 1: `self._verdict_tail` —— 由 `verdict()` 那一个点写入, 只含 valid 轮;
+          * 条件 2: `smem_bound_evidence` —— 今天唯一有量具的硬限制。估的**不是 sketch 的
+            tiling 而是那一轮被测量的代码**: 走 `check_resource_feasibility` (与 L1 预检
+            **同一个估算器**、同一份产物), 否则「证据」与「预检」会是两套算法, 而 sketch
+            与 LLM 真正出的码今天本来就允许不一致;
+          * 条件 3: planner 选中 ∩ 未 applied/未 disabled 的配方 = 还剩的结构方向。
+        """
+        caps_kb = metrics.get("shared_mem_per_sm_kb") or 0
+        limits = ()
+        if caps_kb and current_code:
+            # `check_resource_feasibility` 只读 caps 的这一个字段 ⇒ shim 就够,
+            # 不必为了归因再去解析一份 HardwareCaps (那会引入第二个真源)。
+            class _CapsKB:
+                shared_mem_per_sm_kb = int(caps_kb)
+
+            rep = check_resource_feasibility(
+                current_code, _CapsKB(),
+                getattr(getattr(task, "source", None), "kernel_type", "") or "")
+            limits = smem_bound_evidence(rep.estimated_smem_bytes, rep.limit_bytes)
+        dirs = untried_directions(
+            [r.id for r in (plan.selected_recipes if plan else [])],
+            sorted(applied_recipes), sorted(disabled_recipes))
+        return decide(EscalationInputs(
+            verdicts=tuple(self._verdict_tail), k_valid_rounds=MAX_STAGNANT_ROUNDS,
+            hard_limits=limits, untried_directions=dirs))
 
     def _heartbeat_for_next_measurement(self):
         """下一次真值测量是否该伴随标定心跳 —— 该跑就**现在**跑掉 (同一个窗口)。
@@ -512,6 +569,9 @@ class Conductor:
         # 少花钱。起始时刻一起在这里取 —— 墙钟预算量的是**这一次运行**。
         self._budget = BudgetLedger(self.budget_plan)
         self._run_started = time.monotonic()
+        # §10.3 升级门的运行态: 判决词尾巴 (只进 valid 轮) 与逐轮裁决日志
+        self._verdict_tail = []
+        self._escalation_log = []
         # 心跳计数同理: 「每 N 次真值测量」是**这一次运行**内的事, 跨任务累计会让
         # 第二个任务在错误的位置插入参照对。
         self._true_measurements = 0
@@ -646,7 +706,9 @@ class Conductor:
         reflexion_pending: list = []
         best_gflops: float = 0.0           # 历史最优 GFLOPS
         rounds_without_improvement: int = 0  # 连续无改善轮数
-        max_stagnant_rounds: int = 2       # 连续无改善上限，超过则提前终止
+        # 连续无改善上限，超过则提前终止。**§10.3 条件 1 的 K 就是它** ——
+        # 见 `MAX_STAGNANT_ROUNDS` 的说明。
+        max_stagnant_rounds: int = MAX_STAGNANT_ROUNDS
         optimization_history: list[dict] = []  # 优化历史记录，每轮追加
         applied_recipes: set[str] = set()      # 已成功应用的配方 ID
         disabled_recipes: set[str] = set()     # 被禁用的配方 ID (应用后性能下降)
@@ -1112,6 +1174,14 @@ class Conductor:
             # **永久**拉黑实际有效的配方, 拿它累计停滞会在 max_stagnant_rounds=2 下
             # 把一次正在起效的优化提前终止。L3 通过时同样要看: 那一路会把本轮配方
             # 记进 applied_recipes, 依据不可信的测量给配方记功是同一个错误的镜像。
+            # §10.3 升级门: 本轮的裁决。缺省是**拒绝**(三条件一条都不成立) —— 于是
+            # 「这一轮没走到重算」(例如测量不可信、进了别的分支) 与「判过、没通过」
+            # 对下游是同一个答案, 而不会因为漏算一次就放行。真正的重算在判决之后。
+            _esc_decision = self._denied_escalation()
+            # 每一轮门都被问过, **答了什么都要留痕** —— 包括「没走到重算、按缺省拒绝」
+            # 的那一轮。不留这一条的话, 读数不可信的轮次在产物里与「门没接上」长得一样
+            # (实测: 那几轮原本一条裁决都没有, 于是缺省裁决成了没人读的值)。
+            self._escalation_log.append(dict(_esc_decision.as_dict(), round=round_num))
             measurement_ok = True
             if l3_result is not None:
                 measurement_ok = self._measurement_drives_loop(l3_result, round_num)
@@ -1143,6 +1213,11 @@ class Conductor:
                     # 需要的证据比「这次没测出更好」强。现在只有 SLOW 才禁用。
                     _validity = _validity_of(l3_result.metrics or {})
                     v, why, used_band = verdict(current_gflops, best_gflops, _validity)
+                    # §10.3 条件 1 的输入就在**这一个点**产出: 这个分支只在
+                    # `measurement_ok` 成立时进入 (它要求 can_count_stagnation = VALID),
+                    # 所以尾巴里天然只有 valid 轮 —— 「K 轮 valid」不需要第二次筛
+                    # (再筛一次 = 同一个判定两处实现)。
+                    self._verdict_tail.append(v.name)
                     # 这一轮的判决**真正用过**的那条带宽进血缘 (#87 第 4 片, **只观测**)。
                     # 取的是 `verdict` 自己返回的那个值, 不是这里再查一次表: 分两次查同一张
                     # 表, 中间表被换过就会记下一个「判决没用过的数」, 而这一格要回答的题正是
@@ -1200,6 +1275,27 @@ class Conductor:
                     _perm["stagnation_counted"] = True
                     print(f"\n[Conductor] 性能指标不完整 (gflops={current_gflops:.2f}, speedup={speedup:.4f}), "
                           f"连续 {rounds_without_improvement}/{max_stagnant_rounds} 轮")
+                # ── §10.3 的三条件升级门 (判据的输入刚刚齐: 本轮判决已进尾巴) ──
+                # 位置是判据的一部分: 必须在**停滞出口之前**。第一版把它放在优化分支里,
+                # 于是「记满 K 轮平坦」的那一轮先被停滞出口 break 掉, 门永远开不了
+                # (实测: K=2 时门能看到的尾巴最多只有 1 条)。
+                _esc_decision = self._escalation_decision(
+                    plan, applied_recipes, disabled_recipes,
+                    (l3_result.metrics or {}) if l3_result else {}, current_code, task)
+                # **替换**而不是追加: 这一轮的缺省裁决已经记过一条, 同一轮记两条会让
+                # 「判过几次」变成「轮数 × 分支数」, 而读者要的是每轮一个答案。
+                self._escalation_log[-1] = dict(_esc_decision.as_dict(), round=round_num)
+                if not _esc_decision.allowed:
+                    print(f"\n[Escalation] 结构升级门未通过 ⇒ 本轮只做参数搜索: "
+                          f"{_esc_decision.refusal_note()}")
+                elif rounds_without_improvement >= max_stagnant_rounds:
+                    # 升级**买到的是 K 轮**: 平台化是对**旧结构**的陈述, 换成新结构之后
+                    # 那段平坦区不再是关于它的证据 ⇒ 停滞计数清零。有界性靠
+                    # `max_optimize_rounds`(总轮次) 与「清零后要重新攒够 K 轮 valid」
+                    # 两条一起保证, 不会因为门反复放行而无限跑。
+                    print("\n[Escalation] 结构升级门通过 ⇒ 停滞计数清零, "
+                          "本轮把结构改动交给 LLM")
+                    rounds_without_improvement = 0
                 if rounds_without_improvement >= max_stagnant_rounds:
                     print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善，提前终止优化")
                     snapshot_target_dir = _snap()
@@ -1440,6 +1536,9 @@ class Conductor:
                     # 与 `tuning_refused` 走同一条通道 (perf_data), 不新增签名 ——
                     # SearchAgent 见到它就跳过 `_llm_optimize` 走规则路径。
                     perf_data["llm_budget_exhausted"] = True
+                # §10.3: 把本轮裁决**发布**给 SearchAgent (判据在判决点之后已经算过,
+                # 这里只发布 —— 一个判定一处实现)。不通过 ⇒ 这一轮只做参数搜索。
+                perf_data["structural_escalation_denied"] = list(_esc_decision.refusals)
                 if _can_tune:
                     # 有资格 ⇒ 这份读数进信念, 供后面的轮次沿用
                     last_tunable_perf = perf_data
@@ -1649,6 +1748,9 @@ class Conductor:
         # §10.2 的账本同样落盘: 「计划是多少 / 花了多少 / 谁被挡住了」必须能被读到,
         # 否则预算就是一个只在 `print` 里活过的装置。
         artifact.metadata["budget"] = self._budget.as_dict()
+        # §10.3 的逐轮裁决: 门是**判据**, 判过什么必须留痕 (否则「没升级」与
+        # 「没接门」在下游看起来一样)。
+        artifact.metadata["escalation"] = self._escalation_log
 
         from .report import write_report
         _admission = (artifact.metadata or {}).get("corpus_admission") or {}

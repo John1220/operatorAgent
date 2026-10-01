@@ -559,7 +559,16 @@ class SearchAgent:
         # §10.2 第三行: token 预算用尽 ⇒ **退化成纯数值搜索**, 不问 LLM 要结构改动。
         # 注意这不是「LLM 不在」(那条路会 raise: 规则模板已不再是缺 LLM 时的替补),
         # 而是「LLM 在, 但这一轮的额度花完了」—— 退化的后果正好是规则路径。
-        if perf_data.get("llm_budget_exhausted"):
+        # §10.3: 结构升级门未通过 ⇒ **只做参数搜索**（走规则/格点路径）。
+        # 这条与上面那条 token 退化共用**同一条通道**（perf_data）、但是两件事:
+        # 「额度花完了」是预算问题, 「三条件没同时成立」是判据问题 —— 读同一份
+        # perf_data 的下游必须能分开说出是哪一条（键名不同 ⇒ 理由可归因）。
+        _esc_denied = perf_data.get("structural_escalation_denied")
+        if _esc_denied:
+            prior_sketch, suggestion = self._rule_optimize(sketch, perf_data)
+            print(f"  [Search] 结构升级门未通过 ⇒ 只做参数搜索 (规则模板): "
+                  f"{'; '.join(str(r) for r in _esc_denied)}")
+        elif perf_data.get("llm_budget_exhausted"):
             prior_sketch, suggestion = self._rule_optimize(sketch, perf_data)
             print(f"  [Search] token 预算用尽 ⇒ 纯数值搜索 (规则模板): {suggestion}")
         else:

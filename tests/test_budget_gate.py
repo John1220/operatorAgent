@@ -28,6 +28,7 @@ from operator_agent.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision,
 )
+from tests.test_escalation import _TIGHT_TILE_KERNEL
 from tests.test_measurement_validity import (
     LaunchDominatedGPU, NET_MS_MATMUL_4096,
 )
@@ -67,6 +68,18 @@ class _TaggingLlm:
         return {"algorithm": "matmul",
                 "tiling": {"block_m": 64, "block_n": 64, "block_k": 32},
                 "memory_plan": {}, "pipeline": [], "optimization_hints": []}
+
+
+class _TightTileTaggingLlm(_TaggingLlm):
+    """出「贴到 smem 上界」的码 ⇒ §10.3 条件 2 有量具、门**可能**开
+
+    为什么这组用例要用它: 「没超预算时 LLM 仍会被问」这句断言, 只有在**升级门开着**
+    时才真的是关于 token 预算的。用默认假核时门本来就关着 (没有 BLOCK_* ⇒ 无量具),
+    「没问」是门的判决而不是预算的判决 —— 那样断言会变成永远为真的空话。
+    """
+
+    def chat(self, messages, **kw):
+        return _TIGHT_TILE_KERNEL
 
 
 def _task(min_speedup=5.0):
@@ -174,8 +187,9 @@ class TestTheRulerIsNotStarvedByTheBudget(unittest.TestCase):
 
 class TestTheTokenBudgetDegradesToNumericSearch(unittest.TestCase):
 
-    def _run(self, budget, tokens, max_rounds=2):
-        llm = _TaggingLlm(tokens=tokens)
+    def _run(self, budget, tokens, max_rounds=5, llm=None):
+        # 轮次给够: 升级门要求 K 轮 valid 平台 (K = 停滞上限 = 2), 2 轮攒不出来
+        llm = llm or _TaggingLlm(tokens=tokens)
         c = Conductor(backend=LaunchDominatedGPU(NET_MS_MATMUL_4096),
                       kernel_db=KernelDatabase(jsonl_path=None), llm=llm,
                       max_optimize_rounds=max_rounds, heartbeat_interval=1000,
@@ -185,7 +199,8 @@ class TestTheTokenBudgetDegradesToNumericSearch(unittest.TestCase):
         return llm, art, buf.getvalue()
 
     def test_over_budget_never_asks_the_llm_for_a_structural_change(self):
-        llm, art, out = self._run(BudgetPlan(llm_tokens=100), tokens=150)
+        llm, art, out = self._run(BudgetPlan(llm_tokens=100), tokens=150,
+                                  llm=_TightTileTaggingLlm(tokens=150))
         self.assertNotIn("Search", llm.tags,
                          f"token 超了还在问 LLM 要结构改动: {llm.tags}")
         self.assertIn("退化成纯数值搜索", out)
@@ -194,14 +209,16 @@ class TestTheTokenBudgetDegradesToNumericSearch(unittest.TestCase):
         self.assertGreaterEqual(st["llm_degraded_rounds"], 1)
 
     def test_under_budget_still_asks_the_llm(self):
-        """反向: 门不是「永远不问 LLM」"""
-        llm, art, out = self._run(BudgetPlan(llm_tokens=10 ** 6), tokens=150)
+        """反向: 门不是「永远不问 LLM」(升级门开着时, 没超预算就该问)"""
+        llm, art, out = self._run(BudgetPlan(llm_tokens=10 ** 6), tokens=150,
+                                  llm=_TightTileTaggingLlm(tokens=150))
         self.assertIn("Search", llm.tags, f"没超预算却不问 LLM 了: {llm.tags}")
         self.assertNotIn("退化成纯数值搜索", out)
         self.assertEqual(0, art.metadata["budget"]["llm_degraded_rounds"])
 
     def test_without_a_token_budget_nothing_changes(self):
-        llm, art, _ = self._run(BudgetPlan(), tokens=10 ** 9)
+        llm, art, _ = self._run(BudgetPlan(), tokens=10 ** 9,
+                                llm=_TightTileTaggingLlm(tokens=10 ** 9))
         self.assertIn("Search", llm.tags)
         self.assertEqual(0, art.metadata["budget"]["llm_degraded_rounds"])
 
