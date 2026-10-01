@@ -1010,7 +1010,8 @@ class Verifier:
             print(f"  [Verifier] Roofline: {roofline['roofline_bound']} "
                   f"(AI={roofline['arithmetic_intensity']:.2f} FLOP/Byte, "
                   f"peak={roofline['hw_peak_gflops']/1000:.1f} TFLOPS ({compute_label}|"
-                  f"分母[{roofline['peak_table_key']}] {roofline['peak_source']}), "
+                  f"分母[{roofline['peak_table_key']}] {roofline['peak_source']}"
+                  f"{'' if roofline.get('peak_measured') else '; ⚠️未实测⇒收敛出口关闭'}), "
                   f"GFLOPS利用率={roofline['gflops_utilization_pct']:.1f}%, "
                   f"带宽利用率={roofline['bandwidth_utilization_pct']:.1f}%)")
 
@@ -1382,15 +1383,21 @@ class Verifier:
         # 或者根本没命中表的行, 都**不配**用来开「已到 roofline」这个判停出口。
         peak_trusted = matched_key is not None and not peak_source.startswith("⚠️")
 
-        # launch 地板走 hardware_caps 而不是上面这两张表: 它是实测值而非 datasheet
-        # 推算值, 且按缺口 3 的方向, 硬件知识应该收敛到 HardwareCaps 一处。
+        # launch 地板与**实测峰值**都走 hardware_caps 而不是上面这两张表: 它们是实测值
+        # 而非 datasheet 推算值, 且按缺口 3 的方向, 硬件知识应该收敛到 HardwareCaps 一处。
         # 取不到 (未知设备 / get_hardware_info 抛错) 时为 None, 下游会显式记录
         # 「未做地板支配检查」而不是默认放行。
-        launch_floor_us = None
+        caps = None
         try:
-            launch_floor_us = detect_hardware_caps(hw).launch_floor_us
+            caps = detect_hardware_caps(hw)
         except Exception:
-            pass
+            caps = None
+        launch_floor_us = getattr(caps, "launch_floor_us", None)
+        # 分母**实测过**没有 (设计 §13.5)。与 `peak_trusted` 刻意分开: 后者问的是「表行
+        # 口径核过没有」(dense/sparse 没混、算术自洽), 前者问的是「有没有一次真探测」。
+        # H20 今天两问的答案是「核过」+「从没探测」, 而收敛出口只认后者。
+        _mp = getattr(caps, "measured_peak_tflops", None)
+        peak_measured = bool(isinstance(_mp, (int, float)) and _mp and _mp > 0)
 
         self._theoretical_peak = {
             "fp32_tflops": fp32, "tf32_tflops": tf32,
@@ -1398,6 +1405,10 @@ class Verifier:
             "memory_bandwidth_gbs": bw,
             "peak_source": peak_source,
             "peak_trusted": peak_trusted,
+            # 收敛出口判停用的**唯一**那个位 (measurement.roofline_converged)。
+            # `probe_peak` 落地时: 按精度把实测值写进 HardwareCaps.measured_peak_tflops,
+            # 这个位才会翻真 —— 在那之前出口是关的, 这是设计要的行为, 不是缺陷。
+            "peak_measured": peak_measured,
             "peak_table_key": matched_key or "",
             "launch_floor_us": launch_floor_us,
             "compute_capability": cc, "device": device, "name": name,
@@ -1547,6 +1558,10 @@ class Verifier:
             # 看不出它有多可信**: 138.2 和 1979 在日志里长得一模一样。
             "peak_source": peak.get("peak_source", ""),
             "peak_trusted": peak.get("peak_trusted", False),
+            # 收敛出口判停**只认这一个位** (设计 §13.5)。发布出去是必要的: 它不在这里,
+            # 下游拿到的是一份「核过口径」的记录, 而「实测过没有」这件事实就丢了 ——
+            # 与 I45/I46/I48 同族的「算了一处、判在另一处」。
+            "peak_measured": peak.get("peak_measured", False),
             "peak_table_key": peak.get("peak_table_key", ""),
         }
 

@@ -259,13 +259,17 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
     # 形状走: 它现在多带了 peak_source/peak_trusted/peak_table_key。少了 `peak_trusted`
     # 时「分母口径未核 → 不开出口」这道门会默认关掉, 于是本类的用例全都不停 —— 看着像
     # 「机制生效」, 实际是 fixture 落后了一格。
+    # 这一份是**验尸台上**的分母: 两个位都真 (口径核过 + 实测过), 才允许收敛出口点火。
+    # `peak_measured=True` 是刻意的 —— 今天没有 `probe_peak`, 真机发布出去的是 False,
+    # 于是出口在所有真机上都是关的 (见下面 test_unverified_peak_* 那一族)。这里造的是
+    # 「探测已经落地之后」的形状, 用来钉出口本身的机制。
     PEAK = {"fp32_tflops": 0.02, "tf32_tflops": 0.0,
             "fp16_tflops": 0.0, "bf16_tflops": 0.0,
             "memory_bandwidth_gbs": 1000.0,
             "launch_floor_us": None, "compute_capability": "",
             "device": "mock_gpu", "name": "MockGPU",
             "peak_table_key": "mock", "peak_source": "mock (口径已核)",
-            "peak_trusted": True}
+            "peak_trusted": True, "peak_measured": True}
 
     def test_compute_axis_converged_stops_early(self):
         """50% → 95% GFLOPS 利用率: 第 2 轮已达上界, 不该再跑第 3、4 轮"""
@@ -293,6 +297,18 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
         self.assertNotIn("[Conductor]   分母", out,
                          "没判停就不该打印「判停所依赖的分母」那一行 "
                          "(Verifier 每轮的 Roofline 行里也带分母, 别拿它当判停证据)")
+
+    def test_unmeasured_peak_does_not_open_the_exit_either(self):
+        """分母**口径核过但没实测** ⇒ 同样不能宣布「已到上界」(设计 §13.5)
+
+        与上面那条成对: 「口径核过」(dense/sparse 没混) 与「实测过」(probe_peak 打过一次)
+        是两个问题, 而收敛要说的是「这张卡这一刻贴着上界了」。真机实测抓到的混同是:
+        H20 那行的出处自己写着「无公开官方页 + 算术推导」, 却因为不带 ⚠️ 把出口开着。
+        """
+        peak = dict(self.PEAK, peak_measured=False)
+        _, out, _ = self._run([10.0, 19.0, 40.0, 80.0], max_rounds=4, peak=peak)
+        self.assertNotIn("判定已收敛", out)
+        self.assertEqual(self._rounds_run(out, 4), 4)
 
     def test_memory_axis_converged_stops_early(self):
         """matmul 的名字是 compute-bound, 但先贴上界的是带宽轴 —— 仍该停"""

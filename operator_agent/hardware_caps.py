@@ -82,6 +82,19 @@ class HardwareCaps:
     # metrics 里写明「未做检查」, 不会默认放行 —— 缺证据不等于有效。
     launch_floor_us: Optional[float] = None
 
+    # **实测峰值** —— `probe_peak` 拿一个已知好 GEMM 打到真实峰值的结果 (设计 §13.5)。
+    #
+    # None = 该设备**从未探测过**, 于是 `roofline_converged` 那个收敛出口一律不开:
+    # 收敛要说的是「这张卡**这一刻**贴着上界了」, 而分母只能来自实测。表里的规格行
+    # (哪怕口径核过) 不是实测值 —— 它是 datasheet 推算, 与「这次测量的上限」之间隔了
+    # 时钟/温度/占用率。设计 §13.5 的原话是「`probe_peak` 必须实测 … 探测失败 →
+    # roofline 收敛出口**永久关闭**」。
+    #
+    # 为什么另立一个字段而不是把表里的数字调小: 「口径核过」与「实测过」是**两个**问题
+    # (见 `verifier._PEAK_SOURCE` 上方那段)。混成一个标志就会出现实测抓到的那种情形 ——
+    # H20 那行的出处自己写着「无公开官方页 + 算术推导」, 却被当成可信分母**开了**收敛出口。
+    measured_peak_tflops: Optional[float] = None
+
     # ---- 执行模型 ----
     sm_count: int = 0               # SM/CU/计算单元数量
     max_threads_per_sm: int = 2048  # 每 SM 最大线程数

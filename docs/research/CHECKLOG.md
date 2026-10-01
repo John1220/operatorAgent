@@ -938,6 +938,29 @@
 - **类别**：H · **状态**：✅ 已修（同一个毛病第三次出现：H5 是自报 pid 那一处、doc 62 的
   `ps | grep '[r]unner` 是第二处、这里是第三处 —— 凡是「用文本模式找自己」都要自问这一句）
 
+### I49 · 「峰值必须实测」被「表行口径核过」顶替，而收敛出口只差这一个位
+
+- **原话**：设计 §13.5 —— 「**`probe_peak` 必须实测**：拿一个已知好 GEMM 打到真实峰值，
+  而不是读 spec 表。探测失败 → **roofline 收敛出口永久关闭**」
+- **实证**：全仓 `probe_peak`/`PeakProfile` **0 处**；分母来自 `verifier._PEAK_BY_NAME`
+  （规格表 + 算术推导），而「可信」的判据是
+  `peak_trusted = 命中表行 且 出处串不以 ⚠️ 开头`（`verifier.py:1383`）。
+  H20 那行的出处是 `flash-attention dense 表 148/4.0 + 算术推导; 无公开官方页`
+  （`verifier.py:91`）—— **不带 ⚠️ ⇒ trusted=True**，于是
+  `measurement.roofline_converged`（`measurement.py:694`）**开着**收敛出口。
+  真机 4096³ 的 Roofline 行原文：`peak=74.0 TFLOPS (tf32_tensor_core|分母[h20]
+  flash-attention dense 表 148/4.0 + 算术推导; 无公开官方页)`（2026-10-01，doc 63）
+- **出处**：doc 63 §三；`operator_agent/hardware_caps.py`（新 `measured_peak_tflops`）、
+  `operator_agent/verifier.py`（`peak_measured`）、`operator_agent/measurement.py`
+  （出口只认实测）、`tests/test_measurement_validity.py::test_roofline_converged_needs_a_measured_peak`
+  与 `test_the_published_flag_reads_hardware_caps_not_the_peak_table`（成对: 翻真才算接通）
+- **后果**：这是「用一个较弱的代理顶替了设计里较强的要求」，而**顶替点正好是判停出口** ——
+  分母偏小会把还能优化的核**提前**判成到顶（不对称代价，仓里已经为 ⚠️ 行写过同一条理由）。
+  已修：把两问拆成 `peak_trusted`（口径核过）/ `peak_measured`（实测过），出口**只认后者**，
+  并让日志明写 `⚠️未实测⇒收敛出口关闭`。今天没有任何设备做过探测 ⇒ 出口在所有真机上关闭，
+  这是设计要的方向。`probe_peak` 仍未实现，已写进设计 §15 的「没有实现物」表
+- **类别**：I · **状态**：✅ 已修（口径拆开 + 出口只认实测 + 守卫成对）；`probe_peak` 本体 ⏳ 未做
+
 ---
 
 ### I45 · 「§10.5-4 两次确认 ✅」的判据函数零生产调用者，且默认不强制
@@ -1075,6 +1098,7 @@
 | I46 | §14-8 的资格位发布值不是收口点算的那份 | I | ✅ 已修 |
 | I47 | 跨卡配对检查在生产上没有喂给者 | I | ⚠️ 已知 |
 | I48 | 远端运行时盾的证据不落地 | I | ✅ 已修 |
+| I49 | 峰值「实测」被「口径核过」顶替, 收敛出口因此开着 | I | ✅ 已修 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

@@ -693,6 +693,14 @@ def roofline_converged(metrics: dict) -> bool:
     # `not ...`: 老记录里没这个键时保持原有行为 (默认开), 新链路一律带 True/False。
     if (metrics.get("roofline_analysis") or {}).get("peak_trusted") is False:
         return False
+    # 分母**实测过**没有 (设计 §13.5)。「口径核过」不等于「实测过」: 表里的规格/推导行
+    # 给的是理论规格, 而收敛出口要说的是「这张卡这一刻贴着上界了」—— 那只能拿实测峰值当
+    # 分母。真机实测抓到的正是这个混同: H20 那行的出处自己写着「无公开官方页 + 算术推导」,
+    # 却因为不带 ⚠️ 而把出口**开着**。缺这个键的老记录同样不开 (fail-closed): 缺证据不是
+    # 有效证据 —— 与「地板未知」「峰值表行未核」同一条纪律, 而且方向是不对称的 (关着只会
+    # 白烧几轮, 还有停滞出口兜底; 开着会把还能优化的核提前判成到顶)。
+    if (metrics.get("roofline_analysis") or {}).get("peak_measured") is not True:
+        return False
     a = binding_attainment(metrics)
     return a is not None and a >= ROOFLINE_CONVERGED_PCT
 

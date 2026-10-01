@@ -1079,13 +1079,66 @@ class TestFourStateVerdict(unittest.TestCase):
         self.assertIsNone(binding_attainment({}))
         self.assertIsNone(binding_attainment({"gflops_utilization_pct": None}))
 
+    #: 贴顶的那份读数。分母**实测过** (两个位都真) —— 见下面那条用例, 缺任一个都不开。
+    HOT = {"gflops_utilization_pct": 101.0, "bandwidth_utilization_pct": 5.6,
+           "roofline_analysis": {"peak_trusted": True, "peak_measured": True}}
+
     def test_roofline_converged_needs_a_trustworthy_measurement(self):
-        hot = {"gflops_utilization_pct": 101.0, "bandwidth_utilization_pct": 5.6}
+        hot = self.HOT
         self.assertTrue(roofline_converged(dict(hot)))
         self.assertFalse(roofline_converged(dict(hot, benchmark_contaminated=True)),
                         "不可信的测量没说得出「已经到顶」")
         self.assertFalse(roofline_converged(dict(hot, measurement_can_gate=False)))
         self.assertFalse(roofline_converged({"gflops_utilization_pct": 40.0}))
+
+    def test_roofline_converged_needs_a_measured_peak(self):
+        """口径核过 ≠ 实测过: 收敛出口**只认后者** (设计 §13.5)
+
+        真机实测抓到的混同: H20 那行的出处自己写着「flash-attention dense 表 + 算术推导;
+        无公开官方页」, 却因为不以 ⚠️ 开头而被当成可信分母, 把收敛出口**开着**。两条判据
+        成对写死在这里 —— `peak_trusted` 问的是「表行口径核过没有」(dense/sparse 没混),
+        `peak_measured` 问的是「有没有一次真探测」。
+        """
+        hot = {k: v for k, v in self.HOT.items() if k != "roofline_analysis"}
+        rl = lambda **kw: {"roofline_analysis": kw}          # noqa: E731
+        # 口径核过、从没实测 ⇒ 不开 (H20 今天的真实状态)
+        self.assertFalse(roofline_converged(dict(hot, **rl(peak_trusted=True))))
+        self.assertFalse(roofline_converged(
+            dict(hot, **rl(peak_trusted=True, peak_measured=False))))
+        # 实测过、但表行口径没核 ⇒ 也不开 (老规矩保留)
+        self.assertFalse(roofline_converged(
+            dict(hot, **rl(peak_trusted=False, peak_measured=True))))
+        # 两问都是真 ⇒ 才开
+        self.assertTrue(roofline_converged(
+            dict(hot, **rl(peak_trusted=True, peak_measured=True))))
+        # 老记录连这个键都没有 ⇒ fail-closed (缺证据不是有效证据)
+        self.assertFalse(roofline_converged(dict(hot)))
+
+    def test_the_published_flag_reads_hardware_caps_not_the_peak_table(self):
+        """`peak_measured` 的来源必须是**探测结果** (HardwareCaps), 不是那张规格表
+
+        反方向也要证 (否则这个位可能只是恒 False): 给 HardwareCaps 一个实测值 ⇒ 翻真。
+        """
+        import dataclasses
+        from unittest import mock
+
+        from backend_fakes import DeclaredFakeBackend
+        from operator_agent import hardware_caps as hc
+        from operator_agent.verifier import Verifier
+
+        fake = DeclaredFakeBackend(get_hardware_info=lambda: {
+            "name": "h20", "device": "h20", "compute_capability": "9.0"})
+        peak = Verifier(fake)._detect_theoretical_peak()
+        self.assertIs(peak["peak_trusted"], True, "H20 表行口径是核过的")
+        self.assertIs(peak["peak_measured"], False, "但从来没探测过")
+
+        real = hc.detect_hardware_caps
+        with mock.patch("operator_agent.verifier.detect_hardware_caps",
+                        lambda hw: dataclasses.replace(
+                            real(hw), measured_peak_tflops=150.0)):
+            peak2 = Verifier(fake)._detect_theoretical_peak()
+        self.assertIs(peak2["peak_measured"], True,
+                      "HardwareCaps 里放进实测值之后这个位没翻真 —— 接线断了")
 
 
 if __name__ == "__main__":
