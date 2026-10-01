@@ -139,6 +139,31 @@ def observed_pairing(candidate_identity, baseline_identity):
     return c, b, (SCOPE_SAME if c == b else SCOPE_CROSS)
 
 
+#: 逐臂**测量窗口**的三态 (§11-2 的「同一时间窗」那一半; CHECKLOG I47)。
+#:
+#: 与设备标签同形, 但回答的是另一个问题: 「这一对臂是不是在**同一次测量调用**里量的」。
+#: `None` = 没观测 (oracle 跳过这道比较, 与 `real_device=None` 同一边界), `""` 会成为
+#: 一次恒真的比较 —— 所以缺观测一律 `None`。
+WINDOW_SAME = "same_window"                 #: 两臂同一次调用 ⇒ 同窗
+WINDOW_DIFFERENT = "cross_window_refused"   #: 观测到不同窗 ⇒ 加速比作废 (§11-2)
+WINDOW_UNOBSERVED = "unobserved"            #: 没有逐臂窗口观测 ⇒ 不声称同窗
+
+
+def observed_windows(candidate_window, baseline_window):
+    """两臂的窗口观测 → `(候选窗口, 基线窗口, scope)`。**缺观测返回 None**。
+
+    窗口的意义 (§11-2): 热/时钟状态只有在**同一扇窗**里才可比。远端 runner 在一次
+    `benchmark_with_baselines` 里按块交错量两臂 ⇒ 两臂的窗口 id 由**各自那一臂**的样本
+    带着回来; 有一天某条臂的样本被复用 (缓存/短路), 带回来的就是**旧窗**, 于是这道比较
+    就响。今天远端路径上「同窗」是构造出来的事实, 而这条观测让它是**被观测到的**, 不是
+    被假设的。
+    """
+    if candidate_window is None or baseline_window is None:
+        return None, None, WINDOW_UNOBSERVED
+    return (candidate_window, baseline_window,
+            WINDOW_SAME if candidate_window == baseline_window else WINDOW_DIFFERENT)
+
+
 # ─── 放置 (§11-1 / §13.5) ──────────────────────────────────────
 
 @dataclass(frozen=True)

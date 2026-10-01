@@ -89,6 +89,13 @@ def evaluate(contract: FrozenContract,
              baseline_device: Optional[str] = None,
              candidate_window: Optional[str] = None,
              baseline_window: Optional[str] = None,
+             # ⚠️ 与上面两个**不是一回事**, 所以刻意分成两组参数:
+             #   `candidate_window`  = 这条读数**属于哪一扇心跳窗** (§13.5 的尺子范围)
+             #   `pair_*_window`     = 两臂是不是在**同一次测量调用**里量的 (§11-2 配对)
+             # 混成一个参数就会出现「心跳窗 id ≠ 测量窗 id ⇒ 心跳被判成别窗」这种
+             # 恒假 (或恒真) 的比较 —— 两种失效在日志里都看不出来。
+             pair_candidate_window: Optional[str] = None,
+             pair_baseline_window: Optional[str] = None,
              ) -> Observation:
     """一次完整评测。`measure()` 返回的键至少含 `value` 与可选
     `validity` / `lib_fallback` / `cv_exceeded` / `launch_dominance_exceeded` /
@@ -151,9 +158,13 @@ def evaluate(contract: FrozenContract,
     # ── 2. 同卡配对 (设计 §11-2 / §13.4 硬性语义 2) ──
     # 声明了 same_device、实际跑到两张卡上的加速比**作废**。
     # spine-review P3-16: 这条检查必须在库里, 不能只活在测试文件里。
-    if candidate_device is not None or baseline_device is not None:
+    # ⚠️ 进入条件必须**两个观测各自成立**, 不能挂在设备那一项上: 挂在设备上时
+    # 「runner 报了窗口但没报逐臂身份」会让窗口那道判决**根本没被执行** —— 一个观测的
+    # 缺席掐掉另一个观测的判决, 日志里看不出来 (这道比较此前正是这样半死不活)。
+    if (candidate_device is not None or baseline_device is not None
+            or pair_candidate_window is not None or pair_baseline_window is not None):
         pair_why = pairing_conflict(candidate_device, baseline_device,
-                                   candidate_window, baseline_window)
+                                   pair_candidate_window, pair_baseline_window)
         if pair_why:
             return Observation(
                 metric=metric, value=None, unit=unit,
@@ -167,7 +178,11 @@ def evaluate(contract: FrozenContract,
                 reasons=["pairing_conflict"],
                 provenance={"contract_hash": expected,
                             "candidate_device": candidate_device,
-                            "baseline_device": baseline_device},
+                            "baseline_device": baseline_device,
+                            # 窗口也落盘: 拒评的理由要能被复核 (§11-2 的窗口那一半
+                            # 此前**没有喂给者**, 所以这条 provenance 从来没出现过)
+                            "candidate_window": pair_candidate_window,
+                            "baseline_window": pair_baseline_window},
                 hash_check=hash_check,
             )
 

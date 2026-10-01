@@ -1004,6 +1004,46 @@
   **两臂真机对照 ⏳ 未跑**（同卡两次完整循环, 要 LLM）⇒ 「审计有收益」今天仍不许说
 - **类别**：I · **状态**：⚠️ 比较器 ✅ 已落地 / 两臂 ⏳ 未跑
 
+### I60 · §11-2 的「同一时间窗」没有喂给者，而配对检查整条挂在设备那一项上
+
+- **原话**：设计 §11-2 —— 「一个候选的基线必须租到**同一张卡、同一时间窗**。**A 卡基线
+  vs B 卡候选的『加速比』直接作废** —— 多卡下最容易犯、也最难发现的错。」
+- **实证**：`placement.pairing_conflict` 四条判据都在（P3-16），设备那半 doc 63/I47 接上了
+  观测，**窗口那半一直没有**：生产上 `baseline_window` 恒 `None` ⇒ 这道比较**从未执行过**。
+  再叠两层：①oracle 的配对检查整体挂在 `if candidate_device is not None or
+  baseline_device is not None:` 上 ⇒ **一个观测的缺席掐掉另一个观测的判决**（runner 只报
+  窗口不报身份时，窗口判据根本不跑，日志里看不出来）；②`candidate_window` 当时被喂的是
+  `heartbeat.window_id`（心跳窗），与「测量窗」不是一回事 —— 今天惰性，两侧都真起来就会让
+  心跳那一段判成「别窗读数」。接上喂给者时还当场照出第三个形状：第一版在 oracle 调用处用了
+  `_verify_performance` 的局部量 `_cand_win`，而那段代码在 `_assess_measurement` 里 ⇒
+  `metrics["observation_error"] = NameError: name '_cand_win' is not defined` ——
+  「生产者写了、判决读不到、收口点整轮没跑」（资格停在 fail-closed 的 all-False，所以没放行，
+  但拒评理由永远不出现）。第四个形状：`_measure_baseline` 的缓存让非远程路径**第二轮用的是
+  第一轮的基线**，字面意义上的跨窗，而 `TestBaselineCache` 用 `assertIs`（同一对象）当代理
+  —— 正是这条代理让跨窗一直沉默。
+- **出处**：`operator_agent/placement.py`（`observed_windows` / `WINDOW_*`）、
+  `operator_agent/oracle.py`（`pair_candidate_window`/`pair_baseline_window` 单列一组参数、
+  进入条件、provenance 落两窗口）、`operator_agent/verifier.py`（发布
+  `arm_windows`/`measurement_window_scope`、跨窗 `passed=False`、`baseline_reused`）、
+  `remote_scripts/run_kernel.py`（`_new_window_id` + `paired["arm_windows"]`）、
+  `tests/test_pairing_window.py`（13 条，含真跑 `_bench_pair_interleaved` 的 CPU 路径）、
+  `docs/research/72-*.md`
+- **后果**：不改则「同卡同窗」只有同卡那一半有观测，而配对检查的**进入条件**还挂在设备上
+  —— 一个观测缺席就能让另一个观测的判决静默消失。改后：一扇窗 = 一次交错调用，两臂各自
+  带回自己的窗；缺观测 ⇒ `unobserved`（不声称同窗、也不拒评，与设备那半同一边界）；
+  观测到不同窗 ⇒ `pairing_conflict` 拒评 + `passed=False`（与跨卡同族：加速比没有指称对象）；
+  测量窗与心跳窗**分成两组参数**（名字上就不能互换）；控制端参照臂的跨窗复用**可见**
+  （产物 `baseline_reused` + 消息明写），但**不作判决**（它不是设备租约臂，复用是声明的优化）。
+  **11 处变异全红**，其中 M7（窗口 id 是常量 ⇒ 比较恒真）是「每扇窗不同」这件事的钉。
+- **类别**：I（实现与设计不符：设计有判据、无喂给者；且一个新观测的判决被另一个观测的缺席
+  掐掉） · **状态**：✅ 2026-10-02 —— 边界明写：真机未复跑；远端「同窗」今天由**构造**保证
+  ⇒ 真机上不可能出现 `cross_window_refused`（拒绝路径靠 fakes 用例 + 变异证明是活的，
+  它保护的是将来某一天基线被缓存/短路）；控制端复用的**判决化**刻意没做（多轮 mock 会轮轮
+  DEGRADED = 把噪声当信号，要先有真机 `mode="local"` 多轮的实测分布）
+  → 见 [doc 72](../research/72-同一时间窗那一半的观测与拒评.md)
+
+---
+
 ### I59 · §11-4 的「记录 external_load」没有生产者，而「降级」在放置模块里被实现了第二遍（阈值还不同）
 
 - **原话**：设计 §11-4 —— 「租不到独占卡时，记录 `external_load` 并在 `evidence` 中显式
@@ -1442,6 +1482,7 @@
 | I57 | 「判据的位置」与「K 的来源」是两个会静默失效的判据参数 (§10.3 落地时撞到: 门恒假) | I | ✅ 2026-10-02 修 (位置移到停滞出口前 + K 与停滞上限同一处) |
 | I58 | §13.5 的 `probe_peak` 零实现 ⇒ 收敛出口在所有真机上关着; 「实测」被判据、存放处、读取三处口径同时决定 | I | ✅ 2026-10-02 三层接上 (下界语义/不跨运行/真机未复跑明写) |
 | I59 | §11-4 的「记录 external_load」没有生产者, 而「降级」在放置模块被实现了第二遍 (阈值还不同) | I | ✅ 2026-10-02 租约改成证据三态 + 生产喂给者 (多卡并行仍纸面) |
+| I60 | §11-2 的「同一时间窗」没有喂给者 ⇒ 窗口比较从未执行; 且配对检查整条挂在设备那一项上 | I | ✅ 2026-10-02 逐臂窗口观测 + 三态 + 跨窗拒评 (真机不可能出现 cross_window, 明写) |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

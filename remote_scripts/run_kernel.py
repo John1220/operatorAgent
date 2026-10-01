@@ -21,6 +21,7 @@ import sys
 import json
 import time
 import os
+import uuid
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1042,6 +1043,16 @@ def _arm_identity(device_is_cuda: bool) -> dict:
                 "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "")}
 
 
+def _new_window_id() -> str:
+    """一扇配对测量窗的新 id。
+
+    为什么不是全局计数器: 常驻 runner (`runner_server.py`) 里两次调用必须在同一进程内
+    也可区分, 而 uuid 顺手把「跨进程/跨机器」那半边也解决了 (计数器会撞名, 撞名 = 把
+    跨窗读成同窗, 正是这道检查要抓的反面)。可读性靠控制端日志里的 `measurement_window_scope`。
+    """
+    return uuid.uuid4().hex[:12]
+
+
 def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
                             device_is_cuda: bool) -> tuple:
     """候选与基线**按块交错**计时, 返回 (候选 stats, 基线 stats, paired stats)。
@@ -1072,6 +1083,13 @@ def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
          名字可以改。
     """
     import torch
+
+    # 本次配对测量的**窗口 id** (§11-2 的「同一时间窗」那一半; CHECKLOG I47)。
+    # 一次 `_bench_pair_interleaved` = 一扇窗: 两臂按块交错、同一批时钟/热状态。
+    # 两臂各自把**它自己那批样本所属的窗**带回去 (下面 `paired["arm_windows"]`), 于是
+    # 「同窗」是**被观测到的**而不是被假设的 —— 哪天某条臂的样本被复用/短路 (缓存),
+    # 带回来的就是旧窗, 控制端那条 `pairing_conflict` 就会响。
+    window_id = _new_window_id()
 
     # 各跑一次吃掉 JIT / 首次派发, 否则估时会严重偏大 (与 _bench_callable 同一处理)
     with shield_torch():
@@ -1122,6 +1140,10 @@ def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
     base_stats = _sample_stats(base_times)
     ratios = [b / c for c, b in zip(cand_times, base_times) if c > 0]
     paired = {"paired_runs": len(ratios), "paired_block_samples": block,
+              # 逐臂窗口观测 (§11-2 的「同一时间窗」)。两臂在这里**同值**是结论
+              # (同一次交错调用), 不是空转: 它由**这一扇窗**生成、随两臂各自的样本回来,
+              # 复用别窗样本的那一天就会不等。控制端 `observed_windows` 读这两个键。
+              "arm_windows": {"candidate": window_id, "baseline": window_id},
               # 两臂计时当时的卡身份 + 跑完之后的复读。控制端的同卡配对检查读这里
               # (§11-2 / oracle.evaluate 的 candidate_device/baseline_device)。
               # 放在 `paired` 而不是加第四个返回值: `benchmarks/probe_block_series.py`

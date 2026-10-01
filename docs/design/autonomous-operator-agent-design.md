@@ -23,8 +23,8 @@
 | §8 失败分类路由 | `operator_agent/failure_route.py`（五路 + `fix_not_rewrite`） | ✅ |
 | §14-9 资格审计对照 | `benchmarks/ablation_eligibility.py` + `tests/test_ablation_eligibility.py` | ⏳ **比较器已落地、两臂未跑**：五态判据（含"没打到点上"这一态与"没有收益必须写进报告"），带宽取 `NOISE_BAND[uninformative]`；真机对照需要同卡两次完整循环（要 LLM）⇒ "审计有收益"仍不许声称 |
 | §17「无法确立」 | `confirm.UnableToEstablish` + **`report.py` / `report.md` 产物** | ✅ 2026-10-01 补齐：第 3 件交付物此前完全没有产物（收集器只被两个 benchmark 调过）。空章节带依据、`can_persist=False` 单列一行、入库拒因随报告落盘 |
-| §14 验收八条 | `tests/test_stage1_acceptance.py`（离线） + `benchmarks/smoke_spine_h20.py`（真机 H20） | ✅ **真机已跑**（2026-10-01，8×H20 的 `algorithm-h20`，走生产 L3 入口）：0/1/2/3/7/8 绿、4 见下、5 未覆盖（需 LLM，`LLM_API_KEY` 未设）、6 纯离线。**真机抓出两处「算了但没接上」**（CHECKLOG I46 发布的资格位不是收口点算的那份 ⇒ §14-8 在生产上没生效；I48 远端运行时盾的证据不落地），都已修 + 守卫；§14-7 的运行时检查**已接上喂给者**（I47 同卡那半 2026-10-01 修：远端按臂采身份 ⇒ `measurement_scope` 由观测算出三态、跨卡时资格全 False 且 `passed=False`；**窗口那一半仍无喂给者**，明写在 I47）。见 [docs/research/63](../research/63-真机§14冒烟与它抓出来的两个真源.md) |
-| §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/观测租约） | ✅ **同卡配对已有观测喂给者**（2026-10-01：远端逐臂报卡 ⇒ `observed_pairing` 三态 ⇒ oracle 拒评 + `passed=False`）；✅ 2026-10-02 **观测租约有了生产者**：`DeviceLease` 三态（`exclusive=None`/`external_load=None`/`source`）由 `observed_lease` 从**与档位判决同一份载荷**装出、落 `metrics["device_lease"]`；原先放置模块那份 `degraded_by_competition`/`lease_notes` 是**同一判定的第二处实现**（阈值 `>0` vs `>5%`）已被收掉，降级判决只在 `measurement.assess`。**边界**：多卡并行（`lease_waves` 无多卡消费者）、`interference_domain` 无可观测来源、`pairing_conflict` 的**窗口**那半仍无喂给者 —— 见 [doc 71](../research/71-观测租约与它的生产者.md) |
+| §14 验收八条 | `tests/test_stage1_acceptance.py`（离线） + `benchmarks/smoke_spine_h20.py`（真机 H20） | ✅ **真机已跑**（2026-10-01，8×H20 的 `algorithm-h20`，走生产 L3 入口）：0/1/2/3/7/8 绿、4 见下、5 未覆盖（需 LLM，`LLM_API_KEY` 未设）、6 纯离线。**真机抓出两处「算了但没接上」**（CHECKLOG I46 发布的资格位不是收口点算的那份 ⇒ §14-8 在生产上没生效；I48 远端运行时盾的证据不落地），都已修 + 守卫；§14-7 的运行时检查**已接上喂给者**（I47 同卡那半 2026-10-01 修：远端按臂采身份 ⇒ `measurement_scope` 由观测算出三态、跨卡时资格全 False 且 `passed=False`；**窗口那一半 2026-10-02 也接上了**：runner 每扇交错调用带窗口 id ⇒ `measurement_window_scope` 三态 ⇒ 跨窗拒评 + `passed=False`，见 doc 72）。见 [docs/research/63](../research/63-真机§14冒烟与它抓出来的两个真源.md) |
+| §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/观测租约） | ✅ **同卡配对已有观测喂给者**（2026-10-01：远端逐臂报卡 ⇒ `observed_pairing` 三态 ⇒ oracle 拒评 + `passed=False`）；✅ 2026-10-02 **观测租约有了生产者**：`DeviceLease` 三态（`exclusive=None`/`external_load=None`/`source`）由 `observed_lease` 从**与档位判决同一份载荷**装出、落 `metrics["device_lease"]`；原先放置模块那份 `degraded_by_competition`/`lease_notes` 是**同一判定的第二处实现**（阈值 `>0` vs `>5%`）已被收掉，降级判决只在 `measurement.assess`。✅ 2026-10-02 **窗口那半也接上了观测**：runner 每扇交错调用生成窗口 id、两臂各自带回 ⇒ `observed_windows` 三态 ⇒ 观测到不同窗即拒评 + `passed=False`（与跨卡同族）；oracle 的进入条件改成**两个观测各自成立**（此前一个观测的缺席会掐掉另一个的判决），测量窗与心跳窗**分成两组参数** —— 见 [doc 72](../research/72-同一时间窗那一半的观测与拒评.md)。**边界**：多卡并行（`lease_waves` 无多卡消费者）、`interference_domain` 无可观测来源、真机上「同窗」由构造保证（`cross_window_refused` 尚不可能出现） —— 见 [doc 71](../research/71-观测租约与它的生产者.md) |
 | §13.5 峰值实测（`probe_peak`） | `operator_agent/peak_probe.py` + `hardware_caps` 存放处 + `verifier._publish_peak_probe`/按精度读取 | ✅ 2026-10-02：判据七条（仿真读数 / 精度键 / 出处 / 非有限正数 / 探针自己的档位 / 离散度未知 / 没打到算力峰值 / 高于规格 5%）+ **按精度**发布进 `HardwareCaps.measured_peak_tflops`（字典）+ 收敛出口按**这一轮分母的精度键**读取；零额外 GPU 秒（复用同一次 L3 的基线臂）。**边界**：发布的是**下界**（基线臂的实测可达值，不是器件极限）⇒ 出口偏松；只在**本进程**内生效（不跨运行）；`MockGPU` 一律拒发（无 `REAL_DEVICE`）；真机**未复跑**（本机无 GPU）—— 见 [doc 70](../research/70-实测峰值的判据与按精度发布.md) |
 | §10.2 三种预算 | `operator_agent/budget.py`（`BudgetPlan` + `BudgetLedger`）+ 轮次开头两道门 | ✅ 2026-10-02：oracle 次数（**预留不可挪用**）/ 墙钟 / token 三条接上并落 `artifact.metadata["budget"]`；心跳只记账不被拦。**边界**：`explore`/`refine` 不分相、按 GPU 秒未做、预算默认全关（opt-in）—— 见 [doc 67](../research/67-三种预算与不可挪用的预留.md) |
 | §10.3 候选选择 / LLM 升级门 | — | ⏳ **半片**：三条件升级门**已落地**（`escalation.py` + conductor 判决点接线 + SearchAgent 发布通道，13/13 变异红，CHECKLOG I53→I57/doc 69）—— 条件 2 今天只有 `smem-bound` 一条量具、且只在上界~×1.2 那条带里成立；`score = P(beats_best)×预期增益/预期GPU秒` 与 ε-greedy **未做**（要 GPU 秒口径） |
@@ -441,6 +441,19 @@ class DeviceKey:
    一个候选的基线必须租到**同一张卡、同一时间窗**。
    **A 卡基线 vs B 卡候选的"加速比"直接作废**——多卡下最容易犯、也最难发现的错。
 
+   **落地口径（2026-10-02）**：这条判据的四条比较都在 `placement.pairing_conflict` 里
+   （P3-16），两半各自有**观测喂给者**：设备那半读远端逐臂身份（doc 63），窗口那半读
+   runner 的 `paired["arm_windows"]`（一扇窗 = 一次 `_bench_pair_interleaved` 交错调用，
+   两臂各自带回自己那批样本所属的窗）。三态：`same_window` / `cross_window_refused` /
+   `unobserved`（**缺观测不拒评**，与设备那半同一边界）；观测到不同窗 ⇒ 拒评 +
+   `passed=False`（跨窗与跨卡同族：加速比**没有指称对象**）。**测量窗与心跳窗是两组参数**
+   （`pair_*_window` vs `candidate_window`）：混用会恒真或恒假，而两种失效在日志里都看不出来。
+   ⚠️ 远端路径上「同窗」今天由**构造**保证（一次配对调用里两臂必然同窗）⇒ 真机上还**不可能**
+   出现 `cross_window_refused`；那道拒绝路径保护的是「将来某一天某条臂被缓存/短路」，
+   靠 fakes 用例与变异证明它是活的。非远程路径的控制端参照臂若命中 `_baseline_cache`，
+   那是**字面意义上的跨窗复用** —— 今天**记录不判决**（产物 `baseline_reused` + L3 消息明写），
+   因为参照臂不是设备租约臂。
+
 3. **交错测量。**
    candidate / baseline **交替 + 每轮 L2 flush**，而不是"先跑基线，再跑候选"，
    否则热/时钟状态变化会污染比较。
@@ -767,7 +780,7 @@ Stage 5  记忆与跨任务迁移（带两次确认）
 | 缺的东西 | 现在的真实状态 | 后果 |
 |---|---|---|
 | `probe_peak`（实测峰值） | ✅ **2026-10-02 已落地**（判据 + 按精度发布 + 按精度读取，零额外 GPU 秒）：`operator_agent/peak_probe.py` | 收敛出口不再是「永远关」：同一轮 L3 里基线臂过判据 ⇒ 下一轮起有分母。**仍受的约束**：分母是下界（出口偏松）、不跨运行、真机未复跑 —— [doc 70](../research/70-实测峰值的判据与按精度发布.md) |
-| `Placement.lease`（多卡放置） | ⏳ **半片**（2026-10-02）：`DeviceLease` **有生产者了**（`observed_lease` 落 `metrics["device_lease"]`，含 §11-4 要的 external_load 与 evidence 显式标注），`lease_waves` 给出 `lease(contract,n)` 的形状；但真机仍是**单卡串行 + 一次调用跑完两臂** | §11 的「异域并行省 wall clock」仍是**纸面承诺**；`interference_domain` 无可观测来源（`can_measure_parallel` 恒保守串行）、`pairing_conflict` 的**窗口**那半无喂给者 |
+| `Placement.lease`（多卡放置） | ⏳ **半片**（2026-10-02）：`DeviceLease` **有生产者了**（`observed_lease` 落 `metrics["device_lease"]`，含 §11-4 要的 external_load 与 evidence 显式标注），`lease_waves` 给出 `lease(contract,n)` 的形状；但真机仍是**单卡串行 + 一次调用跑完两臂** | §11 的「异域并行省 wall clock」仍是**纸面承诺**；`interference_domain` 无可观测来源（`can_measure_parallel` 恒保守串行） —— 但 `pairing_conflict` 的**窗口**那半 2026-10-02 已有喂给者（见 §11 行 / doc 72） |
 
 两件都排进 Stage 3 之前 —— 前者决定停止条件能不能用，后者决定多卡是不是真的多卡。
 

@@ -226,7 +226,14 @@ class TestBaselineCache(unittest.TestCase):
         inputs = _matmul_inputs()
         b1 = verifier._measure_baseline(task, inputs)
         b2 = verifier._measure_baseline(task, inputs)
-        self.assertIs(b1, b2)  # 第二次命中缓存 (同一对象)
+        # 命中缓存这件事从 2026-10-02 起是**可观测的** (`baseline_reused`), 不再靠
+        # 对象同一性当代理 —— 同一性是实现细节, 而且是它让「跨窗复用」一直是沉默的。
+        self.assertFalse(b1["baseline_reused"], "第一次是本轮现量的")
+        self.assertTrue(b2["baseline_reused"], "第二次必须命中缓存")
+        self.assertIs(verifier._baseline_cache[verifier._baseline_cache_key(task, inputs)],
+                      verifier._baseline_cache[verifier._baseline_cache_key(task, inputs)])
+        self.assertEqual(b1["baseline_time_ms"], b2["baseline_time_ms"],
+                         "复用的必须是同一次测量值, 不是重测一次")
 
     def test_no_reference_returns_none(self):
         verifier = Verifier(MockGPU())

@@ -28,8 +28,9 @@ from .hardware_caps import (
 )
 from .peak_probe import precision_key_of, probe_peak, sample_from_l3_metrics
 from .placement import lease_evidence, observed_lease
-from .placement import (observed_pairing, SCOPE_SAME, SCOPE_CROSS,
-                        SCOPE_UNOBSERVED)
+from .placement import (observed_pairing, observed_windows,
+                        SCOPE_SAME, SCOPE_CROSS, SCOPE_UNOBSERVED,
+                        WINDOW_DIFFERENT)
 from .backend_caps import Backend, Cap, CapabilityMissing
 
 
@@ -1067,6 +1068,12 @@ class Verifier:
                 _ident = paired.get("arm_identity") or {}
                 _cand_dev, _base_dev, _pair_scope = observed_pairing(
                     _ident.get("candidate"), _ident.get("baseline"))
+                # 逐臂**测量窗口** (§11-2 的「同一时间窗」那一半, CHECKLOG I47 的窗口半格)。
+                # runner 在一次 `benchmark_with_baselines` 里按块交错量两臂 ⇒ 每臂的样本
+                # 各自带着窗口 id 回来; 哪天某臂被复用 (缓存/短路) 带回来的就是旧窗。
+                _wins = paired.get("arm_windows") or {}
+                _cand_win, _base_win, _win_scope = observed_windows(
+                    _wins.get("candidate"), _wins.get("baseline"))
                 metrics.update({
                     "baseline_type": baseline_name,
                     "baseline_display": display_name,
@@ -1084,6 +1091,10 @@ class Verifier:
                     # 任何观测在背后 (全仓只有一个测试在读它)。现在三种取值都写得出:
                     # 有观测且一致 / 观测到不同卡 / 没观测 (老 payload 或非远端路径)。
                     "measurement_scope": _pair_scope,
+                    # 窗口与设备**分开两个键**: 一个是「在哪张卡上」, 一个是「在哪扇窗里」,
+                    # 混成一个 scope 串会让「同卡但跨窗」这种情形两种解释都说得通。
+                    "arm_windows": _wins,
+                    "measurement_window_scope": _win_scope,
                     "candidate_median_time_ms": candidate_metrics.get("median_time_ms"),
                     "baseline_metrics": baselines,
                     # 交错配对的信号: 逐样本比值的 median 与其散布。判定仍走上面那个
@@ -1109,6 +1120,12 @@ class Verifier:
                                           "baseline": _base_dev},
                 })
                 passed = speedup >= min_required
+                if _win_scope == WINDOW_DIFFERENT:
+                    # 跨窗与跨卡同一族: 「同一时间窗」是 §11-2 给加速比立的**指称前提**
+                    # (热/时钟状态可比), 观测到两臂不在同一扇窗里 ⇒ 这个数没有指称对象,
+                    # 「通过」也不许立。判据是**观测到的**不同窗, 不是「没观测到同窗」
+                    # —— 后者 (`unobserved`) 不拒评, 与设备那半同一边界。
+                    passed = False
                 if _pair_scope == SCOPE_CROSS:
                     # 跨卡加速比**没有指称对象** (§11-2 原句: 「A 卡基线 vs B 卡候选的
                     # 『加速比』直接作废」) —— 与 §4.3 规则 3 同一族, 所以「通过」这个
@@ -1179,13 +1196,22 @@ class Verifier:
                 "baseline_time_ms": round(baseline["baseline_time_ms"], 4),
                 "speedup_vs_baseline": round(speedup, 4),
                 "min_speedup_required": min_required,
+                # 跨窗复用的**观测** (不是判决): 控制端参照臂的缓存命中。非远程路径
+                # 的配对窗口没有设备含义 (§11-2 那句话说的是设备租约臂), 所以它不进
+                # `pairing_conflict`; 但它今天是**看得见**的, 不再是一个沉默的捷径。
+                "baseline_reused": bool(baseline.get("baseline_reused")),
                 "perf_criterion": PERF_CRITERION_SPEEDUP,
             })
             passed = speedup >= min_required
             base_ms = baseline["baseline_time_ms"]
             ratio_triple = f"{kernel_min_ms:.4g}/{base_ms:.4g} ({speedup:.2f}x)"
+            # 基线是**这次量的**还是**缓存里那条**: 复用时消息里必须写出来 (§11-2 的
+            # 「同一时间窗」在控制端参照臂上不成立 ⇒ 读者有权知道比较是跨窗的)。
+            _reused = bool(baseline.get("baseline_reused"))
             msg = (f"加速比 {ratio_triple} vs {baseline['baseline_type']} "
-                   f"(要求 >= {min_required:.2f}x, {bound}-bound)")
+                   f"(要求 >= {min_required:.2f}x, {bound}-bound)"
+                   + ("  ⏳ 基线复用本轮之前的测量 (跨窗, §11-2 的窗口前提不成立)"
+                      if _reused else ""))
             msg, assessment = self._assess_measurement(
                 metrics, msg, kernel_min_ms,
                 # ⚠️ 非远程这条路**原先不传 util**, 于是同一个 `gpu_util_pct` 有两条命运:
@@ -1342,12 +1368,15 @@ class Verifier:
                     candidate_window=(heartbeat.window_id if heartbeat is not None else None),
                     # 同卡配对 (§11-2, CHECKLOG I47): 喂的是 `arm_device_labels` ——
                     # 上面刚发布进 metrics 的那一份, 不是现在重算一份。
-                    # ⚠️ **只喂设备, 不喂窗口**: `pairing_conflict` 的窗口那一半要求
-                    # 两侧都非 None 才比, 而 `candidate_window` 是心跳窗口 id —— 把同一个
-                    # id 抄给 `baseline_window` 会让那道比较恒真 (一次永远不响的守卫)。
-                    # 所以窗口那一半**仍然没有喂给者**, 登记在 I47 里, 等真有逐臂窗口观测。
                     candidate_device=(metrics.get("arm_device_labels") or {}).get("candidate"),
                     baseline_device=(metrics.get("arm_device_labels") or {}).get("baseline"),
+                    # 窗口那一半**单列一组参数**: `candidate_window` 是心跳窗口 id, 两者
+                    # 不是一回事 (把心跳窗当测量窗会让心跳那一段判成「别窗读数」)。
+                    # 窗口也从**产物里记的那一份**读 (`_assess_measurement` 是另一个
+                    # 方法, 拿不到 `_verify_performance` 的局部量 —— 用局部量在这里
+                    # 根本看不见, 而 `observation_error` 会把它吞成一行日志)。
+                    pair_candidate_window=(metrics.get("arm_windows") or {}).get("candidate"),
+                    pair_baseline_window=(metrics.get("arm_windows") or {}).get("baseline"),
                 )
                 metrics["observation"] = obs.as_dict()
                 # 收口点的答案就是**发布值**: 它读的是同一组输入加心跳窗口, 是严格更
@@ -1906,7 +1935,11 @@ class Verifier:
             return None
         cache_key = self._baseline_cache_key(task, inputs)
         if cache_key in self._baseline_cache:
-            return self._baseline_cache[cache_key]
+            # ⚠️ 这是**跨窗复用**: 命中缓存 = 这条基线是**本轮之前**量的 (§11-2 的
+            # 「同一时间窗」在这个控制端参照臂上并不成立)。今天不作判决 —— 这条臂不是
+            # 设备租约臂, 复用是**声明的**优化 (省一次 torch eager 的墙钟); 但它从此
+            # **看得见**: 产物里 `baseline_reused=True`, 消息里也会写出来。
+            return dict(self._baseline_cache[cache_key], baseline_reused=True)
 
         # torch 可用时做同步 (CUDA stream 等待), 确保计时准确
         try:
@@ -1934,6 +1967,7 @@ class Verifier:
             "baseline_avg_ms": sum(times) / len(times) * 1000,
             "baseline_type": baseline_type,
         }
+        result["baseline_reused"] = False       # 同一次调用里刚量的 ⇒ 不是复用
         self._baseline_cache[cache_key] = result
         return result
 
