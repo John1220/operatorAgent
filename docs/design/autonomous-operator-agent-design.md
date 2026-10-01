@@ -24,7 +24,7 @@
 | §14-9 资格审计对照 | `benchmarks/ablation_eligibility.py` + `tests/test_ablation_eligibility.py` | ⏳ **比较器已落地、两臂未跑**：五态判据（含"没打到点上"这一态与"没有收益必须写进报告"），带宽取 `NOISE_BAND[uninformative]`；真机对照需要同卡两次完整循环（要 LLM）⇒ "审计有收益"仍不许声称 |
 | §17「无法确立」 | `confirm.UnableToEstablish` + **`report.py` / `report.md` 产物** | ✅ 2026-10-01 补齐：第 3 件交付物此前完全没有产物（收集器只被两个 benchmark 调过）。空章节带依据、`can_persist=False` 单列一行、入库拒因随报告落盘 |
 | §14 验收八条 | `tests/test_stage1_acceptance.py`（离线） + `benchmarks/smoke_spine_h20.py`（真机 H20） | ✅ **真机已跑**（2026-10-01，8×H20 的 `algorithm-h20`，走生产 L3 入口）：0/1/2/3/7/8 绿、4 见下、5 未覆盖（需 LLM，`LLM_API_KEY` 未设）、6 纯离线。**真机抓出两处「算了但没接上」**（CHECKLOG I46 发布的资格位不是收口点算的那份 ⇒ §14-8 在生产上没生效；I48 远端运行时盾的证据不落地），都已修 + 守卫；§14-7 的运行时检查**已接上喂给者**（I47 同卡那半 2026-10-01 修：远端按臂采身份 ⇒ `measurement_scope` 由观测算出三态、跨卡时资格全 False 且 `passed=False`；**窗口那一半仍无喂给者**，明写在 I47）。见 [docs/research/63](../research/63-真机§14冒烟与它抓出来的两个真源.md) |
-| §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/竞争降级） | ✅ **同卡配对已有观测喂给者**（2026-10-01：远端逐臂报卡 ⇒ `observed_pairing` 三态 ⇒ oracle 拒评 + `passed=False`；`placement.plan_leases`/`DeviceLease` 仍**零生产调用者**，见 §15「没有实现物」表） |
+| §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/观测租约） | ✅ **同卡配对已有观测喂给者**（2026-10-01：远端逐臂报卡 ⇒ `observed_pairing` 三态 ⇒ oracle 拒评 + `passed=False`）；✅ 2026-10-02 **观测租约有了生产者**：`DeviceLease` 三态（`exclusive=None`/`external_load=None`/`source`）由 `observed_lease` 从**与档位判决同一份载荷**装出、落 `metrics["device_lease"]`；原先放置模块那份 `degraded_by_competition`/`lease_notes` 是**同一判定的第二处实现**（阈值 `>0` vs `>5%`）已被收掉，降级判决只在 `measurement.assess`。**边界**：多卡并行（`lease_waves` 无多卡消费者）、`interference_domain` 无可观测来源、`pairing_conflict` 的**窗口**那半仍无喂给者 —— 见 [doc 71](../research/71-观测租约与它的生产者.md) |
 | §13.5 峰值实测（`probe_peak`） | `operator_agent/peak_probe.py` + `hardware_caps` 存放处 + `verifier._publish_peak_probe`/按精度读取 | ✅ 2026-10-02：判据七条（仿真读数 / 精度键 / 出处 / 非有限正数 / 探针自己的档位 / 离散度未知 / 没打到算力峰值 / 高于规格 5%）+ **按精度**发布进 `HardwareCaps.measured_peak_tflops`（字典）+ 收敛出口按**这一轮分母的精度键**读取；零额外 GPU 秒（复用同一次 L3 的基线臂）。**边界**：发布的是**下界**（基线臂的实测可达值，不是器件极限）⇒ 出口偏松；只在**本进程**内生效（不跨运行）；`MockGPU` 一律拒发（无 `REAL_DEVICE`）；真机**未复跑**（本机无 GPU）—— 见 [doc 70](../research/70-实测峰值的判据与按精度发布.md) |
 | §10.2 三种预算 | `operator_agent/budget.py`（`BudgetPlan` + `BudgetLedger`）+ 轮次开头两道门 | ✅ 2026-10-02：oracle 次数（**预留不可挪用**）/ 墙钟 / token 三条接上并落 `artifact.metadata["budget"]`；心跳只记账不被拦。**边界**：`explore`/`refine` 不分相、按 GPU 秒未做、预算默认全关（opt-in）—— 见 [doc 67](../research/67-三种预算与不可挪用的预留.md) |
 | §10.3 候选选择 / LLM 升级门 | — | ⏳ **半片**：三条件升级门**已落地**（`escalation.py` + conductor 判决点接线 + SearchAgent 发布通道，13/13 变异红，CHECKLOG I53→I57/doc 69）—— 条件 2 今天只有 `smem-bound` 一条量具、且只在上界~×1.2 那条带里成立；`score = P(beats_best)×预期增益/预期GPU秒` 与 ε-greedy **未做**（要 GPU 秒口径） |
@@ -449,6 +449,14 @@ class DeviceKey:
    租不到独占卡时，记录 `external_load` 并在 `evidence` 中显式标注；观测降为 DEGRADED
    而不是失败——**诚实降级优于静默污染**。
 
+   **落地口径（2026-10-02）**：这句话里有**两件事**，分属两个模块 —— ①记录在
+   `placement.observed_lease`（读 `gpu_util_pct`，与档位判决**同一份载荷**；租约三个字段
+   全三态：`exclusive=None` = 未观测到独占性、「今天恒为 None」是因为 harness 不租卡、
+   `external_load=None` = 未观测 ≠ `0.0` = 观测到干净）；②降级只在 `measurement.assess`
+   （阈值 `5%` 那一处）。放置模块里原先那份 `degraded_by_competition`/`lease_notes(…)->bool`
+   是**第二处实现**且阈值不同（`>0`），已删除 —— 谁先去读它谁就成了尺子。
+   `lease_evidence` 只给三态 (`contended`/`clean`/`unobserved`)，判决不外借。
+
 5. **异构卡。**
    不同 `arch` → 不同分区、不同编译缓存、不同记忆。`best` 只在同一 partition 内有效；
    跨 arch 迁移是**显式声明的操作**，绝不隐式共享。
@@ -759,7 +767,7 @@ Stage 5  记忆与跨任务迁移（带两次确认）
 | 缺的东西 | 现在的真实状态 | 后果 |
 |---|---|---|
 | `probe_peak`（实测峰值） | ✅ **2026-10-02 已落地**（判据 + 按精度发布 + 按精度读取，零额外 GPU 秒）：`operator_agent/peak_probe.py` | 收敛出口不再是「永远关」：同一轮 L3 里基线臂过判据 ⇒ 下一轮起有分母。**仍受的约束**：分母是下界（出口偏松）、不跨运行、真机未复跑 —— [doc 70](../research/70-实测峰值的判据与按精度发布.md) |
-| `Placement.lease`（多卡放置） | `DeviceLease` 只有定义、无生产者；真机是**单卡串行 + 一次调用跑完两臂** | §11 的「异域并行省 wall clock」是**纸面承诺**；`pairing_conflict` 的跨卡检查没有生产喂给者 |
+| `Placement.lease`（多卡放置） | ⏳ **半片**（2026-10-02）：`DeviceLease` **有生产者了**（`observed_lease` 落 `metrics["device_lease"]`，含 §11-4 要的 external_load 与 evidence 显式标注），`lease_waves` 给出 `lease(contract,n)` 的形状；但真机仍是**单卡串行 + 一次调用跑完两臂** | §11 的「异域并行省 wall clock」仍是**纸面承诺**；`interference_domain` 无可观测来源（`can_measure_parallel` 恒保守串行）、`pairing_conflict` 的**窗口**那半无喂给者 |
 
 两件都排进 Stage 3 之前 —— 前者决定停止条件能不能用，后者决定多卡是不是真的多卡。
 

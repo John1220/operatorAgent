@@ -27,6 +27,7 @@ from .hardware_caps import (
     measured_peaks_for, remember_measured_peak,
 )
 from .peak_probe import precision_key_of, probe_peak, sample_from_l3_metrics
+from .placement import lease_evidence, observed_lease
 from .placement import (observed_pairing, SCOPE_SAME, SCOPE_CROSS,
                         SCOPE_UNOBSERVED)
 from .backend_caps import Backend, Cap, CapabilityMissing
@@ -996,6 +997,18 @@ class Verifier:
         # kernel_db 里的历史快照与既有下游。
         metrics["median_time_ms"] = kernel_min_ms
 
+        # ---- §11-4: 这一轮实际用的那张卡的**观测租约** ----
+        #
+        # 设计原话: 「租不到独占卡时, 记录 external_load 并在 evidence 中显式标注; 观测降为
+        # DEGRADED, 而不是失败」。前半句(记录)在这里落地, 后半句(降级)是
+        # `_assess_measurement` -> `measurement.assess` 的职责 —— 它读**同一个**
+        # `gpu_util_pct`。租约只给证据, 不给结论: 两处各自判一次, 阈值迟早分叉 (>0 vs >5%)。
+        lease = observed_lease(metrics, source="L3 载荷 (bench 顶层 + candidate)")
+        lease_text, lease_state = lease_evidence(lease)
+        metrics["device_lease"] = dict(lease.as_dict(), evidence=lease_text,
+                                       competition=lease_state)
+        metrics["device_lease_text"] = lease_text
+
         # ---- 注入 Roofline 指标, 供 SearchAgent 做结构化优化决策 ----
         metrics.update({
             "roofline_analysis": roofline,
@@ -1174,7 +1187,14 @@ class Verifier:
             msg = (f"加速比 {ratio_triple} vs {baseline['baseline_type']} "
                    f"(要求 >= {min_required:.2f}x, {bound}-bound)")
             msg, assessment = self._assess_measurement(
-                metrics, msg, kernel_min_ms, task=task,
+                metrics, msg, kernel_min_ms,
+                # ⚠️ 非远程这条路**原先不传 util**, 于是同一个 `gpu_util_pct` 有两条命运:
+                # 远程路径上它把档位打到 DEGRADED, 本地路径上它只被搬进产物、**没人读**
+                # (而本地路径恰恰可能是真卡: `RemoteExecutor(mode="local")` 就在这台机器上
+                # 跑)。于是「这张卡当时在被别人用」这件事在两条路上的后果不同 ——
+                # 这正是「一个键两种含义」那一族。判据只有一处 (`measurement.assess`),
+                # 两条路都必须把**产物里记的那一份**喂给它。
+                gpu_util_pct=metrics.get("gpu_util_pct"), task=task,
                 environment_drift=environment_drift,
                 heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
             passed = self._refuse_l3_pass(passed, assessment)

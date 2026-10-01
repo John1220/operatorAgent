@@ -13,8 +13,14 @@
 否则 cv 会诚实地变大, 把观测打到 DEGRADED。
 同卡配对 (§11-2): 候选与基线必须同卡同窗 —— A 卡基线 vs B 卡候选的加速比
 **直接作废** (多卡下最容易犯、也最难发现的错)。
-竞争检测 (§11-4): 租不到独占卡时记录 external_load, 观测降为 DEGRADED
-—— **诚实降级优于静默污染**。
+竞争检测 (§11-4): 租不到独占卡时**记录 external_load 并在 evidence 里显式标注**,
+观测降为 DEGRADED —— **诚实降级优于静默污染**。
+
+⚠️ 但「降级」这个判决**不在本模块**: 它是 `measurement.assess` 的职责 (读同一个
+`gpu_util_pct`, 阈值也在那一处)。本模块只产出**证据**(`lease_evidence` 的三态)与
+**观测记录**(`DeviceLease`)。原先这里的 `degraded_by_competition` / `lease_notes(…)->bool`
+是同一判定的**第二处实现**, 而且阈值不同 (本模块 `>0.0`, 那边 `>5%`) —— 谁先去读它,
+谁就成了尺子 (spine-review P1-6 就是这样发生的)。
 """
 from __future__ import annotations
 
@@ -33,7 +39,13 @@ class DeviceKey:
     interference_domain: str = ""    # 同 L2/时钟/NVLink 域 → 域内不可并行测量
 
     def label(self) -> str:
-        base = f"{self.uuid[:8]}@{self.node or '?'}"
+        if self.uuid:
+            base = f"{self.uuid[:8]}@{self.node or '?'}"
+        else:
+            # 没观测到 uuid 时**不许**印出一个像 uuid 的东西 (空串切片也是空串, 但
+            # 若哪天有人塞了伪 uuid 就会冒充真锚)。如实说「只有索引」—— 而索引会漂
+            # (§11: 「uuid 最稳的锚, 别用 index」), 所以这句话本身就是证据的一部分。
+            base = f"index={self.index}@{self.node or '?'}"
         if self.mig:
             base += f"({self.mig})"
         return base
@@ -131,14 +143,95 @@ def observed_pairing(candidate_identity, baseline_identity):
 
 @dataclass(frozen=True)
 class DeviceLease:
-    device: DeviceKey
-    exclusive: bool = True
-    external_load: float = 0.0       # 0..1 探测到的外部占用
+    """一次测量的**观测记录**: 这块卡是谁的、当时有没有别人在用 (§11-4)。
 
-    @property
-    def degraded_by_competition(self) -> bool:
-        """§11-4: 非独占或有外部负载 → 观测应降 DEGRADED, 不是错误通过。"""
-        return (not self.exclusive) or self.external_load > 0.0
+    三个字段都是**三态** (`缺 ≠ 0 ≠ 无上限` 那一族), 因为租约是证据:
+
+      * `exclusive`: `None` = **没有观测到独占性**。今天恒为 `None` —— harness 不租卡,
+        它只是挑一张空闲的卡, 没有任何观测能支撑「独占」这个声明。默认写 `True` 就是
+        「没观测 ⇒ 声称独占」, 而下游会拿它当「干净」的证据。
+      * `external_load`: `None` = 没观测到占用; `0.0` = 观测到**没有**占用。默认写 `0.0`
+        会把「没测」印成「干净」。
+      * `source`: 这条租约是从哪个观测装出来的 (空串 = 不知道出处 ⇒ 它只是一条声明)。
+
+    ⚠️ **本类不做判决**: 降不降级只有 `measurement.assess` 说了算 (§11-4 的原话是
+    「记录 external_load 并在 evidence 中显式标注; 观测降为 DEGRADED」—— 前半句是本类,
+    后半句是测量侧)。
+    """
+    device: DeviceKey
+    exclusive: Optional[bool] = None
+    external_load: Optional[float] = None       # 0..1 观测到的外部占用
+    source: str = ""
+
+    def as_dict(self) -> dict:
+        return {"device": {"uuid": self.device.uuid, "node": self.device.node,
+                           "index": self.device.index, "arch": self.device.arch,
+                           "mig": self.device.mig,
+                           "interference_domain": self.device.interference_domain},
+                "device_label": self.device.label(),
+                "exclusive": self.exclusive,
+                "external_load": self.external_load,
+                "source": self.source}
+
+
+#: 租约证据的三态 (§11-4 的「显式标注」)。**不是判决** —— 判决在 `measurement.assess`。
+LEASE_CONTENDED = "contended"       #: 有观测显示这张卡在被别人用
+LEASE_CLEAN = "clean"               #: 有观测显示当时没有别人用
+LEASE_UNOBSERVED = "unobserved"     #: 没观测到 == 不许声称干净
+
+
+def lease_evidence(lease: DeviceLease) -> Tuple[str, str]:
+    """`(evidence 串, 三态)`。三态的优先级写死在这里, 免得两个调用方各解一次。"""
+    bits = []
+    if lease.exclusive is None:
+        bits.append("exclusive 未观测")
+    else:
+        bits.append("exclusive" if lease.exclusive else "non-exclusive")
+    if lease.external_load is None:
+        bits.append("external_load 未观测")
+    elif lease.external_load > 0:
+        bits.append("external_load={:.2f}".format(lease.external_load))
+    else:
+        bits.append("external_load=0.00")
+    if lease.source:
+        bits.append("source=" + lease.source)
+    if lease.exclusive is False or (lease.external_load or 0.0) > 0.0:
+        state = LEASE_CONTENDED
+    elif lease.external_load is None:
+        state = LEASE_UNOBSERVED
+    else:
+        state = LEASE_CLEAN
+    return ", ".join(bits), state
+
+
+def observed_lease(payload, *, device: Optional[DeviceKey] = None,
+                   source: str = "") -> DeviceLease:
+    """从**这次测量的载荷**装出租约。
+
+    ⚠️ 读的键 (`gpu_util_pct`) 与 `measurement.assess` 读的是**同一份载荷**, 不另采一次
+    —— 「一处观测、一处判决」的前提是两个判定看同一份观测; 各采一次就会出现「租约说忙、
+    档位说干净」这种谁也查不出来的分叉。
+    """
+    util = (payload or {}).get("gpu_util_pct")
+    load = None
+    if isinstance(util, (int, float)) and not isinstance(util, bool):
+        load = float(util) / 100.0
+    return DeviceLease(device=device if device is not None else device_of_payload(payload),
+                       exclusive=None,          # 今天没有任何观测能支撑独占性
+                       external_load=load, source=source)
+
+
+def device_of_payload(payload) -> DeviceKey:
+    """载荷 → 设备身份。只有索引级身份时**如实**记 `uuid=""`。
+
+    `interference_domain` 用空串表示未观测 (`can_measure_parallel` 就是这么读的),
+    uuid 沿用同一约定。**不许**拿 index 冒充 uuid (§11 原话: 「最稳的锚, 别用 index」)。
+    """
+    p = payload or {}
+    idx = p.get("selected_gpu")
+    if isinstance(idx, bool) or not isinstance(idx, int):
+        idx = -1
+    return DeviceKey(uuid="", node=str(p.get("device") or ""), index=idx, arch="")
 
 
 def can_measure_parallel(a: DeviceKey, b: DeviceKey) -> bool:
@@ -183,13 +276,21 @@ def plan_leases(devices: Iterable[DeviceKey], n: int,
     return waves[:n] if n <= len(waves) else waves + [waves[-1]] * (n - len(waves))
 
 
-def lease_notes(lease: DeviceLease) -> Tuple[str, bool]:
-    """`(evidence 串, 该不该降级)`。§11-4: 诚实降级优于静默污染。"""
-    if lease.degraded_by_competition:
-        ev = (f"external_load={lease.external_load:.2f}"
-              f"{'' if lease.exclusive else ', non-exclusive'}")
-        return ev, True
-    return f"exclusive device {lease.device.label()}", False
+def lease_waves(devices: Iterable[DeviceKey], n: int,
+                loads: Optional[dict] = None) -> List[List[DeviceLease]]:
+    """设计的 `Placement.lease(contract, n)` 形状: 波次里装的是**租约**。
+
+    `loads` ({uuid: external_load}) 是今天**唯一**能观测到的竞争信号 ⇒ 记进租约;
+    `exclusive` 仍然恒 `None` (不租卡就没有独占性观测 —— 见 `DeviceLease` 的三态说明)。
+
+    ⚠️ **今天没有多卡消费者**: 真机是单卡串行、一次调用跑完两臂。这一条链路的诚实状态
+    写在 doc 71 与设计 §15 的缺件表里, 不许读成「已经并行了」。
+    """
+    loads = loads or {}
+    return [[DeviceLease(device=d, exclusive=None,
+                         external_load=loads.get(d.uuid),
+                         source="lease_waves")
+             for d in wave] for wave in plan_leases(devices, n)]
 
 
 # ─── 异构卡 (§11-5) ────────────────────────────────────────────

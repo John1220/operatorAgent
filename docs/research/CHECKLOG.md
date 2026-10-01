@@ -1004,6 +1004,35 @@
   **两臂真机对照 ⏳ 未跑**（同卡两次完整循环, 要 LLM）⇒ 「审计有收益」今天仍不许说
 - **类别**：I · **状态**：⚠️ 比较器 ✅ 已落地 / 两臂 ⏳ 未跑
 
+### I59 · §11-4 的「记录 external_load」没有生产者，而「降级」在放置模块里被实现了第二遍（阈值还不同）
+
+- **原话**：设计 §11-4 —— 「租不到独占卡时，记录 `external_load` 并在 `evidence` 中显式
+  标注；观测降为 DEGRADED 而不是失败 —— **诚实降级优于静默污染**。」
+- **实证**：改前 `DeviceLease` 全仓**零构造点**（`plan_leases` 只排波次、`lease_notes` 与
+  `degraded_by_competition` 只被自己的用例读）⇒ 前半句「记录」是纸面承诺；后半句「降级」
+  早有唯一判决者（`measurement.assess` 读 `gpu_util_pct`），而放置模块那一份是**第二处
+  实现**、阈值还不同（`external_load > 0` vs `gpu_util_pct > 5%`）。**本轮实测又抓到一条
+  先于本轮存在的分叉**：同一个 `gpu_util_pct` 在远程路径上把档位打到 DEGRADED，在
+  **非远程路径**上只被搬运循环写进产物、**没人读**（而 `RemoteExecutor(mode="local")`
+  就是在这台机器上真跑）—— 新写的端到端用例第一次跑就红在 `benchmark_contaminated is False`。
+- **出处**：`operator_agent/placement.py`（`DeviceLease` 三态 / `lease_evidence` /
+  `observed_lease` / `device_of_payload` / `lease_waves`）、`operator_agent/verifier.py`
+  （L3 发布 `metrics["device_lease"]`；非远程路径补上 `gpu_util_pct`）、
+  `tests/test_placement.py`、`tests/test_device_lease.py`（含一次真实 `Conductor.execute`）、
+  `docs/research/71-*.md`
+- **后果**：不改则「记录」永远只写在源码注释里，而「降级」有两个阈值 —— 谁先去读
+  `degraded_by_competition` 谁就成为尺子（P1-6 那族分叉）。改后租约是**证据**：
+  `exclusive=None`（今天恒为 None：harness 不租卡，没有任何观测支撑独占）、
+  `external_load=None`（缺 ≠ 0）、`source` 记出处；三态 (`contended`/`clean`/`unobserved`)
+  写在一个函数里，判决仍只在 `measurement.assess`。**反向钉 M9** 就钉在「非远程路径要把
+  产物里记的那份 util 喂给唯一判决点」上 —— 没有它，「记录」会再次退化成「搬进产物没人读」。
+- **类别**：I（实现与设计不符：设计有承诺、无实现物；且同一判定两处实现） · **状态**：✅ 2026-10-02
+  —— 边界明写：多卡并行（`lease_waves` 无多卡消费者）/干扰域不可观测/`pairing_conflict`
+  的窗口那半无喂给者/真机未复跑
+  → 见 [doc 71](../research/71-观测租约与它的生产者.md)
+
+---
+
 ### I58 · §13.5 的 `probe_peak` 零实现：收敛出口在所有真机上关着；而「实测」由判据 / 存放处 / 读取三处口径同时决定
 
 - **原话**：设计 §13.5 —— 「**`probe_peak` 必须实测**：拿一个已知好 GEMM 打到真实峰值，
@@ -1412,6 +1441,7 @@
 | I56 | §12 的 Candidate 联合类型不存在, 候选就是源码字符串; 开关零实现 | I | ✅ 2026-10-02 枚举半片 (模板实例化仍 ⏳) |
 | I57 | 「判据的位置」与「K 的来源」是两个会静默失效的判据参数 (§10.3 落地时撞到: 门恒假) | I | ✅ 2026-10-02 修 (位置移到停滞出口前 + K 与停滞上限同一处) |
 | I58 | §13.5 的 `probe_peak` 零实现 ⇒ 收敛出口在所有真机上关着; 「实测」被判据、存放处、读取三处口径同时决定 | I | ✅ 2026-10-02 三层接上 (下界语义/不跨运行/真机未复跑明写) |
+| I59 | §11-4 的「记录 external_load」没有生产者, 而「降级」在放置模块被实现了第二遍 (阈值还不同) | I | ✅ 2026-10-02 租约改成证据三态 + 生产喂给者 (多卡并行仍纸面) |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
