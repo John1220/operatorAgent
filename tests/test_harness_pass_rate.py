@@ -47,6 +47,12 @@ def _round(n, l1=True, l2=None, l3=None, validity=None, speedup=None, action="op
             "generation_candidates": candidates, "real_l2_runs": l2_runs,
             # 资格位与永久后果 (§14-9 对照实验的原料)。同样: 聚合不消费, 键必须在。
             "eligibility": None,
+            # §12 / Stage 3: 这一轮的候选如果是模板点产出的, 身份与「怎么选的」一起进
+            # 血缘 (代码型轮为 None)。聚合逻辑不消费它, 但键必须在 —— 与上面那条守卫
+            # 同一理由 (它是「产物里的键集合」的一部分, 少写一个就红)。
+            "template_selection": None,
+            # 这一轮的回报记到哪个臂头上 (模板点去重键 / tiling 三元组 / None)
+            "bandit_arm": None,
             "permanent_effects": {"best_updated": False, "recipes_disabled": [],
                                   "stagnation_counted": False}}
 

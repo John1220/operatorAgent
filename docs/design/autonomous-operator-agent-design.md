@@ -29,7 +29,7 @@
 | §10.2 三种预算 | `operator_agent/budget.py`（`BudgetPlan` + `BudgetLedger`）+ 轮次开头两道门 | ✅ 2026-10-02：oracle 次数（**预留不可挪用**）/ 墙钟 / token 三条接上并落 `artifact.metadata["budget"]`；心跳只记账不被拦。**边界**：`explore`/`refine` 不分相、按 GPU 秒未做、预算默认全关（opt-in）—— 见 [doc 67](../research/67-三种预算与不可挪用的预留.md) |
 | §10.3 候选选择 / LLM 升级门 | — | ⏳ **半片**：三条件升级门**已落地**（`escalation.py` + conductor 判决点接线 + SearchAgent 发布通道，13/13 变异红，CHECKLOG I53→I57/doc 69）—— 条件 2 今天只有 `smem-bound` 一条量具、且只在上界~×1.2 那条带里成立；`score = P(beats_best)×预期增益/预期GPU秒` 与 ε-greedy **未做**（要 GPU 秒口径） |
 | §5 bandit 调参 | `operator_agent/bandit.py`（确定性 UCB1）+ `Conductor` 信念门 | ✅ 2026-10-02：`perf_data` / `optimization_history` / 回报统计三条信念通道按 `can_tune` / `can_count_progress` 收口（CHECKLOG I52），prompt 不再把「没有读数」渲染成 `0.00`；状态落 `artifact.metadata["bandit"]`。**臂空间只有 tiling**、`c` 未标定、证据**不进快照**（只覆盖本次运行）；**真机未复跑** —— 见 [doc 66](../research/66-搜索侧的信念门与bandit.md) |
-| §12 模板后端 / `param_space()` | `operator_agent/candidates.py` + `backend_caps.Backend.param_space`/`instantiate` + 便宜代理剪枝 | ✅ 2026-10-02 **枚举半片**（候选联合类型、分开写的去重口径、`ParamSpace` 确定性枚举、`prune_by_smem`、开关 `param_space_of`）+ ✅ 2026-10-02 **实例化半片**（`Instantiation` / `Backend.instantiate` 默认 raise / `BuiltCandidate` 身份**委派给模板点** / `source_hash` 跨语言 + `struct_sig` Python AST / 五道守卫 / 批量 `refusals` 留痕）。**边界**：控制器的候选队列**还没接上**参数空间（`refuse_unconsumed_space` 仍拒绝，Stage 3 下一片）；L1 两道静态守卫是 Python 形状的（对 C++/CUDA 模板源空转）；剪枝只估单缓冲；参数轴只有 tiling 三维有产出者；没有真模板后端 —— 见 [doc 68](../research/68-候选联合类型与便宜代理剪枝.md) / [doc 73](../research/73-模板候选的实例化与身份.md) |
+| §12 模板后端 / `param_space()` | `operator_agent/candidates.py` + `backend_caps.Backend.param_space`/`instantiate` + 便宜代理剪枝 | ✅ 2026-10-02 **枚举半片**（候选联合类型、分开写的去重口径、`ParamSpace` 确定性枚举、`prune_by_smem`、开关 `param_space_of`）+ ✅ 2026-10-02 **实例化半片**（`Instantiation` / `Backend.instantiate` 默认 raise / `BuiltCandidate` 身份**委派给模板点** / `source_hash` 跨语言 + `struct_sig` Python AST / 五道守卫 / 批量 `refusals` 留痕）+ ✅ 2026-10-02 **消费半片**（轮首 `select_template_candidate`：剪枝 → bandit 排序 → 按顺位取第一个建得出来的点；`action="template"` 跳过 Coder；L3 失败后整条 LLM/邻域搜索不走；`bandit_arm` = 点的去重键；全建不出来 ⇒ `template_no_candidate` 停机，不退回代码型；上界载体收成 `resource_check.caps_from_metrics`）。**边界**：L1 两道静态守卫是 Python 形状的（对 C++/CUDA 模板源空转）；剪枝只估单缓冲；参数轴只有 tiling 三维有产出者；没有真模板后端 —— 见 [doc 68](../research/68-候选联合类型与便宜代理剪枝.md) / [doc 73](../research/73-模板候选的实例化与身份.md) |
 
 **审查**：`spine-review.md` 记了 P0–P3；P0 三项、P1-4/P1-5/P1-6/P2-8/P2-9/P2-10 与 P3-11/12/13/15/16/18 已修；P3-14/P3-17 仍未修。**入库判据只有一处**（`oracle.admit_to_corpus`，2026-10-01 收口：此前它零生产调用者，`_save_to_db` 自己又写了一遍那三道门且口径不同）。  
 **尚未宣称收益的那道门已过**（§19.4）：设计原文是「真机 §14 冒烟之前，不对外说资格审计带来收益」——
@@ -525,9 +525,13 @@ Candidate = SourceCandidate | TemplateCandidate
 > 身份**委派给模板点**（两点同源仍是两个候选、同点两次构建仍是同一个候选），源码变化进
 > **证据**（`source_hash` 跨语言内容哈希 + `struct_sig` Python AST α-等价，空串 = 量具不适用），
 > 五道守卫（类型 / 实例化器可达 / 返回形状 / 非空源码 / 版本自报一致）用异常拒绝、批量收成
-> 带理由的 `refusals`。**但仍然拒绝**：控制器还没有消费参数空间的那条路 —— 两侧缺口分成
-> 两个判据（后端 `require_supported_space` / 控制器 `refuse_unconsumed_space`），消息里能
-> 读出下一步该谁动；② 剪枝只估**单缓冲**（不含 `num_stages`
+> 带理由的 `refusals`。✅ **2026-10-02 控制器那一半也落地了**：轮首
+> `select_template_candidate`（剪枝 → bandit 排序 → **按顺位取第一个建得出来的点**）→
+> 本轮 `action="template"`（**跳过 Coder**）→ L3 失败后**整条** LLM/邻域搜索不走
+> （否则模板点与 LLM 结构会混进同一个候选队列）→ 回报记到**那个点的去重键**头上
+> （`bandit_arm` 进血缘，与候选身份同源）→ 全部点建不出来时**停机**并说明
+> （`template_no_candidate`），**不**退回代码型。那个命名了缺口、如今缺口已闭合的守卫
+> （`refuse_unconsumed_space`）已删；② 剪枝只估**单缓冲**（不含 `num_stages`
 > 的多缓冲）⇒ 只砍明显超限的点，边界交给远端；③ 上界取不到时**返回 None（三态）**，
 > 剪枝**不生效**且明说，不当成「剪过了没事」；④ 全摘光时**一个都不摘**（剪枝是省冤枉钱，
 > 不是让这一轮没得跑）；⑤ 参数轴今天只有 tiling 三维用得上（`stages` / `warps` /
@@ -767,7 +771,7 @@ class Calibrator(Protocol):
 Stage 0  契约冻结 + 只读哈希护栏 + 预检 / 峰值标定
 Stage 1  评测器 + 资格模型 + 标定心跳 + checkpoint/幂等/续跑   ← 尺子（含尺子的自检）
 Stage 2  多卡放置：干扰域 + 同卡配对（若一开始就多卡，则与 1 并行）
-Stage 3  参数模板 + bandit 搜索 + 停止条件   ← 参数模板：枚举 ✅ / 实例化 ✅ / 候选队列 ⏳
+Stage 3  参数模板 + bandit 搜索 + 停止条件   ← 参数模板：枚举 ✅ / 实例化 ✅ / 候选队列 ✅（ε-greedy 与分相预算 ⏳）
 Stage 4  LLM 结构提议（带三条件门禁）
 Stage 5  记忆与跨任务迁移（带两次确认）
 ```

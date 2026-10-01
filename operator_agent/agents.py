@@ -7,6 +7,7 @@ prompt 模板均从 prompts/ 目录加载，支持热更新"""
 import json
 from typing import Optional
 from .candidates import TemplateCandidate, prune_by_smem
+from .resource_check import caps_from_metrics
 from .schemas import (
     TaskSchema, UnifiedSketch, TilingStrategy, MemoryPlan,
     PipelineStage, TaskComplexity,
@@ -649,12 +650,12 @@ class SearchAgent:
                 backend="lattice", template_id="tiling",
                 params={"BLOCK_M": t.block_m, "BLOCK_N": t.block_n,
                         "BLOCK_K": t.block_k, "_idx": i}))
-        class _Caps:
-            shared_mem_per_sm_kb = int(perf_data.get("shared_mem_per_sm_kb") or 0)
+        # 上界的载体与口径只有一处 (`resource_check.caps_from_metrics`): 这里不再自己
+        # 造一个 `_Caps`, 免得「搜索侧算出来的上界」与「预检/模板队列算出来的」两套。
         elem = perf_data.get("elem_bytes")
         if not isinstance(elem, int) or isinstance(elem, bool) or elem <= 0:
             elem = 4      # 认不出来时按最窄的常见类型算: 宁可漏拦 (与预检同一条原则)
-        res = prune_by_smem(points, _Caps(), elem)
+        res = prune_by_smem(points, caps_from_metrics(perf_data), elem)
         if res.no_limit:
             return list(sketches), ""
         kept = [sketches[c.params["_idx"]] for c in res.kept]

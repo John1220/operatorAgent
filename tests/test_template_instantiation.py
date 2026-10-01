@@ -26,10 +26,16 @@ from operator_agent.backend_caps import Backend, Instantiation
 from operator_agent.candidates import (BuiltCandidate, ParamSpace,
                                       dedup_key, instantiate_candidate,
                                       instantiate_points, instantiator_available,
-                                      refuse_unconsumed_space,
                                       require_supported_space,
                                       source_candidate)
 from tests.backend_fakes import DeclaredFakeBackend
+
+
+_CONDUCTOR_STOP_REASONS = tuple(
+    line.split('"')[1] for line in
+    (Path(__file__).resolve().parents[1] / "operator_agent/conductor.py")
+    .read_text(encoding="utf-8").splitlines()
+    if "_record_stop(" in line and '"' in line and "def " not in line)
 
 
 class _SpaceBackend(DeclaredFakeBackend):
@@ -233,24 +239,19 @@ class TestTheTwoSidedSwitch(unittest.TestCase):
 
     def test_no_space_is_the_code_backend(self):
         self.assertIsNone(require_supported_space(None, _backend(_inst())))
-        refuse_unconsumed_space(None, _backend(_inst()))     # 代码型: 不拒绝
 
     def test_a_space_without_an_instantiator_is_the_backend_gap(self):
         with self.assertRaises(NotImplementedError) as ctx:
             require_supported_space(_SPACE, _backend())
         msg = str(ctx.exception)
         self.assertIn("Backend.instantiate", msg)
-        self.assertNotIn("候选队列", msg, "两种缺口不许说成同一句话")
+        self.assertIn("template_no_candidate", _CONDUCTOR_STOP_REASONS,
+                      "控制器侧的缺口现在是**停机理由**, 不再是第二个 raise")
 
-    def test_a_space_with_an_instantiator_is_the_controller_gap(self):
+    def test_a_space_with_an_instantiator_passes_the_switch(self):
+        """2026-10-02 控制器那一侧接上候选队列之后, 这条开关就只剩**后端**那个缺口"""
         space = require_supported_space(_SPACE, _backend(_inst()))
-        self.assertIs(space, _SPACE, "有实例化器 ⇒ 这条开关放行 (返回空间)")
-        with self.assertRaises(NotImplementedError) as ctx:
-            refuse_unconsumed_space(space, _backend(_inst()))
-        msg = str(ctx.exception)
-        self.assertIn("候选队列", msg)
-        self.assertIn("instantiate_points", msg,
-                      "要指出实例化那段已经就绪, 缺口在控制器这一侧")
+        self.assertIs(space, _SPACE, "有实例化器 ⇒ 放行 (返回空间)")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ from __future__ import annotations
 import ast
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 # 保守放行的倍数: 估出 1.2× 上限以内都不拦
 _SLACK = 1.2
@@ -43,6 +43,38 @@ def smem_limit_bytes(caps) -> Optional[int]:
     # 取整口径与重构前**逐字节一致**: int(kb * 1024), 不是 int(kb) * 1024
     # —— 小数 KB 时两者差一整 KB, 而既有用例正是钉在边界上的。
     return int(limit_kb * 1024)
+
+
+@dataclass
+class MemCaps:
+    """smem 上界的**唯一载体**: 给 `smem_limit_bytes` 与剪枝用
+
+    为什么要一个载体而不是直接传 dict/`HardwareCaps`: `smem_limit_bytes(caps)` 读的是
+    **属性**, 而调用方手里有三种形状 (L3 产物那一格是 dict, `HardwareCaps` 是对象,
+    搜索侧拿到的是 `perf_data`)。三种形状各写一遍 `getattr/[]` 就是三处口径。
+    """
+
+    shared_mem_per_sm_kb: int = 0
+
+
+def caps_from_metrics(source: Any) -> MemCaps:
+    """从 L3 产物那一格 / `HardwareCaps` 装出 `MemCaps` (**同一处口径**)
+
+    垃圾值 / 缺键 / 0 ⇒ 记 `0` = **上界未知** (由 `smem_limit_bytes` 判成 `None`),
+    不是「无上限」也不是「一点都放不下」。这里不抛: 剪枝是省钱的手段, 不该因为一个
+    脏字段把整轮打断 —— 但也不能把脏值当 0 KB 用 (那就是误判成「放不下」)。
+    """
+    kb: Any = None
+    if source is not None:
+        if isinstance(source, Mapping):
+            kb = source.get("shared_mem_per_sm_kb")
+        else:
+            kb = getattr(source, "shared_mem_per_sm_kb", None)
+    try:
+        value = int(kb or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return MemCaps(shared_mem_per_sm_kb=max(value, 0))
 
 
 @dataclass

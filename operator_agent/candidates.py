@@ -445,24 +445,95 @@ def instantiate_points(points: List[TemplateCandidate], backend: Any,
     return batch
 
 
-def refuse_unconsumed_space(space: Optional[ParamSpace], backend: Any) -> None:
-    """§12 那条路的**控制器侧**缺口: 点建得出来, 但还没有消费它的候选队列
+def template_arm(cand: TemplateCandidate) -> Tuple:
+    """bandit 的臂 = 这个点的**去重键** (§5 的排序器直接吃它)
 
-    与 `require_supported_space` 的分工是刻意的 —— 两条缺口各有主人:
-
-    * 后端侧 (没有实例化器) ⇒ `require_supported_space` 拒绝;
-    * 控制器侧 (没有候选队列) ⇒ 这里拒绝。
-
-    为什么不合成一条消息: 「后端没实现」与「控制器没接上」在报告里必须分得开 ——
-    合成一条会让这两种状态都变成同一句「模板不支持」, 而它们的下一步动作完全不同。
+    刻意**不另立**一套臂身份: 同一个点必须只有一个臂, 否则「这个点上次变快了没有」
+    会随调用方各自解释 —— 而 `dedup_key` 已经是「哪两个候选是同一个」的唯一答案。
     """
-    if space is None:
-        return
-    raise NotImplementedError(
-        f"模板型后端 {backend.label!r} 的参数空间 {space.template_id!r} "
-        f"({space.size()} 个点) 现在**建得出源码** (candidates.instantiate_points), "
-        "但控制器的候选队列还没接上参数空间 (§12 的「LLM / 模板产出候选」那一半)。"
-        "当前这条搜索路径只认代码型候选 —— 不许把声明的空间降级成「没声明」后继续跑。")
+    return dedup_key(cand)
+
+
+def point_label(cand: TemplateCandidate) -> str:
+    """人读的点名 (日志/产物): `t1[BLOCK_M=64,BLOCK_N=128]`"""
+    params = ",".join(f"{k}={v}" for k, v in
+                      sorted((str(k), v) for k, v in dict(cand.params).items()))
+    return f"{cand.template_id}[{params}]"
+
+
+@dataclass
+class TemplateSelection:
+    """这一轮从参数空间里选出的那个点 (以及为什么是它 / 哪些点被拒)
+
+    `chosen is None` 与「空间是空的」**不是一回事**: 空间按构造非空 (`ParamSpace`
+    校验过), 所以 `None` 只剩一个含义 —— **所有点都建不出来**, 而那时控制器的正确
+    动作是停下并说明, 不是退回代码型。
+    """
+
+    chosen: Optional[BuiltCandidate] = None
+    #: 排序后的**全部**点 (剪枝之后), 便于「这一轮为什么先试它」离线可查
+    ranked: List[TemplateCandidate] = field(default_factory=list)
+    #: 被实例化器拒掉的点 (带理由) —— 逐条留痕, 不塌成「候选变少了」
+    refusals: List[Tuple[TemplateCandidate, str]] = field(default_factory=list)
+    pruned_note: str = ""
+    no_limit: bool = False
+
+    def note(self) -> str:
+        if self.chosen is None:
+            return (f"模板选择: 空间里 {len(self.ranked)} 个点**一个都没建成** "
+                    f"(拒绝 {len(self.refusals)} 条)")
+        n = len(self.ranked)
+        pos = next((i + 1 for i, c in enumerate(self.ranked)
+                    if c == self.chosen.candidate), 0)
+        out = f"模板选择: {point_label(self.chosen.candidate)} (第 {pos}/{n} 顺位"
+        if pos > 1:
+            out += f"; 前 {pos - 1} 个点建不出来"
+        out += ")"
+        if self.pruned_note:
+            out += f" | {self.pruned_note}"
+        return out
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "space_no_limit": self.no_limit,
+            "pruned_note": self.pruned_note,
+            "ranked": [point_label(c) for c in self.ranked],
+            "chosen": (point_label(self.chosen.candidate) if self.chosen else None),
+            "chosen_lineage": (self.chosen.as_lineage() if self.chosen else None),
+            "refusals": [{"point": point_label(c), "why": why}
+                         for c, why in self.refusals],
+        }
+
+
+def select_template_candidate(space: ParamSpace, backend: Any, *,
+                              caps: Any = None, elem_bytes: int = 4,
+                              bandit: Any = None,
+                              contract: Any = None) -> TemplateSelection:
+    """§12 的「模板产出候选」: 剪枝 → bandit 排序 → **按顺位取第一个建得出来的点**
+
+    三件事刻意分开:
+
+    * 剪枝 (`prune_by_smem`) 是**便宜代理** (§9): 不花 GPU 秒就能摘掉明显放不下的点,
+      但它只砍明显超限的, 边界留给远端;
+    * 排序交给**已有的** bandit (`Bandit.order`) —— 它的口径是「**无观测的先试**,
+      各自保持先验顺序 (枚举序); 有观测的按 UCB1 分数排」。这个方向是那个模块定死的
+      (广度优先的探索), 这里不另写一套排序、也不翻转它;
+    * 实例化**按顺位惰性进行**: 建不出来的点继续往下走 (逐条记理由), 因为「实例化器在
+      某类参数上一直失败」不该让这一轮没得跑 —— 但它必须**看得见**。
+    """
+    points = space.points()
+    pruned = prune_by_smem(points, caps, elem_bytes)
+    ranked = (bandit.order(pruned.kept, key=template_arm) if bandit is not None
+              else list(pruned.kept))
+    sel = TemplateSelection(ranked=ranked, pruned_note=pruned.as_note(),
+                            no_limit=pruned.no_limit)
+    for cand in ranked:
+        try:
+            sel.chosen = instantiate_candidate(cand, backend, contract)
+            break
+        except Exception as exc:            # noqa: BLE001 — 逐条留痕, 不许吞
+            sel.refusals.append((cand, f"{type(exc).__name__}: {exc}"))
+    return sel
 
 
 # ─────────────────────── 便宜代理剪枝 (不花 GPU 秒) ───────────────────────

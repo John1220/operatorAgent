@@ -40,9 +40,10 @@ from .bandit import Bandit
 from .escalation import (
     EscalationInputs, decide, smem_bound_evidence, untried_directions,
 )
-from .resource_check import check_resource_feasibility
-from .candidates import (param_space_of, refuse_unconsumed_space,
-                        require_supported_space)
+from .hardware_caps import detect_hardware_caps
+from .resource_check import caps_from_metrics, check_resource_feasibility
+from .candidates import (param_space_of, point_label, require_supported_space,
+                        select_template_candidate, template_arm)
 from .budget import BudgetLedger, BudgetPlan
 from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
                           LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
@@ -377,7 +378,11 @@ class Conductor:
                     # §10.2 的两条预算出口。与 `rounds_exhausted` 分开数: 那个是
                     # 「轮次练够了」, 这两个是「钱花完了」—— 复盘时一个要调轮次上限,
                     # 一个要调预算或缩小任务。
-                    "budget_exhausted", "wall_clock_exhausted")
+                    "budget_exhausted", "wall_clock_exhausted",
+                    # §12/Stage 3: 模板型后端的参数空间里**一个点都建不出来** (实例化器
+                    # 拒了全部点)。与 `search_error` 分开: 那个是搜索本身抛异常, 这个
+                    # 是「候选源枯了」—— 复盘时一个看代码, 一个看实例化器的报错。
+                    "template_no_candidate")
 
     def _record_stop(self, artifact, round_num: int, reason: str, detail: str = "") -> None:
         """把「循环为什么停」记成数据, 而不是只留一行 print。
@@ -849,6 +854,10 @@ class Conductor:
         # §5 bandit: 让队列顺序吃本轮累积的证据, 而不是纯 FIFO。与上面那条注释同一个
         # 理由 —— 证据只覆盖本次运行, 机器状态一变就作废, 所以同样不进快照。
         bandit = Bandit()
+        # smem 上界的**载体** (§12 便宜代理剪枝的输入, §9 的「便宜代理先剪枝」)。
+        # 与 Verifier 发布进 L3 的那一格**同一个真源** (`detect_hardware_caps`), 不是
+        # 在这里另查一遍硬件。取不到 ⇒ MemCaps(0) ⇒ 上界未知 ⇒ 剪枝不生效并明说。
+        _mem_caps = caps_from_metrics(detect_hardware_caps(hw_info))
         #: 最近一次**有调参资格**的读数构成的信念 (设计 §10.4 伪码里的 `belief`)。
         #: `can_tune=False` 的轮次不许覆盖它, 只许沿用它。
         last_tunable_perf: Optional[dict] = None
@@ -883,6 +892,42 @@ class Conductor:
                 self._record_stop(artifact, round_num, "budget_exhausted", _why)
                 break
 
+            # ── §12 模板型后端: 本轮的候选来自**参数空间**, 不走 LLM/Coder ──
+            # 位置与预算门同级 (轮次最前面): 候选的**来源**决定这一轮怎么花钱, 所以
+            # 要在花钱之前定下来。开关只有一处判据 (`require_supported_space`): 后端没
+            # 实现实例化器 ⇒ 那里就炸; 这里只管「建不建得出来、先试哪个点」。
+            _space = require_supported_space(
+                param_space_of(self.backend, task), self.backend)
+            template_choice = None
+            _template_sel = None
+            if _space is not None:
+                _template_sel = select_template_candidate(
+                    _space, self.backend, caps=_mem_caps,
+                    elem_bytes=task.constraints.precision.itemsize, bandit=bandit)
+                template_choice = _template_sel.chosen
+                print(f"\n[Template] {_template_sel.note()}")
+                if template_choice is None:
+                    # 空间非空 (ParamSpace 校验过), 所以这个 None 只剩一个含义: **所有点
+                    # 都建不出来**。停在这里并说明, 不退回代码型 —— §12 点名的风险正是
+                    # 「把声明的参数空间悄悄丢掉后继续跑」。
+                    _why = (f"参数空间 {_space.template_id!r} 的 {len(_template_sel.ranked)} "
+                            f"个点一个都没建成 (实例化器拒绝 {len(_template_sel.refusals)} 条)"
+                            " ⇒ 停止, 不退回代码型生成路径")
+                    print(f"\n[Template] {_why}")
+                    self._record_stop(artifact, round_num, "template_no_candidate", _why)
+                    break
+
+            # 本轮的 bandit 臂 = **本轮候选的身份** (§5 的排序器吃的就是它): 模板轮 =
+            # 那个点的去重键, 代码型轮 = tiling 三元组。刻意与候选身份同源 —— 一个候选
+            # 只有一个臂, 否则「这个点上次变快了没有」会随调用方各自解释。
+            #
+            # 位置: 必须在血缘 append **之前** (那是一轮里更早的位置), 也必须在本轮
+            # 搜索**之前** —— 搜索那一步改的是下一轮的 sketch 与队列, 都在它之后, 所以
+            # 这里算出来的与搜索块用掉的是同一个值。
+            bandit_arm = (template_arm(template_choice.candidate)
+                          if template_choice is not None
+                          else self._arm_of(current_sketch))
+
             # P1-1 (generation-side-review): 本轮若走了候选选择, 已跑完的 L1+L2
             # 结果缓存在这里 —— Step 4 复用它, 不重复真机执行。
             # None = 本轮没有多候选 (单体路径 / 修复轮 / 名单里没有默认候选)。
@@ -894,6 +939,8 @@ class Conductor:
             # 而「这次翻转让机时涨了多少」在产物里此前没有任何原料。
             round_candidates = 0
             round_l2_runs = None      # None = 由 verify_results 现算 (非选择路径)
+            # (臂在下面「模板选择」之后立刻算 —— 血缘条目在那一轮更早的位置 append,
+            #  所以臂必须在 append 之前就有值; 见那一处的说明。)
 
             # Step 3: 获取代码
             # - 首轮 / Search 优化后: Coder 根据 Sketch + OptimizationPlanner 配方重新生成
@@ -903,6 +950,14 @@ class Conductor:
                 pending_fix = None
                 action = "fix"
                 print(f"\n[Conductor] 使用 Fixer 修复后的代码重新验证...")
+            elif template_choice is not None:
+                # §12: 模板候选的源码**来自实例化器**, 不经 LLM/Coder (§12 的
+                # 「控制器自动切换成『LLM / 模板产出候选』」那一半)。action 单列一个值,
+                # 于是「这一轮是模板产出的」在血缘里可分辨, 不必从源码去猜。
+                current_code = template_choice.source
+                action = "template"
+                print(f"\n[Conductor] 模板候选 (跳过 Coder): "
+                      f"{point_label(template_choice.candidate)}")
             else:
                 action = "generate" if round_num == 1 else "optimize"
 
@@ -1096,6 +1151,16 @@ class Conductor:
                 # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
                 "candidate_signature": sig,
                 "duplicate_of": dup_of,
+                # §12: 这一轮的候选如果是**模板点**产出的, 它的身份 (template_id /
+                # instantiator_ver / 参数) 与「怎么选的」(顺位/剪枝/被拒的点) 一起进血缘。
+                # 没有这一格, 「这个 tiling 更好」与「这个模板点更好」在产物里长得一样。
+                "template_selection": (_template_sel.as_dict()
+                                       if _template_sel is not None else None),
+                # 本轮候选属于哪个臂 (§5 的排序器吃的就是它)。注意这一格说的是
+                # 「候选是谁」, 不是「这一轮有没有更新统计」—— 后者的读法是
+                # `metadata["bandit"].arms[arm]`: `pulls` 涨了才算这一轮的回报进过账,
+                # 而 L3 直接通过的那些轮不会进搜索 (所以那种轮里这一格一样有值)。
+                "bandit_arm": bandit_arm,
                 # 分母的原料 (缺口 3 的「先补分母」那半, doc 49 §八 第 14 条): Verifier 每轮**已经算出** roofline 的全部轴
                 # (算术强度、脊点、两侧达成率、峰值出处与可信位), 但它们只活到本次判决结束,
                 # 从没进过血缘 —— 于是「可达上界是按 shape/AI 索引的曲线」这件已经量出来的
@@ -1498,13 +1563,12 @@ class Conductor:
                 # 停滞判定同一个量, 不另立一个口径。资格位决定这次回报算不算数:
                 # `can_count_progress=False` 的那一轮只记「试过」, 回报不进均值
                 # (「试过但没数」既不是「没试过」, 也不是「试过且不好」)。
-                _arm = self._arm_of(current_sketch)
                 _cur = l3_result.metrics.get("gflops")
                 _reward = None
                 if (isinstance(_cur, (int, float)) and not isinstance(_cur, bool)
                         and isinstance(best_gflops, (int, float)) and best_gflops > 0):
                     _reward = (float(_cur) - float(best_gflops)) / float(best_gflops)
-                bandit.update(_arm, _reward,
+                bandit.update(bandit_arm, _reward,
                               eligible=_elig.get("can_count_progress") is True)
                 perf_data = {
                     "gflops": l3_result.metrics.get("gflops", 0),
@@ -1556,77 +1620,84 @@ class Conductor:
                         "tuning_refused": "can_tune=False",
                         "optimization_history": [],
                     }
-                if search_alternatives:
-                    # P1-4: 上一轮排好的邻域候选按序轮换 —— 系统搜索代替「每轮
-                    # 重新问一次 LLM 直觉」。轮换候选已带结构 (hints/memory_plan),
-                    # 只换了 tiling, 不需要再过 Search。
-                    current_sketch = search_alternatives.pop(0)
-                    t = current_sketch.tiling
-                    suggestion = "P1-4 邻域候选轮换"
-                    print(f"\n[Search] 轮换邻域候选: tiling={t.block_m}x{t.block_n}x{t.block_k} "
-                          f"(队列剩 {len(search_alternatives)} 个)")
+                if _space is not None:
+                    # §12: 模板型后端的候选来自参数空间 (下一轮轮首再取一次, 那时
+                    # bandit 已经吃过本轮的回报 ⇒ 顺位会跟着证据走)。这条 LLM/邻域搜索
+                    # 路径**整条不适用**: 让 SearchAgent 改 tiling 会把「模板点」与
+                    # 「LLM 结构」混进同一个候选队列 —— 而它们连身份口径都不同。
+                    print(f"\n[Search] 模板型后端: 候选来自参数空间, 本轮不走 LLM 搜索")
+                    # 模板轮**没有**新 sketch 也没有 LLM 建议: 那两行原样打出来会
+                    # 读成「这一轮改了 sketch」—— 那是代码型那边的语义。
+                    #
+                    # `optimization_history` 在这里**一个字都不写**: 它唯一的读者是
+                    # SearchAgent 的 prompt (`agents._llm_optimize`), 而模板轮根本不叫
+                    # SearchAgent —— 写一条进去就是「只有调试者会读到」的键 (与
+                    # CHECKLOG I36 那类「算了没人读」同族)。这一轮的候选身份已经在
+                    # `iteration_history.template_selection` 里, 那是有读者的那一格。
                 else:
-                    # ── §12 的开关: 后端声明了参数空间 ⇒ 模板型 ──
-                    # 控制器「自动切换成 LLM/模板产出候选、bandit 只做局部精修」这件事,
-                    # 今天只有代码型那一半有实现 (bandit 精修 = P1-4 邻域)。模板型那一半
-                    # (由参数空间枚举候选并实例化) 还没落地 ⇒ 在这里 fail-closed, 而不是
-                    # 把它降级成代码型继续跑: §12 点名的风险正是「把候选悄悄当成源码字符串」。
-                    # 放在真值测量**之前** (这一处是每轮搜索的入口), 因为拒绝要发生在花钱之前。
-                    # 两条缺口各有主人, 所以是两个判据: 后端没实现实例化器
-                    # (`require_supported_space` 拒绝) / 控制器没接上候选队列
-                    # (`refuse_unconsumed_space` 拒绝)。实例化那一段 2026-10-02 已就绪,
-                    # 把它的产物接进这个循环要动候选队列的形状 —— 那一片还没落地。
-                    refuse_unconsumed_space(
-                        require_supported_space(
-                            param_space_of(self.backend, task), self.backend),
-                        self.backend)
-                    try:
-                        current_sketch, suggestion = self.search.run(current_sketch, perf_data)
-                    except Exception as e:
-                        # 规则优化也失败时, 终止优化但不崩整个任务
-                        print(f"\n[Conductor] Search 优化异常 ({e}), 终止优化循环")
-                        snapshot_target_dir = self._flush_snapshot(
-                            task=task,
-                            artifact_dir=snapshot_target_dir,
-                            round_done=round_num,
-                            current_sketch=current_sketch,
-                            current_code=current_code,
-                            pending_fix=pending_fix,
-                            iteration_history=artifact.iteration_history,
-                            best_gflops=best_gflops,
-                            rounds_without_improvement=rounds_without_improvement,
-                            optimization_history=optimization_history,
-                            applied_recipes=applied_recipes,
-                            disabled_recipes=disabled_recipes,
-                            all_verification_results=all_verification_results,
-                        )
-                        self._record_stop(artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
+                    if search_alternatives:
+                        # P1-4: 上一轮排好的邻域候选按序轮换 —— 系统搜索代替「每轮
+                        # 重新问一次 LLM 直觉」。轮换候选已带结构 (hints/memory_plan),
+                        # 只换了 tiling, 不需要再过 Search。
+                        current_sketch = search_alternatives.pop(0)
+                        t = current_sketch.tiling
+                        suggestion = "P1-4 邻域候选轮换"
+                        print(f"\n[Search] 轮换邻域候选: tiling={t.block_m}x{t.block_n}x{t.block_k} "
+                              f"(队列剩 {len(search_alternatives)} 个)")
+                    else:
+                        # ── §12 的开关: 后端声明了参数空间 ⇒ 模板型 ──
+                        # 控制器「自动切换成 LLM/模板产出候选、bandit 只做局部精修」这件事,
+                        # 今天只有代码型那一半有实现 (bandit 精修 = P1-4 邻域)。模板型那一半
+                        # (由参数空间枚举候选并实例化) 还没落地 ⇒ 在这里 fail-closed, 而不是
+                        # 把它降级成代码型继续跑: §12 点名的风险正是「把候选悄悄当成源码字符串」。
+                        # 放在真值测量**之前** (这一处是每轮搜索的入口), 因为拒绝要发生在花钱之前。
+                        try:
+                            current_sketch, suggestion = self.search.run(current_sketch, perf_data)
+                        except Exception as e:
+                            # 规则优化也失败时, 终止优化但不崩整个任务
+                            print(f"\n[Conductor] Search 优化异常 ({e}), 终止优化循环")
+                            snapshot_target_dir = self._flush_snapshot(
+                                task=task,
+                                artifact_dir=snapshot_target_dir,
+                                round_done=round_num,
+                                current_sketch=current_sketch,
+                                current_code=current_code,
+                                pending_fix=pending_fix,
+                                iteration_history=artifact.iteration_history,
+                                best_gflops=best_gflops,
+                                rounds_without_improvement=rounds_without_improvement,
+                                optimization_history=optimization_history,
+                                applied_recipes=applied_recipes,
+                                disabled_recipes=disabled_recipes,
+                                all_verification_results=all_verification_results,
+                            )
+                            self._record_stop(artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
 
-                        break
-                    # P1-4: 排队下一轮的轮换候选 (SearchAgent 只在 triton 路径产出)
-                    # §5: 顺序交给 bandit (本轮累积的证据优先, 无观测的保持先验顺序),
-                    # 而不是纯 FIFO —— 后者对脏数据免疫但也无知: 哪个候选上次变快了,
-                    # 队列不知道。资格门在这层之外 (没资格的数根本没进来)。
-                    search_alternatives = bandit.order(
-                        list(getattr(self.search, "last_alternatives", [])),
-                        key=self._arm_of)
-                    if bandit.total_scored or bandit.unscored_updates:
-                        print(f"  [Bandit] 队列按证据重排: 已采纳 {bandit.total_scored} 个回报, "
-                              f"没采纳 {bandit.unscored_updates} 个")
-                print(f"  优化建议: {suggestion}")
-                print(f"  新 Sketch 版本: v{current_sketch.version}")
+                            break
+                        # P1-4: 排队下一轮的轮换候选 (SearchAgent 只在 triton 路径产出)
+                        # §5: 顺序交给 bandit (本轮累积的证据优先, 无观测的保持先验顺序),
+                        # 而不是纯 FIFO —— 后者对脏数据免疫但也无知: 哪个候选上次变快了,
+                        # 队列不知道。资格门在这层之外 (没资格的数根本没进来)。
+                        search_alternatives = bandit.order(
+                            list(getattr(self.search, "last_alternatives", [])),
+                            key=self._arm_of)
+                        if bandit.total_scored or bandit.unscored_updates:
+                            print(f"  [Bandit] 队列按证据重排: 已采纳 {bandit.total_scored} 个回报, "
+                                  f"没采纳 {bandit.unscored_updates} 个")
+                    print(f"  优化建议: {suggestion}")
+                    print(f"  新 Sketch 版本: v{current_sketch.version}")
 
-                # ---- 记录本轮优化历史 (供后续轮次参考) ----
-                # 只在有资格时累加: 这份 history 会印进下一轮的 prompt, 也就是**信念**的
-                # 一部分。把没有调参资格的那一轮数字写进去, 等于换个通道让它指挥搜索。
-                if _can_tune:
-                    optimization_history.append({
-                        "tiling": f"{current_sketch.tiling.block_m}x{current_sketch.tiling.block_n}x{current_sketch.tiling.block_k}",
-                        "gflops": l3_result.metrics.get("gflops", 0),
-                        "stage": "algorithm",  # 由 SearchAgent 返回实际 stage
-                        "outcome": f"GFLOPS={l3_result.metrics.get('gflops', 0):.2f}, "
-                                   f"加速比={l3_result.metrics.get('speedup_vs_baseline', 0):.2f}x",
-                    })
+                    # ---- 记录本轮优化历史 (供后续轮次参考) ----
+                    # 只在有资格时累加: 这份 history 会印进下一轮的 prompt, 也就是**信念**的
+                    # 一部分。把没有调参资格的那一轮数字写进去, 等于换个通道让它指挥搜索。
+                    if _can_tune:
+                        optimization_history.append({
+                            "tiling": f"{current_sketch.tiling.block_m}x{current_sketch.tiling.block_n}x{current_sketch.tiling.block_k}",
+                            "gflops": l3_result.metrics.get("gflops", 0),
+                            "stage": "algorithm",  # 由 SearchAgent 返回实际 stage
+                            "outcome": f"GFLOPS={l3_result.metrics.get('gflops', 0):.2f}, "
+                                       f"加速比={l3_result.metrics.get('speedup_vs_baseline', 0):.2f}x",
+                        })
 
             # ── 可复现性 Harness: 循环走到末尾 (没走 break/continue) 时统一 flush 一次快照 ──
             snapshot_target_dir = _snap()
