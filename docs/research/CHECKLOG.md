@@ -1004,6 +1004,33 @@
   **两臂真机对照 ⏳ 未跑**（同卡两次完整循环, 要 LLM）⇒ 「审计有收益」今天仍不许说
 - **类别**：I · **状态**：⚠️ 比较器 ✅ 已落地 / 两臂 ⏳ 未跑
 
+### I52 · 五位资格里 `can_tune` / `can_report` **零读者**，而搜索正吃着一个没有资格的数
+
+- **原话**：设计 §4.3 —— 「资格决定这个数被允许造成什么后果」（五位的用途表：
+  `can_verdict` / `can_tune` / `can_persist` / `can_report` / `can_count_progress`）
+- **实证**：五位 dict 的生产读者只有一位 —— `can_persist`（`oracle.admit_to_corpus`）。
+  `can_tune`、`can_report` **全仓零读者**（`grep -rn "can_tune" operator_agent/` 除
+  `eligibility.py` 自身外零命中）；`can_count_progress` 也零读者，它的**后果**由另一套词汇
+  顶替（`conductor.py:1551` 读的是旧的 `measurement_can_count_stagnation`）。而具体那一格
+  是这样的：`conductor.py:1299-1322` 在「L3 未通过」分支里**无条件**把
+  `l3_result.metrics` 拼成 `perf_data`（gflops/speedup/`roofline_bound`/util 全在里面），
+  再喂给邻居排序（`agents.py:680` 读 `roofline_bound` 决定往大 BLOCK_K 还是小 BLOCK_M/N 排）
+  与 LLM 先验（`agents.py:708` 读 `speedup`）。于是一个档位 `uninformative`、五位全 False、
+  `can_tune=False` 的读数**照样决定下一轮往哪搜** —— 「这个数不许驱动调参」这件事在搜索路径
+  上没有实现物（对比：同族的 `can_persist` 有声有色的读者，I46 修的也是这一类）
+- **出处**：`operator_agent/conductor.py:1299`（`perf_data` 无门）、`:1551`（旧键）、
+  `operator_agent/agents.py:680,708`（两个消费者）、`operator_agent/oracle.py`（唯一读者）
+- **后果**：被污染/无指称的那一轮，其数字会**改变搜索方向**（软后果，不像入库那样永久，
+  但正是 §10.5-3「毒不入环」要防的那一类）。今天它有两条旁路兜着：① 邻居队列是 FIFO 轮换，
+  与读数无关；② `best`/`stagnation` 那两个分支要求 `measurement_ok`（valid）。所以**不是**
+  「脏数改写 best」，而是「脏数指挥下一轮试哪里」——别忘了连 `can_tune=False` 的那一档也吃
+- **同族的次要一件（消费端三套词汇）**：同一个后果在消费端有 `measurement_validity`→
+  `measurement_ok`（`conductor.py` 多处）、`measurement_can_*`（`:1551`）、`eligibility.can_*`
+  三套写法并存。今天三者都由同一个 validity 派生所以不会打架，但设计 §4.3 的五位是**唯一
+  契约**，三套并存正是 I46（发布值不是收口点那份）能发生的土壤
+- **类别**：I · **状态**：⚠️ 已知未修（方向：`perf_data` 按 `can_tune` 设门 —— 没资格就不许
+  用它的数字挑方向；并与 §5 bandit 的奖励门（`can_count_progress`）**同一处收口**）
+
 ---
 
 ### I45 · 「§10.5-4 两次确认 ✅」的判据函数零生产调用者，且默认不强制
@@ -1159,6 +1186,7 @@
 | I49 | 峰值「实测」被「口径核过」顶替, 收敛出口因此开着 | I | ✅ 已修 |
 | I50 | 设计 §17 第 3 件交付物(报告)此前没有产物 | I | ✅ 已修 |
 | I51 | 「不许声称审计有收益」这道门后面没有路 | I | ⚠️ 比较器已落地 / 两臂未跑 |
+| I52 | 五位资格里 can_tune/can_report 零读者, 而搜索吃没有资格的数 | I | ⚠️ 已知未修 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
