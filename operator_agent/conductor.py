@@ -908,6 +908,17 @@ class Conductor:
             if l3_result is not None:
                 self._true_measurements += 1
 
+            # 这一轮造成的**永久后果** —— 供设计 §14-9 的资格审计对照实验离线统计。
+            #
+            # 为什么必须单独记: `measurement_validity` 进血缘的理由是「有多少轮的读数有资格
+            # 驱动闭环可以离线统计」, 而**后果**从来没被记过。于是设计 §4.3 那句「资格决定
+            # 这个数被允许造成什么后果」在产物侧无法验证 —— 判据算了、后果发生了, 但
+            # 「一个不可信的读数有没有真的永久改掉配置 / 覆盖 best」, 出了循环只剩一个最终
+            # 的 `disabled_recipes` 集合, 归因不到轮。
+            #
+            # 值先建 (全 False), 判决分支里改的就是血缘里这一份 —— 没走到判决的轮次因此读作
+            # 「没有永久后果」, 而不是缺键 (缺键会被读成「没记」)。
+            _perm = {"best_updated": False, "recipes_disabled": [], "stagnation_counted": False}
             # 血缘记录: 每轮动作与结果
             artifact.iteration_history.append({
                 "round": round_num,
@@ -928,7 +939,15 @@ class Conductor:
                 # 而不必重跑一遍才知道那次循环是不是全程都在盲跑
                 "measurement_validity": (l3_result.metrics.get("measurement_validity")
                                          if l3_result else None),
+                # 资格位 (五位) 也进血缘 —— 上面那段为 `measurement_validity` 写的理由逐字
+                # 适用于它, 而且更精确: 档位说「这个数可不可信」, 资格位说「它被允许造成
+                # 什么后果」。缺了它, 「有多少轮真的推进了信念 / 有资格写进记忆」这个问句
+                # 只能靠重跑估。读者: 设计 §14-9 的资格审计对照实验 (ablation_eligibility)。
+                "eligibility": (l3_result.metrics.get("eligibility")
+                                if l3_result else None),
                 "recipes_applied": list(applied_recipes),
+                # 永久后果的记账 (上面刚建好那个 dict 的引用; §14-9 的读者)
+                "permanent_effects": _perm,
                 # P1-1 成本记账: CoderPipeline 翻为默认后, 一个「生成轮」的机时开销变成
                 # 「最多 2 个决赛候选各跑一次 L1+L2, 胜者再跑一次 L3」。这两个数不进血缘,
                 # 「这次翻转让机时涨了多少」就只能靠重跑一遍估 —— 与上面 `levels_passed`
@@ -1053,6 +1072,7 @@ class Conductor:
                     # 完整"分支: 把可用的 gflops 报成缺失, 无条件禁用配方, 并在
                     # max_stagnant_rounds=2 下把一次正在起效的优化提前终止。
                     best_gflops = current_gflops
+                    _perm["best_updated"] = True
                     print(f"\n[Conductor] 建立性能基线: {current_gflops:.2f} GFLOPS "
                           f"(speedup={l3_result.metrics.get('speedup_vs_baseline', 0):.4f})")
                 elif current_gflops > 0 and best_gflops > 0:
@@ -1075,6 +1095,7 @@ class Conductor:
                         print(f"\n[Band] {band_note(_band_agg)}")
                     if v is Verdict.FAST:
                         best_gflops = current_gflops
+                        _perm["best_updated"] = True
                         rounds_without_improvement = 0
                         if plan and plan.selected_recipes:
                             for r in plan.selected_recipes:
@@ -1090,6 +1111,7 @@ class Conductor:
                                            if r.id not in applied_recipes] if plan else []
                             for r in new_recipes:
                                 disabled_recipes.add(r.id)
+                                _perm["recipes_disabled"].append(r.id)
                             if new_recipes:
                                 disabled_names = ", ".join(r.id for r in new_recipes)
                                 print(f"  [Planner] 性能退步，禁用配方: {disabled_names}")
@@ -1099,6 +1121,7 @@ class Conductor:
                             print(f"\n[Conductor] 性能未改善 ({current_gflops:.2f} vs {best_gflops:.2f} "
                                   f"GFLOPS, {why}), 连续 {rounds_without_improvement + 1}/{max_stagnant_rounds} 轮")
                         rounds_without_improvement += 1
+                        _perm["stagnation_counted"] = True
                 else:
                     # gflops 不可用: 用速度比或时间判断
                     speedup = l3_result.metrics.get("speedup_vs_baseline", 0)
@@ -1110,7 +1133,9 @@ class Conductor:
                         new_recipes = [r for r in plan.selected_recipes if r.id not in applied_recipes]
                         for r in new_recipes:
                             disabled_recipes.add(r.id)
+                            _perm["recipes_disabled"].append(r.id)
                     rounds_without_improvement += 1
+                    _perm["stagnation_counted"] = True
                     print(f"\n[Conductor] 性能指标不完整 (gflops={current_gflops:.2f}, speedup={speedup:.4f}), "
                           f"连续 {rounds_without_improvement}/{max_stagnant_rounds} 轮")
                 if rounds_without_improvement >= max_stagnant_rounds:

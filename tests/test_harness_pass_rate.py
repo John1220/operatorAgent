@@ -44,7 +44,11 @@ def _round(n, l1=True, l2=None, l3=None, validity=None, speedup=None, action="op
             "candidate_signature": signature, "duplicate_of": duplicate_of,
             # P1-1 成本记账两键。默认值 = 单候选生成轮 (没触发选择, 真机 L2 一次):
             # 聚合逻辑不消费它们, 但**键必须在** —— 这就是上面那条守卫要的。
-            "generation_candidates": candidates, "real_l2_runs": l2_runs}
+            "generation_candidates": candidates, "real_l2_runs": l2_runs,
+            # 资格位与永久后果 (§14-9 对照实验的原料)。同样: 聚合不消费, 键必须在。
+            "eligibility": None,
+            "permanent_effects": {"best_updated": False, "recipes_disabled": [],
+                                  "stagnation_counted": False}}
 
 
 def _run(rounds, final=None, admitted=False, reason="", tokens=100, usd=0.01,

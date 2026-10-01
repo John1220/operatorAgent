@@ -21,6 +21,7 @@
 | §10.5-4 两次确认 | `operator_agent/confirm.py` + 唯一判据 `oracle.admit_to_corpus` | ✅ **但是 opt-in**：判据默认要求重测，生产把它接到 `require_double_confirm`（默认 `False`，机时承诺）⇒ **默认配置下单次读数即可入库**；理由文本里会写明本次没要求 |
 | §13.4 Oracle 收口 | `operator_agent/oracle.py`，已接 **L3 出口**（`verifier._assess_measurement`） | ✅ |
 | §8 失败分类路由 | `operator_agent/failure_route.py`（五路 + `fix_not_rewrite`） | ✅ |
+| §14-9 资格审计对照 | `benchmarks/ablation_eligibility.py` + `tests/test_ablation_eligibility.py` | ⏳ **比较器已落地、两臂未跑**：五态判据（含"没打到点上"这一态与"没有收益必须写进报告"），带宽取 `NOISE_BAND[uninformative]`；真机对照需要同卡两次完整循环（要 LLM）⇒ "审计有收益"仍不许声称 |
 | §17「无法确立」 | `confirm.UnableToEstablish` + **`report.py` / `report.md` 产物** | ✅ 2026-10-01 补齐：第 3 件交付物此前完全没有产物（收集器只被两个 benchmark 调过）。空章节带依据、`can_persist=False` 单列一行、入库拒因随报告落盘 |
 | §14 验收八条 | `tests/test_stage1_acceptance.py`（离线） + `benchmarks/smoke_spine_h20.py`（真机 H20） | ✅ **真机已跑**（2026-10-01，8×H20 的 `algorithm-h20`，走生产 L3 入口）：0/1/2/3/7/8 绿、4 见下、5 未覆盖（需 LLM，`LLM_API_KEY` 未设）、6 纯离线。**真机抓出两处「算了但没接上」**（CHECKLOG I46 发布的资格位不是收口点算的那份 ⇒ §14-8 在生产上没生效；I48 远端运行时盾的证据不落地），都已修 + 守卫；§14-7 的运行时检查**生产上无喂给者**（I47，已知未修）。见 [docs/research/63](../research/63-真机§14冒烟与它抓出来的两个真源.md) |
 | §11 多卡放置 / §9.3 双键 | `operator_agent/placement.py`（DeviceKey/干扰域/同卡配对/竞争降级） | ✅ |
@@ -643,6 +644,28 @@ class Calibrator(Protocol):
 | 6 | 人为改契约文件 | 评测器拒评（哈希不匹配） |
 | 7 | 把候选和基线放到不同卡 | 配对检查拒绝该观测 |
 | 8 | 关掉心跳 | 该窗口观测全部不可用，不写记忆 |
+| 9 | **同一批轮次跑两臂**：A 照常 / B 关掉资格审计的**后果** | 五态判决，且"没有收益"必须写进报告 |
+
+第 9 条与前面八条性质不同：前八条问"资格审计**在不在岗**"，第 9 条问"它在不在**值**"。
+
+**协议**（`benchmarks/ablation_eligibility.py` 是比较器，跑法是两臂各跑一次）：
+
+- 两臂只差一件事：B 组让资格位不再拦任何东西（判据**照算照记**，只是后果不再受限）。
+  ⚠️ 这个"关掉"**不许做成产品开关** —— 设计 §10.5-5 说 agent 不能编辑自己的尺子，而一个
+  "一键关掉安全门"的环境变量就是那把尺子，它会先被用在无人值守的夜里。所以 B 组只能在
+  harness 侧 patch 出来（`oracle.admit_to_corpus` 忽略 `can_persist`，控制器把每个读数都
+  当有效），命令行里没有这个开关。
+- 三个数全部从 `iteration_history` 离线可算（所以能复盘，不必重跑）：最终 `best`、
+  真值测量轮数（§10.2 的货币）、**脏永久后果**轮数（读数没资格造成永久后果却造成了：
+  覆盖 `best` / 永久禁用配方 —— 就是 §16 那条"让一个噪声大的数永久拉黑配置"）。
+- 判决五态：`无法比较` / `没打到点上` / `没有收益` / `证据不足` / `有收益`。
+  带宽取 `NOISE_BAND[uninformative]` = 2%（跨运行比较的可信度低于轮内比较）。
+  关键的两条：**"门没被需要过"不算"门没用"**（否则从无信息量的实验里读出结论）；
+  **"没有收益"这一向必须写进报告** —— 设计 §19.4 缺的正是它。
+
+**状态**：比较器与五态判据已落地（`tests/test_ablation_eligibility.py`，含"不许有开关"
+的政策守卫）；**两臂真机对照 ⏳ 未跑**（需要在同一张卡上各跑一次完整循环，要 LLM），
+所以"资格审计有收益"这句话今天**仍然不许对外说** —— 边界与 §19.4 一致。
 
 ---
 
