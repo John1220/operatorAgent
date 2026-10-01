@@ -1056,8 +1056,23 @@
 - **出处**：`docs/research/63-*.md` §真机事实；`operator_agent/oracle.py:88-89,154`
 - **后果**：这条检查今天只在离线用例里活着；真机正确性靠「一次调用一张卡」，一旦有人把
   两次调用的读数拼成一个加速比（缓存基线 / 分轮拼接），没有任何东西会作废它
-- **类别**：I · **状态**：⚠️ 已知未修（方向: 远端逐臂报卡号 + verifier 传进 `evaluate`；
-  **不许**把同一个 `selected_gpu` 当两臂各自的值传 —— 那是恒真比较，P0-2 的教训）
+- **修法**（2026-10-01）：远端**按臂**采身份（`_arm_identity`：`visible_index` + 卡名 +
+  `cuda_visible_devices` 三件一起带回，因为「index 是可见集内序号」正是 doc 63 那次事故的
+  失效方式），放进 `paired["arm_identity"]`；控制端把两臂身份压成**可比较标签**
+  （`placement.observed_pairing`，口径只有一处）并喂给 `oracle.evaluate` 的
+  `candidate_device`/`baseline_device`。凑巧的是**旁边那句话本来就是断言**：
+  `metrics["measurement_scope"]` 一直写死 `"same_remote_device"` —— 键名正是 §11-2 要的
+  那件事，而背后没有任何观测（全仓只有一个测试在读它）。现在它由观测算出三态：
+  `same_remote_device` / `cross_device_refused` / `unobserved`（缺观测**不许**自称同卡），
+  message 也跟着写（「同机同卡」/「配对未观测」/「配对=跨卡⇒作废」）。跨卡时判两件事：
+  资格全 False（oracle 那处唯一的判决）+ `passed=False`（跨卡加速比没有指称对象，与 §4.3
+  规则 3 同族；两处读同一对标签，所以不可能分叉）。拒评时**发布的档位也换成收口点的答案**
+  （否则又是 I46 的形状：`measurement_validity=valid` 与 `eligibility` 全 False 并排）。
+- **残留（明写）**：`pairing_conflict` 的**窗口那一半**仍无喂给者 —— 它要求两侧都非 None
+  才比，而 `candidate_window` 是心跳窗口 id；把同一个 id 抄给 `baseline_window` 就是一次
+  永远不响的守卫，所以**没抄**。等真有逐臂窗口观测再接。
+- **类别**：I · **状态**：✅ 同卡那半已修（2026-10-01，`tests/test_pairing_observation.py`
+  16 条 + 5 处变异全红）· ⏳ 窗口那半仍无喂给者
 
 ### I48 · 远端运行时盾的证据不落地（`lib_fallback` 对唯一需要它的那条路径恒 False）
 - **原话**：spine-review P1-4 —— 「反作弊命中必须把 `lib_fallback` 写进 metrics，否则资格
@@ -1139,7 +1154,7 @@
 | I44 | 输入线把标量也「按描述重新生成」：`causal=False` 到真机成了 `np.True_`，L2 验的是另一个算子 | I | ✅ 已修 |
 | I45 | 两次确认的判据零调用者 | I | ✅ 已修 |
 | I46 | §14-8 的资格位发布值不是收口点算的那份 | I | ✅ 已修 |
-| I47 | 跨卡配对检查在生产上没有喂给者 | I | ⚠️ 已知 |
+| I47 | 跨卡配对检查在生产上没有喂给者 | I | ✅ 同卡已修 / ⏳ 窗口无喂给者 |
 | I48 | 远端运行时盾的证据不落地 | I | ✅ 已修 |
 | I49 | 峰值「实测」被「口径核过」顶替, 收敛出口因此开着 | I | ✅ 已修 |
 | I50 | 设计 §17 第 3 件交付物(报告)此前没有产物 | I | ✅ 已修 |

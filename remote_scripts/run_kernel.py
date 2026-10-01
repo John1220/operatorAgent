@@ -1011,6 +1011,37 @@ def _additional_peak_bytes(fn, device_is_cuda: bool):
         return None
 
 
+def _arm_identity(device_is_cuda: bool) -> dict:
+    """**计时当时**这一臂实际所在的那张卡 (观测值, 不是声明值)。
+
+    为什么按臂各读一次, 而不是开局读一次全局: 设计 §11-2 要求「候选与基线同卡」是
+    **观测复核**, 契约里的 `same_device` 只是声明。只读一次全局的话, 任何在**两臂之间**
+    改了当前设备的代码都不会在两臂对比里显形 —— 而这类事故在本仓真发生过 (doc 63 §四:
+    `CUDA_VISIBLE_DEVICES=2 cd X && …python` 是**前缀赋值**, 只作用于内建的 `cd`, 于是
+    变量没进环境、占位落在 GPU 0, 而现场每一条读数都自洽)。
+
+    ⚠️ `visible_index` 是**可见集内**的索引, 不是物理卡号: `CUDA_VISIBLE_DEVICES=2` 时
+    `current_device()` 返回 0, 而物理卡是 2。所以这里连 `CUDA_VISIBLE_DEVICES` 一起带回去
+    —— 「index 0」被当成卡号读, 正是上面那次事故的失效方式。控制端只拿这三个字段做**同卡
+    对比** (同一进程内两侧口径相同), 不去反推物理卡号。
+    """
+    if not device_is_cuda:
+        return {"visible_index": -1, "name": "cpu", "count": 0,
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "")}
+    try:
+        import torch
+        idx = int(torch.cuda.current_device())
+        props = torch.cuda.get_device_properties(idx)
+        return {"visible_index": idx,
+                "name": str(getattr(props, "name", "unknown")),
+                "count": int(torch.cuda.device_count()),
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "")}
+    except Exception as e:      # noqa: BLE001 —— 读不到就明说读不到, 不猜一个值
+        return {"visible_index": None, "name": f"读取失败: {type(e).__name__}",
+                "count": None,
+                "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", "")}
+
+
 def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
                             device_is_cuda: bool) -> tuple:
     """候选与基线**按块交错**计时, 返回 (候选 stats, 基线 stats, paired stats)。
@@ -1067,22 +1098,36 @@ def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
 
     cand_times, base_times = [], []
     block_sizes = []
+    cand_ident = base_ident = None
     i = 0
     while i < n:
         k = min(block, n - i)
         block_sizes.append(k)
+        # 每臂各在自己第一块**计时前**读一次身份 (§11-2 配对检查的观测量)。
+        # ⚠️ 位置要在两臂**之间**各读一次, 不能都在循环开头各读一次: 那样「候选块跑完、
+        # 基线块跑之前有人改了当前设备」就看不见 —— 而这类改动正是这条检查要抓的东西。
+        if cand_ident is None:
+            cand_ident = _arm_identity(device_is_cuda)
         # 一块 = 一次 shield 进出, 且 shield 包的是**整块**而不是每一次调用
         # (与本文件 541-543 的原则一致); 事件窗口在 _timed_runs 内部逐样本开闭,
         # 所以 setattr 群不进测量值。
         with shield_torch():
             cand_times.extend(_timed_runs(cand_fn, k, device_is_cuda))
+        if base_ident is None:
+            base_ident = _arm_identity(device_is_cuda)
         base_times.extend(_timed_runs(base_fn, k, device_is_cuda))
         i += k
 
     cand_stats = _sample_stats(cand_times)
     base_stats = _sample_stats(base_times)
     ratios = [b / c for c, b in zip(cand_times, base_times) if c > 0]
-    paired = {"paired_runs": len(ratios), "paired_block_samples": block}
+    paired = {"paired_runs": len(ratios), "paired_block_samples": block,
+              # 两臂计时当时的卡身份 + 跑完之后的复读。控制端的同卡配对检查读这里
+              # (§11-2 / oracle.evaluate 的 candidate_device/baseline_device)。
+              # 放在 `paired` 而不是加第四个返回值: `benchmarks/probe_block_series.py`
+              # 按三元解包这个函数, 改元数会静默打断那个探针。
+              "arm_identity": {"candidate": cand_ident, "baseline": base_ident,
+                               "after": _arm_identity(device_is_cuda)}}
     if ratios:
         rs = sorted(ratios)
         med = _percentile(rs, 50)

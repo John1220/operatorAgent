@@ -255,7 +255,12 @@ class TestSameDeviceRemoteBenchmark(unittest.TestCase):
         r = _l3(verifier, PYTHON_MATMUL, _matmul_inputs(), _make_task(min_speedup=1.2))
         self.assertTrue(r.passed, r.message)
         self.assertEqual(r.metrics["baseline_type"], "torch_compile")
-        self.assertEqual(r.metrics["measurement_scope"], "same_remote_device")
+        # 这份假载荷**没有**逐臂身份 (老远端的回报形状) ⇒ 正确的读数是「未观测」,
+        # 而不是「同卡」。这一格以前写死 `same_remote_device` —— 键名正是 §11-2 要求的
+        # 那件事, 却没有任何观测在背后 (CHECKLOG I47)。
+        self.assertEqual(r.metrics["measurement_scope"], "unobserved")
+        self.assertEqual(r.metrics["arm_device_labels"],
+                         {"candidate": None, "baseline": None})
         self.assertEqual(r.metrics["speedup_vs_baseline"], 1.25)
 
     def test_control_side_trusts_the_remote_selection(self):

@@ -9,6 +9,7 @@ L3: 性能验证 (性能达到预期加速比) + Roofline 分析
 """
 
 import time
+import dataclasses
 import numpy as np
 from typing import Optional
 from .schemas import (
@@ -22,6 +23,8 @@ from .measurement import (GATE_PARAM_KEYS, PERF_CRITERION_ABSOLUTE_GFLOPS,
                           PERF_CRITERION_SPEEDUP, TRANSPORT_KEY, aggregate_l2_readings,
                           aggregate_note, single_ruler, transport_outcome_of_result)
 from .hardware_caps import detect_hardware_caps
+from .placement import (observed_pairing, SCOPE_SAME, SCOPE_CROSS,
+                        SCOPE_UNOBSERVED)
 from .backend_caps import Backend, Cap, CapabilityMissing
 
 
@@ -1039,6 +1042,11 @@ class Verifier:
                     display_name = "PyTorch Eager(CUDA)"
                 else:
                     display_name = baseline_name
+                # 逐臂身份 → 配对口径 (§11-2 / CHECKLOG I47)。`arm_identity` 原样落盘
+                # (可审计), 标签那对与 scope 是同一个函数算出来的。
+                _ident = paired.get("arm_identity") or {}
+                _cand_dev, _base_dev, _pair_scope = observed_pairing(
+                    _ident.get("candidate"), _ident.get("baseline"))
                 metrics.update({
                     "baseline_type": baseline_name,
                     "baseline_display": display_name,
@@ -1051,7 +1059,11 @@ class Verifier:
                     # 这一个旋钮, 但前两条拿它当「快多少倍」的地板、第三条拿它乘在绝对目标上
                     # 当系数 —— 只比数值会把一次换了量纲的漂移读成「尺没变」。
                     "perf_criterion": PERF_CRITERION_SPEEDUP,
-                    "measurement_scope": "same_remote_device",
+                    # 配对口径由**逐臂观测**算出 (CHECKLOG I47)。此前这行写死
+                    # `"same_remote_device"` —— 键名正是 §11-2 要的那件事, 而当时没有
+                    # 任何观测在背后 (全仓只有一个测试在读它)。现在三种取值都写得出:
+                    # 有观测且一致 / 观测到不同卡 / 没观测 (老 payload 或非远端路径)。
+                    "measurement_scope": _pair_scope,
                     "candidate_median_time_ms": candidate_metrics.get("median_time_ms"),
                     "baseline_metrics": baselines,
                     # 交错配对的信号: 逐样本比值的 median 与其散布。判定仍走上面那个
@@ -1070,14 +1082,36 @@ class Verifier:
                     "baseline_peak_memory_bytes": paired.get("baseline_peak_bytes_extra"),
                     "peak_memory_ratio": paired.get("peak_memory_ratio"),
                     "baseline_attempts": bench.get("baseline_attempts") or [],
+                    # 远端逐臂计时当时的卡身份 (原样保留: 报告/复盘要能看见「哪张卡」,
+                    # 而不是只看见一个结论位), 以及喂给 oracle 的那对标签。
+                    "arm_identity": _ident,
+                    "arm_device_labels": {"candidate": _cand_dev,
+                                          "baseline": _base_dev},
                 })
                 passed = speedup >= min_required
+                if _pair_scope == SCOPE_CROSS:
+                    # 跨卡加速比**没有指称对象** (§11-2 原句: 「A 卡基线 vs B 卡候选的
+                    # 『加速比』直接作废」) —— 与 §4.3 规则 3 同一族, 所以「通过」这个
+                    # 结论也不许立: passed=False。
+                    # 资格位那件事仍**只**由 oracle 判 (它算的是「这个数被允许造成什么
+                    # 后果」); 这里判的是另一件事 ——「passed 有没有对象」(与
+                    # `l3_pass_is_refused` 刻意不折进 `can_gate` 是同一处分)。两处读的是
+                    # 同一对标签 (`observed_pairing`), 所以不可能分叉。
+                    passed = False
                 # 三元组 (LeetCUDA bench 同款): 候选/基线 (倍率)。只报一个 1.04x
                 # 时读者看不见两边的绝对量级 —— 「0.01/0.0096 (1.04x)」与
                 # 「10.4/10.0 (1.04x)」是两回事, 前者可能整个被 launch 地板吞掉。
                 ratio_triple = (f"{kernel_min_ms:.4g}/{baseline_ms:.4g} ({speedup:.2f}x)")
+                # 这句话以前写死「同机同卡」—— 而 `measurement_scope` 现在可能是
+                # 「未观测」或「跨卡」。message 是唯一保证被下游 (Fixer/Search prompt、
+                # 报告、人眼) 看到的通道, 所以它**不许比证据多说一个字**。
+                _scope_note = {
+                    SCOPE_SAME: "同机同卡",
+                    SCOPE_UNOBSERVED: "配对未观测",
+                    SCOPE_CROSS: "配对=跨卡⇒作废",
+                }.get(_pair_scope, "配对未观测")     # 未知取值按最弱的口径写
                 msg = (f"加速比 {ratio_triple} vs {display_name} "
-                       f"(同机同卡 median, 要求 >= {min_required:.2f}x, {bound}-bound)")
+                       f"({_scope_note} median, 要求 >= {min_required:.2f}x, {bound}-bound)")
                 _cp = metrics["candidate_peak_memory_bytes"]
                 _bp = metrics["baseline_peak_memory_bytes"]
                 if isinstance(_cp, int) and isinstance(_bp, int):
@@ -1275,12 +1309,30 @@ class Verifier:
                     heartbeat=heartbeat,
                     heartbeat_expected=heartbeat_expected,
                     candidate_window=(heartbeat.window_id if heartbeat is not None else None),
+                    # 同卡配对 (§11-2, CHECKLOG I47): 喂的是 `arm_device_labels` ——
+                    # 上面刚发布进 metrics 的那一份, 不是现在重算一份。
+                    # ⚠️ **只喂设备, 不喂窗口**: `pairing_conflict` 的窗口那一半要求
+                    # 两侧都非 None 才比, 而 `candidate_window` 是心跳窗口 id —— 把同一个
+                    # id 抄给 `baseline_window` 会让那道比较恒真 (一次永远不响的守卫)。
+                    # 所以窗口那一半**仍然没有喂给者**, 登记在 I47 里, 等真有逐臂窗口观测。
+                    candidate_device=(metrics.get("arm_device_labels") or {}).get("candidate"),
+                    baseline_device=(metrics.get("arm_device_labels") or {}).get("baseline"),
                 )
                 metrics["observation"] = obs.as_dict()
                 # 收口点的答案就是**发布值**: 它读的是同一组输入加心跳窗口, 是严格更
                 # 知情的那一份。发布别的推导 = 让「记录里说 A、判定按 B」这种分叉在
                 # 生产上长期存在 (真机 §14-8 就是它)。
                 metrics["eligibility"] = obs.eligibility.as_dict()
+                if obs.refused:
+                    # 拒评 = 本次**没有**有效观测 ⇒ 发布的档位必须是收口点的答案,
+                    # 而不是上面 `assess()` 算的那一份。否则又回到 I46 的形状:
+                    # `measurement_validity=valid` 与 `eligibility` 全 False 并排 ——
+                    # 「记录里说 A、判定按 B」正是那次真机抓到的病。
+                    # 三个用途位用 `replace` 重新摊平而不是手写: 档位→用途的映射只有
+                    # 一处 (`MeasurementAssessment` 的三个 property), 这里不许再写第二遍。
+                    metrics.update(dataclasses.replace(
+                        assessment,
+                        validity=measurement.Validity(obs.validity)).as_metrics())
                 # 让「契约被改写」这条结论真的有人读: `confirm.py` 的 UnableReport
                 # 一直在读 `contract_hash_mismatch`, 而此前**没有任何生产写入者**
                 # —— 那条「本次评测作废」的条目永远不会出现在报告里 (死读键)。

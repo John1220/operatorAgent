@@ -82,6 +82,51 @@ def pairing_conflict(candidate_device, baseline_device,
     return ""
 
 
+# ─── 逐臂身份 → 可比较标签 (§11-2 配对检查的喂给者; CHECKLOG I47) ──────────
+#
+# 为什么需要这一层: `pairing_conflict` 比的是「两侧的设备标识」, 而远端报回来的是一个
+# dict (`visible_index` / `name` / `cuda_visible_devices`)。压标签的口径必须只有一处 ——
+# 否则「同卡」这件事会随调用方各自解释。v0.5 的 `metrics["measurement_scope"]` 正是
+# 那句解释: 它写死成 `"same_remote_device"`, **键名就是 §11-2 要的那件事, 而当时没有
+# 任何观测在背后** (全仓只有一个测试在读它)。现在它由观测算出来。
+SCOPE_SAME = "same_remote_device"       #: 两臂观测到同一张卡 (有观测, 且一致)
+SCOPE_CROSS = "cross_device_refused"    #: 观测到不同卡 ⇒ 该读数被拒评 (all-False)
+SCOPE_UNOBSERVED = "unobserved"         #: 远端没报逐臂身份 ⇒ **不声称**同卡
+
+
+def device_label(identity) -> Optional[str]:
+    """一个逐臂身份 dict → 可比较标签。不可用 (没观测 / 读失败 / 不是 dict) ⇒ None。
+
+    ⚠️ 标签必须同时含 `visible_index` 与 `cuda_visible_devices`: 只看 index 会把
+    「`CUDA_VISIBLE_DEVICES=2` 下的 index 0」与「`=5` 下的 index 0」读成同一张卡 ——
+    而「index 0 被当成卡号」正是 doc 63 那次事故的失效方式。
+    """
+    if not isinstance(identity, dict):
+        return None
+    idx = identity.get("visible_index")
+    if idx is None:
+        return None       # 读失败 ⇒ 没观测 (不是「约定成 0」)
+    return "cuda:{i} {n} (visible={v})".format(
+        i=idx, n=identity.get("name") or "unknown",
+        v=identity.get("cuda_visible_devices") or "unset")
+
+
+def observed_pairing(candidate_identity, baseline_identity):
+    """远端两臂身份 → `(候选标签, 基线标签, scope)`。**缺观测返回 None** (不许空串冒充)。
+
+    两个契约:
+      * 标签不是判决 —— 「作废」这个决定仍然只有 `pairing_conflict` 一处。但两者读的是
+        同一对标签, 所以不可能不一致 (标签相等 ⟺ `pairing_conflict` 的 `!=` 不成立)。
+      * `None` 与 `""` 不是一回事: `None` = 没观测 (oracle 跳过这道检查, 与
+        `real_device=None` 同一边界), `""` 会变成一次恒真的比较。
+    """
+    c = device_label(candidate_identity)
+    b = device_label(baseline_identity)
+    if c is None or b is None:
+        return None, None, SCOPE_UNOBSERVED
+    return c, b, (SCOPE_SAME if c == b else SCOPE_CROSS)
+
+
 # ─── 放置 (§11-1 / §13.5) ──────────────────────────────────────
 
 @dataclass(frozen=True)

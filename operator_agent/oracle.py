@@ -160,7 +160,11 @@ def evaluate(contract: FrozenContract,
                 validity="uninformative",
                 eligibility=ELIG_ALL_FALSE,
                 refused=pair_why,
-                reasons=[pair_why],
+                # 稳定分类 token + 人话各一份: `reasons` 是给**代码**读的分类
+                # (上面两条拒评同样用 token: `ambiguous_hash_mode` / `missing_record_hash`),
+                # `refused` 是给人读的原文。verifier 靠 token 决定「passed 有没有对象」,
+                # 不靠中文措辞 —— 措辞改一个字不该让判决跟着变。
+                reasons=["pairing_conflict"],
                 provenance={"contract_hash": expected,
                             "candidate_device": candidate_device,
                             "baseline_device": baseline_device},
