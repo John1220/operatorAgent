@@ -31,6 +31,13 @@ RUNNERS = (
     ("run_kernel.py", REPO_ROOT / "remote_scripts" / "run_kernel.py"),
     ("run_kernel_xpu.py", REPO_ROOT / "remote_scripts" / "run_kernel_xpu.py"),
 )
+# 常驻服务端 (doc 62) 是线格式上的**第二个**远端分派现场: 它只认服务端专属 action
+# (`ping`/`shutdown`), 其余整条委托给 kernel runner 的 `run_action`。它必须一起进
+# 契约, 否则控制端发的 `shutdown` 会看起来「没有任何远端脚本派发」——
+# 而那正是这条守卫该抓的形状, 只是它该抓的是「谁都不认」, 不是「kernel runner 不认」。
+SERVERS = (
+    ("runner_server.py", REPO_ROOT / "remote_scripts" / "runner_server.py"),
+)
 CONTROL_DIR = REPO_ROOT / "operator_agent"
 
 
@@ -311,6 +318,8 @@ def _control_side_payloads():
 
 
 CONTRACTS = {label: _Contract(label, path) for label, path in RUNNERS}
+SERVER_CONTRACTS = {label: _Contract(label, path) for label, path in SERVERS}
+ALL_REMOTE = {**CONTRACTS, **SERVER_CONTRACTS}
 SENT = _control_side_payloads()
 
 
@@ -344,22 +353,39 @@ class TestRunnerContractParity(unittest.TestCase):
                          "同名 action 在两个 runner 上读的 payload 键不一致 —— 控制端发出"
                          "而某一侧不读的键会被静默丢掉 (不报错):\n" + "\n".join(diffs))
 
-    def test_every_sent_action_is_dispatched_by_every_runner(self):
-        """用了没声明: 控制端发得出、runner 不认的 action 会在远端变成 Unknown action"""
-        bad = [f"{action} ({where}) 不被 {c.label} 派发"
-               for action, _, where in SENT for c in CONTRACTS.values()
-               if action not in c.actions]
+    def test_every_sent_action_is_dispatched_by_some_remote_script(self):
+        """用了没声明: 控制端发得出、**任何**远端脚本都不认的 action 会在远端变成
+        Unknown action。判据是「有人认」而不再是「每个 kernel runner 都认」—— 线格式
+        上有两个分派现场 (kernel runner × 平台 + 常驻服务端), 见 `SERVERS` 的说明。"""
+        bad = [f"{action} ({where}) 没有任何远端脚本派发"
+               for action, _, where in SENT
+               if not any(action in c.actions for c in ALL_REMOTE.values())]
         self.assertEqual([], bad, "控制端在发没人派发的 action:\n  " + "\n".join(bad))
+
+    def test_server_only_actions_stay_out_of_the_kernel_runners(self):
+        """反向: 服务端专属 action 不许在 kernel runner 里也有一份
+
+        两个分派现场各有一半真话时, 最省事的写法是在两边都认 `ping` —— 那会让
+        「服务端专属」变成一句没有读者的注释, 也会让一次性路径上的 `ping` 看起来像
+        测量动作。"""
+        server_only = (set().union(*(c.actions for c in SERVER_CONTRACTS.values()))
+                       - set().union(*(c.actions for c in CONTRACTS.values())))
+        self.assertTrue(server_only, "服务端没有专属 action? 解析前提不成立")
+        bad = [f"{c.label} 也派发 {a}"
+               for c in CONTRACTS.values() for a in sorted(server_only) if a in c.actions]
+        self.assertEqual([], bad, "服务端专属 action 在 kernel runner 里也有一份:\n  "
+                                  + "\n".join(bad))
 
     def test_every_dispatched_action_is_sent_by_the_control_side(self):
         """声明了没人用: runner 里挂着一个控制端从不发的 action (抄 gen-doc-graphs.ts:563)"""
         sent_actions = {a for a, _, _ in SENT}
         bad = [f"{c.label} 派发了 {action}"
-               for c in CONTRACTS.values() for action in sorted(c.actions - sent_actions)]
+               for c in ALL_REMOTE.values()
+               for action in sorted(c.actions - sent_actions)]
         self.assertEqual([], bad, "runner 里挂着没人发的 action (死分派, 或者控制端漏发):\n  "
                                   + "\n".join(bad))
 
-    def test_every_sent_key_is_consumed_by_every_runner(self):
+    def test_every_sent_key_is_consumed_by_its_dispatcher(self):
         """声明了没人用 (键这一层): 控制端发了、runner 从不读的键 = 静默降级
 
         这一条是 `baseline_priority` / `precision` 被 run_kernel_xpu.py 丢掉时唯一会响的
@@ -367,7 +393,7 @@ class TestRunnerContractParity(unittest.TestCase):
         """
         bad = []
         for action, keys, where in SENT:
-            for c in CONTRACTS.values():
+            for c in ALL_REMOTE.values():
                 if action not in c.actions:
                     continue          # 由 test_every_sent_action_is_dispatched 负责
                 dropped = keys - c.keys[action]

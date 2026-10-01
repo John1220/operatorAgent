@@ -1464,21 +1464,22 @@ def get_gpu_info() -> dict:
     return {"name": "CPU (no CUDA)", "device": "cpu"}
 
 
-if __name__ == "__main__":
-    raw = sys.stdin.read()
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(json.dumps({"success": False, "error": f"Invalid JSON: {e}"}))
-        sys.exit(1)
+def run_action(payload: dict) -> dict:
+    """按 `action` 分派一次请求, 返回结果载荷。
 
+    **一次性路径与常驻服务共用这一份分派** (`__main__` 与 `runner_server.py` 都只调
+    这里)。常驻服务省下的正是「每次调用新起一个进程」那 ~4 s (实测 `import torch`
+    1.09 s + CUDA 上下文 ~0.44 s + ssh 握手 0.57 s), 见 doc 62。抄第二套分派的代价
+    是两边慢慢漂开, 所以宁可把这份链整段搬进来, 也不在服务里再写一个 if 链。
+
+    每个 action 用到的键都在自己那一支里读, 不提到分派之前: tests/test_runner_contract.py
+    按「这一支读了哪些键」对照两个 runner, 提到外面会让所有 action 都算成读了全部键。
+    """
     # 确保使用自动选择的最优 GPU
     _ensure_gpu_device()
 
     action = payload.get("action", "execute")
 
-    # 每个 action 用到的键都在自己那一支里读, 不提到分派之前: tests/test_runner_contract.py
-    # 按「这一支读了哪些键」对照两个 runner, 提到外面会让所有 action 都算成读了全部键。
     if action == "gpu_info":
         result = get_gpu_info()
     elif action == "compile":
@@ -1523,4 +1524,14 @@ if __name__ == "__main__":
     else:
         result = {"success": False, "error": f"Unknown action: {action}"}
 
-    print(json.dumps(result, ensure_ascii=False))
+    return result
+
+
+if __name__ == "__main__":
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(json.dumps({"success": False, "error": f"Invalid JSON: {e}"}))
+        sys.exit(1)
+    print(json.dumps(run_action(payload), ensure_ascii=False))

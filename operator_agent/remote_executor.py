@@ -25,11 +25,14 @@
 """
 
 import os
+import atexit
 import json
 import shlex
 import subprocess
 import tempfile
 import threading
+import queue
+import collections
 import hashlib
 import re
 import urllib.request
@@ -167,6 +170,171 @@ class HardwareProbeFailed(RuntimeError):
         super().__init__(msg)
 
 
+class SessionError(RuntimeError):
+    """常驻会话上的一次调用没有拿到可归因的回答。
+
+    `session_state` 是三态之一, 而不是一个笼统的「失败」—— 这正是常驻会话相对
+    「每次新起进程」多出来的那一格 (doc 60 §二点名: 一次性路径把「超时」与「跑完了但
+    输出不对」折成同一个 `success=False`):
+
+    - `"timeout"` —— 没回显, 而进程还活着。**这一次请求的世界未知**: 它可能还在算,
+      也可能已经把结果丢了。按「未知」处理, 不许当成失败 (失败是可归因的)。
+    - `"eof"` —— 流结束了, 远端进程死了。也没跑完。
+    - `"desync"` —— 回显的 id 不是这一次发的。流已经错位, 之后每一格都不可信。
+
+    继承 `RuntimeError` 是有意的: 文件里有三处 `except RuntimeError` 靠类型走探测分支,
+    换类型会静默改掉它们的行为 (同 `_ssh_exec` 把 rc 挂在异常上而不是换类型的理由)。
+    """
+
+    def __init__(self, state: str, detail: str):
+        self.session_state = state
+        super().__init__(f"常驻会话 [{state}]: {detail}")
+
+
+class _RemoteSession:
+    """一条 SSH 连接 + 一个常驻远端进程, 行分隔 JSON 请求/响应。
+
+    三个必须的附件, 少一个就会以「难查」的方式坏掉:
+
+    1. **读线程**: `stdout.readline()` 上没法带超时, 而一个卡住的远端会让整个控制端
+       一起卡住。读线程把行推进队列, 调用侧用 `queue.get(timeout=...)` 拿。
+    2. **stderr 排水线程**: 远端 stderr 也是管道, 写满 64KB 没人读, 远端就**阻塞在
+       print 上** —— 表现成「测量突然全部超时」, 与真正的慢完全同形。
+    3. **id 回显校验**: 不校验就只能按「收到一行 JSON」当回答, 于是错位之后每一条
+       都是错答案。
+    """
+
+    _EOF = object()
+
+    def __init__(self, argv: list, timeout: float, label: str):
+        self.argv = argv
+        self.timeout = timeout
+        self.label = label
+        self._proc: Optional[subprocess.Popen] = None
+        self._queue: "queue.Queue" = queue.Queue()
+        self._stderr_tail: "collections.deque" = collections.deque(maxlen=40)
+        self._noise_tail: "collections.deque" = collections.deque(maxlen=20)
+        self._next_id = 0
+        self.state = "new"          # new | ready | broken
+        self.state_detail = ""
+        # 一条会话就是一个共享通道: 两个并发调用会互相读走对方的回显。锁在这里而不是
+        # 靠调用方守纪律 —— `RemoteExecutor` 那层有 per-host 锁, 但直接用 `SSHExecutor`
+        # 的人没有 (本轮的测量脚本就是直接用的)。
+        self._lock = threading.Lock()
+
+    # ── 生命周期 ────────────────────────────────────────────────
+    def start(self) -> None:
+        self._proc = subprocess.Popen(
+            self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, bufsize=1,
+        )
+        threading.Thread(target=self._read_stdout, daemon=True).start()
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        self.state = "ready"
+
+    def _read_stdout(self) -> None:
+        try:
+            for line in self._proc.stdout:          # type: ignore[union-attr]
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    # uv / triton 的杂音走 stdout 是常见的; 它不是回答, 也不是错位。
+                    # 真错位会以「id 对不上」的形式出现 (下面), 那一条才判死。
+                    self._noise_tail.append(line[:200])
+                    continue
+                if isinstance(obj, dict) and "result" in obj:
+                    self._queue.put(obj)
+                else:
+                    self._noise_tail.append(line[:200])
+        except Exception as e:                       # pragma: no cover - 管道异常
+            self._stderr_tail.append(f"<stdout reader: {type(e).__name__}: {e}>")
+        finally:
+            self._queue.put(self._EOF)
+
+    def _drain_stderr(self) -> None:
+        try:
+            for line in self._proc.stderr:          # type: ignore[union-attr]
+                self._stderr_tail.append(line.rstrip()[:300])
+        except Exception:                           # pragma: no cover
+            pass
+
+    @property
+    def alive(self) -> bool:
+        return self.state == "ready" and self._proc is not None \
+            and self._proc.poll() is None
+
+    def close(self, grace: float = 5.0) -> None:
+        """先请求干净退出, 再等, 再杀 —— 顺序不能反。
+
+        只杀本地 `ssh` **不保证**远端进程跟着停 (那条纪律见 `benchmarks/_scratch.py`):
+        真正让远端退出的是 stdin 的 EOF —— 服务端 `for line in sys.stdin` 会在**当前
+        在飞的请求跑完后**看到它并退出。所以先 `shutdown`、再关 stdin、再等。
+        """
+        self.state = "broken"
+        if self._proc is None:
+            return
+        try:
+            if self._proc.poll() is None and self._proc.stdin:
+                self._proc.stdin.write(json.dumps({"id": "bye", "action": "shutdown"}) + "\n")
+                self._proc.stdin.flush()
+        except Exception:
+            pass
+        try:
+            if self._proc.stdin:
+                self._proc.stdin.close()            # EOF: 远端下一轮循环就会退出
+        except Exception:
+            pass
+        try:
+            self._proc.wait(timeout=grace)
+        except Exception:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=grace)
+            except Exception:
+                self._proc.kill()
+
+    # ── 一次调用 ────────────────────────────────────────────────
+    def call(self, payload: dict, timeout: Optional[float] = None) -> dict:
+        with self._lock:
+            return self._call_locked(payload, timeout)
+
+    def _call_locked(self, payload: dict, timeout: Optional[float] = None) -> dict:
+        if not self.alive:
+            raise SessionError("eof", f"会话不可用 (state={self.state} {self.state_detail}); "
+                                      f"stderr 末尾: {list(self._stderr_tail)[-5:]}")
+        self._next_id += 1
+        req_id = self._next_id
+        req = dict(payload)
+        req["id"] = req_id
+        try:
+            self._proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")  # type: ignore
+            self._proc.stdin.flush()                                            # type: ignore
+        except Exception as e:
+            self.state = "broken"
+            self.state_detail = f"写请求失败: {type(e).__name__}: {e}"
+            raise SessionError("eof", self.state_detail)
+        try:
+            obj = self._queue.get(timeout=timeout or self.timeout)
+        except queue.Empty:
+            # 没回显而进程还活着: 世界未知。**不能**当失败 —— 失败可归因, 这个不行。
+            self.state = "broken"
+            self.state_detail = f"请求 {req_id} 超时 ({timeout or self.timeout}s)"
+            raise SessionError("timeout", self.state_detail)
+        if obj is self._EOF:
+            self.state = "broken"
+            self.state_detail = f"请求 {req_id} 收到 EOF"
+            raise SessionError("eof", f"{self.state_detail}; stderr 末尾: "
+                                      f"{list(self._stderr_tail)[-5:]}")
+        if obj.get("id") != req_id:
+            self.state = "broken"
+            self.state_detail = f"回显 id={obj.get('id')!r} 但发的是 {req_id}"
+            raise SessionError("desync", self.state_detail)
+        return obj.get("result") or {}
+
+
 class SSHExecutor(Backend):
     """
     通过 SSH 在远程 GPU 服务器上执行 kernel 代码。
@@ -189,8 +357,16 @@ class SSHExecutor(Backend):
         work_dir: Optional[str] = None,
         timeout: int = 300,
         platform: str = "nvidia",  # 接入其他 GPU 平台时在此增加分支
+        persistent: bool = False,
     ):
         self.platform = platform
+        if persistent and platform != "nvidia":
+            # 不给它一条「悄悄退化成一次性」的路: 常驻服务与 run_action 分派是同一条
+            # 契约 (run_kernel_xpu.py 用 dispatch 字典, 没有 run_action), 静默退化会让
+            # 「我开了常驻」变成一句没有读者的声明。
+            raise ValueError(
+                f"常驻会话暂只支持 nvidia 平台 (runner_server.py 依赖 run_kernel.run_action); "
+                f"platform={platform!r}")
         if platform == "kunlunxin":
             # 昆仑芯 P800 (服务器已下线)。分支保留作为"非 NVIDIA 平台"的接入范例:
             # 不走 uv, 用厂商预装 conda python + 专用 runner, 且需要额外的 LD_LIBRARY_PATH
@@ -238,6 +414,13 @@ class SSHExecutor(Backend):
         # 固定的 GPU 卡号: None=未解析, -1=解析过但不固定, >=0=固定该卡
         self._gpu_pin: Optional[int] = None
         self._uv_path = "~/.local/bin/uv"   # ensure_environment 复用
+        # 常驻会话 (默认关): 每次调用新起一个远端进程的固定开销实测 ≈4.5 s, 而测量本身
+        # 只有毫秒级 (doc 62)。开着它省的是这笔固定开销, 一次性的那条路一行没动。
+        self._persistent = persistent
+        self._session: Optional[_RemoteSession] = None
+        self._session_atexit_registered = False
+        #: 会话钉住的那张卡 (握手时读数; 一次性路径下恒为 None)
+        self.session_gpu: Optional[int] = None
 
     @property
     def label(self) -> str:
@@ -385,7 +568,13 @@ class SSHExecutor(Backend):
         return self._gpu_pin if self._gpu_pin >= 0 else None
 
     def _ssh_exec_json(self, payload: dict) -> dict:
-        """通过 SSH 在远程执行 runner 脚本并解析 JSON 结果"""
+        """通过 SSH 在远程执行 runner 脚本并解析 JSON 结果
+
+        开着常驻会话时走会话 (`runner_server.py`), 否则每次调用新起一个远端进程。
+        两条路**共用远端同一份分派** (`run_kernel.run_action`)。
+        """
+        if self._persistent:
+            return self._session_call(payload)
         json_str = json.dumps(payload, ensure_ascii=False)
         if self.platform != "nvidia":
             # 非 NVIDIA 平台: 用厂商预装 conda python, 需要额外的 LD_LIBRARY_PATH
@@ -408,6 +597,57 @@ class SSHExecutor(Backend):
             if line.startswith("{"):
                 return json.loads(line)
         raise ValueError(f"No JSON found in remote output: {output[:500]}")
+
+    # ── 常驻会话 (可选路径, 默认关闭) ──────────────────────────────
+    def _session_server_path(self) -> str:
+        """服务端脚本与 runner 同目录 (部署清单里它排在 runner 之后)"""
+        return str(PurePosixPath(self.remote_runner_path).parent / "runner_server.py")
+
+    def _session_argv(self, remote_cmd: str) -> list:
+        """会话进程的 argv。
+
+        单独一个方法是为了留一条**离线可测的接缝**: 用例把「远端」换成本地一段进程,
+        就能把握手/超时/错位/EOF 四态全试出来, 不必有 SSH 或 GPU。
+        """
+        return self._build_ssh_base() + [remote_cmd]
+
+    def _start_session(self) -> _RemoteSession:
+        if self._session is not None and self._session.alive:
+            return self._session
+        if not self._deployed:
+            self.deploy()               # 服务端脚本必须先到远端
+        gpu = self._pinned_gpu()
+        env = f"OPERATOR_AGENT_GPU={gpu} " if gpu is not None else ""
+        # `-u` 不是可选项: 行协议上任何缓冲都会表现成「第一次调用就超时」。
+        remote_cmd = (f"cd {self.work_dir} && {env}"
+                      f"~/.local/bin/uv run python -u {self._session_server_path()}")
+        sess = _RemoteSession(self._session_argv(remote_cmd),
+                              timeout=self.timeout, label=self.name)
+        sess.start()
+        # 握手: 确认服务端真的起来了, 并把它**钉住的那张卡**记下来。选卡发生在 runner
+        # import 时 (它在那儿设 CUDA_VISIBLE_DEVICES), 所以一次会话固定在同一张卡上 ——
+        # 对可比性是好事, 但「固定在哪张」必须是个读数, 不能是推断。
+        hello = sess.call({"action": "ping"})
+        if not hello.get("pong"):
+            sess.close(grace=2.0)
+            raise SessionError("eof", f"服务端没有应答握手: {hello!r}")
+        self.session_gpu = hello.get("selected_gpu")
+        self._session = sess
+        if not self._session_atexit_registered:
+            # 退出时收干净。只杀本地 ssh **不保证**远端进程停, 所以 close() 的顺序是
+            # 先发 shutdown、再关 stdin (EOF 才是远端真正退出的信号)、再等、最后才杀。
+            atexit.register(self.close)
+            self._session_atexit_registered = True
+        return sess
+
+    def _session_call(self, payload: dict) -> dict:
+        return self._start_session().call(payload)
+
+    def close(self) -> None:
+        """收掉常驻会话 (幂等)。没开会话时是空操作。"""
+        sess, self._session = self._session, None
+        if sess is not None:
+            sess.close()
 
     def _setup_uv_env(self) -> bool:
         """在远程工作目录下自动配置 uv 环境 (nvidia)，或使用厂商预装 conda 环境 (其他平台)"""
@@ -516,7 +756,7 @@ class SSHExecutor(Backend):
         """
         repo_root = Path(__file__).parent.parent
         remote_dir = str(PurePosixPath(self.remote_runner_path).parent)
-        return [
+        files = [
             # L2 数值门的容差表与判定式, runner 以同级模块 import
             (repo_root / "operator_agent" / "tolerance.py",
              f"{remote_dir}/tolerance.py"),
@@ -526,6 +766,14 @@ class SSHExecutor(Backend):
             (repo_root / "remote_scripts" / self._runner_script,
              self.remote_runner_path),
         ]
+        if self.platform == "nvidia":
+            # 常驻服务排在 runner **之后**: 它 import run_kernel 并调 `run_action`, 所以
+            # 半途失败时必须是「新 runner + 无服务端」(一次性路径照跑), 不能反过来
+            # (服务端在而 `run_action` 不在 ⇒ 会话一开就炸)。非 nvidia 不加:
+            # run_kernel_xpu.py 用 dispatch 字典, 没有 run_action。
+            files.append((repo_root / "remote_scripts" / "runner_server.py",
+                          f"{remote_dir}/runner_server.py"))
+        return files
 
     def _remote_hashes(self, paths: list) -> dict:
         """一次 SSH 往返取回多个远端文件的 sha256 前 12 位; 不存在的记为空串"""
@@ -1169,6 +1417,7 @@ class RemoteExecutor(Backend):
         work_dir: Optional[str] = None,
         timeout: int = 300,
         platform: str = "nvidia",  # 接入其他 GPU 平台时透传给 SSHExecutor
+        persistent: bool = False,  # 常驻会话 (doc 62); 只对 SSH 生效
     ):
         self._mode = mode
         self._backend = None
@@ -1181,6 +1430,7 @@ class RemoteExecutor(Backend):
         self._http_url = http_url
         self._work_dir = work_dir
         self._timeout = timeout
+        self._persistent = persistent
 
     def _init_backend(self):
         """延迟解析执行侧, 并把解析结果记成 `Resolution` 数据
@@ -1208,6 +1458,7 @@ class RemoteExecutor(Backend):
                 work_dir=self._work_dir,
                 timeout=self._timeout,
                 platform=self._platform,
+                persistent=self._persistent,
             )
             ok, reason = ssh.probe_connection()
             if ok:
