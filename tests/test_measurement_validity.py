@@ -540,15 +540,20 @@ class TestConductorIgnoresUninformativeMeasurement(unittest.TestCase):
         self.assertIn("测量有效性=uninformative", out)
         self.assertIn("3 轮的 L3 测量被判为不可信", out)
 
-    def test_valid_measurement_still_terminates_on_real_stagnation(self):
+    def test_valid_measurement_still_advances_the_stagnation_counter(self):
         """反向保护: 不得把改造做成「干脆不做停滞判定」
 
         候选净时间 979.9 µs (matmul 4096³ 那一档) → launch_dominance 2.0% → VALID,
-        于是停滞判定照常生效, max_stagnant_rounds=2 下第 3 轮不再执行。
+        于是停滞计数照常前进 —— 观察面是「达到阈值」这件事本身。
+
+        ⚠️ §10.4 的第二半 (CHECKLOG I64) 之后, 达到阈值**不再**等于停: 这条路径是代码型
+        (候选由 LLM/规则按需产生 ⇒ 覆盖无法确立), 所以运行改由轮次上限收口, 而
+        「真停滞仍能终止」那条保护在**可判**的模板型路径上
+        (`tests/test_exhaustion.py::TestExhaustedRegionStillTerminates`)。
         """
         out = self._run(NET_MS_MATMUL_4096, max_rounds=3)
         self.assertNotIn("测量有效性=", out)
-        self.assertIn("提前终止", out)
+        self.assertIn("覆盖**无法确立**", out)
 
 
 class TestMeasurementDrivesLoopDirectly(unittest.TestCase):

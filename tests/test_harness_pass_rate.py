@@ -55,6 +55,8 @@ def _round(n, l1=True, l2=None, l3=None, validity=None, speedup=None, action="op
             "bandit_arm": None,
             # §10.3: 这一轮的选择 (模式/抽签/分数/顺序) 与它花的预算相位, 以及分母原料
             "selection": None, "phase": None, "measurement_wall_s": None,
+            # §10.4: 覆盖判定 (轮首 append、轮中后填的空 dict —— 真实运行里也是这个形状)
+            "coverage": {},
             "permanent_effects": {"best_updated": False, "recipes_disabled": [],
                                   "stagnation_counted": False}}
 

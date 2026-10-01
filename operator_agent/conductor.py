@@ -37,6 +37,8 @@ from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
 from .bandit import Bandit
+from .exhaustion import (FROM_LLM_ON_DEMAND, FROM_TEMPLATE_SPACE,
+                          CoverageLedger, assess_coverage, undeclared)
 from .selection import DEFAULT_EPSILON, choose, explore_draw, phase_of
 from .escalation import (
     EscalationInputs, decide, smem_bound_evidence, untried_directions,
@@ -862,6 +864,9 @@ class Conductor:
         # 改进即停 (stagnation 逻辑照旧)。不进快照: 断点续跑时机器状态已变,
         # 旧排序作废, 重新让 Search 出一轮队列。
         search_alternatives: list = []
+        # §10.4 的「有希望的区域已穷尽」：逐轮的覆盖判定收成一份运行级记录。它回答的是
+        # 「K 轮无改善」之外的另一半 —— 没有它, 停滞出口就只是「轮数够了」。
+        coverage_ledger = CoverageLedger()
         # §5 bandit: 让队列顺序吃本轮累积的证据, 而不是纯 FIFO。与上面那条注释同一个
         # 理由 —— 证据只覆盖本次运行, 机器状态一变就作废, 所以同样不进快照。
         bandit = Bandit()
@@ -911,6 +916,15 @@ class Conductor:
                 param_space_of(self.backend, task), self.backend)
             template_choice = None
             _template_sel = None
+            # 本轮**可枚举**的候选全集 (§10.4 的覆盖判据要它): 模板型 = 剪枝后的点,
+            # 代码型 = None (候选由 LLM/规则按需产生 ⇒ 覆盖无法确立)。初值必须在轮首 ——
+            # 否则代码型轮会读到**上一轮**留下的一批点 (那会让覆盖判定拿旧全集说新话)。
+            _universe = None
+            # 这一轮的覆盖判定 (§10.4 的另一半)。血缘条目在**轮首**就 append 了, 而覆盖
+            # 判定要等本轮的观测进账 (这一轮的候选试过没有) —— 所以这里放一个**会被后填的
+            # 字典**, 与 `permanent_effects` 同一处置 (血缘里存的是同一个对象的引用)。
+            # 第一版直接 `_coverage = None` 再在下面赋值 ⇒ 每一轮血缘里都是 `null`。
+            _coverage_record: dict = {}
             # §10.3 这一轮的选择 (模式/抽签/分数/顺序)。模板型 = 本轮用的候选就是它选的;
             # 代码型 = 它在轮末选的是**下一轮**的候选 (`applies_to` 说明是哪一种)。
             # ⚠️ 初值必须在**选择之前**: 第一版把它放在模板选择之后, 于是刚选出来的那份
@@ -1212,6 +1226,10 @@ class Conductor:
                 # §10.3 这一轮的选择: 模式 / 抽签值 / 每个候选的分数 / 顺序 / 被计划格子
                 # 逼成什么样。模板型轮 `applies_to="this_round"`, 代码型轮是给下一轮选的。
                 "selection": _round_selection,
+                # §10.4 的另一半: 这一轮的候选空间覆盖到哪了 (无法确立也照记)。引用同一个
+                # 会被后填的字典 —— 与上面 `permanent_effects` 同一种写法: 血缘在轮首就
+                # append 了, 而这个判定要等本轮的观测进账才算得出来。
+                "coverage": _coverage_record,
                 # 这一轮的候选花的是哪一格预算 (§10.3 的分相)。与 `selection.mode` 是同一个
                 # 事实的两处写法 —— 测试钉住它们相等, 于是「记的相位」不会漂。
                 "phase": round_phase,
@@ -1424,10 +1442,34 @@ class Conductor:
                     print("\n[Escalation] 结构升级门通过 ⇒ 停滞计数清零, "
                           "本轮把结构改动交给 LLM")
                     rounds_without_improvement = 0
-                if rounds_without_improvement >= max_stagnant_rounds:
-                    print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善，提前终止优化")
+                # ── §10.4 可靠停滞 = 两个条件**同时**成立 ──
+                # 前半句 (K 轮 valid 无改善) 上面刚记完; 后半句是「有希望的区域已穷尽」。
+                # 位置: 停滞出口之前 —— 判据的输入是本轮候选全集与 bandit 的观测, 两者都
+                # 已经定下来了。
+                _coverage = (assess_coverage(_universe.kept, bandit, template_arm,
+                                             label=point_label, universe=FROM_TEMPLATE_SPACE)
+                             if _universe is not None
+                             else undeclared(
+                                 FROM_LLM_ON_DEMAND,
+                                 "代码型路径的候选由 LLM/规则按需产生, 没有可列举的全集"))
+                _threshold = rounds_without_improvement >= max_stagnant_rounds
+                _coverage_record.update(_coverage.as_dict(),
+                                        threshold_reached=_threshold)
+                coverage_ledger.record(_coverage, threshold_reached=_threshold)
+                if _threshold and not _coverage.exhausted:
+                    # 「只因轮数」不许停 (设计 §10.4 的原话)。停不成的原因要留痕: 没有这一格,
+                    # 「因为没穷尽所以继续跑」与「停滞判据根本没人读」在产物里长得一样。
+                    print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善, 但"
+                          f"{_coverage.note()}")
+                if _threshold and _coverage.exhausted:
+                    print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善，"
+                          f"{_coverage.note()} ⇒ 提前终止优化")
                     snapshot_target_dir = _snap()
-                    self._record_stop(artifact, round_num, "stagnant", "连续无改善达上限")
+                    # 停机理由要**点名两半**都成立 (只有前一半的话, 那正是设计点名的
+                    # 错读法): 「连续无改善」+「候选区域已穷尽 (哪个集合, 几个点)」。
+                    _why = (f"连续无改善达上限且候选区域已穷尽 "
+                            f"({_coverage.universe} {_coverage.tried}/{_coverage.total})")
+                    self._record_stop(artifact, round_num, "stagnant", _why)
 
                     break
 
@@ -1913,6 +1955,8 @@ class Conductor:
         artifact.metadata["bandit"] = bandit.as_dict()
         # §10.3 的选择策略: ε 与抽签种子落盘, 于是逐轮那个抽签值可以**离线复算**
         # (`selection.explore_draw(seed, round)`), 而不必把每个随机数都记下来。
+        # §10.4: 「有希望的区域已穷尽」的逐轮判定 (含被拒绝的停滞 —— 那正是它的观察面)
+        artifact.metadata["coverage"] = coverage_ledger.as_dict()
         artifact.metadata["selection_policy"] = {
             "epsilon": self.selection_epsilon, "seed": _selection_seed,
             "rule": "score(c) = P(beats_best) × 预期增益 / 预期测量秒",

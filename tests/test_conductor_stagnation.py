@@ -202,14 +202,35 @@ class TestImprovingTrendRunsFullBudget(StagnationCase):
 
 
 class TestRealStagnationStillTerminates(StagnationCase):
-    """反向保护: 修死锁不能顺手把停滞判定废掉"""
+    """反向保护: 修死锁不能顺手把停滞判定废掉
 
-    def test_flat_gflops_terminates_early(self):
+    ⚠️ §10.4 的第二半（CHECKLOG I64）改了这里的**语义**：停滞 = 「K 轮 valid 无改善」**且**
+    「有希望的区域已穷尽」，只满足前半句**不许**停。MockGPU 是代码型路径 —— 候选由 LLM/规则
+    按需产生，覆盖**无法确立** ⇒ 停滞条件不成立（照旧跑满轮次），而这件事必须留痕。
+    「真停滞仍能终止」那条保护改到**可判**的那条路径上（`TestExhaustedRegionStillTerminates`，
+    模板型：候选全集可枚举）。这一改不是放宽：旧的断言把「只因轮数就宣布停滞」当成了正确行为，
+    而设计点名那种读法是错的。
+    """
+
+    def test_flat_gflops_does_not_declare_stagnation_when_coverage_is_unknown(self):
         _, out, _ = self._run([10.0, 10.0, 10.0, 10.0], max_rounds=4)
         self.assertIn("性能未改善", out)
-        self.assertIn("提前终止", out)
-        self.assertEqual(self._rounds_run(out, 4), 3,
-                         "max_stagnant_rounds=2: 基线轮 + 2 轮无改善后应停")
+        self.assertIn("覆盖**无法确立**", out, "无法确立必须写明, 不许静默继续")
+        self.assertNotIn("提前终止", out,
+                         "代码型路径的候选不可枚举 ⇒ 「已穷尽」无法确立 ⇒ 不许只因轮数停")
+        self.assertEqual(self._rounds_run(out, 4), 4, "轮次上限才是收口的那一条")
+
+    def test_the_declined_stop_is_recorded_in_the_artifact(self):
+        """「没停」与「判据没人读」在产物里必须分得开"""
+        artifact, out, _ = self._run([10.0, 10.0, 10.0, 10.0], max_rounds=4)
+        cov = artifact.metadata["coverage"]
+        self.assertEqual("unknown", cov["last"]["state"])
+        self.assertEqual(True, cov["last"]["exhausted"] is None,
+                         "无法确立的三态值必须是 None (不是 False)")
+        self.assertGreaterEqual(cov["declined"].get("unknown", 0), 2,
+                                "达到阈值却没停的轮次要被记下来")
+        rounds = [h["coverage"] for h in artifact.iteration_history if h["coverage"]]
+        self.assertTrue(rounds, "逐轮的覆盖判定要进血缘")
 
     def test_flat_gflops_does_not_disable_recipes(self):
         """打平不再是「禁用配方」的证据 (D4 四态判决)

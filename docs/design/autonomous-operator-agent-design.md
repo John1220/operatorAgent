@@ -28,6 +28,7 @@
 | §13.5 峰值实测（`probe_peak`） | `operator_agent/peak_probe.py` + `hardware_caps` 存放处 + `verifier._publish_peak_probe`/按精度读取 | ✅ 2026-10-02：判据七条（仿真读数 / 精度键 / 出处 / 非有限正数 / 探针自己的档位 / 离散度未知 / 没打到算力峰值 / 高于规格 5%）+ **按精度**发布进 `HardwareCaps.measured_peak_tflops`（字典）+ 收敛出口按**这一轮分母的精度键**读取；零额外 GPU 秒（复用同一次 L3 的基线臂）。**边界**：发布的是**下界**（基线臂的实测可达值，不是器件极限）⇒ 出口偏松；只在**本进程**内生效（不跨运行）；`MockGPU` 一律拒发（无 `REAL_DEVICE`）；真机**未复跑**（本机无 GPU）—— 见 [doc 70](../research/70-实测峰值的判据与按精度发布.md) |
 | §10.2 三种预算 | `operator_agent/budget.py`（`BudgetPlan` + `BudgetLedger`）+ 轮次开头两道门 | ✅ 2026-10-02：oracle 次数（**预留不可挪用**）/ 墙钟 / token 三条接上并落 `artifact.metadata["budget"]`；心跳只记账不被拦。**边界**：`explore`/`refine` 不分相、按 GPU 秒未做、预算默认全关（opt-in）—— 见 [doc 67](../research/67-三种预算与不可挪用的预留.md) |
 | §10.3 候选选择 / LLM 升级门 | `operator_agent/selection.py`（`score_candidate` + `choose`） + `bandit.py` 的 `p_beats_best`/`gain_if_win`/`mean_cost*` + `budget.py` 的 `phase_room`/`phases_with_room` + conductor 轮首选择 | ⏳ **两半都在，各有边界**：①`score(c) = P(beats_best)×预期增益/预期测量秒` 与 ε-greedy **已落地**（抽签是 `(seed,轮次)` 的纯函数 ⇒ 逐轮值可离线复算；分母 = **控制端测量墙钟**，与 §10.2 墙钟同一货币，不是卡上时间），**分相预算已是选择的约束**（`_plan_phases()`：有格子 ⇒ 约束，一格都没有 ⇒ 不拿计划当约束，突破记 `over_plan`）；19/19 变异红，CHECKLOG I63/doc 75；②三条件升级门**已落地**（`escalation.py` + conductor 判决点接线 + SearchAgent 发布通道，13/13 变异红，CHECKLOG I53→I57/doc 69）—— 条件 2 今天只有 `smem-bound` 一条量具、且只在上界~×1.2 那条带里成立。**边界**：没有真模板后端（选择器只在假后端上跑）、参数轴仍只有 tiling 三维、`phase_caps` 之外没有「按 GPU 秒」的预算 |
+| §10.4 停止条件 | `operator_agent/exhaustion.py`（覆盖判据三态 + 逐轮/运行级账本） + conductor 停滞出口（两条件**同时**成立才停） | ✅ 2026-10-02：**「有希望的区域已穷尽」落地** —— `exhausted`（可枚举全集且每点观测过）/`unexplored`（还有没试的 ⇒ 不停，`declined` 记账）/`unknown`（无法确立 ⇒ 停滞条件不成立）；模板型可判、代码型恒 `unknown`（候选按需产生，收口靠轮次与 §10.2 预算）；空集不算已穷尽。14/14 变异红，CHECKLOG I64/doc 76 |
 | §5 bandit 调参 | `operator_agent/bandit.py`（确定性 UCB1）+ `Conductor` 信念门 | ✅ 2026-10-02：`perf_data` / `optimization_history` / 回报统计三条信念通道按 `can_tune` / `can_count_progress` 收口（CHECKLOG I52），prompt 不再把「没有读数」渲染成 `0.00`；状态落 `artifact.metadata["bandit"]`。**臂空间只有 tiling**、`c` 未标定、证据**不进快照**（只覆盖本次运行）；**真机未复跑** —— 见 [doc 66](../research/66-搜索侧的信念门与bandit.md) |
 | §12 模板后端 / `param_space()` | `operator_agent/candidates.py` + `backend_caps.Backend.param_space`/`instantiate` + 便宜代理剪枝 | ✅ 2026-10-02 **枚举半片**（候选联合类型、分开写的去重口径、`ParamSpace` 确定性枚举、`prune_by_smem`、开关 `param_space_of`）+ ✅ 2026-10-02 **实例化半片**（`Instantiation` / `Backend.instantiate` 默认 raise / `BuiltCandidate` 身份**委派给模板点** / `source_hash` 跨语言 + `struct_sig` Python AST / 五道守卫 / 批量 `refusals` 留痕）+ ✅ 2026-10-02 **消费半片**（轮首 `select_template_candidate`：剪枝 → bandit 排序 → 按顺位取第一个建得出来的点；`action="template"` 跳过 Coder；L3 失败后整条 LLM/邻域搜索不走；`bandit_arm` = 点的去重键；全建不出来 ⇒ `template_no_candidate` 停机，不退回代码型；上界载体收成 `resource_check.caps_from_metrics`）。**边界**：L1 两道静态守卫是 Python 形状的（对 C++/CUDA 模板源空转）；剪枝只估单缓冲；参数轴只有 tiling 三维有产出者；没有真模板后端 —— 见 [doc 68](../research/68-候选联合类型与便宜代理剪枝.md) / [doc 73](../research/73-模板候选的实例化与身份.md) |
 
@@ -379,6 +380,24 @@ score(c) = P(beats_best | 观测) × 预期增益 / 预期 GPU 秒
 
 要点：**"无法再改进"这个结论本身必须可信。**
 否则要么烧卡到天长地久，要么错误宣布胜利。
+
+> **实现状态（2026-10-02）**：五个出口里三个早已落地（达标 / 预算耗尽 / 不安全中止），
+> roofline 收敛的**前置**（`peak_measured`）也已落地（§13.5 / doc 70）。**「可靠停滞」原来
+> 只有前一半** —— `max_stagnant_rounds` 数够 K 轮就直接停，正是上表备注点名不许的那种读法。
+> 现在两半都判：`operator_agent/exhaustion.py` 回答「有希望的区域穷尽了吗」，三态
+> * `exhausted`（有一个**可枚举**的候选全集，且每个点都至少观测过一次；记下试过几个 / 没试的
+>   是哪几个）⇒ 与 K 轮无改善**同时**成立才停（停机理由点名两半）；
+> * `unexplored` ⇒ **不停**（还有候选没试过），并把「达到阈值却没停」记进
+>   `coverage.declined` —— 没有这一格，「因为没穷尽所以继续跑」与「停滞判据根本没人读」在产物
+>   里长得一样；
+> * `unknown` = **无法确立** ⇒ 停滞条件**不成立**。代码型路径的候选由 LLM / 规则**按需产生**
+>   （每轮都可能提出新邻居甚至换结构），覆盖没有可列举的全集可言，所以今天恒为 `unknown`：
+>   这一路径的收口靠 `max_optimize_rounds` 与 §10.2 的预算，而不是「轮数够了就宣布停滞」。
+> 覆盖判定逐轮进血缘（`coverage`），运行级账本进 `artifact.metadata["coverage"]`。
+> **边界**：代码型路径**没有**覆盖判据的生产者（不是「暂时没接」—— 它需要「什么算可枚举的
+> 候选空间」这个定义，今天只有模板型有）；空集**不算**已穷尽（空队列自证可停是最危险的那种
+> 写反）；14/14 变异红，见 [CHECKLOG I64](../research/CHECKLOG.md) 与
+> [doc 76](../research/76-有希望的区域已穷尽.md)。
 
 ### 10.5 自动跑专属安全装置
 
@@ -795,7 +814,7 @@ class Calibrator(Protocol):
 Stage 0  契约冻结 + 只读哈希护栏 + 预检 / 峰值标定
 Stage 1  评测器 + 资格模型 + 标定心跳 + checkpoint/幂等/续跑   ← 尺子（含尺子的自检）
 Stage 2  多卡放置：干扰域 + 同卡配对（若一开始就多卡，则与 1 并行）
-Stage 3  参数模板 + bandit 搜索 + 停止条件   ← 参数模板：枚举 ✅ / 实例化 ✅ / 候选队列 ✅；§10.3 选择器（score(c) + ε-greedy + 分相预算）✅；停止条件：达标/预算/不安全 ✅、可靠停滞半片 ⏳（「有希望的区域已穷尽」未做）
+Stage 3  参数模板 + bandit 搜索 + 停止条件   ← 参数模板：枚举 ✅ / 实例化 ✅ / 候选队列 ✅；§10.3 选择器（score(c) + ε-greedy + 分相预算）✅；§10.4 停止条件：达标/预算/不安全 ✅、roofline 前置 ✅、可靠停滞 ✅（第二半「有希望的区域已穷尽」已落地：模板型可判 / 代码型恒为「无法确立」⏳）
 Stage 4  LLM 结构提议（带三条件门禁）
 Stage 5  记忆与跨任务迁移（带两次确认）
 ```

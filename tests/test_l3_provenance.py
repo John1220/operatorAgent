@@ -593,10 +593,17 @@ class TestConductorStopsTreatingItAsEvidence(unittest.TestCase):
         self.assertIn("不记为通过", l3.message)
         self.assertIn("real_device", " ".join(l3.metrics["measurement_validity_reasons"]))
 
-    def test_without_the_requirement_the_loop_behaves_as_before(self):
-        """方向对照: 同一份模拟载荷, 任务没要真卡 ⇒ 照旧按停滞出口提前终止"""
+    def test_without_the_requirement_the_loop_is_not_refused(self):
+        """方向对照: 同一份模拟载荷, 任务没要真卡 ⇒ 不因出处拒评 (停滞另说)
+
+        ⚠️ 这里原来断言的是「照旧提前终止」。§10.4 的第二半 (CHECKLOG I64) 之后,
+        代码型路径的停滞**无法确立** ⇒ 不再只因轮数停, 而这个用例要对照的本来就是
+        「拒评那一条没有触发」, 不是「停在第几轮」—— 所以观察面换成「跑满轮次且没有
+        拒评的那条消息」, 判据本身一个字没动。
+        """
         _, out = self._run(required=(), rounds=4)
-        self.assertIn("提前终止", out)
+        self.assertNotIn("拒评", out)
+        self.assertIn("覆盖**无法确立**", out)
 
 
 # ─── 五、AST 守卫: 三条返回路径都过了门 ──────────────────────────
