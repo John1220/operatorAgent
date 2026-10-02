@@ -767,6 +767,10 @@ class SSHExecutor(Backend):
             # 运行时反作弊屏蔽, 与控制端 static_audit 共用同一份禁用清单
             (repo_root / "operator_agent" / "anticheat.py",
              f"{remote_dir}/anticheat.py"),
+            # I68 跨进程占卡声明: run_kernel 顶层 import 它 ⇒ 排在 runner 前面
+            # (半途失败只会「新依赖 + 旧 runner」, 不会「新 runner + 缺依赖」)
+            (repo_root / "remote_scripts" / "gpu_claim.py",
+             f"{remote_dir}/gpu_claim.py"),
             (repo_root / "remote_scripts" / self._runner_script,
              self.remote_runner_path),
         ]

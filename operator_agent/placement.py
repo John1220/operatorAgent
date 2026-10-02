@@ -177,6 +177,10 @@ class DeviceLease:
         「没观测 ⇒ 声称独占」, 而下游会拿它当「干净」的证据。
       * `external_load`: `None` = 没观测到占用; `0.0` = 观测到**没有**占用。默认写 `0.0`
         会把「没测」印成「干净」。
+      * `harness_peers` (CHECKLOG I68): `None` = 没观测 (旧 runner 不报这个键);
+        `0` = 观测到没有; `>0` = **同卡还有别的 harness 进程** (claim 声明)。它与
+        `external_load` 分工: 那个是任意负载的利用率 (时刻采样, 看不见还在 import 的
+        对手), 这个的声明生命期 = 对手的整个进程 —— 一旦 >0, 竞争是**结构性**的。
       * `source`: 这条租约是从哪个观测装出来的 (空串 = 不知道出处 ⇒ 它只是一条声明)。
 
     ⚠️ **本类不做判决**: 降不降级只有 `measurement.assess` 说了算 (§11-4 的原话是
@@ -186,6 +190,7 @@ class DeviceLease:
     device: DeviceKey
     exclusive: Optional[bool] = None
     external_load: Optional[float] = None       # 0..1 观测到的外部占用
+    harness_peers: Optional[int] = None         # 同卡其他 harness 进程 (claim 声明, I68)
     source: str = ""
 
     def as_dict(self) -> dict:
@@ -196,6 +201,7 @@ class DeviceLease:
                 "device_label": self.device.label(),
                 "exclusive": self.exclusive,
                 "external_load": self.external_load,
+                "harness_peers": self.harness_peers,
                 "source": self.source}
 
 
@@ -218,9 +224,14 @@ def lease_evidence(lease: DeviceLease) -> Tuple[str, str]:
         bits.append("external_load={:.2f}".format(lease.external_load))
     else:
         bits.append("external_load=0.00")
+    # I68: 同卡 harness 声明只在**有对手**时占一格 —— `0` 与「未观测」都由
+    # external_load 那一格负责表达「干净/没测」, 这里重复一遍只会稀释证据。
+    if lease.harness_peers:
+        bits.append(f"同卡 harness 进程 ×{lease.harness_peers} (claim 声明)")
     if lease.source:
         bits.append("source=" + lease.source)
-    if lease.exclusive is False or (lease.external_load or 0.0) > 0.0:
+    if (lease.exclusive is False or (lease.external_load or 0.0) > 0.0
+            or (lease.harness_peers or 0) > 0):
         state = LEASE_CONTENDED
     elif lease.external_load is None:
         state = LEASE_UNOBSERVED
@@ -233,17 +244,23 @@ def observed_lease(payload, *, device: Optional[DeviceKey] = None,
                    source: str = "") -> DeviceLease:
     """从**这次测量的载荷**装出租约。
 
-    ⚠️ 读的键 (`gpu_util_pct`) 与 `measurement.assess` 读的是**同一份载荷**, 不另采一次
-    —— 「一处观测、一处判决」的前提是两个判定看同一份观测; 各采一次就会出现「租约说忙、
-    档位说干净」这种谁也查不出来的分叉。
+    ⚠️ 读的键 (`gpu_util_pct` / `gpu_harness_peers`) 与 `measurement.assess` 读的是
+    **同一份载荷**, 不另采一次 —— 「一处观测、一处判决」的前提是两个判定看同一份
+    观测; 各采一次就会出现「租约说忙、档位说干净」这种谁也查不出来的分叉。
     """
-    util = (payload or {}).get("gpu_util_pct")
+    p = payload or {}
+    util = p.get("gpu_util_pct")
     load = None
     if isinstance(util, (int, float)) and not isinstance(util, bool):
         load = float(util) / 100.0
-    return DeviceLease(device=device if device is not None else device_of_payload(payload),
+    # I68: harness 声明是计数不是利用率, 单独一格; 键不在 (= 旧 runner) ⇒ None,
+    # 「未观测」不许被读成「观测到没有」。
+    peers = p.get("gpu_harness_peers")
+    if isinstance(peers, bool) or not isinstance(peers, int):
+        peers = None
+    return DeviceLease(device=device if device is not None else device_of_payload(p),
                        exclusive=None,          # 今天没有任何观测能支撑独占性
-                       external_load=load, source=source)
+                       external_load=load, harness_peers=peers, source=source)
 
 
 def device_of_payload(payload) -> DeviceKey:

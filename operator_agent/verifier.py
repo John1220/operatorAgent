@@ -1017,6 +1017,7 @@ class Verifier:
                           "p25_time_ms", "p75_time_ms",
                           "dispersion_iqr_over_median", "dispersion_max_over_median",
                           "gpu_util_pct", "gpu_util_samples", "gpu_other_procs",
+                          "gpu_harness_peers", "gpu_harness_peer_scans",
                           "selected_gpu",
                           # D2: 窗口边界上的 SM/显存时钟与 throttle 位图。搬运是必须的
                           # —— 缺口 1 的教训就是「runner 报了但控制端没人搬, 于是没人读」。
@@ -1334,6 +1335,9 @@ class Verifier:
             median_time_ms=candidate_ms,
             launch_floor_us=self._detect_theoretical_peak().get("launch_floor_us"),
             gpu_util_pct=gpu_util_pct,
+            # I68: harness 同卡声明从**已搬进 metrics 的**那份读 —— 判定看的必须
+            # 就是产物里记的 (与 mode/device 同一条规矩), 不回头再问载荷。
+            gpu_harness_peers=metrics.get("gpu_harness_peers"),
             dispersion=metrics.get("dispersion_iqr_over_median"),
             max_over_median=metrics.get("dispersion_max_over_median"),
             backend_caps=self._caps,

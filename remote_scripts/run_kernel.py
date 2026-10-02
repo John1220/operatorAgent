@@ -13,8 +13,9 @@ Actions:
 同级依赖:
   tolerance.py - L2 数值门的容差表与判定式 (单一事实来源, 见该模块 docstring)。
   anticheat.py - 运行时屏蔽 shield_torch, 与控制端 static_audit 共用同一份禁用清单。
-  两者都由 SSHExecutor.deploy() 与本文件一起推送; 在仓库内直接跑本文件时回退到
-  operator_agent/ 下找。
+  gpu_claim.py - 跨进程的同卡占用声明 (CHECKLOG I68): import 本文件时写入、退出拆除。
+  前两者由 SSHExecutor.deploy() 从 operator_agent/ 推送; gpu_claim.py 与本文件同在
+  remote_scripts/ 下, 部署与仓库内直跑都在同一目录, 直接 import 即可。
 """
 
 import sys
@@ -34,6 +35,8 @@ except ImportError:          # 仓库内直接运行: 模块还在 operator_agen
     sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "operator_agent"))
     import tolerance
     from anticheat import shield_torch
+
+import gpu_claim  # 同目录 (部署后 = 工作目录; 仓库内 = remote_scripts/)
 
 
 # ─── GPU 自动选择 ─────────────────────────────────────────────
@@ -282,6 +285,13 @@ else:
         f"\n  CUDA_VISIBLE_DEVICES 已设置 ({os.environ['CUDA_VISIBLE_DEVICES']}), "
         f"选中 index={_SELECTED_GPU_ID} (将在运行时 set_device)"
     )
+
+# I68: 进程级占卡声明 —— 生命期与本进程相同 (atexit 拆除)。控制端的
+# _EXEC_LOCKS 只在进程内互斥; 两个 harness 进程共卡时实测时间可整体偏移 2.1×
+# 而档位仍 valid, 因为时刻采样看不见「还在 import torch 的对手」。claim 的
+# 生命期覆盖对手的**整个进程**, 它还没建 CUDA 上下文也看得见。尽力而为:
+# 写不进不挡测量 (声明是观测面, 不是入场券)。
+gpu_claim.write_claim(_SELECTED_GPU_ID, runner="run_kernel")
 
 
 def _ensure_gpu_device():
@@ -1564,6 +1574,10 @@ def run_action(payload: dict) -> dict:
         # 被其他租户占用会让加速比失真, 把实测占用与两次原始读数随结果返回, 由控制端
         # 标记污染, 而不是静默采信这个数字。
         util_before, other_procs, util_samples, state_before = _sample_gpu_idle()
+        # I68 的另一半: 上面的采样是**时刻**性的 (util ~1s 窗口 / compute-apps 只见
+        # 已建上下文的进程), 看不见还在 import 的对手; claim 生命期 = 整个进程。
+        # 前后各扫一次: 窗口中途新到的对手由后一次抓住, 取 max 当「窗口内有对手」。
+        peers_before = gpu_claim.scan_claims(_SELECTED_GPU_ID, exclude_pid=os.getpid())
         if action == "benchmark":
             result = run_benchmark(payload.get("code", ""), payload.get("inputs", {}),
                                    payload.get("warmup", 3), payload.get("repeat", 10))
@@ -1579,10 +1593,16 @@ def run_action(payload: dict) -> dict:
         # D2: 窗口之后的时钟/throttle 读数。窗口之前那次由 _sample_gpu_idle 顺路带回,
         # 所以整个 L3 只多付一次 nvidia-smi 调用 (~130 ms), 不是三次。
         state_after = read_gpu_state()
+        peers_after = gpu_claim.scan_claims(_SELECTED_GPU_ID, exclude_pid=os.getpid())
         if isinstance(result, dict):
             result["gpu_util_pct"] = util_before
             result["gpu_util_samples"] = util_samples
             result["gpu_other_procs"] = other_procs
+            # harness 同卡声明 (与 other_procs 分工: 那个是任意进程几乎恒真只作提示,
+            # 这个只数 harness 实例, 能当判据)。两个原始计数一并回报 —— 「max 是在
+            # 防漏报还是在夸大」要靠 before/after 的差审计, 与 util_samples 同一处置。
+            result["gpu_harness_peers"] = max(len(peers_before), len(peers_after))
+            result["gpu_harness_peer_scans"] = [len(peers_before), len(peers_after)]
             result["selected_gpu"] = _SELECTED_GPU_ID
             for side, snap in (("before", state_before), ("after", state_after)):
                 for key, val in snap.items():

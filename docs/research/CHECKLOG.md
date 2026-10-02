@@ -1098,14 +1098,9 @@
   档位仍是 `valid`，`gpu_util` 采样看到的还是 0%。B 被抓成 `uninformative` 是**碰巧**
   （离散度/launch 地板那条规则），不是被「同卡有人」抓到。相对我昨天记的 I67 观察②
   （「两个时刻没分开」），这一跑说明**同一时刻它也可能是错的**。
-- **出处**：`operator_agent/remote_executor.py#L50`（`_EXEC_LOCKS` 是 `threading.Lock`）/ `#L336-L365`（`_gpu_pin` 在连接时选定，无构造参数）；证据 `/tmp/oa-real/arm0.json`、`arm1.json`（临时）
-- **后果**：不改则「两个任务同时跑不会互相干扰」这句话只在**单进程内**成立，而两个 agent / 两个任务并行正是本方案的目标场景（多卡、长跑、无人值守）⇒ 被测出来的数字可以整体偏移 2 倍而档位照样 `valid`，长期记忆与停止条件都会吃到这个偏移。挂起**仅因优先级**（单卡任务在前），不是因为不影响结论
-- **实验自身缺陷一并记**：直调 `verify_l3_only` 没带层级结果 ⇒ `device_lease`/`arm_windows` 为空
-  （调用方式所致，不是机器）；钉卡失败是实验手法问题（生产 API 没有钉卡参数）。
-- **类别**：I（承诺与实现不符：串行化保证只覆盖进程内） · **状态**：⚠️ 2026-10-02 **仅备注，未修** —— 修的方向
-  （需先定判据、不是加参数）：① 跨进程互斥要**远端侧**的卡占用声明（远端 lockfile/claim，runner
-  启动时读写），控制端的锁跨不了进程；② `external_load` 的采样窗口要能看见「同卡另一个 harness 进程」
-  （现在 0% 是盲的）。**单卡任务优先，此条挂起。** 证据：`/tmp/oa-real/arm0.json`、`arm1.json`（临时）
+- **出处**：`operator_agent/remote_executor.py#L50`（`_EXEC_LOCKS` 是 `threading.Lock`）/ `#L336-L365`（`_gpu_pin` 在连接时选定，无构造参数）；证据 `/tmp/oa-real/arm0.json`、`arm1.json`（临时）；修复落点：`remote_scripts/gpu_claim.py`（新）、`run_kernel.py`（import 时写声明 + benchmark 前后扫描）、`remote_executor.py`（deploy 清单）、`placement.py`（`DeviceLease.harness_peers` + contended）、`measurement.py`（`assess` 第 6 信号）、`verifier.py`（搬运 + 判据输入）、`tests/test_gpu_claim.py`（13 条）、`benchmarks/verify_cross_process_claims.py`（真机验收）
+- **后果**：不改则「两个任务同时跑不会互相干扰」这句话只在**单进程内**成立，而两个 agent / 两个任务并行正是本方案的目标场景（多卡、长跑、无人值守）⇒ 被测出来的数字可以整体偏移 2 倍而档位照样 `valid`，长期记忆与停止条件都会吃到这个偏移。已修（2026-10-02 当日第三片，按原修法两半落地）：① **远端侧 claim 协议**（`gpu_claim.py`, 纯 stdlib）—— runner import 时以 O_EXCL+0600 写**进程级**声明（atexit 拆除, 崩溃残留由 pid 活性检查兜底）, benchmark 动作前后各扫一次同卡声明取 max —— 声明生命期覆盖对手**整个进程**, 对手还在 import torch 也看得见（时刻采样的盲区正是这里）；② 控制端消费 —— `measurement.assess(gpu_harness_peers=…)` 第 6 信号（与 util 污染同档 DEGRADED, 不许禁用配方/累计停滞）+ `DeviceLease.harness_peers`（lease_evidence 判 contended）；`benchmark_contaminated` 刻意**不**借给 peers（report.py 对它写的字面就是「util 超阈值」）。**真机验收 4/4**：串行臂 5.70ms/valid/clean（无人时 peers=0 不误报）；并发两臂同卡（gpu=2）A=10.50ms / B=10.00ms（1.84× 膨胀）**双双 degraded+contended**, peers=1 而 util 仍 0% —— 修复前 A 是 false-valid, 现在档位如实；B 的 scans=[1,0] 顺带证明 max(before,after) 的必要（after 时 A 已退, 单扫会漏报）。边界：膨胀本身仍在（claim 治「看不见」, 不治「不发生」）；claim 目录在 `~` ⇒ 只覆盖**同用户**的 harness 进程（跨用户干扰仍由 util 兜底）；`exclusive` 仍恒 None（claim 只证「有对手」, 不证「无对手」—— 不写 claim 的旧版 runner 对手仍不可见）；**并发 scp 部署同一文件存在竞争窗口**（实验以串行预热规避, 值得另挂号）；本地拉真 runner 的测试把 claim 目录重定向 tmp（test_persistent_session）, 测试现场不进用户 home。
+- **类别**：I（承诺与实现不符：串行化保证只覆盖进程内） · **状态**：✅ 2026-10-02 **已修** + 真机验收 4/4（`verify_cross_process_claims.py`, 读数可重建）；同卡膨胀的**避免**（而非检出）仍无机制 —— 串行化跨进程互斥（按 claim 拒绝/排队）是下一步, 本片只补「看得见」
 
 ---
 
@@ -1852,7 +1847,7 @@
 | I65 | 两道静态守卫对 C++/CUDA 模板源**判不了**, 而返回值只有一个「有/没有问题」的通道 (空列表 / `None`) ⇒ **「查不了」被读成「没问题」** (fail-open, 信任凭空产生) | I | ✅ 2026-10-02 适用性三态 + `coverage` 一处判定 (两个守卫消费它), 随源码走到资格层: 明确不适用 ⇒ DEGRADED (不持久化/不计进度), 未观测 ⇒ 不改判; 18/18 变异红 (无真模板后端 ⇒ 端到端无法观察) |
 | I66 | `prune_by_smem` 只读 tiling 三维 ⇒ 声明了 `stages` 的空间按 1 份缓冲估算, 明显放不下的点被放行 (剪枝在带流水轴的模板上失效, 且无记录可见) | I | ✅ 2026-10-02 口径写死 (`+ (BM*BK+BK*BN)*elem*(stages-1)`), 三态「未观测 ≠ 1」+ 下界必须说出来; 9/9 变异红 (warps/向量宽度等轴仍需各自的判据) |
 | I67 | 「真机未复跑」被我在卡点表里写成了「远端不可用」—— 实际 `algorithm-h20` (8×H20) 一直可用: **没查就下的判断**; 复跑同时暴露两个真机独有观察 (语料核过不了 fp32 L2 / 租约读数与选卡读数是两个时刻) | I/M | ✅ 2026-10-02 真机复跑 (六片拿到真机等价物, 含规则 8 的独立效果); 无真模板后端/非 Python 源/多卡仍 ➖ |
-| I68 | ⚠️ **备注(未修)**：同卡并行的污染在**跨进程**时没有守卫 —— `_get_exec_lock` 是进程内 threading 锁, 两个 harness 进程会静默共卡 (实测 6.2ms 串行 → 13.6/11.6ms, 2.1× 膨胀), 而其中一条仍判 `valid`、`gpu_util_pct=0` | I | ⏳ **仅备注未修** (需远端侧卡占用声明 + 采样窗口能看见同卡他进程; 单卡优先) |
+| I68 | 同卡并行的污染在**跨进程**时没有守卫 —— `_get_exec_lock` 是进程内 threading 锁, 两个 harness 进程会静默共卡 (实测 6.2ms 串行 → 13.6/11.6ms, 2.1× 膨胀), 而其中一条仍判 `valid`、`gpu_util_pct=0` | I | ✅ 2026-10-02 已修: 远端 claim 协议 (进程级声明 + benchmark 前后扫描) + `assess` 第 6 信号 + 租约 `harness_peers`; 真机验收 4/4 (并发双臂 1.84× 且**双双 degraded+contended**, peers=1 而 util=0 —— false-valid 消失)。边界: 同用户 only / 膨胀本身仍在 / 并发 scp 竞争另挂号 |
 | I69 | ⚠️ **误判: 我把 §10.5-4 判成「缺生产者」, 实际 HEAD 里生产者/字段/确认相预算/报告读者全都在** —— 依据是两句**历史注释**(「生产路径无人写入」)而没有读代码, 与 I67 同型 | I(自省) | ⚠️ 2026-10-02 已定: 保持 opt-in, 只补「本次未要求」的强制可见性 |
 | I70 | ✅ §12 的**真**模板后端（Triton matmul）落地: 参数点 → 真能跑的源码, 且**参数与真机读数有因果**（同模板只换点: 6.108ms → 5.209ms, L1/L2 全过）; 此前六片只押在假模板后端上 | I | ✅ 2026-10-02 真机两个参数点; Conductor 模板接线**已真机跑通** (I72); 组合层矩阵 8/8 已补 |
 | I71 | 组合后端 `TritonTemplateSSHExecutor` 只在「同文件早先用例已把模板类污染成具体类」的进程里可构造 —— 全新进程 (生产形状) `__init__` 直接 TypeError, 全套件绿把地雷埋住; 机制同时解释了 d66c430 备注②的 flake | I | ✅ 2026-10-02 去 Backend 继承 + `_concrete` 删除 + 子进程证人 + 变异矩阵 8/8 |

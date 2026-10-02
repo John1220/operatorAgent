@@ -160,6 +160,26 @@ class TestTheObservedLease(unittest.TestCase):
         self.assertIn("index=-1", d["device_label"])
 
 
+    def test_harness_peers_make_the_lease_contended_even_at_zero_util(self):
+        """I68: util 是**时刻**采样 (对手还在 import 时读到 0), claim 声明的生命期
+        覆盖对手整个进程 —— 所以 0% util + 1 个 harness 声明仍是 contended。"""
+        lease = observed_lease({"gpu_util_pct": 0.0, "selected_gpu": 2,
+                                "gpu_harness_peers": 1}, source="L3")
+        self.assertEqual(1, lease.harness_peers)
+        self.assertEqual(0.0, lease.external_load)
+        text, state = lease_evidence(lease)
+        self.assertEqual(LEASE_CONTENDED, state)
+        self.assertIn("同卡 harness 进程 ×1", text)
+        self.assertIn("external_load=0.00", text, "util 那一格照实说它的 0")
+
+    def test_missing_peers_key_is_unobserved_not_zero(self):
+        """旧 runner 不报这个键 ⇒ None (未观测), 序列化也带得出去; 缺 ≠ 0 ≠ 有对手。"""
+        lease = observed_lease({"gpu_util_pct": 0.0})
+        self.assertIsNone(lease.harness_peers)
+        self.assertIsNone(lease.as_dict()["harness_peers"])
+        self.assertEqual(LEASE_CLEAN, lease_evidence(lease)[1])
+
+
 class TestBuildKeyIsNotPartitionKey(unittest.TestCase):
     def test_same_source_different_arch_different_build_key(self):
         """§9.3: 编译产物按 arch 共享, 测量结果绝不共享"""

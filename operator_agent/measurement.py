@@ -1130,7 +1130,8 @@ def assess(median_time_ms: Optional[float] = None,
            required_caps: Optional[frozenset] = None,
            reported_mode: Optional[str] = None,
            reported_device: Optional[str] = None,
-           environment_drift: Optional[List[str]] = None) -> MeasurementAssessment:
+           environment_drift: Optional[List[str]] = None,
+           gpu_harness_peers: Optional[int] = None) -> MeasurementAssessment:
     """综合判定测量有效性: 信号各自独立判定, 合成时取更差的一档
 
     问「测得准不准」的三个: launch 地板支配 (`median_time_ms` vs `launch_floor_us`)、
@@ -1178,6 +1179,18 @@ def assess(median_time_ms: Optional[float] = None,
     contaminated = gpu_util_pct is not None and gpu_util_pct > CONTAMINATION_UTIL_PCT
     if contaminated:
         reasons.append(f"测量前 GPU util={gpu_util_pct}%, 基准被污染, 加速比不可比")
+        validity = _worse(validity, Validity.DEGRADED)
+
+    # I68: 同卡还有 harness 进程 (claim 声明)。与 util 污染同档 (DEGRADED 而不是
+    # UNINFORMATIVE): interleaved A/B 的比值仍保留部分意义, 但实测时间可整体偏移
+    # (I68 实测 2.1× 膨胀而档位曾仍 valid), 不足以支撑「禁用配方/累计停滞」这类
+    # 永久决策。时刻采样 (util / compute-apps) 看不见还在 import 的对手, 所以这个
+    # 信号来自**进程级** claim 声明, 生命期覆盖对手整个进程。
+    peers = (gpu_harness_peers if isinstance(gpu_harness_peers, int)
+             and not isinstance(gpu_harness_peers, bool) else None)
+    if peers:
+        reasons.append(f"同卡还有 {peers} 个 harness 进程 (claim 声明) —— 跨进程共卡, "
+                       f"实测时间可整体偏移 (I68 实测 2.1×)")
         validity = _worse(validity, Validity.DEGRADED)
 
     disp_exceeded: Optional[bool] = None

@@ -17,8 +17,10 @@
 """
 import ast
 import json
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -27,6 +29,13 @@ from operator_agent.remote_executor import SessionError, _RemoteSession
 
 ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "remote_scripts" / "runner_server.py"
+
+# run_kernel **import 时**会写进程级 GPU claim (CHECKLOG I68)。本文件在本地拉起真
+# runner_server ⇒ 不处理的话它会往真实 ~/.operator_agent_gpu_claims/ 写声明 ——
+# 测试不许动用户的 home (conftest「测试现场与真实现场分开」的同一条纪律)。指到
+# 本模块自己的 tmp, 子进程经 env 继承; claim 本身是尽力而为, 不影响协议测试。
+_CLAIM_TMP = tempfile.TemporaryDirectory(prefix="operator_agent_test_claims_")
+os.environ["OPERATOR_AGENT_GPU_CLAIM_DIR"] = _CLAIM_TMP.name
 
 _ECHO = (
     "import sys, json\n"

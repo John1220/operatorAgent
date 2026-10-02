@@ -145,6 +145,25 @@ class TestAssessTiers(unittest.TestCase):
         self.assertFalse(a.contaminated)
         self.assertIs(a.validity, Validity.VALID)
 
+    def test_harness_peers_alone_is_degraded_like_util_contamination(self):
+        """I68: 同卡还有 harness 进程 (claim 声明) —— 实测时间可整体偏移 2.1× 而
+        时刻采样看不见对手, 所以单独成一条污染判据; 与 util 污染同档 (比值仍
+        部分有意义, 但撑不住禁用配方/累计停滞)。"""
+        a = assess(median_time_ms=1.0, launch_floor_us=H20_FLOOR_US,
+                   gpu_harness_peers=1)
+        self.assertIs(a.validity, Validity.DEGRADED)
+        self.assertTrue(a.can_gate)
+        self.assertFalse(a.can_disable_recipe)
+        self.assertFalse(a.can_count_stagnation)
+        self.assertTrue(any("harness" in r for r in a.reasons), a.reasons)
+
+    def test_harness_peers_absent_or_junk_is_not_contamination(self):
+        """键不在 (旧 runner) / 0 / 坏形状一律不降档 —— 「未观测」不许读成「有对手」"""
+        for peers in (None, 0, "2", True, 1.5):
+            a = assess(median_time_ms=1.0, launch_floor_us=H20_FLOOR_US,
+                       gpu_harness_peers=peers)
+            self.assertIs(a.validity, Validity.VALID, peers)
+
 
 class TestUnknownFloorIsNotSilentlyValid(unittest.TestCase):
     """地板未知 (hardware_caps 里没这台设备) 时不得默默当成有效
@@ -263,7 +282,7 @@ class TestBaselinePlan(unittest.TestCase):
 
 def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO,
                      dispersion=None, p25=None, p75=None, max_over_median=None,
-                     cand_peak=None, base_peak=None, block_medians=None):
+                     cand_peak=None, base_peak=None, block_medians=None, peers=None):
     """搭一个远程形状的 L3: benchmark_with_baselines 返回同机同卡的候选 + 一个基线
 
     D3 之后远端只测**一个**基线并回报 `baseline_selected`, 所以这里的 payload 也只带
@@ -305,6 +324,10 @@ def _remote_verifier(candidate_ms, baseline_ms, util=None, hw_info=H20_HW_INFO,
     if util is not None:
         bench["gpu_util_pct"] = util
         bench["gpu_other_procs"] = 7
+    # I68: runner 的 claim 扫描结果 (None = 旧 runner 不报这个键)
+    if peers is not None:
+        bench["gpu_harness_peers"] = peers
+        bench["gpu_harness_peer_scans"] = [peers, peers]
     backend = fake_backend(benchmark_with_baselines=lambda *a, **kw: bench,
                            get_hardware_info=lambda: dict(hw_info))
     return Verifier(backend)
@@ -361,6 +384,24 @@ class TestVerifierEmitsValidity(unittest.TestCase):
         self.assertEqual(r.metrics["measurement_validity"], Validity.DEGRADED.value)
         self.assertFalse(r.metrics["measurement_can_disable_recipe"])
         self.assertIn("污染", r.message)
+
+    def test_harness_peers_degrade_the_tier_and_the_lease_at_zero_util(self):
+        """I68 的端到端形状: 两 harness 进程共卡, 时刻采样全瞎 (util=0), claim 声明
+        看得见 ⇒ 档位 DEGRADED + 租约 contended; 而 util 语义的
+        benchmark_contaminated 不因 peers 点亮 (report.py 对它写的就是「util 超阈值」)。"""
+        r, _ = self._l3(_remote_verifier(candidate_ms=NET_MS_MATMUL_4096,
+                                         baseline_ms=1.10, util=0, peers=1))
+        self.assertEqual(r.metrics["measurement_validity"], Validity.DEGRADED.value)
+        self.assertFalse(r.metrics["measurement_can_disable_recipe"])
+        self.assertFalse(r.metrics["measurement_can_count_stagnation"])
+        self.assertTrue(any("harness" in x
+                            for x in r.metrics["measurement_validity_reasons"]))
+        self.assertFalse(r.metrics["benchmark_contaminated"],
+                         "contaminated 保持 util 语义, 不被 peers 借用")
+        self.assertEqual("contended", r.metrics["device_lease"]["competition"])
+        self.assertEqual(1, r.metrics["device_lease"]["harness_peers"])
+        self.assertIn("同卡 harness 进程 ×1", r.metrics["device_lease_text"])
+        self.assertIn("harness", r.message, "message 是 Fixer/Search 的 prompt 素材")
 
     def test_unknown_device_records_unchecked(self):
         """hardware_caps 里没有的设备: 地板未知, 显式记录「未做检查」而不是放行"""
