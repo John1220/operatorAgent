@@ -18,7 +18,7 @@
 | §3 契约冻结 + 哈希 | `operator_agent/contract.py`（含 `freeze_from_task` / `load_dict` 校验载荷 hash） | ✅ |
 | §4.3 五位资格 | `operator_agent/eligibility.py` | ✅ |
 | §10.5-1 标定心跳 | `operator_agent/calibration.py`（成对参照双比值） | ✅ |
-| §10.5-4 两次确认 | `operator_agent/confirm.py` + 唯一判据 `oracle.admit_to_corpus` | ✅ **但是 opt-in**：判据默认要求重测，生产把它接到 `require_double_confirm`（默认 `False`，机时承诺）⇒ **默认配置下单次读数即可入库**；理由文本里会写明本次没要求 |　**+2026-10-02 备注（CHECKLOG I69）**：根因不是默认值 —— 那道门默认开、生产接成关，因为「独立重测」的证据字段**没有生产者**（打开就把入库率归零）。待做：重测生产者 + §10.2 的 10% 确认相（该相今天无消费者），然后再谈默认值。
+| §10.5-4 两次确认 | `operator_agent/confirm.py` + 唯一判据 `oracle.admit_to_corpus` | ✅ **但是 opt-in**：判据默认要求重测，生产把它接到 `require_double_confirm`（默认 `False`，机时承诺）⇒ **默认配置下单次读数即可入库**；理由文本里会写明本次没要求 |　**+2026-10-02 更正（CHECKLOG I69）**：本条一次误判已撤回 —— 生产者（`conductor.py#L2337` 的第二次独立 `verify_l3_only` + `oracle_spend("confirm")`）、字段声明（P2-10）、报告读者（`report.py#L312`）**在 HEAD 里都在**，我当时是把两句历史注释当成了现状。**决定：保持 opt-in**（默认不重测），只补一件事 —— 「本次未要求两次确认」必须强制可见。
 | §13.4 Oracle 收口 | `operator_agent/oracle.py`，已接 **L3 出口**（`verifier._assess_measurement`） | ✅ |
 | §8 失败分类路由 | `operator_agent/failure_route.py`（五路 + `fix_not_rewrite`） | ✅ |
 | §14-9 资格审计对照 | `benchmarks/ablation_eligibility.py` + `tests/test_ablation_eligibility.py` | ⏳ **比较器已落地、两臂未跑**：五态判据（含"没打到点上"这一态与"没有收益必须写进报告"），带宽取 `NOISE_BAND[uninformative]`；真机对照需要同卡两次完整循环（要 LLM）⇒ "审计有收益"仍不许声称 |
