@@ -133,5 +133,36 @@ class TestTheProtocolIsHonoured(unittest.TestCase):
             Hosted().instantiate(TEMPLATE_ID, POINT)
 
 
+class TestTheComposedBackendServesBothHalves(unittest.TestCase):
+    """生产里 `Conductor.backend` **一个对象**要同时是可执行后端与模板后端"""
+
+    class _FakeExec:
+        label = "fake_exec"
+
+        @property
+        def capabilities(self):
+            return frozenset({"real_device"})
+
+        def compile(self, *a, **k): return {"ok": True}
+
+    def test_both_halves_come_from_the_right_place(self):
+        from operator_agent.triton_matmul_template import TritonTemplateSSHExecutor
+
+        be = TritonTemplateSSHExecutor(self._FakeExec(), smem_limit_bytes=228 * 1024)
+        self.assertEqual(TEMPLATE_ID, be.param_space().template_id)
+        self.assertEqual(INSTANTIATOR_VER, be.instantiate(TEMPLATE_ID, POINT).instantiator_ver)
+        self.assertEqual({"ok": True}, be.compile("src"), "执行那一半按名字转发")
+        self.assertEqual(frozenset({"real_device"}), be.capabilities)
+        self.assertIn("triton_matmul_v1", be.label)
+
+    def test_a_missing_attribute_still_raises(self):
+        """fail-closed: 转发不许把「少了个方法」变成 None"""
+        from operator_agent.triton_matmul_template import TritonTemplateSSHExecutor
+
+        be = TritonTemplateSSHExecutor(self._FakeExec())
+        with self.assertRaises(AttributeError):
+            be.not_a_method_at_all
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
