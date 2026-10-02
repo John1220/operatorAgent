@@ -4,6 +4,7 @@
 （接口契约 / 反作弊 / L1 语法）—— 能过，模板路径才真的接上了端到端。
 """
 
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -16,19 +17,8 @@ from operator_agent.candidates import PruneResult, prune_by_smem  # noqa: E402
 from operator_agent.interface_contract import check_kernel_interface  # noqa: E402
 from operator_agent.resource_check import MemCaps  # noqa: E402
 from operator_agent.triton_matmul_template import (  # noqa: E402
-    INSTANTIATOR_VER, TEMPLATE_ID, TritonMatmulTemplateBackend, instantiate,
-    param_space)
-
-def _concrete(cls):
-    """这一片只声明「模板那一半」: 执行侧抽象方法用桩补齐, 免得测试假装成了执行后端
-
-    ABC 的 `__abstractmethods__` 在类创建时算好, 事后补方法必须一起清掉它。
-    """
-    for name in ("compile", "execute", "benchmark", "get_hardware_info"):
-        setattr(cls, name, lambda self, *a, **k: (_ for _ in ()).throw(NotImplementedError))
-    cls.__abstractmethods__ = frozenset()
-    return cls
-
+    INSTANTIATOR_VER, TEMPLATE_ID, TritonMatmulTemplateBackend,
+    TritonTemplateSSHExecutor, instantiate, param_space)
 
 POINT = {"BLOCK_M": 128, "BLOCK_N": 64, "BLOCK_K": 32, "stages": 2, "warps": 8}
 
@@ -102,7 +92,8 @@ class TestTheEmittedSourceIsExecutable(unittest.TestCase):
 
 class TestTheProtocolIsHonoured(unittest.TestCase):
     def test_the_backend_serves_the_space_and_the_instantiator(self):
-        be = _concrete(TritonMatmulTemplateBackend)(smem_limit_bytes=228 * 1024)
+        # 不再需要 _concrete 补桩: 本类不是执行后端, 不继承 Backend (I71 的修复面)
+        be = TritonMatmulTemplateBackend(smem_limit_bytes=228 * 1024)
         self.assertEqual(be.param_space().template_id, TEMPLATE_ID)
         self.assertEqual(INSTANTIATOR_VER, be.instantiate(TEMPLATE_ID, POINT).instantiator_ver)
         with self.assertRaises(ValueError):
@@ -146,22 +137,48 @@ class TestTheComposedBackendServesBothHalves(unittest.TestCase):
         def compile(self, *a, **k): return {"ok": True}
 
     def test_both_halves_come_from_the_right_place(self):
-        from operator_agent.triton_matmul_template import TritonTemplateSSHExecutor
-
         be = TritonTemplateSSHExecutor(self._FakeExec(), smem_limit_bytes=228 * 1024)
         self.assertEqual(TEMPLATE_ID, be.param_space().template_id)
         self.assertEqual(INSTANTIATOR_VER, be.instantiate(TEMPLATE_ID, POINT).instantiator_ver)
         self.assertEqual({"ok": True}, be.compile("src"), "执行那一半按名字转发")
         self.assertEqual(frozenset({"real_device"}), be.capabilities)
         self.assertIn("triton_matmul_v1", be.label)
+        # 访问器也必须指对那一半 —— 诊断面拿错对象就说谎 (变异矩阵 M7 的证人)
+        self.assertEqual(TEMPLATE_ID, be.template_backend.param_space().template_id)
 
     def test_a_missing_attribute_still_raises(self):
         """fail-closed: 转发不许把「少了个方法」变成 None"""
-        from operator_agent.triton_matmul_template import TritonTemplateSSHExecutor
-
         be = TritonTemplateSSHExecutor(self._FakeExec())
         with self.assertRaises(AttributeError):
             be.not_a_method_at_all
+
+    def test_the_smem_limit_reaches_the_template_half(self):
+        """组合时丢了 smem 上界 ⇒ 空间按默认格枚举、剪枝才摘点 —— 白烧实例化与测量
+        (变异矩阵 M8 的证人)"""
+        tiny = TritonTemplateSSHExecutor(self._FakeExec(), smem_limit_bytes=1)
+        self.assertLess(tiny.param_space().size(), param_space().size())
+        for values in tiny.param_space().axes.values():
+            self.assertTrue(values, "缩格不许把某一轴缩成空集 (那会让空间恒空)")
+
+    def test_the_composed_backend_builds_in_a_fresh_process(self):
+        """I71 的证人: 组合后端曾只在「同文件早先用例已把模板类污染成具体类」的
+        进程里可构造 —— 全新进程 (生产的形状) __init__ 直接 TypeError, 而全套件
+        绿把地雷埋住了。证人必须是**子进程**: 类级污染跨不出本进程。
+        """
+        code = (
+            "from operator_agent.triton_matmul_template import ("
+            "TEMPLATE_ID, TritonTemplateSSHExecutor)\n"
+            "class Exec:\n"
+            "    label = 'exec'\n"
+            "    def compile(self, *a, **k): return True\n"
+            "be = TritonTemplateSSHExecutor(Exec())\n"
+            "assert be.param_space().template_id == TEMPLATE_ID\n"
+            "assert be.compile('x') is True\n"
+        )
+        proc = subprocess.run([sys.executable, "-B", "-c", code],
+                              capture_output=True, text=True, cwd=str(ROOT))
+        self.assertEqual(0, proc.returncode,
+                         f"全新进程里构造/使用组合后端失败:\n{proc.stderr}")
 
 
 if __name__ == "__main__":

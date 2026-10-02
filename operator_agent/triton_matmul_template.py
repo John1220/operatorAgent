@@ -20,7 +20,7 @@
 
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-from .backend_caps import Backend, Instantiation
+from .backend_caps import Instantiation
 from .candidates import ParamSpace
 
 #: 模板身份的一半。**改发射语义要一起升**（见模块 docstring 第 1 条）。
@@ -129,8 +129,15 @@ def instantiate(params: Mapping[str, Any]) -> Instantiation:
                   f"启动参数, 不在源码文本里)"))
 
 
-class TritonMatmulTemplateBackend(Backend):
-    """"模板型后端"的协议实现 —— `param_space()` 返空间, `instantiate()` 返源码"""
+class TritonMatmulTemplateBackend:
+    """「模板那一半」的提供者 —— `param_space()` 返空间, `instantiate()` 返源码
+
+    刻意**不继承 `Backend`** (那是执行后端的契约, 本类四个执行方法一个都给不出):
+    继承会两头堵 —— 不补抽象方法 ⇒ 组合后端在**全新进程**里构造不出来 (2026-10-02
+    实测 TypeError; 全套件绿只因同文件早先用例把类污染成了具体类, CHECKLOG I71);
+    补桩 ⇒ 混进 `concrete_backends()` 的登记表完备性守卫 (test_backend_caps)。
+    「既是执行后端又声明空间」的对象是 `TritonTemplateSSHExecutor`, 不是本类。
+    """
 
     def __init__(self, smem_limit_bytes: Optional[int] = None, elem_bytes: int = 4):
         self._space = param_space(smem_limit_bytes, elem_bytes)
@@ -189,10 +196,13 @@ class TritonTemplateSSHExecutor:
                     contract: object = None) -> Instantiation:
         return self._template.instantiate(template_id, params, contract)
 
-    # ── 执行那一半：显式转发 (不用 __getattr__, 那会把「少了一个方法」藏起来) ──
+    # ── 执行那一半：按名转发 (`__getattr__`) ──
     def __getattr__(self, name: str) -> Any:
-        # 只在**本对象没有**该属性时走到这里; 转发给执行后端 —— 名字对不上就照旧
-        # AttributeError (fail-closed), 不会静默返回 None。
+        # 正常属性查找**失败**才走到这里 ⇒ 上面的覆写 (param_space/instantiate/
+        # label/capabilities) 不会被转发路径顶掉。转发给被包住的执行后端; 名字对
+        # 不上就照旧 AttributeError (fail-closed), 不会静默返回 None —— 「少一个
+        # 方法」藏不住。⚠️ 本注释曾写「不用 __getattr__」: 那是第一版草稿的残留,
+        # 与代码正相反 (提交 d66c430 的说明与类 docstring 才是实现口径)。
         return getattr(self._executor, name)
 
     @property
