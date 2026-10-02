@@ -695,7 +695,10 @@ class Conductor:
         # §10.3 的 ε 抽签种子: 一次运行一个。抽签值是它的纯函数, 而它自己落进产物 ⇒
         # 「第 3 轮为什么走了探索那一支」跑完可以逐位复算 (不必记下每个随机数)。
         _selection_seed = f"{task.task_id}|{self.backend.label}"
-        fingerprint = fingerprint_of(hw_info, self.backend.label)
+        # 指纹的 backend 键取 `fingerprint_label` 而不是 `label` (I72): 组合后端的
+        # label 带模板后缀, 而换模板壳是**候选来源**变化, 不是执行环境变化 —— 拿 label
+        # 进指纹会让每个新组合后端首跑都被判「环境漂移」(degraded, can_persist=False)。
+        fingerprint = fingerprint_of(hw_info, self.backend.fingerprint_label)
         # 挂在实例上而不是加到 `_flush_snapshot` 的 12 个形参里: 它在一次运行内是常量,
         # 而 `_flush_snapshot` 有 7 个调用点 (与 `capture_execution` 写 `self._log_path`
         # 同一种「本次运行的上下文」)。`execute()` 不是可重入的。

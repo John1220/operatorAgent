@@ -96,4 +96,13 @@ ROWS = [
         "`assertLess(默认, 默认)` 不成立。真实失效: 剪枝才摘点 —— 这张卡上放不下的 tile "
         "全被实例化+测量一遍, 白烧机时 (I66 修的就是这个浪费的另一面: 剪枝口径)。"
         "证人是本片矩阵新补的, 此前上界传递零观察。"),
+
+    Row("M9 指纹拿了组合身份而不是执行侧身份 (I72)", "tmt",
+        "        return self._executor.label",
+        "        return self.label",
+        "⇒ `test_the_fingerprint_takes_the_executor_identity` 红: 指纹身份变成带模板后缀的"
+        "组合 label。真实失效 (I72 实测): 同机/同卡/同 runner 换组合壳 ⇒ 首轮被判「环境"
+        "漂移」degraded (can_persist=False) —— 每个新模板后端的第一份读数永远不可入库。"
+        "证人是 I72 修复片新补的 (此前指纹口径零观察)。⚠️ 锚点用单行而非整个 property 块:"
+        "块锚点会把 docstring 也算进去, 第一版就是这么 ANCHOR 的 (0 次命中)。"),
 ]

@@ -1013,9 +1013,9 @@
   - **达标臂** (min_speedup=0.1)：第 1 轮点 `64×64×32 s1 w4` → L1/L2/L3 全过（0.340x vs cuBLAS(TF32), 24093 GFLOPS），`stop=passed`；`chat=0`（Coder/Fixer/Search 全被跳过）。
   - **搜索臂** (min_speedup=0.5, 实测点位 0.32~0.37x ⇒ 必不过)：3 轮 **3 个不同点**（s1w4 24093 → s1w8 19764 → s2w4 25188 GFLOPS），`stop=rounds_exhausted`；第 3 轮 `validity=valid` 且 peak_probe 实测 `tf32=70.80 TFLOPS`（refusals 空）。
   - 五判据全绿：C1 LLM chat 零调用 / C2 `action=template` 且臂=点身份 / C3 达标即停 / C4 换点 / C5 `template_selection` 落血缘。产物：`output/matmul/nvidia_gpu/20261002_233811_c5f4d86b`（pass）与 `20261002_233922_c5b33fa4`（search）。
-- **后果**：不改（不跑通）则 I70 那句「接线仍未做」会一直遮着一个事实——接线本身是通的, 缺的只是真后端（I71 修完即通）。**新观察（未处置, 下一片）**：组合后端的 label（`SSHExecutor@algorithm-h20(nvidia)+triton_matmul_v1@$1`）进了环境指纹 ⇒ 同一台机/同一张卡/同一 runner, 仅换组合壳, 首轮被判「环境漂移」`degraded`（`can_persist=False`）——**每个新模板后端的第一份读数永远不可入库**；第 2 轮起 drift 比较的「上一次」也变成同一组合后端, 自然恢复 `valid`（搜索臂实测如此）。修法方向：指纹的 backend 维度取**执行侧**身份, 或 drift 判据区分「执行环境」与「候选来源」。另一边界如实记：§10.4 覆盖判据的「穷尽」分支未单独观测（48 点的空间 3 轮跑不满, `rounds_exhausted` 先到）。
-- **出处**：`benchmarks/template_e2e_h20.py`（两臂判据 C1–C5 内建, 读数可重建）；上述两个产物目录；依赖 I71（组合后端全新进程可构造——没有它这一跑在 `__init__` 就炸）
-- **类别**：I（I70 的「接线仍未做」已过期；指纹口径把「候选来源」混进「执行环境」） · **状态**：✅ 2026-10-02 两臂全过, 模板机制真机端到端成立; 指纹漂移 ⏳ 登记未处置
+- **后果**：不改（不跑通）则 I70 那句「接线仍未做」会一直遮着一个事实——接线本身是通的, 缺的只是真后端（I71 修完即通）。**新观察（当日已修）**：组合后端的 label（`SSHExecutor@algorithm-h20(nvidia)+triton_matmul_v1@$1`）进了环境指纹 ⇒ 同一台机/同一张卡/同一 runner, 仅换组合壳, 首轮被判「环境漂移」`degraded`（`can_persist=False`）——**每个新模板后端的第一份读数永远不可入库**。已修（当日第二片）：`Backend.fingerprint_label` 协议属性（默认 = `label`；立在基类而非调用方 `hasattr` 嗅探, 与 `param_space` 同一条理由），组合后端覆写为**执行侧** label（模板那一半是候选来源, 不是执行环境）；Conductor 指纹改吃 `fingerprint_label`。**真机验证（连跑两次达标臂）**：第 1 次对旧键产物仍漂移一次（`+triton_matmul_v1@$1 → SSHExecutor@…`, 诚实过渡）；第 2 次「环境漂移: 无」⇒ `validity=valid`、`can_persist=True`。变异矩阵扩到 **9/9 红**（新 M9: 指纹拿组合身份）。另一边界如实记：§10.4 覆盖判据的「穷尽」分支未单独观测（48 点的空间 3 轮跑不满, `rounds_exhausted` 先到）。
+- **出处**：`benchmarks/template_e2e_h20.py`（两臂判据 C1–C5 内建, 读数可重建）；上述两个产物目录；依赖 I71（组合后端全新进程可构造——没有它这一跑在 `__init__` 就炸）；修复落点 `operator_agent/backend_caps.py`（`fingerprint_label` 默认）/ `triton_matmul_template.py`（覆写）/ `conductor.py`（指纹改吃 `fingerprint_label`）/ `tests/test_triton_template_backend.py`（两个证人）/ `mut_specs/composed_template_backend.py`（M9）
+- **类别**：I（I70 的「接线仍未做」已过期；指纹口径把「候选来源」混进「执行环境」——已修） · **状态**：✅ 2026-10-02 两臂全过 + 指纹口径当日修复并真机复验（第 2 跑 `valid`/`can_persist=True`）; §10.4「穷尽」分支仍 ➖ 未观测
 
 ### I71 · 组合后端只在「同文件早先用例已把模板类污染成具体类」的进程里可构造（d66c430 的生产地雷）
 
@@ -1856,7 +1856,7 @@
 | I69 | ⚠️ **误判: 我把 §10.5-4 判成「缺生产者」, 实际 HEAD 里生产者/字段/确认相预算/报告读者全都在** —— 依据是两句**历史注释**(「生产路径无人写入」)而没有读代码, 与 I67 同型 | I(自省) | ⚠️ 2026-10-02 已定: 保持 opt-in, 只补「本次未要求」的强制可见性 |
 | I70 | ✅ §12 的**真**模板后端（Triton matmul）落地: 参数点 → 真能跑的源码, 且**参数与真机读数有因果**（同模板只换点: 6.108ms → 5.209ms, L1/L2 全过）; 此前六片只押在假模板后端上 | I | ✅ 2026-10-02 真机两个参数点; Conductor 模板接线**已真机跑通** (I72); 组合层矩阵 8/8 已补 |
 | I71 | 组合后端 `TritonTemplateSSHExecutor` 只在「同文件早先用例已把模板类污染成具体类」的进程里可构造 —— 全新进程 (生产形状) `__init__` 直接 TypeError, 全套件绿把地雷埋住; 机制同时解释了 d66c430 备注②的 flake | I | ✅ 2026-10-02 去 Backend 继承 + `_concrete` 删除 + 子进程证人 + 变异矩阵 8/8 |
-| I72 | Stage 3 模板机制**首次真机过完整 Conductor 主循环**（两臂全绿: 跳过 LLM 生成侧 / 臂=点身份 / 达标即停 / 3 轮 3 点 / template_selection 落血缘）; 新观察: 组合后端 label 进环境指纹 ⇒ 新组合后端**首跑必 degraded** (can_persist=False, 第 2 轮起自愈) | I | ✅ 2026-10-02 两臂 (30.9s/57.7s); 指纹口径 (执行环境 vs 候选来源) ⏳ 未处置 |
+| I72 | Stage 3 模板机制**首次真机过完整 Conductor 主循环**（两臂全绿: 跳过 LLM 生成侧 / 臂=点身份 / 达标即停 / 3 轮 3 点 / template_selection 落血缘）; 新观察: 组合后端 label 进环境指纹 ⇒ 新组合后端**首跑必 degraded** (can_persist=False) | I | ✅ 2026-10-02 两臂 (30.9s/57.7s); 指纹口径**当日修复** (`fingerprint_label` 取执行侧身份) 并真机复验 (第 2 跑 valid/can_persist=True); 矩阵 9/9; §10.4「穷尽」分支 ➖ |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

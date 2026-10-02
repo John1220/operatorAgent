@@ -141,6 +141,19 @@ class Backend(ABC):
         return type(self).__name__
 
     @property
+    def fingerprint_label(self) -> str:
+        """进**环境指纹**的那个身份 (`environment.fingerprint_of` 的 backend 键)。
+
+        默认 = `label`: 「同一台机器、换了个执行后端」是最要紧的漂移 (门面连不上时
+        静默解析到 LocalExecutor, 器件名与版本一项都不变, 只有这个键会变 —— doc 49
+        §3.1 A1)。**组合后端覆写它**返回被包住的执行后端的 label: 模板那一半是
+        **候选来源**, 不是执行环境 —— 同机/同卡/同 runner 换组合壳被判「环境漂移」
+        的实测教训 (CHECKLOG I72: 每个新模板后端首跑必 degraded, can_persist=False)。
+        立在基类上而不是让调用方 `hasattr` 嗅探, 与 `param_space` 同一条理由。
+        """
+        return self.label
+
+    @property
     def selected_gpu(self) -> Optional[int]:
         """**实际**用来跑核的那张卡的编号; `None` = 这里没有编号可报。
 

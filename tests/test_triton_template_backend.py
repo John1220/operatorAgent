@@ -122,6 +122,8 @@ class TestTheProtocolIsHonoured(unittest.TestCase):
         self.assertIsNone(Hosted().param_space())
         with self.assertRaises(NotImplementedError):
             Hosted().instantiate(TEMPLATE_ID, POINT)
+        # 基类默认: 指纹身份 = label (只有组合后端覆写它 —— I72)
+        self.assertEqual("hosted", Hosted().fingerprint_label)
 
 
 class TestTheComposedBackendServesBothHalves(unittest.TestCase):
@@ -159,6 +161,15 @@ class TestTheComposedBackendServesBothHalves(unittest.TestCase):
         self.assertLess(tiny.param_space().size(), param_space().size())
         for values in tiny.param_space().axes.values():
             self.assertTrue(values, "缩格不许把某一轴缩成空集 (那会让空间恒空)")
+
+    def test_the_fingerprint_takes_the_executor_identity(self):
+        """I72 的证人: 指纹的 backend 维度取**执行侧**身份 —— 换模板壳是候选来源
+        变化, 不是执行环境变化。不覆写时每个新组合后端首跑都被判「环境漂移」
+        (degraded, can_persist=False), 第一份读数永远不可入库 (变异矩阵 M9 的证人)。"""
+        be = TritonTemplateSSHExecutor(self._FakeExec())
+        self.assertEqual("fake_exec", be.fingerprint_label)
+        self.assertNotEqual(be.fingerprint_label, be.label,
+                            "组合 label 带模板后缀, 正是它不许进指纹的原因")
 
     def test_the_composed_backend_builds_in_a_fresh_process(self):
         """I71 的证人: 组合后端曾只在「同文件早先用例已把模板类污染成具体类」的

@@ -212,3 +212,14 @@ class TritonTemplateSSHExecutor:
     @property
     def capabilities(self) -> frozenset:
         return self._executor.capabilities
+
+    @property
+    def fingerprint_label(self) -> str:
+        """环境指纹取**执行侧**身份 (I72): 模板那一半是候选来源, 不是执行环境。
+
+        实测教训: 不覆写时, 组合 label (`…+triton_matmul_v1@$1`) 进指纹 ⇒ 同机/同卡/
+        同 runner 仅换组合壳, 首轮被判「环境漂移」degraded (can_persist=False) —— 每个
+        新模板后端的第一份读数永远不可入库; 第 2 轮起 drift 比较的「上一次」也变成同
+        一组合后端, 才自然恢复 valid。
+        """
+        return self._executor.label
