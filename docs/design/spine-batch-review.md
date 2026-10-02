@@ -96,7 +96,7 @@ flowchart TB
 
 ```bash
 # ① 判别：未提交回退（预期显示 M 状态）还是提交内回退
-cd /Users/zh/repos/operatorAgent
+# 在仓库根目录执行
 git status --short operator_agent/
 git show --stat 2737843e            # 确认最后一个提交是否只动了 docs
 
