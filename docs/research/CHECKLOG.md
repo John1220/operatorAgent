@@ -1006,6 +1006,19 @@
   **两臂真机对照 ⏳ 未跑**（同卡两次完整循环, 要 LLM）⇒ 「审计有收益」今天仍不许说
 - **类别**：I · **状态**：⚠️ 比较器 ✅ 已落地 / 两臂 ⏳ 未跑
 
+### I74 · §10.4 两条件停滞出口与「拒绝只因轮数停止」首次真机观测；账本把停止轮也记进 declined
+
+- **原话**：设计 §10.4「不许只因轮数停止 —— 停滞 = 『K 轮 valid 无改善』∧『有希望的区域已穷尽』两条件**同时**成立」；I72 的边界「§10.4 覆盖判据的『穷尽』分支未单独观测（48 点空间 3 轮跑不满）」。
+- **实证**：`python3 benchmarks/template_exhaustion_h20.py`（H20, 4096³ fp32, smem 上界压到 32 KiB ⇒ 空间缩到 **12 点**, min_speedup=0.5 必不过, max_rounds=18, 不经 LLM, wall 197.2s）：
+  - rounds 1–12 **explore 相位逐点试完全部 12 点**（bandit 臂=点去重键, 无重复）；其中 rounds 7/8/11/12 四次「连续 2 轮无改善」**阈值已到但覆盖判据说 unexplored ⇒ 打印『不许宣布停滞』继续跑**（declined 留痕进 `metadata["coverage"]`）；
+  - round 13 转入 **refine 相位**（§10.3 的相位转换首次真机可见）⇒ 阈值 ∧ exhausted(12/12) 同时成立 ⇒ `stop=stagnant`, detail=「连续无改善达上限且候选区域已穷尽 (template_space 12/12)」——**两条件停滞出口第一次在真机 fire**；
+  - 五判据全绿：C1 12/12 distinct / C2 设计出口（非轮数用尽）/ C2b 理由点名两半 / C3 declined 出现过 / C4 chat=0（升级门评估点是纯判据）。
+  - 如实记的三个小观察：① **账本语义瑕疵**——`coverage_ledger.declined` 计了 `{unexplored: 4, exhausted: 1}`, 那个 `exhausted: 1` 是**停止轮本身**（`record()` 在停止判定之前执行）——「declined」的语义应是「阈值到而未停」, 停止轮不该算, 未修只记；② refine 轮重跑的**不是**历史最优点（K32s1w4=24110 而非 K64s2w4=26439）——UCB1 按不确定度/成本排序的选择, 是读数不是缺陷判定, 单次无从评价；③ 升级门逐轮裁决**没有落进 RESULT**（driver 未抓, `_escalation_log` 是否落盘未核）——观察面缺口。
+  - §13.5 收敛出口**预期内未 fire**：最优 26440 GFLOPS ≈ 37% of 实测峰值 70.8T, 远低于阈值 —— 不 fire 也是读数。
+- **后果**：不改（不跑）则 §10.4 的两个关键行为——「explore 相位不被轮数掐死」与「穷尽后停滞才成立」——只有离线用例与变异背书, 没有真机证据; I72 的边界一直空着。跑后该边界闭合。搜索本身也第一次拿到全空间读数：K=64 系普遍快于 K=32（24.3~26.4T vs 19.7~25.4T）, 最优点 K64s2w4 —— 模板空间确有可搜的结构, 与 I70 的两点因果互证。
+- **出处**：`benchmarks/template_exhaustion_h20.py`（判据 C1–C4 内建, 读数可重建）；产物 `output/matmul/nvidia_gpu/20261003_143118_628837ee`（13 轮快照）
+- **类别**：I（设计有、真机观测缺 —— 本条闭合它; 附带暴露账本 declined 语义与升级门裁决落盘两处小缺口） · **状态**：✅ 2026-10-03 观测完成, 五判据全绿; 账本语义/裁决落盘两处小缺口 ⚠️ 登记未修; 心跳在本次观测中被显式关掉（隔离变量）, 其真机观测仍 ➖
+
 ### I73 · 并发首次部署同一文件存在竞争窗口——串行化承诺对 **deploy 路径**同样只覆盖进程内
 
 - **原话**：CLAUDE.md「Serialized remote execution: per-host locks prevent concurrent benchmark pollution on shared GPUs」；`remote_executor._deploy_files` 的 docstring「runner 的同级依赖必须排在 runner 前面: 这样一次部署即使中途失败, 也只会出现『新依赖 + 旧 runner』」—— 这个排序假设的是**单写者**。
@@ -1021,9 +1034,9 @@
   - **达标臂** (min_speedup=0.1)：第 1 轮点 `64×64×32 s1 w4` → L1/L2/L3 全过（0.340x vs cuBLAS(TF32), 24093 GFLOPS），`stop=passed`；`chat=0`（Coder/Fixer/Search 全被跳过）。
   - **搜索臂** (min_speedup=0.5, 实测点位 0.32~0.37x ⇒ 必不过)：3 轮 **3 个不同点**（s1w4 24093 → s1w8 19764 → s2w4 25188 GFLOPS），`stop=rounds_exhausted`；第 3 轮 `validity=valid` 且 peak_probe 实测 `tf32=70.80 TFLOPS`（refusals 空）。
   - 五判据全绿：C1 LLM chat 零调用 / C2 `action=template` 且臂=点身份 / C3 达标即停 / C4 换点 / C5 `template_selection` 落血缘。产物：`output/matmul/nvidia_gpu/20261002_233811_c5f4d86b`（pass）与 `20261002_233922_c5b33fa4`（search）。
-- **后果**：不改（不跑通）则 I70 那句「接线仍未做」会一直遮着一个事实——接线本身是通的, 缺的只是真后端（I71 修完即通）。**新观察（当日已修）**：组合后端的 label（`SSHExecutor@algorithm-h20(nvidia)+triton_matmul_v1@$1`）进了环境指纹 ⇒ 同一台机/同一张卡/同一 runner, 仅换组合壳, 首轮被判「环境漂移」`degraded`（`can_persist=False`）——**每个新模板后端的第一份读数永远不可入库**。已修（当日第二片）：`Backend.fingerprint_label` 协议属性（默认 = `label`；立在基类而非调用方 `hasattr` 嗅探, 与 `param_space` 同一条理由），组合后端覆写为**执行侧** label（模板那一半是候选来源, 不是执行环境）；Conductor 指纹改吃 `fingerprint_label`。**真机验证（连跑两次达标臂）**：第 1 次对旧键产物仍漂移一次（`+triton_matmul_v1@$1 → SSHExecutor@…`, 诚实过渡）；第 2 次「环境漂移: 无」⇒ `validity=valid`、`can_persist=True`。变异矩阵扩到 **9/9 红**（新 M9: 指纹拿组合身份）。另一边界如实记：§10.4 覆盖判据的「穷尽」分支未单独观测（48 点的空间 3 轮跑不满, `rounds_exhausted` 先到）。
+- **后果**：不改（不跑通）则 I70 那句「接线仍未做」会一直遮着一个事实——接线本身是通的, 缺的只是真后端（I71 修完即通）。**新观察（当日已修）**：组合后端的 label（`SSHExecutor@algorithm-h20(nvidia)+triton_matmul_v1@$1`）进了环境指纹 ⇒ 同一台机/同一张卡/同一 runner, 仅换组合壳, 首轮被判「环境漂移」`degraded`（`can_persist=False`）——**每个新模板后端的第一份读数永远不可入库**。已修（当日第二片）：`Backend.fingerprint_label` 协议属性（默认 = `label`；立在基类而非调用方 `hasattr` 嗅探, 与 `param_space` 同一条理由），组合后端覆写为**执行侧** label（模板那一半是候选来源, 不是执行环境）；Conductor 指纹改吃 `fingerprint_label`。**真机验证（连跑两次达标臂）**：第 1 次对旧键产物仍漂移一次（`+triton_matmul_v1@$1 → SSHExecutor@…`, 诚实过渡）；第 2 次「环境漂移: 无」⇒ `validity=valid`、`can_persist=True`。变异矩阵扩到 **9/9 红**（新 M9: 指纹拿组合身份）。另一边界：§10.4 覆盖判据的「穷尽」分支**其后已观测**（I74：12 点空间 13 轮, 两条件停滞出口真机 fire）。
 - **出处**：`benchmarks/template_e2e_h20.py`（两臂判据 C1–C5 内建, 读数可重建）；上述两个产物目录；依赖 I71（组合后端全新进程可构造——没有它这一跑在 `__init__` 就炸）；修复落点 `operator_agent/backend_caps.py`（`fingerprint_label` 默认）/ `triton_matmul_template.py`（覆写）/ `conductor.py`（指纹改吃 `fingerprint_label`）/ `tests/test_triton_template_backend.py`（两个证人）/ `mut_specs/composed_template_backend.py`（M9）
-- **类别**：I（I70 的「接线仍未做」已过期；指纹口径把「候选来源」混进「执行环境」——已修） · **状态**：✅ 2026-10-02 两臂全过 + 指纹口径当日修复并真机复验（第 2 跑 `valid`/`can_persist=True`）; §10.4「穷尽」分支仍 ➖ 未观测
+- **类别**：I（I70 的「接线仍未做」已过期；指纹口径把「候选来源」混进「执行环境」——已修） · **状态**：✅ 2026-10-02 两臂全过 + 指纹口径当日修复并真机复验（第 2 跑 `valid`/`can_persist=True`）; §10.4「穷尽」分支其后已观测（I74）
 
 ### I71 · 组合后端只在「同文件早先用例已把模板类污染成具体类」的进程里可构造（d66c430 的生产地雷）
 
@@ -1859,8 +1872,9 @@
 | I69 | ⚠️ **误判: 我把 §10.5-4 判成「缺生产者」, 实际 HEAD 里生产者/字段/确认相预算/报告读者全都在** —— 依据是两句**历史注释**(「生产路径无人写入」)而没有读代码, 与 I67 同型 | I(自省) | ⚠️ 2026-10-02 已定: 保持 opt-in, 只补「本次未要求」的强制可见性 |
 | I70 | ✅ §12 的**真**模板后端（Triton matmul）落地: 参数点 → 真能跑的源码, 且**参数与真机读数有因果**（同模板只换点: 6.108ms → 5.209ms, L1/L2 全过）; 此前六片只押在假模板后端上 | I | ✅ 2026-10-02 真机两个参数点; Conductor 模板接线**已真机跑通** (I72); 组合层矩阵 8/8 已补 |
 | I71 | 组合后端 `TritonTemplateSSHExecutor` 只在「同文件早先用例已把模板类污染成具体类」的进程里可构造 —— 全新进程 (生产形状) `__init__` 直接 TypeError, 全套件绿把地雷埋住; 机制同时解释了 d66c430 备注②的 flake | I | ✅ 2026-10-02 去 Backend 继承 + `_concrete` 删除 + 子进程证人 + 变异矩阵 8/8 |
-| I72 | Stage 3 模板机制**首次真机过完整 Conductor 主循环**（两臂全绿: 跳过 LLM 生成侧 / 臂=点身份 / 达标即停 / 3 轮 3 点 / template_selection 落血缘）; 新观察: 组合后端 label 进环境指纹 ⇒ 新组合后端**首跑必 degraded** (can_persist=False) | I | ✅ 2026-10-02 两臂 (30.9s/57.7s); 指纹口径**当日修复** (`fingerprint_label` 取执行侧身份) 并真机复验 (第 2 跑 valid/can_persist=True); 矩阵 9/9; §10.4「穷尽」分支 ➖ |
+| I72 | Stage 3 模板机制**首次真机过完整 Conductor 主循环**（两臂全绿: 跳过 LLM 生成侧 / 臂=点身份 / 达标即停 / 3 轮 3 点 / template_selection 落血缘）; 新观察: 组合后端 label 进环境指纹 ⇒ 新组合后端**首跑必 degraded** (can_persist=False) | I | ✅ 2026-10-02 两臂 (30.9s/57.7s); 指纹口径**当日修复** (`fingerprint_label` 取执行侧身份) 并真机复验 (第 2 跑 valid/can_persist=True); 矩阵 9/9; §10.4「穷尽」分支其后已观测 (I74) |
 | I73 | 并发首次部署同一文件存在竞争窗口 —— 两个 harness 进程同时 hash 失配、同时 scp 同一路径, 写坏 ⇒ runner 起不来 (自愈但白烧一轮); 串行化承诺对 **deploy 路径**同样只覆盖进程内 | I | ⚠️ 未修 (登记); 修法方向: 远端临时名+原子 mv 或部署锁; 实验以串行预热规避 |
+| I74 | §10.4 **两条件停滞出口首次真机 fire**（12 点空间 13 轮: explore 逐点试完, 4 次「阈值到但未穷尽 ⇒ 不许宣布停滞」, 转 refine 后 12/12 穷尽 ∧ 阈值 ⇒ stagnant 且理由点名两半）; §13.5 如实不 fire (37% of 峰值) | I | ✅ 2026-10-03 五判据全绿 (197.2s); 附带两处小缺口已记正文 (账本 declined 语义 / 升级门裁决未落 RESULT) |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
