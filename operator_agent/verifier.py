@@ -1616,6 +1616,10 @@ class Verifier:
             # 「这套 tile 根本放不下」的点)。走 caps 这一处 —— 与 L1 资源预检同一个
             # 真源, 不在这里另抄一个数字; 取不到时 0 (= 不知道), 下游必须显式处理。
             "shared_mem_per_sm_kb": int(getattr(caps, "shared_mem_per_sm_kb", 0) or 0),
+            # 每 SM 的线程上界: §10.3 条件 2 的第二把量具 (占用率) 要它。与 smem 同一个
+            # 真源、同一条纪律: 取不到时 0 (= 不知道), 由判据显式处理 —— 缺键既不等于
+            # 「没有上限」, 也不等于「有硬限制」。
+            "max_threads_per_sm": int(getattr(caps, "max_threads_per_sm", 0) or 0),
             "compute_capability": cc, "device": device, "name": name,
         }
         return self._theoretical_peak

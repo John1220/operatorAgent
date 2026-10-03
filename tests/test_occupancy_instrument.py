@@ -65,5 +65,37 @@ class TestTheInstrumentOnlySpeaksWithEvidence(unittest.TestCase):
                          "smem 已经贴到上界时, 占用率侧不许再报一条")
 
 
+class TestTheInstrumentHasAProducerOnTheRealPath(unittest.TestCase):
+    """量具的输入必须有人**发布** —— 否则它是一条永远不产出证据的判据
+
+    §10.3 条件 2 的另一半输入 (`num_warps`) 仍缺发布者, 这一点写在边界里, 不用
+    「反正恒为 0」把它盖过去。
+    """
+
+    def test_the_caps_publish_carries_the_thread_bound(self):
+        from operator_agent import MockGPU
+        from operator_agent.verifier import Verifier
+
+        metrics = Verifier(MockGPU())._detect_theoretical_peak()
+        self.assertIn("max_threads_per_sm", metrics,
+                      "没有发布者 ⇒ 占用率量具永远拿不到输入")
+        value = metrics["max_threads_per_sm"]
+        self.assertIsInstance(value, int)
+        self.assertFalse(isinstance(value, bool))
+        self.assertGreaterEqual(value, 0, "0 = 不知道 (三态), 不是编造的默认值")
+
+    def test_it_is_the_same_number_as_the_caps_field(self):
+        """与 `shared_mem_per_sm_kb` 同一条真源纪律: 不许在这里另抄一个数字"""
+        from operator_agent import MockGPU
+        from operator_agent.hardware_caps import detect_hardware_caps
+        from operator_agent.verifier import Verifier
+
+        v = Verifier(MockGPU())
+        metrics = v._detect_theoretical_peak()
+        caps = detect_hardware_caps(v.backend.get_hardware_info())
+        self.assertEqual(int(caps.max_threads_per_sm or 0),
+                         metrics["max_threads_per_sm"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
