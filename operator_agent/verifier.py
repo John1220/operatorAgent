@@ -1000,6 +1000,13 @@ class Verifier:
 
         metrics = {"avg_time_ms": exec_time, "min_time_ms": kernel_min_ms,
                    "gflops": round(actual_gflops, 4),
+                   # 编译产物的事实 (§10.3 条件 2 的真源): **runner 报了才带上** ——
+                   # 三态, 不许在这里补默认值 (缺失 ≠ 0 ≠ 没有上限)。控制侧此前是手写
+                   # 白名单, 于是 runner 报的新键会被静默丢掉 (实测: 远端已报、L3 无键)。
+                   # 只放与我们判据有关的那几个, 不把 runner 的整个信封灌进 metrics。
+                   **{k: bench[k] for k in ("num_warps", "num_stages", "n_regs",
+                                            "n_spills", "n_max_threads",
+                                            "shared_bytes_per_cta") if k in bench},
                    "memory_bandwidth_gbs": round(bandwidth, 4),
                    "bound_type": bound, "primary_metric": "speedup_vs_baseline",
                    "backend": str(self.backend)}

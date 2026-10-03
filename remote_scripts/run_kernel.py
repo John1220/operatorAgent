@@ -1290,6 +1290,55 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
         return {"success": False, "error": f"Remote benchmark error: {type(e).__name__}: {e}"}
 
 
+def _triton_compile_metadata(module) -> dict:
+    """从**编译产物**取「关于被测量那份码」的事实 (§10.3 条件 2 的真源)
+
+    为什么必须从这里取: 控制端的 L1 只有 4 个键、L3 的 87 个键里没有一个关于线程数/
+    寄存器/溢出 —— `num_warps`/`shared`/`n_regs`/`n_spills` 今天没人发布, 于是
+    §10.3 条件 2 的第二把量具 (`occupancy_bound_evidence`) 在真机上不可能产出证据。
+    而「被测量的是哪份码」这件事, 只有编译产物说得准: 控制端的 sketch 与 LLM 真出的
+    码本来就允许不一致 (所以**不**在控制端解析源码文本)。
+
+    真机实测 (H20, triton 3.8.0): `_k.device_caches[dev][0]` 是 {key: CompiledKernel}
+    (3.8 已无 `.cache`); `CompiledKernel` 有 `.n_regs`/`.n_spills`/`.n_max_threads`,
+    `.metadata` 是 KernelMetadata, 带 `num_warps`/`num_stages`/`shared`(=每 CTA 字节)。
+
+    三态纪律: 取不到就**不发布这个键** —— 缺失既不等于 0, 也不等于「没有上限」。
+    """
+    out = {}
+    try:
+        from triton.runtime.jit import JITFunction
+    except Exception:
+        return out
+    for obj in list(vars(module).values()):
+        if not isinstance(obj, JITFunction):
+            continue
+        caches = getattr(obj, "device_caches", None) or {}
+        for entry in caches.values():
+            cache = entry[0] if isinstance(entry, tuple) else entry
+            try:
+                kernels = list(cache.values())
+            except Exception:
+                continue
+            for ck in kernels:
+                md = getattr(ck, "metadata", None)
+                if md is not None:
+                    for src, dst in (("num_warps", "num_warps"),
+                                     ("num_stages", "num_stages"),
+                                     ("shared", "shared_bytes_per_cta")):
+                        value = getattr(md, src, None)
+                        if isinstance(value, int) and not isinstance(value, bool):
+                            out[dst] = value
+                for src in ("n_regs", "n_spills", "n_max_threads"):
+                    value = getattr(ck, src, None)
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        out[src] = value
+                if out:
+                    out["compile_metadata_from"] = type(ck).__name__
+                return out
+    return out
+
+
 def _benchmark_triton(code: str, real_inputs: dict, warmup: int, repeat: int) -> dict:
     import triton
     import triton.language as tl
@@ -1339,6 +1388,8 @@ def _benchmark_triton(code: str, real_inputs: dict, warmup: int, repeat: int) ->
             "gflops": round(gflops, 4),
             "memory_bandwidth_gbs": round(bandwidth, 4),
             "device": str(device),
+            # 编译产物的事实 (num_warps/shared/n_regs/n_spills): 取不到就不带这些键
+            **_triton_compile_metadata(module),
         }
     except Exception as e:
         return {"success": False, "error": f"Triton benchmark error: {type(e).__name__}: {e}"}

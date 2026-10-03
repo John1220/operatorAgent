@@ -1,8 +1,12 @@
 """真机探针: Triton 编译产物里有哪些**关于被测量那份码**的事实 (§10.3 条件 2 的真源)
 
 用法 (探针要跑在 GPU 机上, 本机无卡):
-    ssh <host> "cat > /tmp/probe_jit.py" < benchmarks/probe_remote_jit_metadata.py
-    ssh <host> "cd ~/operator_agent && ~/.local/bin/uv run python /tmp/probe_jit.py"
+    ssh <host> "cat > <远端临时文件>" < benchmarks/probe_remote_jit_metadata.py
+    ssh <host> "cd ~/operator_agent && ~/.local/bin/uv run python <远端临时文件>"
+
+    (刻意的: 不写死任何本机或远端固定路径 —— 共享主机上写固定 scratch 路径会被
+     `tests/test_shared_host_scratch_paths.py` 的棘轮判红, 那是 doc 52 的落点纪律。)
+
 
 为什么要有它: 控制端的 L1 只有 4 个键 (backend/compile_status/static_guards/
 static_guards_lang)、L3 的 87 个键里**没有一个**关于线程数/寄存器/溢出 —— 也就是说
