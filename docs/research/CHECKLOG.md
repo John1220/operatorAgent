@@ -1006,6 +1006,14 @@
   **两臂真机对照 ⏳ 未跑**（同卡两次完整循环, 要 LLM）⇒ 「审计有收益」今天仍不许说
 - **类别**：I · **状态**：⚠️ 比较器 ✅ 已落地 / 两臂 ⏳ 未跑
 
+### I73 · 并发首次部署同一文件存在竞争窗口——串行化承诺对 **deploy 路径**同样只覆盖进程内
+
+- **原话**：CLAUDE.md「Serialized remote execution: per-host locks prevent concurrent benchmark pollution on shared GPUs」；`remote_executor._deploy_files` 的 docstring「runner 的同级依赖必须排在 runner 前面: 这样一次部署即使中途失败, 也只会出现『新依赖 + 旧 runner』」—— 这个排序假设的是**单写者**。
+- **实证**：I68 的两进程 A/B 首跑时, 两个 harness 进程同时发现 hash 失配、**同时 scp 同一批文件到同一路径** —— scp 对同一目标路径的并发写存在交错/写坏窗口（无锁、无临时名+rename）。`verify_cross_process_claims.py` 因此先跑**串行基线臂兼部署预热**, 两臂并发时 hash 已一致、不再部署。⚠️ 如实记：没有实测造出写坏的远端文件（窗口存在是机制判断, 不是读数）。
+- **后果**：两个 agent / 任务同时冷启动（都 hash 失配）时, 远端 runner 可能写坏 ⇒ 起不来；下一次 hash 检查又触发重推 —— 自愈, 但每次失败白烧一轮。修法方向：远端**临时名 + 原子 `mv`**（同文件系统内 rename 原子）, 或复用 claim 目录做部署锁。**未修, 登记**。
+- **出处**：`operator_agent/remote_executor.py`（`_deploy_files` / `deploy`）、`benchmarks/verify_cross_process_claims.py`（串行预热规避）
+- **类别**：I（串行化承诺只覆盖进程内 —— 与 I68 同族, 这条在**部署**路径） · **状态**：⏳ 未修（登记）; 实验以串行预热规避
+
 ### I72 · Stage 3 的模板机制第一次在真机上过完整 Conductor 主循环；组合后端 label 进环境指纹 ⇒ 每个新组合后端首跑必 degraded
 
 - **原话**：设计 §12「控制器自动切换成『LLM / 模板产出候选』」；I70 的边界原话「Conductor 的模板接线（候选队列 / 覆盖判据 / 选择器吃真点）**仍未做**」。
@@ -1852,6 +1860,7 @@
 | I70 | ✅ §12 的**真**模板后端（Triton matmul）落地: 参数点 → 真能跑的源码, 且**参数与真机读数有因果**（同模板只换点: 6.108ms → 5.209ms, L1/L2 全过）; 此前六片只押在假模板后端上 | I | ✅ 2026-10-02 真机两个参数点; Conductor 模板接线**已真机跑通** (I72); 组合层矩阵 8/8 已补 |
 | I71 | 组合后端 `TritonTemplateSSHExecutor` 只在「同文件早先用例已把模板类污染成具体类」的进程里可构造 —— 全新进程 (生产形状) `__init__` 直接 TypeError, 全套件绿把地雷埋住; 机制同时解释了 d66c430 备注②的 flake | I | ✅ 2026-10-02 去 Backend 继承 + `_concrete` 删除 + 子进程证人 + 变异矩阵 8/8 |
 | I72 | Stage 3 模板机制**首次真机过完整 Conductor 主循环**（两臂全绿: 跳过 LLM 生成侧 / 臂=点身份 / 达标即停 / 3 轮 3 点 / template_selection 落血缘）; 新观察: 组合后端 label 进环境指纹 ⇒ 新组合后端**首跑必 degraded** (can_persist=False) | I | ✅ 2026-10-02 两臂 (30.9s/57.7s); 指纹口径**当日修复** (`fingerprint_label` 取执行侧身份) 并真机复验 (第 2 跑 valid/can_persist=True); 矩阵 9/9; §10.4「穷尽」分支 ➖ |
+| I73 | 并发首次部署同一文件存在竞争窗口 —— 两个 harness 进程同时 hash 失配、同时 scp 同一路径, 写坏 ⇒ runner 起不来 (自愈但白烧一轮); 串行化承诺对 **deploy 路径**同样只覆盖进程内 | I | ⏳ 未修 (登记); 修法方向: 远端临时名+原子 mv 或部署锁; 实验以串行预热规避 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
