@@ -16,6 +16,7 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -30,6 +31,7 @@ from operator_agent.kernel_db import KernelDatabase
 from operator_agent.prompt_manager import PromptManager
 from operator_agent.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, UnifiedSketch,
+    TilingStrategy,
     TaskType, TaskComplexity, Precision,
 )
 
@@ -342,3 +344,139 @@ class TestResourceGate(unittest.TestCase):
             c.execute(_task(), _inputs(), target_gflops=0.0)
         self.assertIsNotNone(c._coder_pipeline, "默认路径应构造 pipeline")
         self.assertIsNotNone(c._coder_pipeline.caps, "caps 应在 hw_info 后注入")
+
+
+# ─── I75 后续: 确定性机械改写 (prompt 约束真机无效 → 生成后机械对齐) ───
+
+TRITON_DOT_TILE = """import triton
+import triton.language as tl
+
+@triton.jit
+def _mm(a_ptr, b_ptr, c_ptr, M, N, K,
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    a = tl.load(a_ptr)
+    b = tl.load(b_ptr)
+    acc = tl.dot(a, b, acc)
+    tl.store(c_ptr, acc)
+
+def kernel(A, B):
+    _mm[(1,)](A, B, A, 1, 1, 1, BLOCK_M=64, BLOCK_N=64, BLOCK_K=32)
+    return A
+"""
+
+
+def _sketch_646432() -> UnifiedSketch:
+    """sketch 64×64×32 —— I75 真机场景 (H20 smem 228KiB + fp32 matmul)"""
+    return UnifiedSketch(
+        algorithm="matmul", version=1, target_dsl="triton",
+        tiling=TilingStrategy(block_m=64, block_n=64, block_k=32),
+    )
+
+
+class TestMechanicalRewrite(unittest.TestCase):
+    """I75 后续: LLM 无视 prompt 硬约束 (256 大 tile / fp32 不带 input_precision),
+    生成后用确定性文本改写兜住 —— 见 coder_pipeline.normalize_candidate"""
+
+    def _pipe(self) -> CoderPipeline:
+        return CoderPipeline(
+            MockLLM(), KernelDatabase(),
+            compile_fn=lambda code, dsl: (bool(code), []))
+
+    def _task_fp(self, precision: Precision) -> TaskSchema:
+        t = _task(dsl="triton")
+        t.constraints = ConstraintSpec(precision=precision, min_speedup=0.5,
+                                       max_error=1e-5)
+        return t
+
+    def test_big_tile_rewritten_to_sketch(self):
+        """256 大 tile + sketch(64,64,32) → 三维改回 sketch 值, notes 非空"""
+        pipe = self._pipe()
+        code, notes = pipe.normalize_candidate(
+            TRITON_BIG_TILE, _sketch_646432(), _task(dsl="triton"))
+        self.assertIn("BLOCK_M=64", code)
+        self.assertIn("BLOCK_N=64", code)
+        self.assertIn("BLOCK_K=32", code)
+        self.assertNotIn("BLOCK_M=256", code)
+        self.assertNotIn("BLOCK_N=256", code)
+        self.assertTrue(any("BLOCK_M 256→64" in n for n in notes), notes)
+        self.assertTrue(notes)
+
+    def test_matching_tile_returned_verbatim(self):
+        """BLOCK 已等于 sketch → 原样 (同一字符串对象), notes 为空"""
+        pipe = self._pipe()
+        code, notes = pipe.normalize_candidate(
+            TRITON_SMALL_TILE, _sketch_646432(), _task(dsl="triton"))
+        self.assertIs(code, TRITON_SMALL_TILE)
+        self.assertEqual(notes, [])
+
+    def test_no_block_literals_returned_verbatim(self):
+        """无 BLOCK 字面量 (triton) / 纯 python numpy 代码 → 原样"""
+        pipe = self._pipe()
+        sketch = _sketch_646432()
+        no_block = ("import triton\nimport triton.language as tl\n\n"
+                    "@triton.jit\ndef kernel(A):\n    return A\n")
+        for raw, dsl in ((no_block, "triton"), (PYTHON_MATMUL, "python")):
+            code, notes = pipe.normalize_candidate(raw, sketch, _task(dsl=dsl))
+            self.assertIs(code, raw)
+            self.assertEqual(notes, [])
+
+    def test_fp32_dot_pinned_to_ieee(self):
+        """fp32 + tl.dot(a, b, acc) 无 input_precision → 追加 ieee"""
+        pipe = self._pipe()
+        code, notes = pipe.normalize_candidate(
+            TRITON_DOT_TILE, _sketch_646432(), _task(dsl="triton"))
+        self.assertIn('tl.dot(a, b, acc, input_precision="ieee")', code)
+        self.assertTrue(any("ieee" in n for n in notes), notes)
+
+    def test_dot_already_with_input_precision_untouched(self):
+        """已含 input_precision → 不重复追加, 原样返回"""
+        pipe = self._pipe()
+        already = TRITON_DOT_TILE.replace(
+            "tl.dot(a, b, acc)", 'tl.dot(a, b, acc, input_precision="ieee")')
+        code, notes = pipe.normalize_candidate(
+            already, _sketch_646432(), _task(dsl="triton"))
+        self.assertIs(code, already)
+        self.assertEqual(notes, [])
+
+    def test_fp16_dot_not_pinned(self):
+        """精度非 fp32 (fp16) → 不钉 ieee"""
+        pipe = self._pipe()
+        code, notes = pipe.normalize_candidate(
+            TRITON_DOT_TILE, _sketch_646432(), self._task_fp(Precision.FP16))
+        self.assertIs(code, TRITON_DOT_TILE)
+        self.assertNotIn("input_precision", code)
+        self.assertEqual(notes, [])
+
+    def test_nested_dot_not_pinned_leaves_note(self):
+        """嵌套括号的 tl.dot 匹配不到 → 代码不动, 留「人工注意」note"""
+        pipe = self._pipe()
+        nested = TRITON_DOT_TILE.replace(
+            "tl.dot(a, b, acc)", "tl.dot(a, tl.trans(b), acc)")
+        code, notes = pipe.normalize_candidate(
+            nested, _sketch_646432(), _task(dsl="triton"))
+        self.assertNotIn("input_precision", code)
+        self.assertTrue(any("未钉住" in n for n in notes), notes)
+
+    def test_missing_sketch_dim_left_alone(self):
+        """sketch 缺某维 (SimpleNamespace 伪装) → 该维不改写, 只改有依据的"""
+        pipe = self._pipe()
+        sketch = SimpleNamespace(tiling=SimpleNamespace(block_m=64))  # 缺 N/K
+        code, notes = pipe.normalize_candidate(
+            TRITON_BIG_TILE, sketch, _task(dsl="triton"))
+        self.assertIn("BLOCK_M=64", code)      # M 有依据 → 改
+        self.assertIn("BLOCK_N=256", code)     # N 无依据 → 不动
+        self.assertIn("BLOCK_K=64", code)      # K 无依据 → 不动
+        self.assertEqual(notes, ["BLOCK_M 256→64 (sketch)"])
+
+    def test_run_level_big_tile_survives_the_gate(self):
+        """端到端证人: LLM 恒返 256 大 tile (真机 I75 行为), 机械改写后过
+        资源门 (改写前 384KiB > 228KiB 会被剪光) → last_finalists 非空"""
+        llm = MockLLM(chat_handler=lambda p, t: TRITON_BIG_TILE)
+        pipe = CoderPipeline(llm, KernelDatabase(jsonl_path=None),
+                             compile_fn=lambda code, dsl: (bool(code), []))
+        pipe.caps = MemCaps(228)
+        code = pipe.run(_sketch_646432(), _task(dsl="triton", kernel="matmul"))
+        self.assertTrue(pipe.last_finalists)
+        self.assertIn("BLOCK_M=64", code)
+        self.assertNotIn("BLOCK_M=256", code)

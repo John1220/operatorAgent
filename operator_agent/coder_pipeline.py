@@ -7,6 +7,7 @@
 
 import concurrent.futures
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -14,7 +15,9 @@ from .planner import PlannerAgent
 from .rule_templates import RuleTemplateCoder
 from .fixer import FixerAgent
 from .interface_contract import broadcast_calling_convention
-from .resource_check import check_resource_feasibility
+# _extract_block_sizes 是同包 (resource_check) 的私有名, 这里直接引用是刻意的:
+# BLOCK_* 解析必须与资源预检 (I75-G1) / L1 用**同一份**实现, 两份解析器迟早漂移
+from .resource_check import check_resource_feasibility, _extract_block_sizes
 from .schemas import TaskSchema, UnifiedSketch
 from .prompt_manager import PromptManager
 
@@ -104,7 +107,13 @@ class CoderPipeline:
               f"(temps={self.SAMPLE_TEMPERATURES})...")
         candidates = self._parallel_sample(plan, sketch, task, calling_convention)
 
-        # 3. compile-gate 早退剪枝 (P1-1): 收集通过者而不是「首个通过即返回」
+        # 3. 确定性机械改写 (I75 后续): prompt 层约束已被真机证明对该模型无效
+        #    (无视 sketch 写 256 大 tile / fp32 不带 input_precision), 生成后
+        #    机械对齐兜底 —— 不再指望模型「自觉」
+        candidates = [self._normalize_and_report(c, sketch, task)
+                      for c in candidates]
+
+        # 4. compile-gate 早退剪枝 (P1-1): 收集通过者而不是「首个通过即返回」
         finalists = self._prune_to_finalists(candidates, dsl, task.source.kernel_type)
         self.last_finalists = list(finalists)
         if finalists:
@@ -112,7 +121,7 @@ class CoderPipeline:
                   f"(决赛上限 {self.L2_FINALISTS}); 最终选择在 Conductor 侧 L1+L2")
             return finalists[0]
 
-        # 4. 有状态修复循环
+        # 5. 有状态修复循环
         print(f"  [CoderPipeline] 全部候选未通过, 进入修复循环 (max {self.MAX_REPAIR_ROUNDS} 轮)...")
         repaired = self._repair_loop(candidates, sketch, task, dsl)
         if repaired:
@@ -120,7 +129,7 @@ class CoderPipeline:
             self.last_finalists = [repaired]
             return repaired
 
-        # 5. 规则模板回退
+        # 6. 规则模板回退
         print(f"  [CoderPipeline] 修复未通过, 回退规则模板...")
         tmpl = self.rule_coder.generate(task, sketch)
         if tmpl:
@@ -187,6 +196,85 @@ class CoderPipeline:
             caller_tag="CoderPipeline.Coder",
         )
         return FixerAgent._extract_code(raw)
+
+    # ─── 确定性机械改写 (I75 后续) ────────────────────────────
+
+    def normalize_candidate(self, code: str, sketch: UnifiedSketch,
+                            task: TaskSchema) -> tuple[str, list[str]]:
+        """生成后确定性改写: 违反 sketch 的 BLOCK_* 常数改回 sketch 值;
+        fp32 的 tl.dot 钉住 input_precision="ieee"。
+
+        为什么不再靠 prompt (CHECKLOG I75 真机证据): LLM 无视 prompt 硬约束
+        坚持 BLOCK_M=BLOCK_N=256 (sketch 说 64×64×32, smem 384KiB > H20 的
+        228KiB), 且 fp32 的 tl.dot 不带 input_precision 走 TF32 (差 ~2.98e-3,
+        容差 1e-4 必挂 L2)。prompt 层约束对该模型无效 ⇒ 唯一可靠的位置是
+        生成之后的机械文本改写。
+
+        返回 (code, notes); 无可改写内容时**原样返回原字符串对象**。
+        """
+        # 非 triton / 空代码: 没有可改写的对象, 原样返回
+        if not code or task.target.dsl != "triton":
+            return code, []
+        notes: list[str] = []
+        new_code = code
+
+        # ── 1) tiling 改写: BLOCK_M/N/K 与 sketch 不符 → 改回 sketch 值 ──
+        # sketch 缺某维 (getattr 不到 / 非 int) 时该维**不改写** —— 只改有依据的;
+        # BLOCK_M/N/K 之外的 BLOCK_* (如 BLOCK_SIZE) 没有 sketch 对应物, 同样跳过
+        tiling = getattr(sketch, "tiling", None)
+        targets: dict[str, int] = {}
+        for blk, attr in (("BLOCK_M", "block_m"), ("BLOCK_N", "block_n"),
+                          ("BLOCK_K", "block_k")):
+            v = getattr(tiling, attr, None)
+            if isinstance(v, int) and not isinstance(v, bool):
+                targets[blk] = v
+        for name, old in _extract_block_sizes(new_code):
+            target = targets.get(name)
+            if target is None or old == target:
+                continue
+            # 精确 token 替换 (该「名字=旧值」对的全部出现): 覆盖解析器认识的
+            # 两种书写 —— `BLOCK_M=256` (含 `: tl.constexpr` / 空格变体) 与
+            # autotune dict 的 `'BLOCK_M': 256`; (?!\d) 防止 256 咬中 2560 的前缀
+            pat = (rf"(\b{name}\s*(?::\s*tl\.constexpr\s*)?=\s*){old}(?!\d)"
+                   rf"|(['\"]{name}['\"]\s*:\s*){old}(?!\d)")
+            rewritten = re.sub(
+                pat, lambda m: (m.group(1) or m.group(2)) + str(target), new_code)
+            if rewritten != new_code:   # 确实改到了才记 note (没改到 = 无依据可改)
+                new_code = rewritten
+                notes.append(f"{name} {old}→{target} (sketch)")
+
+        # ── 2) ieee 钉住: fp32 下 tl.dot 默认走 TF32, 精度必挂 L2 (I75 实测) ──
+        if (task.constraints.precision.value == "fp32"
+                and "tl.dot(" in new_code
+                and "input_precision" not in new_code):
+            pinned = 0
+
+            def _pin(m: "re.Match") -> str:
+                nonlocal pinned
+                args = m.group(1)
+                if not args.strip():   # `tl.dot()` 空参不追加
+                    return m.group(0)
+                pinned += 1
+                return f'tl.dot({args}, input_precision="ieee")'
+
+            # 单行正则: 参数内再出现括号 (嵌套) 即匹配不到 —— 匹配不到的交给人工
+            pinned_code = re.sub(r"tl\.dot\(([^()]*)\)", _pin, new_code)
+            if pinned:
+                new_code = pinned_code
+                notes.append(f'tl.dot 钉住 input_precision="ieee" ({pinned} 处)')
+            else:
+                # 代码里有 tl.dot( 却一处都匹配不上 (嵌套括号/跨行) —— 跳过并留痕
+                notes.append("tl.dot 跨行/嵌套, ieee 未钉住(人工注意)")
+
+        return new_code, notes
+
+    def _normalize_and_report(self, code: str, sketch: UnifiedSketch,
+                              task: TaskSchema) -> str:
+        """normalize_candidate 的接线封装: 改写发生时打一行日志供人工复核"""
+        code, notes = self.normalize_candidate(code, sketch, task)
+        if notes:
+            print(f"  [CoderPipeline] 机械改写: {', '.join(notes)}")
+        return code
 
     # ─── 编译剪枝 ────────────────────────────────────────────
 
@@ -265,6 +353,9 @@ class CoderPipeline:
             state.tried_fixes.append(note)
             if not fixed:
                 break
+            # 修复产物同样过机械改写 (I75 后续): 修复的 LLM 与生成的 LLM 是同一个,
+            # 一样会把 256 大 tile 写回来 —— 修完再机械对齐一次 sketch
+            fixed = self._normalize_and_report(fixed, sketch, task)
             # 复检也过资源门 (I75-G1): 修完又写回大 tile 的产物不许再烧 SSH
             ok, issues = self._gate_check(fixed, dsl, task.source.kernel_type)
             if ok:
