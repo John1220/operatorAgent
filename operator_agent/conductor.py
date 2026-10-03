@@ -371,6 +371,9 @@ class Conductor:
             coder_pipeline = CoderPipeline(
                 llm=llm, kernel_db=self.kernel_db, prompt_manager=self.pm,
             )
+        # I75-G1: 留引用给 execute() —— hw_info 到手后把 smem 上界注入
+        # compile-gate (不可行 tile 本地剪掉, 不烧 SSH)。None = 单体路径/假件。
+        self._coder_pipeline = coder_pipeline
         self.coder = CoderAgent(self.kernel_db, llm=llm, prompt_manager=self.pm,
                                 pipeline=coder_pipeline)
         self.verifier = Verifier(self.backend)
@@ -878,6 +881,11 @@ class Conductor:
         # 与 Verifier 发布进 L3 的那一格**同一个真源** (`detect_hardware_caps`), 不是
         # 在这里另查一遍硬件。取不到 ⇒ MemCaps(0) ⇒ 上界未知 ⇒ 剪枝不生效并明说。
         _mem_caps = caps_from_metrics(detect_hardware_caps(hw_info))
+        # I75-G1: 同一份 smem 上界也交给 compile-gate —— 不可行 tile 在采样处
+        # 剪掉, 不烧 SSH (首跑教训: 六次 L1 全是 256×256 超限, 每次白烧一轮往返)。
+        # 单体路径/测试假件 (pipeline=None) 时这里自然跳过。
+        if self._coder_pipeline is not None:
+            self._coder_pipeline.caps = _mem_caps
         #: 最近一次**有调参资格**的读数构成的信念 (设计 §10.4 伪码里的 `belief`)。
         #: `can_tune=False` 的轮次不许覆盖它, 只许沿用它。
         last_tunable_perf: Optional[dict] = None

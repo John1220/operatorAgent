@@ -14,6 +14,7 @@ from .planner import PlannerAgent
 from .rule_templates import RuleTemplateCoder
 from .fixer import FixerAgent
 from .interface_contract import broadcast_calling_convention
+from .resource_check import check_resource_feasibility
 from .schemas import TaskSchema, UnifiedSketch
 from .prompt_manager import PromptManager
 
@@ -70,6 +71,10 @@ class CoderPipeline:
         # compile_fn: (code, dsl) -> (passed: bool, issues: list[str])
         # 默认 = 本地语法/结构预检; 生产可注入 Verifier L1 真实编译
         self.compile_fn = compile_fn or self._default_compile
+        # I75-G1: compile-gate 的资源上界 (MemCaps / HardwareCaps / None)。
+        # 由 Conductor 在 hw_info 到手后注入 (构造时还没有); None / 无 smem 键
+        # ⇒ 资源预检跳过 (宁可漏拦, 与 L1 同一口径)。
+        self.caps = None
         self._agent_role = "coder"
         self._skill_name = "triton_skill"
         # 最近一次 run() 留给 Conductor 做 L1+L2 选择的决赛候选 (P1-1)。
@@ -100,7 +105,7 @@ class CoderPipeline:
         candidates = self._parallel_sample(plan, sketch, task, calling_convention)
 
         # 3. compile-gate 早退剪枝 (P1-1): 收集通过者而不是「首个通过即返回」
-        finalists = self._prune_to_finalists(candidates, dsl)
+        finalists = self._prune_to_finalists(candidates, dsl, task.source.kernel_type)
         self.last_finalists = list(finalists)
         if finalists:
             print(f"  [CoderPipeline] {len(finalists)}/{len(candidates)} 候选通过编译剪枝 "
@@ -185,12 +190,31 @@ class CoderPipeline:
 
     # ─── 编译剪枝 ────────────────────────────────────────────
 
-    def _prune_to_finalists(self, candidates: list, dsl: str) -> list[str]:
+    def _gate_check(self, code: str, dsl: str, kernel_type: str = "") -> tuple:
+        """compile-gate 的两道便宜门收在一处 (I75-G1): 语法 + **资源预检**。
+
+        资源预检与 L1 用**同一份**估算 (`resource_check.check_resource_feasibility`,
+        单一真源)——不可行的 tile 在采样处就死掉, 不烧 SSH (I75 首跑: 六次 L1 全是
+        同一类 256×256 超限, 每次白烧一轮往返+环境自检)。caps 缺 ⇒ 跳过并留 note,
+        宁可漏拦。返回 (ok, issues); 资源问题的 message 会流进修复循环的反馈
+        (修代码的提示从此带着上界约束 —— I75-G3 的流程半边)。
+        """
+        ok, issues = self.compile_fn(code, dsl)
+        issues = list(issues or [])
+        if ok and code:
+            rep = check_resource_feasibility(code, self.caps, kernel_type)
+            if not rep.feasible:
+                ok = False
+                issues.append(rep.as_message())
+        return ok, issues
+
+    def _prune_to_finalists(self, candidates: list, dsl: str,
+                            kernel_type: str = "") -> list[str]:
         """compile-gate 早退剪枝 (P1-1): 编译通过只是入围, 不是入选
 
         旧 `_select_first_pass` 取首个通过者直接定终身 —— 编译通过 ≠ 正确,
         选择权停在最弱的验证信号上。现在只做两件事:
-          1. 剪掉空候选与预检失败者 (截断/语法错不进后续任何环节);
+          1. 剪掉空候选与预检失败者 (截断/语法错/**tile 放不下**不进后续任何环节);
           2. 按 temperature 序 (0.1→0.4→0.7, 低温 = 更贴 plan 的先验) 放行
              至多 L2_FINALISTS 个进入决赛, 由 Conductor 侧 L1+L2 真机定夺。
         """
@@ -200,18 +224,21 @@ class CoderPipeline:
                 break
             if not code:
                 continue
-            ok, _issues = self.compile_fn(code, dsl)
+            ok, issues = self._gate_check(code, dsl, kernel_type)
             if ok:
                 finalists.append(code)
+            elif any("资源预检" in i for i in issues):
+                # 单独说一句: 这类失败是「本地就能判死」的, 之前它烧的是真机往返
+                print(f"  [CoderPipeline] 候选被资源预检剪掉 (未动 SSH): {issues[-1][:110]}")
         return finalists
 
-    def _best_failure(self, candidates: list, dsl: str):
+    def _best_failure(self, candidates: list, dsl: str, kernel_type: str = ""):
         """选 issues 最少的失败候选作为修复基线; 返回 (code, issues) 或 None"""
         scored = []
         for code in candidates:
             if not code:
                 continue
-            ok, issues = self.compile_fn(code, dsl)
+            ok, issues = self._gate_check(code, dsl, kernel_type)
             scored.append((len(issues), code, issues))
         if not scored:
             return None
@@ -223,7 +250,7 @@ class CoderPipeline:
     def _repair_loop(self, candidates: list, sketch: UnifiedSketch,
                      task: TaskSchema, dsl: str) -> Optional[str]:
         state = RepairState(max_attempts=self.MAX_REPAIR_ROUNDS)
-        best = self._best_failure(candidates, dsl)
+        best = self._best_failure(candidates, dsl, task.source.kernel_type)
         if not best:
             return None
         base_code, base_issues = best
@@ -238,7 +265,8 @@ class CoderPipeline:
             state.tried_fixes.append(note)
             if not fixed:
                 break
-            ok, issues = self.compile_fn(fixed, dsl)
+            # 复检也过资源门 (I75-G1): 修完又写回大 tile 的产物不许再烧 SSH
+            ok, issues = self._gate_check(fixed, dsl, task.source.kernel_type)
             if ok:
                 return fixed
             base_code, base_issues = fixed, issues   # 基于修复版继续

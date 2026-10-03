@@ -100,7 +100,9 @@ def main() -> int:
         "l2_runs": h.get("real_l2_runs"),
     } for i, h in enumerate(hist)]
     cost = meta.get("llm_cost") or {}
-    deepest = max((r["levels"] or {}), key=lambda lv: -1) if rounds else None
+    any_level = lambda lv: any(lv in (r["levels"] or {}) for r in rounds)
+    deepest = ("L3" if any_level("L3") else "L2" if any_level("L2")
+               else "L1" if any_level("L1") else "无")
     out = {"wall_s": round(wall, 1), "preflight_s": preflight_s,
            "stop": meta.get("stop"), "llm_cost": cost, "rounds": rounds}
     print("RESULT " + json.dumps(out, ensure_ascii=False, default=str), flush=True)

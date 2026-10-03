@@ -24,6 +24,7 @@ import numpy as np
 
 from operator_agent.coder_pipeline import CoderPipeline, RepairState
 from operator_agent.planner import PlannerAgent
+from operator_agent.resource_check import MemCaps
 from operator_agent.rule_templates import RuleTemplateCoder
 from operator_agent.kernel_db import KernelDatabase
 from operator_agent.prompt_manager import PromptManager
@@ -270,3 +271,74 @@ class TestCoderAgentWithPipeline(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ─── I75-G1: compile-gate 的资源门 ─────────────────────────────
+
+TRITON_BIG_TILE = """import triton
+import triton.language as tl
+
+@triton.jit
+def _mm(a_ptr, b_ptr, c_ptr, M, N, K,
+        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    tl.store(c_ptr, acc)
+
+def kernel(A, B):
+    _mm[(1,)](A, B, A, 1, 1, 1, BLOCK_M=256, BLOCK_N=256, BLOCK_K=64)
+    return A
+"""
+# (256*64 + 64*256 + 256*256) * 4B = 384 KiB —— I75 首跑六次 L1 失败的同一形状
+TRITON_SMALL_TILE = TRITON_BIG_TILE.replace(
+    "BLOCK_M=256, BLOCK_N=256, BLOCK_K=64", "BLOCK_M=64, BLOCK_N=64, BLOCK_K=32")
+
+
+class TestResourceGate(unittest.TestCase):
+    """I75-G1: 不可行 tile 在采样处剪掉 (不烧 SSH), 与 L1 同一份估算、同一漏拦口径"""
+
+    def _pipe(self, caps):
+        llm = MockLLM()          # 门测试不该调 LLM; 调到会炸出可读错误
+        pipe = CoderPipeline(llm, KernelDatabase(),
+                             compile_fn=lambda code, dsl: (bool(code), []))
+        pipe.caps = caps
+        return pipe
+
+    def test_an_oversized_tile_dies_at_the_gate(self):
+        pipe = self._pipe(MemCaps(228))
+        self.assertEqual([], pipe._prune_to_finalists(
+            [TRITON_BIG_TILE], "triton", "matmul"))
+
+    def test_a_fitting_tile_passes(self):
+        pipe = self._pipe(MemCaps(228))
+        self.assertEqual([TRITON_SMALL_TILE], pipe._prune_to_finalists(
+            [TRITON_SMALL_TILE], "triton", "matmul"))
+
+    def test_missing_caps_lets_it_through(self):
+        """caps 缺 ⇒ 漏拦 (与 L1 同口径): 门不许比 L1 更严, 否则 caps 缺键的任务
+        会在生成侧全军覆没而没人知道为什么"""
+        pipe = self._pipe(None)
+        self.assertEqual([TRITON_BIG_TILE], pipe._prune_to_finalists(
+            [TRITON_BIG_TILE], "triton", "matmul"))
+
+    def test_the_resource_reason_reaches_the_repair_baseline(self):
+        """修复基线的 issues 带着上界约束 —— 修代码的提示从此有硬数字 (G3 的流程半边)"""
+        pipe = self._pipe(MemCaps(228))
+        best = pipe._best_failure([TRITON_BIG_TILE], "triton", "matmul")
+        self.assertIsNotNone(best)
+        _, issues = best
+        self.assertTrue(any("资源预检" in i and "228" in i for i in issues), issues)
+
+    def test_the_conductor_injects_caps_from_hardware(self):
+        """接线证人: hw_info → detect_hardware_caps → pipeline.caps (execute 内注入)"""
+        import contextlib
+        import io
+        from operator_agent.conductor import Conductor
+        from operator_agent.mock_gpu import MockGPU
+        from tests.test_template_queue import _KernelLLM, _task, _inputs
+
+        c = Conductor(backend=MockGPU(), llm=_KernelLLM(),
+                      kernel_db=KernelDatabase(jsonl_path=None))
+        with contextlib.redirect_stdout(io.StringIO()):
+            c.execute(_task(), _inputs(), target_gflops=0.0)
+        self.assertIsNotNone(c._coder_pipeline, "默认路径应构造 pipeline")
+        self.assertIsNotNone(c._coder_pipeline.caps, "caps 应在 hw_info 后注入")
