@@ -12,7 +12,11 @@
 - 硬件: {{hardware}}
 - DSL: {{dsl}}
 - 精度: {{precision}}
-- Tiling: {{block_m}} x {{block_n}} x {{block_k}}
+
+## Tiling 硬约束 (MUST —— 违反的候选会被资源预检**直接淘汰**, 不进真机验证)
+- BLOCK_M/BLOCK_N/BLOCK_K **必须严格使用** {{block_m}} x {{block_n}} x {{block_k}} (来自设计 sketch, 是设计决定, 不是建议)
+- **不得自行放大**: BLOCK_M=BLOCK_N=256 在 228 KiB smem 的卡上估算 384 KiB, 会被预检剪掉 (实测教训, 整轮白费)
+- 「性能要求」里的"增大 BLOCK"一律指**在上述 tiling 约束内**做结构优化, 不许改 BLOCK_* 常数
 
 ## 参考代码
 {{ref_code}}

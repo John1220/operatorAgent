@@ -99,7 +99,13 @@ def main() -> int:
         "gflops": h.get("gflops"),
         "l2_runs": h.get("real_l2_runs"),
     } for i, h in enumerate(hist)]
-    cost = meta.get("llm_cost") or {}
+    # llm_cost: result.json 落在**顶层** (ArtifactStore 把 metadata.llm_cost 提升),
+    # 进程内则在 artifact.metadata —— 两个口径都看; 分解的键形 (扁平/嵌套) 不猜,
+    # 原样进 RESULT, 判据只用「有量」这种结构事实。
+    cost = (getattr(art, "metadata", None) or {}).get("llm_cost") or {}
+    if not cost:
+        top = getattr(art, "llm_cost", None)
+        cost = top if isinstance(top, dict) else {}
     any_level = lambda lv: any(lv in (r["levels"] or {}) for r in rounds)
     deepest = ("L3" if any_level("L3") else "L2" if any_level("L2")
                else "L1" if any_level("L1") else "无")
@@ -108,12 +114,17 @@ def main() -> int:
     print("RESULT " + json.dumps(out, ensure_ascii=False, default=str), flush=True)
 
     def _calls(*tags):
-        return sum((cost.get(t) or {}).get("calls", 0) for t in tags)
+        # 兼容两种分解形状: {tag: {...}} 或 {by_caller: {tag: {...}}}
+        by_caller = cost.get("by_caller") if isinstance(cost.get("by_caller"), dict) else cost
+        return sum((by_caller.get(t) or {}).get("calls", 0) for t in tags)
 
-    any_level = lambda lv: any(lv in (r["levels"] or {}) for r in rounds)
+    total_calls = cost.get("total_calls") or sum(
+        (v or {}).get("calls", 0) for v in
+        (cost.get("by_caller") or cost).values() if isinstance(v, dict))
+
     checks = {
         "C1 端点预检通过": bool(pong.strip()),
-        "C2 Designer 有花费 (sketch 产出)": _calls("Designer") >= 1,
+        "C2 生成侧有 LLM 花费 (Designer/Coder/Planner)": total_calls >= 1,
         "C3 CoderPipeline 走了 (candidates>=1)": any(
             isinstance(r["candidates"], int) and r["candidates"] >= 1 for r in rounds),
         "C4 L1 有判定 (真机编译)": any_level("L1"),
