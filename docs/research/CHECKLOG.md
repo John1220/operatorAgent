@@ -1006,6 +1006,19 @@
   **两臂真机对照 ⏳ 未跑**（同卡两次完整循环, 要 LLM）⇒ 「审计有收益」今天仍不许说
 - **类别**：I · **状态**：⚠️ 比较器 ✅ 已落地 / 两臂 ⏳ 未跑
 
+### I75 · 代码型路径首次真 LLM 端到端：路径活了，27B 卡在 L1——三个生成侧缺口被照亮
+
+- **原话**：设计 §15「Stage 4 LLM 结构提议」；Stage 3 行「仍未覆盖…LLM 路径」；§9「便宜代理先剪枝」。
+- **实证**：`python3 benchmarks/llm_e2e_h20.py`（真 LLM Qwen3.8-27B @ config.yaml 端点免 key；H20 真机；matmul 4096³ fp32/triton/min_speedup=0.5/max_rounds=3；wall≈3.3min）：
+  - **路径首秀全走通**：预检→Designer sketch（64×64×32，schema 过）→CoderPipeline（3 路采样、2/3 过 compile-gate）→决赛选择（真机 L1+L2）→L1 资源预检拦下→§8 路由 fix→Fixer×2+Reflexion×2→3 轮→`stop=l1_l2_failed`；llm_cost 按 caller_tag 落盘（Designer/Planner/Coder/Fixer/Reflexion/Preflight 分列）；Novelty 3 轮 2 结构；FailureDB 双门在岗。
+  - **六次 L1 失败一字不差**：全部 BLOCK 256×256×64 ⇒ 估算 384KiB > 228KiB——资源预检（`daf2126`）每次都在动 GPU 前拦下，它自己工作正常；被照亮的是它上游的三个缺口：
+    **G1** compile-gate 只查「代码长得像」不查 smem——tile 估算控制端就能算（I66 的 `tile_smem_bytes`），256 的候选本应**本地**剪掉，现在每轮白烧一次 SSH+环境自检（本轮共 6 次）；
+    **G2** Coder 不遵从 sketch tiling——Designer 给了 64×64×32，代码写 256×256；「Designer/Coder 分离 ⇒ 改 sketch 不必重写代码」的前提（遵从性）不成立；
+    **G3** `fixer_repair.md` 不带 smem 上限约束——Reflexion 根因写对（「BLOCK_M/N 256 过大」）而 Fixer 两轮修复产物 `BLOCK_M=256` **原封不动**（提示约束缺、27B 常数修改能力弱，二者至少其一）。
+- **后果**：不修 G1，坏 tile 候选每次白烧 SSH；不修 G2/G3，27B 在这类任务上永远过不了 L1，Stage 4 的「LLM 提议」没有起点。修法方向：G1 = `tile_smem_bytes` 预检接进 CoderPipeline 的 compile-gate（§9「便宜代理先剪枝」在生成侧的对应物，本地零成本）；G2/G3 = prompt 层（planner/coder 带上 smem 上限与 sketch tiling 的硬约束；fixer_repair.md 增资源约束节）。**本片只登记，修复是下一片。**
+- **出处**：`benchmarks/llm_e2e_h20.py`（判据 C1–C7 内建）；产物 `output/matmul/nvidia_gpu/20261003_145558_5a651a4f`（report.md / result.json / 13 步快照）；日志 `logs/20261003_145238_matmul_nvidia_gpu_llm-e2e-.log`
+- **类别**：I（生成侧三缺口首次被真机照亮——此前 spine 全程 LLM-free，这条路径上的判定从未真的跑过） · **状态**：⚠️ 2026-10-03 首跑完成——路径判定 C1–C4 过（预检/Designer/流水线/L1 有判定），C5–C6 未达（L1 全灭 ⇒ L2/L3 未及），C7 过；G1–G3 登记未修，修复是下一片
+
 ### I74 · §10.4 两条件停滞出口与「拒绝只因轮数停止」首次真机观测；账本把停止轮也记进 declined
 
 - **原话**：设计 §10.4「不许只因轮数停止 —— 停滞 = 『K 轮 valid 无改善』∧『有希望的区域已穷尽』两条件**同时**成立」；I72 的边界「§10.4 覆盖判据的『穷尽』分支未单独观测（48 点空间 3 轮跑不满）」。
@@ -1875,6 +1888,7 @@
 | I72 | Stage 3 模板机制**首次真机过完整 Conductor 主循环**（两臂全绿: 跳过 LLM 生成侧 / 臂=点身份 / 达标即停 / 3 轮 3 点 / template_selection 落血缘）; 新观察: 组合后端 label 进环境指纹 ⇒ 新组合后端**首跑必 degraded** (can_persist=False) | I | ✅ 2026-10-02 两臂 (30.9s/57.7s); 指纹口径**当日修复** (`fingerprint_label` 取执行侧身份) 并真机复验 (第 2 跑 valid/can_persist=True); 矩阵 9/9; §10.4「穷尽」分支其后已观测 (I74) |
 | I73 | 并发首次部署同一文件存在竞争窗口 —— 两个 harness 进程同时 hash 失配、同时 scp 同一路径, 写坏 ⇒ runner 起不来 (自愈但白烧一轮); 串行化承诺对 **deploy 路径**同样只覆盖进程内 | I | ⚠️ 未修 (登记); 修法方向: 远端临时名+原子 mv 或部署锁; 实验以串行预热规避 |
 | I74 | §10.4 **两条件停滞出口首次真机 fire**（12 点空间 13 轮: explore 逐点试完, 4 次「阈值到但未穷尽 ⇒ 不许宣布停滞」, 转 refine 后 12/12 穷尽 ∧ 阈值 ⇒ stagnant 且理由点名两半）; §13.5 如实不 fire (37% of 峰值) | I | ✅ 2026-10-03 五判据全绿 (197.2s); 附带两处小缺口已记正文 (账本 declined 语义 / 升级门裁决未落 RESULT) |
+| I75 | 代码型路径**首次真 LLM 端到端**（27B+H20, 全链走通: sketch→流水线→决赛→L1 预检→路由→Fixer→l1_l2_failed）; 27B 卡 L1, 照亮三缺口: G1 compile-gate 不查 smem (白烧 SSH×6) / G2 Coder 不遵从 sketch tiling (64→256) / G3 fixer 提示无资源约束且改不动常数 | I | ⚠️ 2026-10-03 首跑: C1-C4/C7 过, C5-C6 未达; G1-G3 登记未修, 修复是下一片 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |
