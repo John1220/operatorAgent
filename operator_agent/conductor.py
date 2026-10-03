@@ -42,7 +42,8 @@ from .exhaustion import (FROM_LLM_ON_DEMAND, FROM_TEMPLATE_SPACE,
 from .selection import DEFAULT_EPSILON, choose, explore_draw, phase_of
 from .source_lang import flag_from_metrics
 from .escalation import (
-    EscalationInputs, decide, smem_bound_evidence, untried_directions,
+    EscalationInputs, decide, occupancy_bound_evidence, smem_bound_evidence,
+    untried_directions,
 )
 from .hardware_caps import detect_hardware_caps
 from .resource_check import caps_from_metrics, check_resource_feasibility
@@ -446,6 +447,12 @@ class Conductor:
                 current_code, _CapsKB(),
                 getattr(getattr(task, "source", None), "kernel_type", "") or "")
             limits = smem_bound_evidence(rep.estimated_smem_bytes, rep.limit_bytes)
+            # §10.3 条件 2 的第二把量具 (占用率上限)。输入全部取自**已测指标**,
+            # 缺任一 ⇒ 该条不产出 (三态), 绝不拿默认值假装测过。
+            limits = limits + occupancy_bound_evidence(
+                rep.estimated_smem_bytes, metrics.get("num_warps"),
+                shared_mem_per_sm_kb=caps_kb,
+                max_threads_per_sm=metrics.get("max_threads_per_sm"))
         dirs = untried_directions(
             [r.id for r in (plan.selected_recipes if plan else [])],
             sorted(applied_recipes), sorted(disabled_recipes))

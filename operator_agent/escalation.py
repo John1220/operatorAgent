@@ -111,6 +111,53 @@ def smem_bound_evidence(tile_smem_bytes: Optional[int],
             f"{limit_bytes / 1024:.0f}KiB (resource_check 估算 + HardwareCaps)",)
 
 
+#: 占用率硬限制的门槛: 每 SM 最多只驻留这么少的 CTA ⇒ 谈不上延迟隐藏, 而**换 tile 不改这个数**
+#: (它由每个 CTA 的线程数决定) —— 这正是「可归因的硬限制」而不是「感觉调不动了」。
+OCCUPANCY_FLOOR_CTAS = 2
+
+
+def occupancy_bound_evidence(tile_smem_bytes: Optional[int],
+                             num_warps: Optional[int], *,
+                             shared_mem_per_sm_kb: Optional[int] = None,
+                             max_threads_per_sm: Optional[int] = None
+                             ) -> Tuple[str, ...]:
+    """`occupancy-bound` 证据 (设计 §10.3 条件 2 明列的「占用率上限」那一把量具)
+
+    与 `smem_bound_evidence` **同一条纪律**: 说得出出处才算证据 —— 缺任一侧 ⇒ 空
+    (三态: 「没测到」不等于「没上限」, 也**不**等于「有硬限制」)。
+
+    判据是**每 SM 能同时驻留几个 CTA**, 取两个限制里更紧的那个:
+      * 线程: `max_threads_per_sm // (num_warps × 32)`
+      * 共享内存: `shared_mem_per_sm_kb × 1024 // tile_smem_bytes`
+
+    为什么这算「换 tile 改不了」: 线程那一侧只由 CTA 的线程数决定, tile 大小动不了它;
+    所以当**线程侧**就是瓶颈且只够 1–2 个 CTA 时, 参数搜索确实到顶了 —— 要变只能改
+    线程数/布局这类**结构方向** (条件 3 管的就是「还有没有这样的方向」)。
+
+    smem 侧因此**也必须已知**: 只有知道 smem 侧不比线程侧更紧, 才有资格说瓶颈是线程。
+
+    刻意**不**把「smem 侧更紧」也报成占用率证据: 那已经被 `smem_bound_evidence` 认领,
+    同一件事报成两条会让条件 2 看起来证据更多 (归因必须唯一)。
+    """
+    for value in (tile_smem_bytes, num_warps, max_threads_per_sm, shared_mem_per_sm_kb):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            return ()
+    ctas_by_threads = max_threads_per_sm // (num_warps * 32)
+    if ctas_by_threads > OCCUPANCY_FLOOR_CTAS:
+        return ()
+    # smem 侧**必须**已知: 不知道谁更紧, 就没有资格声称「换 tile 改不了这个数」
+    # (「没测到」不许被读成「不是它」—— 那是三态纪律里最容易被偷的那一步)。
+    ctas_by_smem = shared_mem_per_sm_kb * 1024 // tile_smem_bytes
+    if ctas_by_smem < ctas_by_threads:
+        return ()      # 更紧的是 smem 侧 ⇒ 那是 smem-bound, 不由本条认领
+    pct = 100.0 * ctas_by_threads * num_warps * 32 / max_threads_per_sm
+    return (f"occupancy-bound: 每 CTA {num_warps}×32={num_warps * 32} 线程, 每 SM 上限 "
+            f"{max_threads_per_sm} 线程 ⇒ 最多 {ctas_by_threads} 个 CTA ({pct:.0f}% 占用), "
+            f"且线程侧不比 smem 侧松 ({ctas_by_smem} vs {ctas_by_threads}) —— "
+            f"换 tile 改不了这个数 (TritonCompileConfig.num_warps "
+            f"+ HardwareCaps.max_threads_per_sm)",)
+
+
 def untried_directions(selected_recipe_ids: Sequence[str],
                        applied_recipe_ids: Sequence[str],
                        disabled_recipe_ids: Sequence[str] = ()) -> Tuple[str, ...]:
