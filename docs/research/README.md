@@ -88,4 +88,4 @@
 
 - 分支：`research/agent-design-2026`（每项吸纳一个提交）
 - 上游既有文档：[`../问题识别与技术方案.md`](../问题识别与技术方案.md)、[`../CUDA-Agent-特性分析.md`](../CUDA-Agent-特性分析.md)
-- 架构总览：[`../../CLAUDE.md`](../../CLAUDE.md)
+- 架构总览：[`../design/autonomous-operator-agent-design.md`](../design/autonomous-operator-agent-design.md)（§2 总体架构）与 [`../user_guide.md`](../user_guide.md) §1.3；实现状态见 [`../status/autonomous-operator-agent-status.md`](../status/autonomous-operator-agent-status.md)。原 `CLAUDE.md` 已归档（[`../archive/CLAUDE-md-archived.md`](../archive/CLAUDE-md-archived.md)，不再维护）

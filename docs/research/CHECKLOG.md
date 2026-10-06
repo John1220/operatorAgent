@@ -802,6 +802,260 @@
   门看不出。修法：标量走新的 `scalars` 字段按值直传（数组仍按描述生成，那是刻意的取舍）
 - **类别**：I · **状态**：✅ 已修（真机复验：远端收到 `causal=False eps=1e-05 repeats=8 scale=2.5`）
 
+### I83 · §21.3「筛过的证据 vs 全量日志」真机两臂跑了：N=3 个场景 × 2 臂，**结论是「分辨不出」**，可分辨的那一侧只有成本
+- **原话**：设计 §21.3「每次 LLM 调用**只**提供这八项」；`Conductor.structured_evidence`
+  的构造参数注释原先写「关掉时 prompt 与接线前逐字相同」，状态文档 §21 行写「两臂对照今天
+  仍没跑（⭐ 收益未实测，不许声称）」
+- **实证**（真机 algorithm-h20 + 真 LLM `Qwen3.8-27B`（端点见 `benchmarks/` 的配置，不在这里落字），
+  2026-10-05，报告 `output/evidence_ablation_20261005-235717.json`，`mode=real`、
+  `plan=6`、`aborted=false`）：三个场景（`syntax` 本地语法预检 / `interface` 本地接口契约
+  预检 / `numeric` L2 数值门）各跑两臂，**三对全部 `usable=true`**（判据：砍掉证据段后两臂
+  prompt 除空白外**逐字相同** = `squeezed_residual_chars` 全 `0`；纯空白残差 −2 chars 来自
+  模板自己占的那一行；历史修复案例段两臂都是「无」⇒ 失败库没串味）：
+
+  | 场景 | 开（筛过的证据） | 关（全量日志） | 轮数（开/关） | 停止原因（开/关） | prompt token（开/关） | 证据段 | 墙钟（开/关） |
+  |---|---|---|---|---|---|---|---|
+  | syntax | ✗ 未通过 | ✗ 未通过 | 2 / 2 | `l1_l2_failed` / 同 | 5352 / 4965 | 924 chars | 51.4s / 64.4s |
+  | interface | ✗ 未通过 | ✗ 未通过 | 2 / 2 | `l1_l2_failed` / 同 | 5515 / 5144 | 831 chars | 57.1s / 40.0s |
+  | numeric | ✗ 未通过 | ✗ 未通过 | 2 / 2 | `rounds_exhausted` / 同 | 5310 / 4976 | 685 chars | 54.2s / 55.4s |
+
+  合计 **通过 0/3（开）vs 0/3（关）**、差值 **+0.0 pp**、两臂**读数完全相同**；
+  N=3 时通过率量具最多只能分辨 ≈60.1 pp（`harness_pass_rate.min_detectable_delta`）。
+  **可分辨的那一侧只有成本**：证据段 685~924 chars ⇒ 每次 Fixer 调用的 prompt token
+  多 **+334~+387**（三格同向）。⚠️ 成本读数只认 **`tokens_prompt`**：把完成量算进来的
+  「整跑 token」两臂可正可负（syntax −239 / interface +1256 / numeric +295），**被完成长度
+  的方差盖过**；远端调用数两臂不同是**通过/失败的下游后果**（关臂过了 L2 才会去跑 L3），
+  不是独立成本信号。
+  **「两臂都红」不是证据造成的**（同一批的现场证据）：fp32 的容差表
+  `tolerance_for('fp32') = (1e-4, 1e-4, 1.0)`，而 `effective_atol` 对任务值取 **min** ⇒
+  实验里传的 `max_error=1e-2` 完全无效，真正的门是 **atol=1e-4**；triton `tl.dot` 默认 TF32
+  在这台卡上误差 **1.22e-03** ⇒ 不加 `input_precision="ieee"` 的修复**必挂 L2**。所以那三格
+  的红**读不出开关效应**，只读出「这条路线还没解决精度」。
+  另有一份 N=1 的单场景报告（`output/evidence_ablation_20261006-000119.json` /
+  `-000419.json`，同一份源码指纹，`--min-speedup 0.3`）里 `numeric` 是
+  **开=未通过 / 关=通过**（−100 pp）—— 单格的方向不稳，正是「N 太小时一格不算数」的现场。
+  它能当反例是有实据的：同格开臂三次的 Fixer prompt **逐字同长 13516 字符 / 证据段同 685 /
+  预算数值同源**，修复产物却一次带 `input_precision="ieee"`（`output/matmul/nvidia_gpu/`
+  `20261005_235621_e8d3281a/code.py`，L2 过 0.00e+00）、两次不带
+  （`20261006_000019_873cbd2b`、`20261006_000315_7dcbdecd`，L2 挂 1.22e-03）
+  ⇒ **修复侧本身是采样的**（端点 temperature=0.1），单次分裂读不出方向。事后用仓内自己的
+  `harness_pass_rate.fisher_exact` 算：0/2 vs 2/2 → **p=0.333**；并三次 1/3 vs 3/3 →
+  **p=0.400**；批一全量 0/3 vs 0/3 → p=1.000 —— **三个都不显著**（这一行是事后补充，
+  不在被引用的结论句里）
+- **出处**：权威报告 `output/evidence_ablation_20261005-235717.json`，
+  sha256 `709e0979…ffbd3`（主 agent 复核过），`mode=real` / `plan=6` / `aborted=""`；
+  两份补充报告 `…-000119.json` sha256 `80428322…1053b`、`…-000419.json`
+  sha256 `43cc8e13…67ed6`（内容相同，numeric 单格复跑）。
+  ⚠️ 按实读一条：权威报告里 `min_speedup` 是 **`null`**（那个字段当时还不存在），
+  **实跑用的是源码里写死的默认档 0.5** —— `null` **不许**读成「没有性能门」；这一档后来
+  做成了 `--min-speedup` 并逐次记进读数（当前 `benchmarks/evidence_ablation_h20.py`
+  sha256 `c8b6e282…`；**权威报告不是这一版产生的**：批一用 `70020db00885…`、批二/三用
+  `5c1d8ca79cb8…`，当前版多存一个 `fix_prompt_sha256`、结论句多一行「红在哪」，
+  而被引用的那两段结论句与落盘 JSON 的 `conclusion` 字段**逐字节相同**）。
+  驱动本身：`benchmarks/evidence_ablation_h20.py`（`pair_up` 三条判据、`_empty_run`
+  崩溃留痕、`conclusion` 里写死「N 太小时不许声称收益、也不许声称无收益」）、
+  `tests/test_evidence_ablation.py`（**30 条**：两臂在 prompt 上的差集、崩溃路径、结论句不许
+  出现「收益」、`min_detectable_delta` 必须出现在结论里）、
+  `benchmarks/mut_specs/evidence_ablation.py`（8 行）、`operator_agent/conductor.py`
+  的 `structured_evidence` 构造参数（唯一开关）；报告自带 `provenance.files`：
+  `conductor.py d1260b2cf9bc` / `agent_runtime.py 55259db3f3cd` / `fixer.py 96e598a14423` /
+  `prompts/fixer_repair.md 16b531866015`（与冻结指纹逐字一致）+ 驱动自己的哈希。
+  **变异标定（2026-10-06，主 agent 串行跑）**：8 行 → **行为 7/7 + 结构 1/1，0 逃逸**。
+  标定当场抓到两个真问题并已修：① M8（`error_excerpt` 不丢掉标题那一行）**逃逸** ——
+  用例当时只断言「样板句不在」，标题行漏掉了；补 `assertNotIn('## 错误信息')` + 首行逐字
+  相等后才杀掉（同时把这一行的名字改对了：它动的从来不是样板句）；② M7 的
+  `behavioral=False` 当初**只写在证人字符串里、没真的传关键字**，于是它在分母里被算成
+  行为行 —— 已补上，分类才与「只有源码守卫杀得掉它」一致
+- **后果**：**可声称**：① 两臂的对照是**干净**的（差集口径成立、失败库无串味、三对全可用）；
+  ② 证据那一段的成本是**可分辨的**（+334~+387 prompt token/次，快照式读数）；③ 在 N=3
+  这个量程下**通过率、轮数、停止原因三项都分辨不出差别**。**不许声称**：收益（「筛过的证据
+  更好」）与无收益（「证据没用」）—— 两句话在今天的数据上都不成立，量程自己就写着 ≈60 pp。
+  要给出可判的答案，需要的是**更多场景/更多重复**（每次真机跑 ≈40~65s/格，6 次上限意味着
+  N 只能到 3），而不是改结论。这一条同时修掉两处文档口径：构造参数与状态文档里原先那句
+  「关掉时 prompt 与接线前逐字相同」已改成**差集口径**（其余段两臂同值、不进差集）
+- **类别**：I · **状态**：✅ 2026-10-05 已真机跑（N=3，两臂干净、收益不许声称；欠账是 N）
+  ＋ 2026-10-06 变异标定 8 行 0 逃逸（抓到并修掉 M8 逃逸与 M7 分类错误）
+
+### I84 · §21.1 的 `AgentAction` 一直是 harness 自己包出来的 —— 七个种类里三个**没有生产者**，而 §21.2 有一条判据因此**永不失败**
+- **原话**：设计 §21.1「每次 LLM 调用必须交一个动作信封：`kind` / `rationale` /
+  `expected_bottleneck` / `requested_tools` / `token_budget`」；§21.2 的权限表里
+  「数值错误 → `repair_correctness`（局部优先，**必须带误差形态**）」
+- **实证**：接线前 `Conductor._round_agent_action` 按轮次与路由**自己拼**动作：`kind`
+  由 `_round_action_kind(round_action, route)` 推、`rationale` 由 harness 拼
+  （形如 `第 2 轮 fix; 路由 kind=numeric route=…; 误差形态=whole_tensor; 相对父代 +a/-b 行`）、
+  `requested_tools` 恒空。后果分两半，都不是「少个功能」：
+  ① `request_profiler` / `request_new_shape` / `explain_failure` 在仓里**只有判据、
+     没有生产者**（与 I82 的 `AuditCoverage` 同族、与 I80 硬伤三同族：闭集词汇的一端
+     没人发）；设计里写着「模型可以要观测」，而链路上根本没人在读模型的话；
+  ② §21.2 那条「必须带误差形态」因为理由是 harness 逐字拼进去的，**永远为真** ——
+     一条只可能绿的判据（本仓 I4/I11 那一族的第 N 个形态，这次的位置是「判据的对象
+     由判据自己生产」）
+- **2026-10-05 落码**：`agent_runtime` 新增信封生产者侧（`ENVELOPE_FENCE` /
+  `parse_action_envelope` 三态 `parsed`/`absent`/`malformed` + `ActionEnvelope` /
+  `ask_unavailable_reason`）；`FixerAgent.run_with_action` 用信封替掉回复里的那一段
+  （`run` 保留为它的**两格投影**，接线前行为逐字不变）；`Conductor` 在**修复轮 → 下一轮**
+  这一格消费它（与 `pending_fix` 同生同灭，读点一处、写点四处，AST 计数守卫钉住）。
+  **作者边界**：模型写意图（kind/rationale/bottleneck/tools），harness 写**数字与路径**
+  （`patch.path` 来自 §22.1 的 `candidate_path`、`token_budget` 是真的上限；模型自己在
+  信封里写的 `token_budget` 只留档、`path` 进 `unknown_keys`）—— 让被判的人填判据里的数
+  就是这条纪律的反面。**响应有界**：询问类动作答/拒一次（`ask_turns=2` 再问就停并记
+  `ask_turns_exhausted` 进出口词汇表），答复走**声明过的**模板段而不是塞进 §21.3 的八段
+  证据（第二个注入通道会污染两臂对照）
+- **出处**：`operator_agent/agent_runtime.py`（信封 + 同源判据）、`operator_agent/fixer.py`
+  （`run_with_action` / `FixOutcome`）、`operator_agent/conductor.py`（消费点 +
+  `_answer_ask_and_retry`）、`operator_agent/prompts/fixer_repair.md`（`## 动作信封` 段 +
+  `{{ask_answer}}`）；`tests/test_llm_action_producer.py`（24 条，含**真跑一轮**把
+  `source == llm` 那一支执行到）、`tests/test_agent_runtime_wiring.py`、
+  `tests/test_structured_evidence.py`、`tests/test_fixer.py`；
+  `benchmarks/demo_agent_runtime.py` 场景 6（零依赖，屏幕上能看到「动作是谁写的」）；
+  `benchmarks/mut_specs/llm_action_producer.py`（16 行：14 行为 + 2 结构）
+- **后果**：可声称：`kind`/`rationale`/`bottleneck`/`tools` 的来源在产物里分得开
+  （`action_envelope.source` = `llm`/`harness` + `used_for_action`）；§21.2 的误差形态
+  从**构造保证**变成**对真实输入的判断**（模型不点名形态 ⇒ 零 GPU 秒被拒，拒绝理由作为
+  下一轮的错误信息回到模型眼前 ⇒ 自纠的环）；三个 ask 种类第一次有生产者且有响应。
+  代价说清：模型不守协议时白烧一次 Fixer 调用（`absent` 档退回接线前的行为）；
+  跨**续跑**那一格只恢复候选（`pending_fix`）不恢复意图（信封不进快照）⇒ 那一轮必然记
+  `absent`，宁可退回 harness 拼装也不凭空造一份模型理由（守卫钉住快照那两个函数都不碰信封）。
+  **同源判据顺手补了一处三态缺陷**：`_check_capability` 里 `KIND_REQUIRED_TOOLS` 那一支
+  原先写「今天不可用」，把「profiler 还没做」与「这台机器不支持它」压成一句，现在直接用
+  `ask_unavailable_reason` 的事实句
+- **类别**：I · **状态**：✅ 2026-10-05 生产者侧接线完成（24 守卫 + 16 行变异 + 演示场景 6）；
+  **2026-10-06 变异标定：行为 14/14 + 结构 2/2，0 逃逸**（标定当场抓到 M16 那一行**写错了**：
+  它加的是「另一个名字的属性」，而 AST 守卫数的是同一个属性名的写点 ⇒ 逃逸；改成同一个
+  属性名的多余写点后才被杀掉 —— 这正是「逃逸的行说明证人写错了」那一族，已把这条教训写进
+  规格里那一行的证人）；
+  边界：`request_profiler` / `request_new_shape` **答不出来**（注册表里是 `None`，如实报
+  `refused_no_gauge`，不许读成「观测结果是空」）；两臂真机读数见 I83
+
+### I85 · §22.2「候选执行时的资源隔离」今天只有**本地半片**：五档状态 + 逐项强制读数是真的，隔离不是
+- **原话**：设计 §22.2「候选代码在评测进程里运行时，它与 harness 共享地址空间、文件系统与
+  网络」，九项清单（编译超时 · 运行超时 · GPU watchdog · CPU/内存 quota · 文件系统白名单 ·
+  网络默认关闭 · 进程树清理 · artifact 大小限制 · 设备租约超时与回收）；§3.5 规则 2
+  「默认值即判据」；I65「查不了不许读成没问题」
+- **实证**（darwin / python 3.9.12 / uid 501，2026-10-04，原始读数见
+  `operator_agent/exec_guard.py` docstring）：**拦得住的**：`CPU=1s` + 死循环 ⇒
+  `rc=-24`（SIGXCPU）；`FSIZE=1MB` 写 5MB ⇒ `Errno 27`（文件停在 1048576 字节，**没有**
+  SIGXFSZ）；`NPROC=8` + 60 次 `Popen` ⇒ **0 成功 / 60 次 `EAGAIN`**（且是 **per-UID**，
+  不许读成「这个进程可以有 N 个子进程」）；`start_new_session` + `killpg` ⇒ 孙进程零残留、
+  **正常返回也收尾**。**设不上的**：`RLIMIT_AS`/`RLIMIT_DATA`/`RLIMIT_RSS` 在本机内核
+  `EINVAL`/`EPERM`（libc 直调 `setrlimit` 复现，能把「内核不给」与「Python 不给」分开）
+  ⇒ 内存这一档只能**如实报** `not_enforced` + 原始 errno，父侧看活体子进程内存也做不到
+  （`ps` 被沙箱挡；`getrusage(RUSAGE_CHILDREN).ru_maxrss` 活体轮询恒 0.0MB）。**顺带抓到的
+  一条真缺陷**：产物经 pickle 文件回传，`RLIMIT_FSIZE` 同时管它和候选写的文件 ⇒ 第一版
+  8MB/64MB 把 LeetCUDA 那些**合法**的 64MB 产物截断成一句 `UnpicklingError`（看起来像
+  「候选坏了」，实际是「两个上限打架」）；修法 = 默认值 512MB/256MB + **构造期不变量**
+  `artifact_bytes <= file_size_bytes`
+- **出处**：`operator_agent/exec_guard.py`（新，单一入口 `run_candidate`）、
+  `operator_agent/mock_gpu.py::_execute_python`（唯一接线点，语义逐字不变）、
+  `tests/test_exec_guard.py`(35) + `tests/test_demo_exec_guard.py`(5)、
+  `benchmarks/demo_exec_guard.py`、`benchmarks/mut_specs/exec_guard.py`（14 行；作者自查 14/14
+  拦住、0 逃逸，M9 曾逃逸 —— 断言只覆盖了产物那条路的读数，没覆盖「失败原因必须带
+  maxrss」这句话本身。**2026-10-06 主 agent 在全部代码冻结后串行标定：行为 13/13 + 结构 1/1，
+  0 逃逸**，与自查一致）；受影响的既有守卫 `tests/test_leetcuda_bench.py`；
+  撞过并避让的既有不变量 `tests/test_run_layout.py::TestOnlyOneDoorInTheHarness`。
+  **主 agent 独立复核过三条**（不是转述报告）：`Limits(artifact_bytes > file_size_bytes)`
+  ⇒ `ValueError`；产物 32,000,732 字节 > 上限 1024 ⇒ `status=limit_exceeded`、
+  `kind=artifact`、`output=None`（失败而不是截断后当通过）；`memory_bytes=64MB` ⇒
+  `not_enforced` + 真实原因（`ValueError: current limit exceeds maximum limit`），
+  而该次 `status=ok`、`fully_enforced=False`（设不上没有被读成「拦住了」或「没有上限」）
+- **后果**：可声称 6 条（杀进程组含孙子 + 正常返回也收尾；CPU/文件大小/进程数三档拦得住
+  且带读数；设不上/没请求/被杀读不到的项如实报 `not_enforced` + 原因；产物封顶是**失败**
+  不是截断；正常候选语义逐字不变；候选改不动 harness 的模块状态/环境变量/cwd —— 这是原先
+  进程内 `exec` 做不到的）。**不许声称**：不是敌意候选的沙箱（同 uid、**网络没关**、无容器/
+  cgroup、无文件系统白名单）；内存本机设不上（Linux 未实测）；无 GPU watchdog；无设备租约
+  回收；**编译超时**未落；远端 runner 侧零覆盖（仍是同 uid 落 `/tmp` 后 `exec_module`）；
+  CUDA 执行路径未接。另有一条「默认值即判据」在这里的具体含义：`Limits` 今天是**模块默认
+  常数**，任务/阶段的超时传递链没有落地 ⇒ 所有阶段共用一组数（§22.2 第一项，登记未做）
+- **类别**：I · **状态**：⚠️ 本地半片已落（40 守卫 + 14 行变异；**2026-10-06 主 agent 复跑串行标定：
+  14/14 全拦住、0 逃逸**）。复跑修掉两处**量具**问题（都不是判据被绕过）：① 那张表原来的 M12
+  （`_execute_python` 直接 `exec`）走的是**结构分母**，理由是「合法候选那一趟两种实现返回值一样」——
+  但「候选改不动 harness」那组用例本来就分得开，所以它改成行为见证人（去掉受控入口 ⇒ 6 条红）；
+  ② M2（正常返回后不再收尾）的证人是「孙进程过 1.0s 写文件，用例等 1.3s 再看」——余量只有
+  0~0.25s（孙进程还要先起一个解释器），机器一忙痕迹就晚于检查出现，**一次标定把它读成了
+  「逃逸」**；用例的等待提到 2.5s（余量 ~1.2s）后复跑为真。这一族（读数随机器负载变）与
+  I11/I15 同源：**证人自己的余量也是量具的一部分**
+
+### I86 · 「离线全绿、真机必炸」的一类盲区：漏导入藏在**从来没有被离线执行到的那一支**里
+- **原话**：本仓的接线自检长期写成「`import operator_agent` 通过 + 离线套件全绿 ⇒ 接线没断」
+- **实证**：I84 接线时 `conductor.py` 用了 `PATCH_KINDS` 却漏了它进 `from .agent_runtime
+  import (...)` 名单。`import operator_agent` **通过**（NameError 在函数体内），离线套件
+  **全绿**（那行判据是 `if source == ACTION_SOURCE_LLM and kind not in PATCH_KINDS:`，
+  `source` 为 harness 时被 `and` 短路 ⇒ 那一支从未求值），而真机跑到第 1 格第 2 轮就
+  `NameError: name 'PATCH_KINDS' is not defined`，把一次 6 次上限的 A/B 实验整跑带走
+  （实测代价：1 次真实 Fixer 调用 + 预检，零可引用读数）。同一族的形状：报告里那句
+  「import ok」式的自检**结构上**挡不住这一类 —— 它检查的是模块能否加载，不是那支代码
+  能否执行
+- **出处**：`tests/test_llm_action_producer.py::test_the_kind_and_the_rationale_come_from_the_model`
+  （修法：把信封真的喂进一次 `Conductor.execute`，断言下一轮 `action_envelope.source == "llm"`，
+  于是 `source == ACTION_SOURCE_LLM` 那一支**必须**被执行到）；发现者是并行的检索侧会话
+  （它当时正用 `benchmarks/evidence_ablation_h20.py` 跑真机，见 I83）
+- **后果**：接线自检的口径要改：**每一支新分支都要有一个离线输入把它执行到**，不然
+  「全绿」证明的只是「没走到那儿」。这条与 I11/I15（守卫在不成立的前提下恒绿、没有汇总行
+  不是拦住）同族，位置在**生产入口的新分支**上；另外它揭示了一类成对风险：离线路径
+  （MockGPU、无 LLM）与真机路径（真 LLM 会交信封）覆盖的**分支集不同**，两边的绿不能
+  互相顶替
+- **类别**：I · **状态**：✅ 已修（`PATCH_KINDS` 进名单 + 那条「真跑一轮」的守卫；同族检查
+  已在本片新分支上做一遍：信封三态、三个 ask 种类、模型/harness 两种来源都有离线的具体输入）
+
+### I87 · §22.2 的第一项「编译超时」一直是**空的**：编译期在 harness 进程里 `exec` —— 九项清单的第一项，落点却在「进 L1 之前」
+- **原话**：设计 §22.2 的清单第一位就是「编译超时」，而本仓的编译期执行从来没有墙钟、没有 rlimit、没有进程组
+- **实证**：`MockGPU.compile`（Python 那条支路）与 `LocalExecutor.compile` 都是 harness 进程内的
+  `exec(kernel_code, ns)` —— 候选在**模块顶层**写一个死循环或一次巨型分配，就能在进入 L1 验证链路
+  **之前**把评测进程拖死，而那时 §22.2 已经落地的那一半（`_execute_python` 的受控子进程）还根本
+  没轮到：I85 的「本地半片」保护的是**运行期**，编译期在它上游。不是「忘了加超时」，是那段代码
+  所在的位置本身就决定了它没有任何上限（`exec` 前后没有可挂超时的地方）
+- **后果**：①一次真机运行里，候选只要在模块顶层挂住，整轮评测就**卡在那里**（进程还在、日志停在
+  上一轮），已经花掉的 LLM 调用与前面几轮的机时全部无法继续，而产物里没有任何读数能指出是哪一步
+  挂的 —— 这条与 I86 同族：**保护落在下游，上游就先被拖死**；②「执行器拦下」若与「候选自己编译
+  失败」混在同一支，Fixer 会拿到一份指向错误对象的处方（把「超时/撞上限」读成语法错）；③异常
+  跨进程重建只保 `str()` 时，`msg/lineno/offset/text` 的丢失是**静默**的（`str()` 逐字相同 ⇒
+  没有证人），任何依赖 `SyntaxError` 字段的读者会拿到 `None` 而不是报错
+- **落地内容（2026-10-06）**：
+  * `exec_guard` 新增第 5 张闭合词表 `MODES = ("run", "compile")` 与公开入口 `run_compile(code, *,
+    limits, imports, …)`：**只 `exec`、不调用 `kernel`**，与 `run_candidate` 共用同一套子进程
+    机制（墙钟 / rlimit / 进程组 / 产物上限 / 逐项强制读数）。`imports` 只服务 Triton 那条路
+    （`TRITON_COMPILE_IMPORTS` 与搬走之前的 `local_ns = {"triton":…, "tl":…, "torch":…}` 逐字对应）
+  * 两个后端的编译都改走它，**对外契约逐字不变**：`MockGPU` 的 `SyntaxError` 原样重抛、其余包成
+    `RuntimeError("Compile error: …")`（含反直觉的 `TypeError("'kernel' is not callable")` 也被包）、
+    两条 `Missing 'kernel' function…` 文案与判定顺序不变、两条历史 quirk（真 Triton 支路里
+    「namespace 没有 kernel 但源码含 `def kernel` 子串」⇒ 通过）也保持不变；`LocalExecutor` 仍
+    **不做包装**（候选抛什么类型就是什么类型）。「无真 Triton 环境」那条静态支路**一次 exec 都没有**
+    （搬走前后一致，守卫钉住它，见测例 `test_the_triton_static_branch_never_execs`）
+  * 异常跨进程重建：`GuardResult.exc_type` + `syntax_fields`（`msg/filename/lineno/offset/text`）。
+    **只保住 `str()` 是不够的** —— `verifier.syntax_error_report()` 读行号与列号，而「`str()` 一样」
+    正是静默丢契约的形状；测例逐字段与进程内 `exec` 的原始异常比对
+  * 新增第三档拒绝：`GuardRefusal`（超时 / 撞上限 / 盾命中 / 起不来）——不与「候选自己编译失败」
+    混在一起。`Verifier._verify_compile` 把它发布成 `compile_status = compile_<status>`
+    （既有取值 `interface_mismatch`/`resource_infeasible`/`cached`/`success` 都是**相等判据**，
+    新取值不动它们）；`kernel_db._FAILURE_CLASS_MARKERS` 加 `exec_guard_refused`（否则签名落成
+    `L1|unknown|-`）；`benchmarks/verify_corpus_honesty.py::origin_of` 的默认支是 **remote**，
+    已补认这一族是**本地**（漏认会把一次本地超时读成远端报的，方向正好相反）
+  * §22.2 的**阶段级上限第一次有消费端**：`Conductor(execution_limits=, compile_limits=)` →
+    （自建后端）`MockGPU(exec_limits=, compile_limits=)` → `exec_guard`。默认值唯一出处
+    `limits_for(mode, limits)`：运行档 `Limits()`、编译档 `COMPILE_LIMITS`（30s/60s，
+    **暂定值、真机未实测** —— 它必须装得下子进程自己的 `import torch/triton`，而 `subprocess`
+    后端那笔开销本机实测 ≈860ms）。只走显式构造参数：不接配置文件 / 环境变量 / 命令行（§3.5）
+- **出处**：`operator_agent/exec_guard.py`（`MODES`/`run_compile`/`GuardRefusal`/`candidate_error`/
+  `refusal_from`/`limits_for`/`COMPILE_LIMITS`/`syntax_fields`）、`operator_agent/mock_gpu.py`
+  （`compile` 与 `_compile_in_guard`）、`operator_agent/remote_executor.py`（`LocalExecutor.compile`）、
+  `operator_agent/verifier.py`（L1 失败支的发布）、`operator_agent/kernel_db.py`、
+  `operator_agent/conductor.py`（两格上限参数）、`benchmarks/verify_corpus_honesty.py`；
+  守卫 `tests/test_exec_compile_guard.py`（14 条：契约 / 传递链 / 发布面 / 语料探针）与
+  `tests/test_exec_guard.py`（新增 `TestCompileMode` 8 条 + `TestTheInProcessExecInventory` 2 条）；
+  变异表 `benchmarks/mut_specs/compile_guard.py` 13 行（11 行为 + 2 结构）。
+  标定读数（2026-10-06 串行跑）：**行为 11/11 + 结构 2/2，0 逃逸**。一处要一并读的归属：
+  M12 与 M13 的红名单**完全相同**（2 条）—— 因为那一页账本测的是「所有文件的进程内 exec 集合」，
+  两个文件各加一处死代码都会同时顶红「账本」与「编译路径 AST」两条；归属正确，但一条红不能
+  反推是哪一处加的
+- **仍欠的账（不许读成本条已收口）**：① L1 **成功**那一趟的逐项强制读数没有发布面（后端 `compile`
+  只回 `bool`）⇒「设不上的项如实报」今天只在**失败**那一支成立；② 账本里剩下的进程内 `exec`：
+  `LocalExecutor.execute`/`benchmark`、`MockGPU._execute_triton_cuda`/`_benchmark_triton_cuda`/
+  `_benchmark_python`、`reference.load_reference_source`（`tests/test_exec_guard.py` 的
+  `EXPECTED` 表逐处登记，「只减不增」）；③ 远端 runner 侧零覆盖（仍是同 uid 落 `/tmp` 后
+  `exec_module`）；④ 编译档的 30s/60s 未在真机实测
+- **类别**：I · **状态**：⚠️ §22.2 第 1 项（编译超时）已在**本地两个后端**落地并接上阶段级上限链；
+  上面四条欠账与其余八项一并登记
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -1005,6 +1259,161 @@
   第 9 条把中心主张变成可证伪, 且把「没有收益」写成必须进报告的一向;
   **两臂真机对照 ⏳ 未跑**（同卡两次完整循环, 要 LLM）⇒ 「审计有收益」今天仍不许说
 - **类别**：I · **状态**：⚠️ 比较器 ✅ 已落地 / 两臂 ⏳ 未跑
+
+### I82 · §22.1 只落地了「harness 侧收口」那一半：权限位 + 唯一写入口是真的，而「候选被挡住」今天**证不了**（同一个 uid）
+
+- **原话**：设计 §22.1（`docs/design/autonomous-operator-agent-design.md:1536-1550`）给了七格布局，并写死一句判据：「候选**不能**写入 `contract/`、`harness/`、`baseline/`、`measurements/`、`report/`。这条不是『约定』，而是权限位：违反时写入必须**失败**，而不是『事后被审计发现』。」§22 的引言还写了一层：「静态守卫能拦住库调用，拦不住文件系统、网络与进程 —— **静态检查不是唯一防线，也不能替代沙箱**。」
+- **实证**（2026-10-03 落地时的第一手读数）：
+  - 落地前 `run_root` 只有两个读者：`authorized_roots`（`conductor.py:395`）与 `Patch.path`（`:554` / `:659`），默认 `""`，**仓内没有一处生产调用点传它**；七个目录**一个都不存在**。
+  - 旧 `candidate_path` 的实现是 `"/".join(p for p in (str(run_root).strip("/"), …) if p)` —— 它把绝对路径的根吃掉（`/a/b` → `a/b/candidate/code.py`）。所以构造参数注释里那句「§22 落地那天把真实 run_root 传进来即可，判据一个字都不用改」当时**不成立**：传进来会得到一条相对路径，判据（`_under_any`）照样判，但判的是错的东西。
+  - 落地内容：`operator_agent/run_layout.py`（新模块）+ `run_layout()`（七格：五个受保护格 `0500`、`candidate`/`build` `0700`；已存在但权限位不对 ⇒ **报错不静默修**；符号链接格 ⇒ 报错）+ `write_for(role, rel, data)`（唯一写入口：先判角色再碰文件系统，`O_CREAT|O_EXCL|O_NOFOLLOW`，写出的 artifact 一律 `0400`，受保护格的**整条父链**临时 `chmod 0700` 并在 `finally` 复原）+ `ensure_dir`（嵌套 artifact 路径显式建，走同一判据，子目录也收 `0500`）+ `layout_path()`（**纯**路径构造，无 IO）。`Conductor.execute` 在写任何 artifact 之前建一次（`run_root` 为空则不建）；`agent_runtime.PROTECTED_DIR_NAMES` / `CANDIDATE_DIR` 改为从本模块再导出（**同一份源**），`candidate_path(run_root)` 走 `layout_path`。离线可当场看 `python3 benchmarks/demo_run_layout.py`（`tests/test_demo_run_layout.py` 6 条守着它自称的结论与那四句边界）；守卫 33 条（`tests/test_run_layout.py`：形状 / 5×7 角色矩阵 / 裸写 / 逃逸 / 同源 / 单门 AST / 接线），变异表 `benchmarks/mut_specs/run_layout_doors.py` **9/9 拦住**（8 行为 + 1 结构）。⚠️ 落地当天自己写出来又收掉的一个缺陷也留在表里（M9）：`ensure_dir` 原先**一律**把新子目录收成 `0500`，于是在一格「可写」的空间里（`candidate/`）造出一格不可写的空间 —— 候选的 scratch 直接写不进去。它只在「可写格里建子目录」这条路上现形，收权限那条用例（受保护格）当时全绿 ⇒ 两层行为各要一条用例。
+  - **两层是独立的**（M1 与 M2 各拆一层都红）：唯一入口自己会开写窗（`chmod 0700`），所以在入口内部，越权与否**只**由角色判据决定；而绕过入口的裸写，靠的是权限位（目录写位管「新建条目」、文件写位管「覆盖内容」，两层都要有 —— M5 拆掉文件写位就红）。
+- **出处**：`operator_agent/run_layout.py`（新）、`operator_agent/{agent_runtime,conductor}.py`；测试 `tests/test_run_layout.py`；设计 §22.1 / §21.5。
+- **后果**：**可以声称的**（有守卫）：①七格布局与权限位是数据（`describe()`），②越权写在**碰文件系统之前**失败且不留痕（连 `.tmp` 都不留 —— 否则失败本身污染 `measurements/`），③不经过入口的裸写在同 uid 下也失败，④§21 的判据与 §22.1 的目录名读**同一个对象**（`assertIs`，不是内容比对：两份内容今天逐字相同，漂走那天内容比对才红就晚了），⑤**只有一扇门**（AST ratchet：`operator_agent/` 里 `os.chmod` 与 `os.open(O_CREAT…)` 只有 `run_layout.py` 一处）。**不许声称的**（也写进了 `describe()` 的两个恒 `False` 键）：①**候选没被挡住** —— 候选今天在 harness 进程内 `exec`（本地）或以 runner 的 uid 落 `/tmp` 临时文件后 `exec_module`（远端），与 harness **同一个 uid**，属主可以自己 `chmod` 回去或直接改文件；权限位拦的是**误写与非敌意越权**，不是敌意攻击（那要 §22.2 的独立 uid/容器）。②**远端零覆盖** —— 远端 runner 侧的布局与权限位一个字都没说。③**这不是沙箱** —— §22.2 清单（编译超时 / 运行超时 / GPU watchdog / CPU·内存 quota / 文件系统白名单 / 网络默认关闭 / 进程树清理 / artifact 大小上限 / 设备租约回收）**一条都没落**，且厂商卡那条 runner（`run_kernel_xpu.py`）连运行时盾与容差都没有。④**`run_root` 今天没有生产调用方** ⇒ 当前形态是「声明 + 可运行守卫」，不是「线上已经在拦」。⑤**§22.3 的覆盖率数据有生产者、没有消费者** —— 同名条目里 `AuditCoverage` 已经进 `verdict.as_dict()['coverage']`、拒绝理由与血缘，但「coverage 不足影响 `ClaimLevel` 与 promotion」这一步没有实现（数据可审计、不参与判决）。
+- **类别**：I · **状态**：⚠️ §22.1 的 harness 侧一半已落地（32 守卫 + 8/8 变异）；候选侧那一半要 §22.2（登记）；§22.2 全部、远端侧全部 ⏳ 未落地
+
+### I81 · 静态反作弊的白名单曾被**任务字段**打开（子串匹配 `dc/ls/ft/rv`），而运行时那半恒开 —— 两半互相矛盾；修法 = 白名单只认执行侧声明
+
+- **原话**：设计 §3.5「**不允许配置**（无开关、无环境变量、不可被 Agent 或任务参数改写）」清单里含「lib fallback 检查」；`anticheat.static_audit` 的注释原文「昇腾等自研加速卡白名单放开 torch.matmul 等 (因为它们的 Tensor Core 只能通过厂商的 torch 后端下放激活)」；`shield_torch` 的 docstring「用法」那一段当时写着 `with shield_torch(hardware=task.target.hardware):`。
+- **实证**（2026-10-03，I80 审计的第一手读数 + 复现）：
+  - `operator_agent/verifier.py:475` 把 **`task.target.hardware`** 传进 `static_audit`，而 `anticheat._hardware_allows_torch_compute` 是**子串**匹配：`any(tok in hardware.lower() for tok in ("ascend","npu","昇腾","huawei","cambricon","mlu","hygon","dc","海光","loongson","ls","phytium","ft","zhaoxin","兆芯","sunway","神威","rv","riscv","玄铁"))`，命中就 `return AuditVerdict([], lang)`（零违规）。两字母 token 让**任何**含 `dc`/`ls`/`ft`/`rv` 的串都命中。
+  - 而运行时屏蔽在所有生产调用点都是**裸调用**（`remote_executor.py:1327`、`mock_gpu.py:250/374`、`remote_scripts/run_kernel.py` 十余处）：厂商卡上「静态放行、运行时抛 `CheatDetectedError`」⇒ **两半互相矛盾**，那份静态白名单唯一的效果是让两侧说法不一致（作弊调用最终仍会被运行时盾拦下 → `lib_fallback=True` → 资格全 False，所以端到端是 fail-closed 的 —— 这一点必须一起说，它不是「整条防线被绕过」）。
+  - 当时 `tests/test_anticheat_bypass.py::TestHardwareWhitelist` 的 3 条用例正把「传 `hardware=` 就放行」钉成**正确行为**（`static_audit(code, "python", hardware="Ascend910").violations == []`）。
+- **出处**：`operator_agent/{anticheat,verifier,schemas}.py`；`tests/test_anticheat_bypass.py`（`TestHardwareWhitelist` + 运行时屏蔽结构守卫）；`benchmarks/smoke_spine_h20.py:341`（旧调用形态）；设计 §3.5。
+- **后果**：不改的话，`hardware="Ascend910"`（或任何含 `dc`/`ls`/`ft`/`rv` 的串）就是一条「**用任务参数关掉半道安全判据**」的路。已修（2026-10-03）：①`_hardware_allows_torch_compute` 连同那份 token 名单整段删除；②`static_audit(..., vendor_torch_ok: bool = False)` 与 `shield_torch(vendor_torch_ok: bool = False)` —— 两侧读**同一个执行侧声明**；③`verifier` 用模块常量 `VENDOR_TORCH_OK: bool = False`（今天**没有生产者**：加一条 `Cap` 必须同时给出声明者与读者，而真正的声明者还得把远端 runner 的 shield 一起接通）⇒ 生产路径恒 False，**两眼一致地拒绝**；④厂商卡上「torch 合法」这条路要开通必须**三件事一起做**（静态白名单 + 运行时盾 + `run_kernel_xpu.py` 至今无盾无容差），作为欠账登记。守卫五条（API 面参数集合 / 子串匹配器不存在 / 端到端任务声明 `Ascend910` 仍被 L2 反作弊拒 / 源码里调用点写的是 `VENDOR_TORCH_OK` 且括号体内不含 `task.target.hardware` / AST 断言每个生产 shield 调用点都是裸调用）；变异表 `benchmarks/mut_specs/vendor_whitelist_not_from_task.py` **6/6 拦住**（5 行为 + 1 结构）。⚠️ 标定时才看清的一条事实：`_execute_triton_cuda` 里那处 shield 改成传声明时**行为用例全绿**（本机无 CUDA，那条路径走不到），只有 AST 断言杀得掉 —— 「运行时那半在生产路径上恒开」不能只在能跑的那条路上成立。
+- **类别**：I · **状态**：✅ 2026-10-03 已修（静态侧，I80 硬伤一收口）；厂商卡两半一起开通这件事仍欠（登记）
+
+### I80 · §3.5「不允许配置」清单的逐项审计：**没有第二处默认关的安全装置**，但有三处能被非人化输入关掉的门（最硬的一处是**任务字段**改写静态反作弊判据）
+
+- **原话**：设计 §3.5（`docs/design/autonomous-operator-agent-design.md:266-279`）同一份「**不允许配置**（无开关、无环境变量、不可被 Agent 或任务参数改写）」清单 + 三条实现纪律（规则 1 载体先于开关 / 规则 2 默认值即判据 / 规则 3 消融不许做成产品开关）。
+- **实证**（2026-10-03，只读审计，逐项核对实现位置与**生产调用点**）：
+  - **结论一：没有第二处「默认关的安全装置」**（I79 那一处是唯一的一处）。逐项：容差（`tolerance.effective_atol` 取 `min(atol, task_max_error)`，任务只能**收紧**）、基线实现（`verifier.baseline_plan` 纯函数、无参数）、契约哈希校验（`record_hash` 与 `fresh` 都没有 ⇒ 拒评）、同卡成对测量、升级门（`escalation.decide` fail-closed）、受保护目录判据（`PROTECTED_DIR_NAMES` 单一真源 + 六条检查无条件顺序跑）——都是无条件生效。全仓 `operator_agent/` 内**零 `argparse`、零配置文件读取**（仓库根的 `config.yaml` 没有任何代码读它）。
+  - **硬伤一（形态 (e)：任务字段改写判据）**：`operator_agent/verifier.py:475` 把 `task.target.hardware` 传进 `anticheat.static_audit(..., hardware=task.target.hardware)`，而 `anticheat._hardware_allows_torch_compute`（`:214-223`）一命中白名单就 `return AuditVerdict([], lang)`（零违规，`:467-470`）。白名单是**子串**匹配且含 `"dc" / "ls" / "ft" / "rv"` 这类两字母 token，`"ascend" / "npu"` 本就在 `_KNOWN_HARDWARE` 里、未知 hardware 只 warning 不拦（`schemas.py:238-242`）⇒ 一个任务只要声明这类硬件名，**静态审计就整段短路**。⚠️ 白名单本身有正当理由（昇腾等自研卡的 Tensor Core 只能经厂商 torch 后端下放，见 `anticheat.py:210-213` 与 `verifier.py:473-474` 的注释）—— 缺陷不在名单存在，而在**名单的输入是任务字段**（一个未经验证的声明），而不是执行侧真实设备。**缓解事实必须一起读**：运行时那半恒开 —— 所有 `shield_torch()` 生产调用点都不传 `hardware` ⇒ 白名单失效 ⇒ 屏蔽照装 ⇒ 作弊调用抛 `CheatDetectedError` → `lib_fallback=True` → 资格全 False。所以端到端仍 fail-closed；可被关掉的是**静态审计这半道判据**。
+  - **硬伤二（形态 (b)：环境变量关掉「写」）**：`OPERATOR_AGENT_LOG_DIR=off/none/0/false` 完全不落实验日志（`agent_logger.py:96-105`）、`OPERATOR_AGENT_LOG_KEEP=1` 清光历史日志（`:110-116`）、`OPERATOR_AGENT_KERNEL_DB=off` 关长期记忆落盘（`kernel_db.py:261-263`）、`OPERATOR_AGENT_FAILURE_DB=off` 关失败库、`OPERATOR_AGENT_FAILURE_GATE=0/1` 关失败复发门。它们关的是「写 / 检索」而不是「判」，设计意图是「测试不得改动仓库状态」的逃生门 —— 但 §3.5 的字面是「**无环境变量**」。
+  - **硬伤三（形态 (a)：把频率调大就是关掉心跳）**：`heartbeat_interval` 只校验正整数、**无上限**，`benchmarks/template_exhaustion_h20.py:86` 传 `999` 并在注释里写「隔离观测变量」—— 本仓自己的 harness 正在用「把 N 调大」关掉一条 §3.5 不变量，正是规则 3 不许的形状。
+  - 两处附带（判为接缝、不是开关，但要留在案）：`eligibility.derive_eligibility` 的签名全体默认「无问题」（漏传一个键 = 默认放行；生产唯一调用者 `oracle.py:264` 恒传真值）；「不可变实验日志」今天只是**追加文本**，没有任何哈希链/签名 ⇒ 「不可变」要求到哪一档设计没定（属 §23.1）。
+- **出处**：`operator_agent/{anticheat,verifier,schemas,eligibility,tolerance,measurement,placement,escalation,agent_logger,kernel_db,conductor}.py`（逐符号 `file:line` 见上）；设计 §3.5；`docs/status/autonomous-operator-agent-status.md` §3.5 行。
+- **后果**：本条是**登记**不是修复 —— 三处今天都还在。三处同族（「可被非人化输入关掉」）但修法不同：硬伤一要把白名单的输入从 `task.target.hardware` 换成**执行侧设备声明**（并处理两字母 token 的子串匹配）；硬伤二要区分「测试逃生门」与「生产可关」（收进 policy 层并留痕）；硬伤三要么给间隔封顶、要么把「必须有心跳」写成不变量。**在修完之前，§3.5 那一栏不许读成「全部无条件生效」**，也不许说「拒绝过一次就永远拒绝」。附带一条**守卫覆盖缺口**（I79 撞到的）：全仓没有「入库成功（`corpus_admission.kept=True`）」的正向端到端对照 —— 控制机上 `MockGPU` 只声明 `EMULATED`/`SIMULATED_PERF`，读数按设计被判 uninformative，入库在更前面那道门就该被拒 ⇒ 想验「入库成功」得有一台真卡。
+- **类别**：I · **状态**：⚠️ 已登记，三处均未修（硬伤一最硬：它让「lib fallback 检查」的半道判据可被任务字段整段短路）
+
+### I79 · §3.5 把「长期记忆的独立确认」列为**不可配置的不变量**，而代码里它是一个默认 `False` 的构造参数 —— 默认配置下单次读数即可进语料，且有三条守卫把这件事钉成了「正确行为」
+
+- **原话**：设计 §3.5 的「不允许配置」清单里含「长期记忆的独立确认」，规则 2「**默认值本身就是判据**：一个『默认关』的安全装置等于不存在 —— 无人值守下没人会去打开它。所有安全门的默认值必须由用例钉住（『默认配置下这条路走不通』）」；状态文档自 2026-10-01 起把它登记成欠账（第 32 / 37 / 88 / 139 行），第 158 行写着「安全默认值那一半**只差 `require_double_confirm` 翻转**」。
+- **实证**（2026-10-03，翻转前的 HEAD 工作树）：
+  - `Conductor.__init__(..., require_double_confirm: bool = False)`，`_save_to_db` 里 `requires_remeasure=bool(getattr(self, "require_double_confirm", False))` ⇒ 第 3 道门默认**不生效**：`oracle.admit_to_corpus` 那一支直接放行，理由文本自己写着「本次**未要求**两次确认（`requires_remeasure=False`）：单次读数即可入库」。生产者 `_produce_remeasure` 也挂在 `if self.require_double_confirm:` 后面。
+  - 翻转当天**两条老用例红了，且红得对**（不是放宽断言，两条都按新语义改写）：①
+    `tests/test_finalist_selection.py::test_second_finalist_wins_and_l3_runs_once`
+    —— L3 次数从 **1 变 2**（决赛一次 + 进语料前的强制重测一次，同一份码），它把不变量的
+    **机时代价**变成了可见的读数（每份要记住的结论多付一次 L3，正是「机时承诺」四个字的意思）；
+    ②`tests/test_kernel_db_persistence.py::test_trusted_measurement_is_written_and_reloaded`
+    —— 从「可信即入库」变成「可信 **且** 有独立重测才入库」（它用 `Conductor.__new__` 绕开
+    构造器，于是那条 `getattr(..., False)` 的回落恰好在这条用例上现形）。
+  - 更贵的一条：**守卫把不安全的行为钉成了正确行为**。`tests/test_spine_wiring.py::test_good_run_still_persists_without_double_confirm_flag`（docstring 原文「默认不强制两次确认 —— 不打断现有链路」）断言默认配置下**入库成功**；`test_the_machine_time_policy_is_passed_not_hardcoded` 断言接线处必须**跟着开关走**；`test_double_confirm_defaults_off` 断言默认关。三条一起把「默认关」锁成一个不许改的约定 —— 守卫钉住错的行为，比没有守卫更贵。
+- **出处**：`operator_agent/conductor.py`（构造参数 / `all_passed` 分支 / `_save_to_db`）、`operator_agent/oracle.py:350-425`、`tests/test_spine_wiring.py`、`tests/test_budget_gate.py`、`benchmarks/demo_spine_local.py` 场景 4。
+- **后果**：不改的话，「入库了」在默认配置下**不含**「两次确认已通过」—— 正是 §10.5-4 要防的「一次侥幸读数变成永久真理」。已修（2026-10-03）：构造参数与属性删掉；`all_passed` 分支无条件先补一次独立重测再入库；判据侧写死 `requires_remeasure=True`（生产调用点不再读任何开关）。四条守卫：①默认配置下**没有重测就不入库**（老用例翻面）；②**没有开关**（传 `require_double_confirm=` 抛 `TypeError`，实例上也不存在可改的布尔）；③默认路径上生产者**真的跑了**（`art.remeasure` 非 None）；④**消融只能在 harness 侧 patch**（把生产者换成空实现 ⇒ 判据收到 `None`，而判据**仍然**要求着 —— 消融消的是生产者，不是判据）。`admit_to_corpus` 的 `requires_remeasure` 参数保留但只服务消融臂，docstring 明写「不许接到配置文件/环境变量/命令行/任务字段上」（§3.5 规则 3）。
+- **类别**：I · **状态**：✅ 2026-10-03 已翻转 + 五条守卫（四条行为 + 一条源码，`tests/test_spine_wiring.py` 31 条全绿）；变异表 `benchmarks/mut_specs/double_confirm_invariant.py` **6/6 拦住**（5 行为 + 1 结构，含「把开关加回构造参数」与「给不变量加一行环境变量」两行 —— 后者的失效方式是静默的，只有源码守卫杀得掉）；翻转撞到的守卫覆盖缺口记在 I80
+
+### I78 · §21.4「新增依赖」的基线若是「上一份候选」，同一个违规候选第二次提交就能过门——真机实测白烧了一趟远端编译
+
+- **原话**：设计 §21.4 第 4 条「新增依赖」；§21.1「动作先被裁决、再进编译」；
+  `docs/status` §21 行那句「被拒 = 一条合成的 L1 失败（`agent_action_refused`，零 GPU 秒）」。
+- **实证**（2026-10-03，`benchmarks/agent_action_h20.py` **第一版**，algorithm-h20 +
+  真 LLM 端点，产物 `output/matmul/nvidia_gpu/20261004_230032_f27cef2a`）：
+  - 修复产物由脚本给定：`import torch`（§21.4 第 4 条要拦的就是这种夹带）。
+  - 第 2 轮**拦住了**：日志 `[§21 Runtime] 动作被拒 (零 GPU 秒): 这次改动新增了外部依赖
+    ['torch']`，这一轮零远端调用 ✓ —— 门在它该在的地方。
+  - 第 3 轮 Fixer 又交了**同一份**（脚本如此；真机上的 Fixer 重交同一份也是常见行为），
+    这一轮 `agent_action.accepted=true`，日志 `[Verifier] L1: 编译验证... L1 PASSED:
+    编译成功` —— 那份源码**真的被送出编译**，只有 L2 的反作弊静态审计把它拦下
+    （`反作弊: 检测到禁用的原生算子回退调用 (1 处)`）。proxy 记录：`torch_payloads=1`。
+  - **原因**：「新增依赖」当时对着 `Patch.parent_source` 判，而第 3 轮的父代正是第 2 轮那份
+    **被拒**的候选 —— 一份从没进过流程的候选，成了「这个依赖已经有了」的基线。
+- **修法**：基线改成「上一次**过门**的候选」
+  （`ActionContext.dep_baseline_source` 优先于 `Patch.parent_source`；
+  `Conductor._admitted_baseline` 只在 `accepted` 时更新，与 §21 的记账同一条纪律：单位是一次运行）。
+  **真机复跑**（`output/matmul/nvidia_gpu/20261004_230747_5268d8fe`，35.3s，SSHExecutor@algorithm-h20）：
+  第 2、3 轮都被拒（违约都是 `new_dependency`），`torch_payloads=0`，后端全跑只收到 **1** 份载荷
+  （第一份坏码的依赖探针 + 按需补装，`[SSHExecutor] 依赖安装成功`）——
+  也就是「被拒的候选零 GPU 秒」这句话现在**每一轮都成立**，而不是只在第一次成立。
+- **出处**：`operator_agent/agent_runtime.py`（`ActionContext.dep_baseline_source`、
+  `_check_new_dependency`）、`operator_agent/conductor.py`（`_admitted_baseline`、`dep_baseline=`）、
+  `benchmarks/agent_action_h20.py`（真机驱动，判据 C1–C8）、
+  `benchmarks/mut_specs/structured_evidence.py`（M11「被拒的候选也进基线」/M12「依赖判据不看
+  调用方给的基线」）、`tests/test_agent_runtime_wiring.py::test_the_same_violating_candidate_is_refused_every_time`、
+  `tests/test_agent_runtime.py::test_new_dependency_prefers_the_admitted_baseline`。
+- **后果**：不修 ⇒ 门**被自己走过的路绕开**：任何**重复提交**的违规候选第二次都过门。代价是真金白银
+  的远端往返（本例一次编译），而且——若 L2 没有那条反作弊静态审计——它会直接进产物。
+  这一族的形态与 I46/I47（判据算了没人读）不同：这里判据在岗、也被读，**是基线取错了对象**；
+  与 I77 同一天、同一条链路，说明「字段在、值取错」这一类比「字段缺」更难看见。
+- **类别**：I · **状态**：✅ 2026-10-03 当日修 + 真机复跑 PASS（35.3s，零远端载荷）；
+  ⚠️ 边界：这一跑**没有** L3 真值测量（违规候选被拒、第一份候选死在本地语法预检），
+  所以「零 GPU 秒」的口径是**零远端载荷**，不是卡级秒数（多进程共享卡，卡级读数分不出是谁的）。
+
+### I77 · §21.3 接上生产者的当天：留痕写成了普通变量（后填的值进不了产物），diff 基线取错（恒空而标题仍在）
+
+- **原话**：`conductor.py` 里 `_coverage_record` 上面那段注释（本仓既有纪律）：
+  「血缘条目在**轮首**就 append 了, 而覆盖判定要等本轮的观测进账 —— 所以这里放一个
+  **会被后填的字典**」；§21.3 的「每次 LLM 调用只提供这八项」；§21.1 的「可审计」。
+- **实证**（2026-10-03，`Conductor.structured_evidence` 接上之后）：
+  - 第一版把注入留痕写成 `_fix_evidence_record = None`，在修复之后
+    `_fix_evidence_record = record`。**prompt 里那八段确实进去了**（替身 LLM 抓到的
+    文本里逐字有），但产物里 `iteration_history[i]["fix_evidence"]` **每一轮都是 `null`**
+    —— 因为血缘条目在修复之前就 append 完了（`conductor.py` 的 append 在修复调用之前），
+    后填的值只改了局部变量。用例 `test_the_round_facts_are_in_it_not_boilerplate`
+    当场红（`rec["injected"]` 为 False 而 prompt 里有那段证据）。
+    修法：初值就是 `{"injected": False}` 这个**字典**，注入后 `.update(_rec)` —— 与
+    `_coverage_record` 同一处置。
+  - 同一片里第二处：diff 基线第一版取 `repair_base`（**正在被修的那一份**），而它常常
+    就是 `current_code` ⇒ `Patch.diff()` 恒空，而 prompt 里「### 父候选 diff」这一节
+    照印。读者会读成「这一轮没改动」，真相是「基线取错了」。改成
+    `_code_before_this_round`（本轮开始**之前**手里那份）之后，第二次修复那一轮才看得到
+    真正的 diff（`tests/test_structured_evidence.py::TestTheDiffBaselineIsThePreviousCandidate`
+    为此专门造了「修复产物仍错、但与上一份不同」的场景：一字不改的产物与「没有父代」
+    在 diff 上长得一样，不造这个场景就区分不开）。
+- **出处**：`operator_agent/conductor.py`（`_fix_evidence`、血缘 append 与修复调用的先后、
+  `_coverage_record` 的既有注释）；`tests/test_structured_evidence.py`（12 条）；
+  `docs/status/autonomous-operator-agent-status.md` §21 行 ④。
+- **后果**：不修第一条，A/B 对照（「筛过的证据 vs 全量错误日志」）**在产物上无法区分两臂**
+  —— 只能靠重跑或看终端，而真机跑一次不便宜；这正是 I15/I11 那一族（守卫/留痕在不成立的
+  前提下恒绿、恒空）在**产物侧**的形态：字段在、值恒空、没人发现。不修第二条，prompt 里
+  会长期躺着一节永远为空的 diff，而它是修复时最该看到的证据。
+- **类别**：I · **状态**：✅ 2026-10-03 当日修（字典后填 + 基线改正），12 条用例钉住；
+  ⚠️ 与它配套的**真机对照仍未跑**（开关已就位，收益不许声称）。
+
+### I76 · §21 动作协议：判据的位置决定它能不能省钱——事后裁决的预算门省不下 token，还会把退化出口打成死循环
+
+- **原话**：设计 §21.1「控制器只接受通过 schema 校验、权限校验与预算校验的动作」；
+  §21.4「这些检查必须在候选进入编译之前执行」；§10.2 预算表「LLM token ｜ 只在结构级介入时
+  消耗 ｜ 独立管；超了退化成纯数值搜索」。
+- **实证**（`operator_agent/agent_runtime.py` + `conductor.py` 接线，2026-10-03）：
+  - 门放在「候选已生成、还没进编译」那一点（Step 4 之前，Coder/模板/Fixer/决赛四条路的汇合处）
+    —— 对**路径/ABI/依赖/重复/能力**这五轴是对的：拒绝发生在 GPU 秒之前，省下的是机时。
+    但**同一个位置对 token 预算那一轴含义不同**：候选是「先生成、后提交」，裁决发生时那次
+    `chat` 已经付过钱 ⇒ 拒绝省下 **0**。
+  - 第一版按字面把预算也算拒绝理由，`python3 -m pytest tests/test_budget_gate.py` **立刻红**：
+    `BudgetPlan(llm_tokens=100)` 而已用 150 时每轮候选都被拒 ⇒ `[Budget] … 退化成纯数值搜索`
+    再没出现过、`llm_degraded_rounds` 归零。即：按 §21.1 的字面执行，会把 §10.2 明写的
+    **退化出口换成一个死循环**（拒绝 → 走 Fixer → 再拒绝），而症状看起来像「这一档没触发」。
+  - 修法：把「这次的钱花了没有」变成上下文里有名字的一格（`ActionContext.spend_committed`）。
+    事前提议类动作（请求工具 / 结构升级）默认 `False` ⇒ 预算不过就拒绝，**省得下钱**；
+    候选类动作在真链路上写 `True` ⇒ 预算问题**照记进产物**（`budget_problems` +
+    `budget_deferred_note`，写明「按 §10.2 退化成数值搜索处理」）但不据此拒绝。
+  - 同一片里**变异标定**抓出第二条：M25「被拒的候选照样跑远端依赖分析」第一版**逃逸**。
+    那条守卫断言的代码在 `if round_num < self.max_optimize_rounds:` 里面，而用例当时用
+    `rounds=2` ⇒ 被拒的第 2 轮根本走不到那段 ⇒ 把跳过整条删掉也**照样绿**
+    （守卫在不成立的前提下恒绿）。改成 `rounds=3` 后 M25 立刻变红。
+- **出处**：设计 §21.1 / §21.4 / §10.2；`operator_agent/agent_runtime.py`（`budget_problems`、
+  `ActionContext.spend_committed`）、`operator_agent/conductor.py`（Step 4 前的裁决点、
+  `_round_action_context(spend_committed=True)`、依赖分析那一段）；`tests/test_agent_runtime.py`
+  （49 条）、`tests/test_agent_runtime_wiring.py`（11 条）、`benchmarks/mut_specs/agent_action_gate.py`
+  （27 行：26 行为 + 1 结构，终读数 **26/26 + 1/1，0 逃逸**）；`tests/test_budget_gate.py`
+  （第一版变红的现场）。
+- **后果**：不把两轴分开，(a) 一个装好的退化出口会被一个「照规范执行」的门打成死循环；
+  (b) 「判据算了没人读」的反面同样贵 —— **守卫在不成立的前提下恒绿**，而它会被读成
+  「这条跳过快路径已被验证」。同族先例 I15（零用例执行被读成绿）、I11（变异还原不彻底）。
+- **类别**：I · **状态**：✅ 2026-10-03 事前/事后分格 + 27 行变异全拦住；
+  边界（写进状态文档 §21 行）：预算那一格的拒绝**只对事前动作生效**，候选类动作的拒绝
+  只有路径/契约/依赖/重复/能力那五轴。
 
 ### I75 · 代码型路径首次真 LLM 端到端：路径活了，27B 卡在 L1——三个生成侧缺口被照亮
 
@@ -1889,6 +2298,18 @@
 | I73 | 并发首次部署同一文件存在竞争窗口 —— 两个 harness 进程同时 hash 失配、同时 scp 同一路径, 写坏 ⇒ runner 起不来 (自愈但白烧一轮); 串行化承诺对 **deploy 路径**同样只覆盖进程内 | I | ⚠️ 未修 (登记); 修法方向: 远端临时名+原子 mv 或部署锁; 实验以串行预热规避 |
 | I74 | §10.4 **两条件停滞出口首次真机 fire**（12 点空间 13 轮: explore 逐点试完, 4 次「阈值到但未穷尽 ⇒ 不许宣布停滞」, 转 refine 后 12/12 穷尽 ∧ 阈值 ⇒ stagnant 且理由点名两半）; §13.5 如实不 fire (37% of 峰值) | I | ✅ 2026-10-03 五判据全绿 (197.2s); 附带两处小缺口已记正文 (账本 declined 语义 / 升级门裁决未落 RESULT) |
 | I75 | 代码型路径**首次真 LLM 端到端**（27B+H20, 全链走通: sketch→流水线→决赛→L1 预检→路由→Fixer→l1_l2_failed）; 27B 卡 L1, 照亮三缺口: G1 compile-gate 不查 smem (白烧 SSH×6) / G2 Coder 不遵从 sketch tiling (64→256) / G3 fixer 提示无资源约束且改不动常数 | I | ✅ 三片收口: G1 门 + 机械改写 (BLOCK_* 对齐 sketch + fp32 钉 ieee) 双保险, 终验 **generate 轮完整 L1→L2→L3 + 连续两轮完整循环** (C1-C7 全过); 残余: 27B 非 TF32 精度缺陷 (1.09e-03) 属 Fixer 领域 |
+| I76 | §21 动作协议落地暴露「判据的**位置**决定它能不能省钱」: token 预算那道门只能在**事后**裁决 (候选是「先生成、后提交」) ⇒ 拒绝省不下 token, 且按 §21.1 字面执行会把 §10.2 的「超了退化成纯数值搜索」**换成死循环** (实测 `test_budget_gate` 立刻红); 同一片里还抓到一条**在不成立的前提下恒绿**的守卫 (依赖分析那半句在 `round_num < max_optimize_rounds` 里面, 用例用 rounds=2 时那一轮走不到) | I | ✅ 2026-10-03 事前/事后分格 (`spend_committed`) + 27 行变异全拦住 (M25 逃逸后改 rounds=3 才红); 边界: 候选类动作不因预算被拒 |
+| I77 | §21.3 的生产者接上之后, 「注入留痕」第一版写成了**普通变量** —— 而血缘条目在修复**之前**就已经 append, 于是后填的值进不了产物: prompt 里明明有那八段, `fix_evidence` 每一轮都是 `null` ⇒ A/B 两臂从产物上**分不开** (`_coverage_record` 的注释早写过这条纪律, 我抄了注释没抄机制); 同一片还发现 diff 基线取成了「正在被修的那一份」(与 `current_code` 常常同一份 ⇒ diff 恒空而标题仍在) | I | ✅ 2026-10-03 改成会被后填的字典 + `.update()`; 基线改 `_code_before_this_round`; 12 条用例钉住 (含「产物侧能区分两臂」) |
+| I78 | §21.4「新增依赖」的基线取成了 **patch 的父代**, 而父代可能是**上一轮被拒**的那份候选 ⇒ 同一个违规候选第二次提交就**过门**: 真机实测第 3 轮那份夹带 `import torch` 的候选 `agent_action.accepted=true` 且 `L1 PASSED: 编译成功`, 只有 L2 的反作弊静态审计兜住 (第一版 `torch_payloads=1`); 修法 = 基线取**上一次过门的候选** (`dep_baseline_source` / `_admitted_baseline`), 复跑 `torch_payloads=0` 且第 2/3 轮都被拒 | I | ✅ 2026-10-03 真机复跑 PASS (35.3s, 违规候选零远端载荷) + 修法与守卫进 12 行变异表 |
+| I79 | §3.5 把「长期记忆的独立确认」列为**不可配置的不变量**, 代码却是默认 `False` 的构造参数 ⇒ 默认配置下单次读数即可入库; 且**三条守卫把不安全的行为钉成了正确行为** (「默认不强制两次确认 —— 不打断现有链路」) | I | ✅ 2026-10-03 翻转: 参数/属性删除 + `all_passed` 分支无条件补重测 + 判据侧写死 `requires_remeasure=True`; 四条行为守卫 (无重测不入库 / 没有开关 / 生产者真跑 / 消融只能 harness 侧 patch) + 一条源码守卫 (不许读环境变量或命令行); 变异 6/6 (5 行为 + 1 结构); 附带守卫覆盖缺口见 I80 |
+| I80 | §3.5「不允许配置」清单逐项审计: **没有第二处默认关的安全装置**, 但有三处可被非人化输入关掉的门 —— ①静态反作弊白名单的输入是**任务字段** `task.target.hardware` (子串匹配含 `dc/ls/ft/rv` ⇒ 静态审计整段短路; 运行时那半恒开故端到端仍 fail-closed) ②五条环境变量关「写」(LOG_DIR=off / KERNEL_DB=off / FAILURE_GATE=0…) ③`heartbeat_interval` 无上限, 仓内 benchmark 正用 999 关掉心跳 (§3.5 规则 3 不许的形状) | I | ⚠️ 已登记, 三处均未修 |
+| I81 | 静态反作弊白名单曾被**任务字段**打开 (`verifier` 把 `task.target.hardware` 传给 `static_audit`, 子串匹配含 `dc/ls/ft/rv` ⇒ 任务声明 `Ascend910` 就零违规), 而运行时盾在所有生产调用点恒开 ⇒ 静态与运行时**两半互相矛盾** | I | ✅ 2026-10-03 已修: 白名单只认执行侧声明 (`VENDOR_TORCH_OK`, 今天无生产者 ⇒ 两眼一致拒绝), 子串匹配器删除; 变异 6/6 (5 行为 + 1 结构) |
+| I82 | §22.1 只落地**harness 侧收口**那一半: 七格布局 + 权限位 + 唯一写入口 (`write_for` 判角色、受保护格写窗在 `finally` 复原) 是真的, 而「候选被挡住」今天**证不了** —— 候选与 harness 同一个 uid (本地 `exec` / 远端 runner 落 `/tmp` 后 `exec_module`), 属主可自己 `chmod` 回去; 远端侧与 §22.2 全部未落地 | I | ⚠️ harness 侧已落 (32 守卫 + 8/8 变异 + §21 判据同源); 候选侧要 §22.2 (登记) |
+| I83 | §21.3「筛过的证据 vs 全量日志」真机两臂跑了一次: **N=3 场景 × 2 臂、三对全部干净** (砍段后非空白残差 0 / 历史案例段两臂皆「无」), 通过 **0/3 vs 0/3**、轮数与停止原因两臂相同 ⇒ 可分辨的那一侧只有成本 (证据段 685~924 chars ⇒ prompt token +334~+387/次); N=3 时量具最多分辨 ≈60.1 pp ⇒ **收益与无收益都不许声称** | I | ✅ 2026-10-05 已真机跑 (algorithm-h20 + 真 LLM; 报告 `output/evidence_ablation_20261005-235717.json` 自带与冻结指纹一致的 provenance); 欠账是 N; **2026-10-06 串行变异标定 8 行: 行为 7/7 + 结构 1/1、0 逃逸** (当场抓到 M8 逃逸 —— 用例漏了「标题行必须丢掉」那一条 —— 与 M7 分类写错, 均已修) |
+| I84 | §21.1 的 `AgentAction` 一直是 harness 自己包出来的 ⇒ 七个动作种类里 `request_profiler`/`request_new_shape`/`explain_failure` **只有判据没有生产者**, 且 §21.2「数值修复必须带误差形态」因为理由是 harness 拼进去的而**永不失败** (一条只可能绿的判据) | I | ✅ 2026-10-05 生产者侧接线 (信封三态 + `run_with_action` + conductor 消费点): 24 守卫 / 16 行变异 / 演示场景 6; 模型写意图、harness 写数字与路径; 同源判据顺带修掉一处三态缺陷; **2026-10-06 串行标定 16 行: 14/14 + 2/2、0 逃逸** (M16 第一版写错、逃逸, 改成同一属性名的多余写点后杀掉) |
+| I85 | §22.2「候选执行时的资源隔离」今天只有**本地半片**: 五档状态 + 逐项强制读数是真的 (CPU/文件大小/进程数真拦得住, 设不上的如实报 `not_enforced`), **隔离不是** —— 同 uid、网络没关、无容器/cgroup/白名单, 内存本机设不上, 无 GPU watchdog/设备租约回收, 远端侧零覆盖 (编译超时那一项已在 I87 落地) | I | ⚠️ 本地半片已落 (40 守卫 + 14 行变异; **2026-10-06 复跑串行标定 14/14、0 逃逸**, M12 由结构分母升为行为见证人); 标定还修掉一处**量具余量**缺陷: M2 的证人只等 1.3s 而孙进程要「起解释器 + 1.0s」才落盘 ⇒ 机器一忙就被读成「逃逸」, 等待提到 2.5s 后复跑为真; 其余几项登记未做 |
+| I86 | 「离线全绿、真机必炸」的一类盲区: 漏导入 (`PATCH_KINDS`) 藏在**从来没有被离线执行到的那一支**里 —— `import operator_agent` 通过、离线套件全绿 (`and` 短路), 真机第 2 轮 `NameError` 把一次 6 次上限的 A/B 实验整跑带走 | I | ✅ 已修 (`PATCH_KINDS` 进名单 + 「把信封真喂进一次 `Conductor.execute`」的守卫 ⇒ 那一支必须被执行到) |
+| I87 | §22.2 的第一项「编译超时」一直是空的: 编译期在 harness 进程里 `exec` —— 候选在模块顶层死循环就能在**进 L1 之前**拖死评测进程 (运行期那道门在上游够不着); 同一片还抓出「异常跨进程重建只保住 `str()`、丢掉 `msg/lineno/offset/text`」与「阶段级上限只有声明没有消费端」 | I | ⚠️ 本地两个后端已落 (`run_compile` + 第 5 张词表 `MODES`; 契约逐字不变; `GuardRefusal` 第三档 + `compile_status=compile_*` + 签名桶 + 语料探针认本地; `Conductor`→后端→`exec_guard` 的上限链; 守卫 24 条 + 13 行变异); 欠账: L1 成功那趟的强制读数无发布面 / 账本里仍有 6 处候选侧进程内 exec / 远端零覆盖 / 编译档默认值未真机实测 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

@@ -1,3 +1,19 @@
+> ⚠️ **已归档（2026-10-03），不再维护，也不参与工作区指令加载。**
+> 这是仓库根目录 `CLAUDE.md` 的原文。它被移走的原因不是内容错，而是**承载方式错了**：
+> 它把规范、实现状态与历史变更混在同一份文件里（治理规则见设计规范 §25），
+> 于是 `git diff` 不可读、更正只能写进正文，而且它的自述会与代码漂开。
+>
+> 当前口径以这些为准：
+> - **规范**：`docs/design/autonomous-operator-agent-design.md`
+> - **实现状态与守卫**：`docs/status/autonomous-operator-agent-status.md`
+> - **研究日志**：`docs/research/CHECKLOG.md`
+> - **操作指南**：`docs/user_guide.md`
+>
+> 已知的失实之处（例如"`config.yaml` 是主配置文件"、"per-host locks 防止并发污染"）
+> 记在状态文档的「已知的文档/代码不一致」一节，**以那一节为准**。
+
+---
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -113,7 +129,7 @@ writes a line) so the names come from the harness, not from the Planner's guess.
 - **Fixer**: repairs L1/L2 failures using error logs + `FailureDatabase` (negative samples)
 
 **Execution backends** (`operator_agent/remote_executor.py`):
-- `SSHExecutor` — deploys `remote_scripts/run_kernel.py` to a remote GPU server, sends JSON over SSH stdin, receives JSON on stdout. Uses `uv` for environment management. `persistent=True` (default **off**, SSH/nvidia only) instead keeps one long-lived `remote_scripts/runner_server.py` behind that single SSH pipe (line-delimited JSON with id echo, so a missing reply / a failure reply / a desync are three distinct states): per-call transport drops 4.5 s → 0.038 s and one heartbeat 8.75 s → 3.75 s with no measurable bias (doc 62); the remaining ~1.8 s per benchmark is the runner's own 1.2 s util sampling, not transport. `get_gpu_info()` values are **derived from the probe or from `hardware_caps`**; if the probe fails it **raises `HardwareProbeFailed`** rather than returning a spec dict, and any field with no source in either is reported as `"unknown"`.
+- `SSHExecutor` — deploys `remote_scripts/run_kernel.py` to a remote GPU server, sends JSON over SSH stdin, receives JSON on stdout. Uses `uv` for environment management. `get_gpu_info()` values are **derived from the probe or from `hardware_caps`**; if the probe fails it **raises `HardwareProbeFailed`** rather than returning a spec dict, and any field with no source in either is reported as `"unknown"`.
 - `HTTPExecutor` — talks to a remote HTTP API. That protocol has **no hardware endpoint**, so `get_hardware_info()` raises and `capabilities` is the **empty set** (it cannot be `require()`d by real-device consumers).
 - `LocalExecutor` — runs kernels locally on CPU
 - `RemoteExecutor` — unified facade that auto-selects SSH → HTTP → Local

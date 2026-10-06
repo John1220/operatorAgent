@@ -67,7 +67,7 @@ ArtifactStore (产物快照) → output/<kernel_type>/<hardware>/<时间戳>_<id
    和失败签名，所以落盘前先过一道掩码（`measurement.safe_error_text`）：保留「是哪一类失败、
    哪一步、超时多久」，摘掉地址类信息。**候选代码自己的报错原样保留** —— 那是被修对象的信息。
 
-英文/源码视角的同一张图见仓库根目录 [`CLAUDE.md`](../CLAUDE.md) 的 Architecture 一节。
+英文/源码视角的同一张图见设计规范 [`docs/design/autonomous-operator-agent-design.md`](design/autonomous-operator-agent-design.md) §2.1（一次运行的流水线）与 §2.2（五平面目标架构）；当前实现状态与守卫见 [`docs/status/autonomous-operator-agent-status.md`](status/autonomous-operator-agent-status.md)。
 
 ### 1.4 支持的硬件与 DSL
 
@@ -94,12 +94,33 @@ ArtifactStore (产物快照) → output/<kernel_type>/<hardware>/<时间戳>_<id
 git clone <repository-url>
 cd operatorAgent
 
-# 安装依赖
-pip install -r requirements.txt
-
-# 安装 Triton（如果需要本地编译）
-pip install triton torch numpy
+# 安装依赖 —— 本仓库**没有 requirements.txt**（依赖极少，直接装）
+pip install numpy            # 必需：参考实现 / MockGPU
+pip install torch triton     # 真机执行才需要（跑 MockGPU 与单测不需要）
 ```
+
+**开发与自测**（都不需要 GPU / LLM）：
+
+```bash
+# 全部单元测试（~2000 条，一分钟内）
+python -m pytest tests/ -q
+
+# 单个文件 / 单个用例
+python -m pytest tests/test_p1.py -v
+python -m pytest tests/test_coder_pipeline.py::TestPlanStage::test_planner_outputs_structured_plan -v
+
+# 真机端到端（需要 GPU 与 SSH）
+python test_nvidia_matmul.py
+
+# 冒烟：不碰 GPU 与 LLM
+python -c "
+from operator_agent import MockGPU, KernelDatabase
+print(KernelDatabase().search(algorithm='matmul', hardware='nvidia_gpu', dsl='triton')[0].kernel_id)
+"
+```
+
+> 跑测试前若担心往仓库里灌产物，用 `OPERATOR_AGENT_OUTPUT_DIR` / `OPERATOR_AGENT_LOG_DIR`
+> 指到仓库外（理由见 §4.2 与 §6.7）。
 
 ### 2.3 目录结构
 
@@ -265,9 +286,18 @@ print(artifact.code)
 
 ## 4. 高级配置参数说明
 
-### 4.1 配置文件结构
+### 4.1 配置文件结构（`config.yaml` 是**索引**，不是生效配置）
 
-配置文件路径：`config.yaml`
+> ⚠️ **`config.yaml` 目前不被任何模块读取**（全仓无 `import yaml`）。改它不会有任何效果。
+> 真正生效的配置面是**三处**，换机器时请同步这三处：
+>
+> 1. `operator_agent/remote_executor.py` 的 `SSHExecutor.__init__` 默认值
+> 2. `test_nvidia_*.py` / `test_kunlunxin_matmul.py` 的 `build_llm()` 与 `ssh_config()`
+> 3. **环境变量**（见 §4.2）—— 唯一受支持的运行时开关面
+>
+> 下面这份结构只是这些默认值的**可读索引**（与仓库根目录 `config.example.yaml` 顶部那段
+> 说明同一个口径）。`config.yaml` 已被 `.gitignore` 覆盖：它含真实 SSH 主机与 LLM 端点，
+> **不要提交**。
 
 ```yaml
 # LLM 配置
@@ -315,6 +345,14 @@ hardware_presets:
     warp_size: 16
     vector_width: 128
 ```
+
+**LLM 客户端**（`operator_agent/llm_client.py`，排查 LLM 侧问题时先读这三条）：
+
+- **零依赖**：只用标准库 `urllib` 的 OpenAI 兼容客户端，不装 `openai` 包；
+- **关掉了 Qwen3 的思考模式**（`chat_template_kwargs={"enable_thinking": False}`）——
+  否则 JSON / 代码会被截断；
+- **JSON 抽取带自动修复**：模型输出的常见格式错误（围栏、尾逗号、单引号）会被就地修掉，
+  修不掉才报错。
 
 ### 4.2 环境变量
 
