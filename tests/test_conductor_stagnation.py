@@ -152,8 +152,8 @@ class StagnationCase(unittest.TestCase):
                 self.addCleanup(hc.forget_measured_peaks)
                 key = hc.device_key_of({"name": peak.get("name", ""),
                                         "compute_capability": peak.get("compute_capability", "")})
-                for prec, value in (peak.get("measured_peak_tflops") or {}).items():
-                    hc.remember_measured_peak(key, prec, value, "用例注入的实测值")
+                for prec, value in (peak.get("reference_lower_bound_tflops") or {}).items():
+                    hc.remember_reference_lower_bound(key, prec, value, "用例注入的实测值")
             artifact = conductor.execute(task, inputs, target_gflops=0.0)
         return artifact, buf.getvalue(), backend
 
@@ -276,7 +276,7 @@ class TestMissingGflopsFirstRound(StagnationCase):
 class TestRooflineConvergedTerminatesSearch(StagnationCase):
     """缺口 4 的正解要落在循环的调用点上
 
-    `roofline_converged()` 在 `test_measurement_validity` 里有单测, 但变异 P8
+    `reference_ceiling_reached()` 在 `test_measurement_validity` 里有单测, 但变异 P8
     (把 conductor 里这段出口整个删掉) 逃逸了 —— 那就是缺口 1 记过的那类失效:
     判据算出来了, 下游没人读。所以这里断言的是**轮次确实停在这里**。
 
@@ -292,7 +292,7 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
     # 时「分母口径未核 → 不开出口」这道门会默认关掉, 于是本类的用例全都不停 —— 看着像
     # 「机制生效」, 实际是 fixture 落后了一格。
     # 这一份是**验尸台上**的分母: 两个位都真 (口径核过 + 实测过), 才允许收敛出口点火。
-    # `peak_measured=True` 是刻意的 —— 今天没有 `probe_peak`, 真机发布出去的是 False,
+    # `reference_lower_bound=True` 是刻意的 —— 今天没有 `probe_peak`, 真机发布出去的是 False,
     # 于是出口在所有真机上都是关的 (见下面 test_unverified_peak_* 那一族)。这里造的是
     # 「探测已经落地之后」的形状, 用来钉出口本身的机制。
     PEAK = {"fp32_tflops": 0.02, "tf32_tflops": 0.0,
@@ -301,11 +301,11 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
             "launch_floor_us": None, "compute_capability": "",
             "device": "mock_gpu", "name": "MockGPU",
             "peak_table_key": "mock", "peak_source": "mock (口径已核)",
-            "peak_trusted": True, "peak_measured": True,
-            # §13.5 起实测峰值**按精度**发布 (`{"fp32": 0.02}`)。收敛出口读的是
+            "peak_trusted": True, "reference_lower_bound": True,
+            # §13.5 起参考下界**按精度**发布 (`{"fp32": 0.02}`)。天花板出口读的是
             # `_roofline_analysis` 里按这一轮分母的精度键取出来的那一位 —— fixture 少了
             # 这一格就会「看着像机制生效, 其实是 fixture 落后了一格」(见上面那段告诫)。
-            "measured_peak_tflops": {"fp32": 0.02}}
+            "reference_lower_bound_tflops": {"fp32": 0.02}}
 
     def test_compute_axis_converged_stops_early(self):
         """50% → 95% GFLOPS 利用率: 第 2 轮已达上界, 不该再跑第 3、4 轮"""
@@ -341,7 +341,7 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
         是两个问题, 而收敛要说的是「这张卡这一刻贴着上界了」。真机实测抓到的混同是:
         H20 那行的出处自己写着「无公开官方页 + 算术推导」, 却因为不带 ⚠️ 把出口开着。
         """
-        peak = dict(self.PEAK, peak_measured=False, measured_peak_tflops={})
+        peak = dict(self.PEAK, reference_lower_bound=False, reference_lower_bound_tflops={})
         _, out, _ = self._run([10.0, 19.0, 40.0, 80.0], max_rounds=4, peak=peak)
         self.assertNotIn("判定已收敛", out)
         self.assertEqual(self._rounds_run(out, 4), 4)
@@ -379,7 +379,7 @@ class TestRooflineConvergedTerminatesSearch(StagnationCase):
     def test_uninformative_measurement_is_not_called_converged(self):
         """档位 uninformative 的数字不能说「已经到顶」: 那是拿不可信的测量结束搜索
 
-        这一条走的是 `roofline_converged` 里的 can_gate 守卫。它必须单独测: 停滞
+        这一条走的是 `reference_ceiling_reached` 里的 can_gate 守卫。它必须单独测: 停滞
         那条出口被 `measurement_ok` 挡住时就不再执行, 而收敛出口是独立的 if ——
         少一道守卫就会在脏数据上直接终止整个搜索。
         """

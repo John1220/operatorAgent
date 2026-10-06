@@ -23,7 +23,7 @@ from .schemas import (
 )
 from .agents import DesignerAgent, CoderAgent, SearchAgent
 from .fixer import FixerAgent, failure_class
-from .verifier import Verifier
+from .verifier import COMPILE_FACT_KEYS, Verifier
 from .kernel_db import (
     KernelDatabase, FailureDatabase, FailureRecord, FAILURE_CLASS_REFERENCE,
     failure_signature,
@@ -52,16 +52,26 @@ from .candidates import (param_space_of, point_label, require_supported_space,
 from .budget import BudgetLedger, BudgetPlan
 from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
                           LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
-                          PERF_GATE_PARAM_KEYS, ROOFLINE_CONVERGED_PCT,
+                          PERF_GATE_PARAM_KEYS, REFERENCE_CEILING_PCT,
                           RULER_LABEL_CORRECTNESS,
                           RULER_LABEL_PERFORMANCE, TRANSPORT_KEY, Verdict,
                           Validity, band_note, binding_attainment,
                           cross_round_band, cross_round_ruler,
                           correctness_verified_levels, l2_ruler_reading,
-                          l3_ruler_reading, roofline_converged,
+                          l3_ruler_reading, reference_ceiling_reached,
                           ruler_note, verdict)
 from .agent_logger import capture_execution
 from .optimization_planner import OptimizationPlanner
+from .run_layout import RunLayout, run_layout
+from .exec_guard import Limits
+from .agent_runtime import (
+    KIND_PROPOSE_SOURCE_PATCH, KIND_PROPOSE_TEMPLATE, KIND_REPAIR_COMPILE,
+    KIND_REPAIR_CORRECTNESS, KIND_EXPLAIN_FAILURE, PATCH_KINDS,
+    ACTION_SOURCE_HARNESS, ACTION_SOURCE_LLM, ENVELOPE_ABSENT,
+    ActionContext, ActionEnvelope, AgentAction, AgentRuntime, Patch,
+    ask_unavailable_reason, candidate_path,
+)
+from .failure_route import classify as classify_failure
 
 
 class Router:
@@ -172,6 +182,26 @@ def verified_parent_from(iteration_history: list[dict],
     if correctness_verified_levels(last.get("levels_passed") or {}):
         return current_code
     return None
+
+
+def _correctness_credential(results) -> Optional[bool]:
+    """这份候选的**正确性凭据**, 从它自己的 L2 结果里读 (三态)。
+
+    设计 §14-10 / §20.4: 性能观测的晋级要求"这个核算得对"是**已验证的事实**,
+    而 `Verifier.verify_l3_only` 是唯一能绕开 L2 产出 L3 观测的入口 —— 所以凭据必须由
+    调用方按**它手里那份结果**给出, 不由 Verifier 假设、也不看实例状态 (与
+    `static_guards` 同一条纪律: 事实属于那一份候选, 不属于那个 Verifier 实例)。
+
+    三态, 与 `source_lang.flag_from_metrics` 同边界:
+      * 有 L2 结果 → 它过没过 (`all(...)`: 多组之间取最保守, 一组没过就是没过);
+      * 没有 L2 结果 → `None` = 没凭据。**不写成 False** —— "这一格空着"与
+        "验过且不合格"是两件事, 混成一个值会让"没检查"伪装成"检查过且坏"。
+    """
+    l2 = [r for r in (results or [])
+          if getattr(getattr(r, "level", None), "name", "") == "L2_FUNCTION"]
+    if not l2:
+        return None
+    return all(bool(r.passed) for r in l2)
 
 
 def _round_axes(l3_result, test_inputs) -> dict:
@@ -291,26 +321,57 @@ class Conductor:
         # 缓慢漂移 / 悄悄坏掉」, 不需要逐次; 短跑根本到不了期, 于是默认不会给已有
         # 链路添任何行为变化。
         heartbeat_interval: int = 5,
-        # 打开后: 进语料前**由本进程**补一次独立重测 (设计 §10.2 最后 10% 预算 /
-        # §10.5-4)。默认关, 因为它是**要花机时**的承诺: 每一份要记住的结论都要量两遍。
-        # 关键区别在于它不再是「开着就一律拒」—— 生产者 (`_produce_remeasure`) 与
-        # 消费者 (`_save_to_db` → `oracle.admit_to_corpus` 的 `requires_remeasure`)
-        # 成对存在, 打开这个开关是可用状态而不是自锁状态。
-        require_double_confirm: bool = False,
+        # ⚠️ 这里**曾经**有一个 `require_double_confirm: bool = False` 的构造参数。
+        # 设计 §3.5 把「长期记忆的独立确认」列在**不允许配置**那一栏 (无开关、无环境
+        # 变量、不可被任务参数改写), 而那个默认 `False` 的参数正好是「默认关的安全装置
+        # 等于不存在」那条纪律的反例 —— 默认配置下单次读数就能进语料。现在它是
+        # **无条件**的: `all_passed` 的产物先补一次独立重测 (`_produce_remeasure`),
+        # 再过 `admit_to_corpus` 的第 3 道门。消融 (§14-9 要的「关掉资格审计的后果」
+        # 那一臂) 只能在 harness 侧 patch, 见 `tests/test_spine_wiring.py` 里那条用例
+        # —— §3.5 规则 3: 能一键关掉的尺子会先被用在无人值守的夜里。
         # 设计 §10.2 的三种预算 (`operator_agent/budget.py`)。**默认全关**: 没设上限
         # 就不拦, 也不假装拦过 —— 「本轮要不要花这次钱」是任务级的决定, 不是模块能替
-        # 调用方拍的 (`require_double_confirm` 那条同一个理由)。
+        # 调用方拍的。
         budget: Optional[BudgetPlan] = None,
         # §10.3 的 ε (探索概率)。设计没给具体数 ⇒ `selection.DEFAULT_EPSILON` (偏探索)。
         # 做成构造参数是为了 §14-9 的对照实验: ε=0 就是「纯利用」那条基线 —— 而把它
         # 放在 `execute()` 的局部状态里 (像 `max_stagnant_rounds` 那样) 就没法做对照。
         selection_epsilon: float = DEFAULT_EPSILON,
+        # §21 Agent Runtime (结构化动作 + 进编译前的独立检查)。默认**自己建一个**:
+        # 一个「默认没有 Runtime」的控制器会让 §21 退化成「测试里才存在的一层」，
+        # 而那正是本仓最贵的缺陷类型（判据算了但没人调）。
+        # 注入的用途是替身与替身级对照（`tests/test_agent_runtime_wiring.py`）。
+        agent_runtime: Optional[AgentRuntime] = None,
+        # §22.1 的运行布局根。默认 `""` ⇒ **不建布局**，候选的角色路径是
+        # `candidate/code.<ext>`（§21 的动作协议活在「声明」那一档）。传了真实
+        # `run_root` ⇒ 每次 `execute` 建/核一次布局（七个角色目录 + 权限位），
+        # 并且 `Patch.path` 变成**真实绝对路径**（同一个判据，输入端换了一档）。
+        # ⚠️ 仓内今天**没有一处生产调用点传它** —— 传了才建，所以当前形态是
+        # 「声明 + 可运行守卫」，不是「线上已经在拦」。
+        run_root: str = "",
+        # §21.3 的「结构化证据」进不进**修复提示**。默认开：设计 §21.3 是强制句
+        # （「每次 LLM 调用**只**提供」那八项），而这一段是它的生产者。
+        # 做成构造参数的理由与 `selection_epsilon` 同一个：**对照实验需要关掉它的那一臂**
+        # （「筛过的证据 vs 全量错误日志」到今天还没有我方实测数字）。
+        # ⚠️ 收益**未实测** ⇒ 不许声称。差集口径（不是「关掉 == 接线前」）：两臂
+        # prompt 砍掉证据那一段后除空白外逐字相同，其余段（契约短哈希、误差形态、
+        # 动作信封协议）两臂**同值** ⇒ 不进差集。
+        structured_evidence: bool = True,
+        # §22.2 的**阶段级**执行上限（编译一档、运行一档）。默认 `None` ⇒ 各自由
+        # `exec_guard` 那一档的默认值给（编译与运行**不是**同一个默认）。
+        # 传递链是「调用方 → Conductor → 后端 → `exec_guard`」，只走显式构造参数：
+        # 不接配置文件、不接环境变量、不接命令行（§3.5 的「不允许配置」清单）。
+        # ⚠️ 只在**本类自己建后端**（`backend is None`）时生效：注入后端时策略属于那个
+        # 后端自己的构造参数，这里再塞一份就会出现「两个地方都能改同一个数」。
+        execution_limits: Optional["Limits"] = None,
+        compile_limits: Optional["Limits"] = None,
     ):
         # `is None` 而不是 `or`: `FailureDatabase` 定义了 `__len__`, 于是**一条记录都没有的
         # 注入实例是假的**, `failure_db or FailureDatabase()` 会把它丢掉换成一个默认实例 ——
         # 调用方拿不到自己注入的那个库, 而失败记录被写进了默认路径。真机探针 (doc 49 §7.17)
         # 就是这么把 7 条探针记录写进 `output/failure_db.jsonl` 的: 它给的是临时目录。
-        self.backend = backend if backend is not None else MockGPU()
+        self.backend = backend if backend is not None else MockGPU(
+            exec_limits=execution_limits, compile_limits=compile_limits)
         self.kernel_db = kernel_db if kernel_db is not None else KernelDatabase()
         self.failure_db = failure_db if failure_db is not None else FailureDatabase()
         self.llm = llm
@@ -339,6 +400,25 @@ class Conductor:
         #: §10.3 的 ε。抽签值本身是 (seed, 轮次) 的纯函数, 不用随机数发生器 —— 于是
         #: ε-greedy 与「跑完能离线复算」不冲突 (见 `selection` 模块注释)。
         self.selection_epsilon = float(selection_epsilon)
+        #: §21 的动作入口。能力取自**后端自己声明的**那一份（不是猜的），授权根只有
+        #: §22.1 的 `candidate/` 一个 —— 「候选只能写候选」这条权限今天就有判据面。
+        self.run_root = str(run_root or "")
+        #: §22.1 的布局句柄（`execute` 里建，跨任务不保留 —— 布局是「这一次运行」的单位）。
+        self.layout: Optional[RunLayout] = None
+        self.structured_evidence = bool(structured_evidence)
+        #: §21.1 **生产者侧**的那一格: 修复轮里模型交上来的动作信封, 由下一轮的判据点消费
+        #: （就在 `current_code = pending_fix` 那两行旁边）。它与 `pending_fix` 同生同灭 ——
+        #: 单独一个变量会留下「谁清它」这个问句, 而本仓 I77/I78 两个缺陷的形状正是
+        #: 「一个写进去、没人负责清的留痕」。
+        self._pending_action_envelope: Optional[ActionEnvelope] = None
+        #: 上一次**过了 §21 门**的候选源码 —— 「新增依赖」的基线 (I78)。
+        #: ⚠️ 被拒的候选**不**更新它: 它从没进过流程, 拿它当基线就等于把同一份违规
+        #: 候选的第二次提交放行 (真机实测过一次, 见 ActionContext.dep_baseline_source)。
+        self._admitted_baseline: str = ""
+        self.agent_runtime = agent_runtime if agent_runtime is not None else AgentRuntime(
+            capabilities=self.backend.capabilities,
+            authorized_roots=(candidate_path(self.run_root).rsplit("/", 1)[0],),
+        )
         #: 本次运行里**真值测量**(L3 读数)的累计条数 —— 心跳按它的倍数触发。
         self._true_measurements = 0
         #: §10.2 的账本。构造时就建一个 (与 `_true_measurements` 同一个理由: 只走
@@ -357,11 +437,11 @@ class Conductor:
         #: 最近一次心跳。只对它自己的 window 作数。
         self._last_heartbeat = None
 
-        #: 永久结论要不要量两遍 (设计 §10.5-4)。生产者是 `_produce_remeasure`, 消费者是
-        #: 入库判据 (`oracle.admit_to_corpus` 的 `requires_remeasure`) —— 两边必须同时
-        #: 存在, 否则这个开关只有「一律拒」一档。默认 `False` = **不花这份机时**,
-        #: 于是默认配置下**单次读数即可入库** (判据的允许理由里会写明这一点)。
-        self.require_double_confirm = bool(require_double_confirm)
+        #: 永久结论**必须**量两遍 (设计 §10.5-4 / §3.5 的不变量, 不是开关)。
+        #: 生产者是 `_produce_remeasure`, 消费者是入库判据 (`oracle.admit_to_corpus`
+        #: 的第 3 道门, 生产路径恒传 `requires_remeasure=True`)。两者成对存在, 所以
+        #: 「一律要求」不再是「一律拒」: 每一份要进语料的结论都会**先**补一次独立重测。
+        #: 曾经这里是一个默认 `False` 的构造参数 ⇒ 默认配置下单次读数即可入库 (I79)。
 
         # 初始化 Agent (注入 LLM + PromptManager)
         self.designer = DesignerAgent(self.kernel_db, llm=llm, prompt_manager=self.pm)
@@ -397,7 +477,11 @@ class Conductor:
                     # §12/Stage 3: 模板型后端的参数空间里**一个点都建不出来** (实例化器
                     # 拒了全部点)。与 `search_error` 分开: 那个是搜索本身抛异常, 这个
                     # 是「候选源枯了」—— 复盘时一个看代码, 一个看实例化器的报错。
-                    "template_no_candidate")
+                    "template_no_candidate",
+                    # §21.1 生产者侧: 模型连续两次交的都是「不改候选」的动作信封
+                    # (解释 / 请求观测), 响应过之后仍然没有补丁 ⇒ 本轮没有候选可验证。
+                    # 与 `fix_error` 分开: 那个是修复**抛了异常**, 这个是模型**明说不改**。
+                    "ask_turns_exhausted")
 
     def _record_stop(self, artifact, round_num: int, reason: str, detail: str = "") -> None:
         """把「循环为什么停」记成数据, 而不是只留一行 print。
@@ -459,6 +543,302 @@ class Conductor:
         return decide(EscalationInputs(
             verdicts=tuple(self._verdict_tail), k_valid_rounds=MAX_STAGNANT_ROUNDS,
             hard_limits=limits, untried_directions=dirs))
+
+    # ─── §21 Agent Runtime：候选进编译之前的那一次裁决 ──────────────
+
+    @staticmethod
+    def _round_action_kind(round_action: str, route) -> str:
+        """本轮的动作种类（§21.1 的词汇）× 本轮在做什么（Conductor 的 `action` 词）
+
+        | 本轮的 `action` | 动作种类 | 依据 |
+        |---|---|---|
+        | `generate` / `optimize` | `propose_source_patch` | LLM 出的是一份实现（首轮是提议，之后是搜索驱动的重生成） |
+        | `template` | `propose_template` | 源码来自实例化器，不经 LLM（§12） |
+        | `fix` | `repair_correctness` / `repair_compile` | §8 的路由判的是「数值错还是编译错」 |
+
+        `fix` 而没有路由（或路由说不清是数值还是编译）时按 `repair_compile` 记：
+        §8 的五路里只有这两路会走到 Fixer，而「局部修复」这一侧两只都符合；
+        写成第三种词会造出一个 §21.1 词汇表里没有的种类。
+        """
+        if round_action == "template":
+            return KIND_PROPOSE_TEMPLATE
+        if round_action == "fix":
+            if route is not None and getattr(route, "kind", "") == "numeric":
+                return KIND_REPAIR_CORRECTNESS
+            return KIND_REPAIR_COMPILE
+        return KIND_PROPOSE_SOURCE_PATCH
+
+    def _round_agent_action(self, *, round_num: int, round_action: str, route,
+                            current_code: str, parent_code: str, task: TaskSchema,
+                            error_shape: Optional[str],
+                            envelope: Optional[ActionEnvelope] = None) -> AgentAction:
+        """把这一轮的产物包成 §21.1 的结构化动作（`Patch` 的审计与回滚点在这里成型）
+
+        **动作是谁写的**（§21.1 的生产者侧）：`envelope` 是模型自己交上来的意图时，
+        种类 / 理由 / 预期瓶颈 / 想用的工具**取模型写的**；两样东西仍然由 harness 写 ——
+        `patch.path`（§22.1 的布局，唯一产者 `candidate_path()`）与 `token_budget`
+        （判它的数必须与真正花掉的那个上限同源；交给模型填就是让被判的人填判据里的数，
+        而它只要写 1 就能绕过 `budget_problems`）。
+
+        `rationale` 不再无条件由 harness 拼装（只在**交不出信封**时拼）—— 这是刻意的：
+        §21.2「`repair_correctness` 必须带误差形态」原先靠 harness 拼装成为**构造保证**，
+        于是那条判据永远不会红。现在模型写的理由要自己点名形态，不点名就被拒（零 GPU 秒），
+        而拒绝理由会作为下一轮的错误信息回到模型眼前 —— 判据第一次遇到一个真正不可靠的
+        生产者。harness 那几条事实（轮次 / 路由 / 误差形态 / ±行数）**没有**混进模型的
+        理由里（混进去上面那条判据又变成永不失败）：它们本来就各自在血缘里
+        （`round` / `action` / `agent_action.context` / `patch.added_lines`）。
+        """
+        kind = self._round_action_kind(round_action, route)
+        source = ACTION_SOURCE_HARNESS
+        rationale = ""
+        bottleneck: Optional[str] = None
+        tools: Tuple[str, ...] = ()
+        if envelope is not None and envelope.usable:
+            source = ACTION_SOURCE_LLM
+            kind = envelope.kind
+            rationale = envelope.rationale
+            bottleneck = envelope.expected_bottleneck
+            tools = envelope.requested_tools
+        ext = {"triton": "py", "cuda_c": "py", "python": "py"}.get(
+            (task.target.dsl or "python").lower(), "py")
+        patch: Optional[Patch] = Patch(path=candidate_path(self.run_root, ext),
+                                       new_source=current_code,
+                                       parent_source=parent_code or "")
+        if source == ACTION_SOURCE_LLM and kind not in PATCH_KINDS:
+            # 模型说它不是「改候选」的那一类 ⇒ harness **不替它**造一个 patch。
+            # 造了就是 harness 自己编语义（「借解释之名改代码」正是 §21.1 要挡的形状，
+            # 而那一半由 `schema_problems` 的 `SIDE_EFFECT_FREE_KINDS` 判）。
+            patch = None
+        bits = [f"第 {round_num} 轮 {round_action}"]
+        if route is not None:
+            bits.append(f"路由 kind={getattr(route, 'kind', '')} route={getattr(route, 'route', '')}")
+        if error_shape:
+            bits.append(f"误差形态={error_shape}")
+        if patch is not None and patch.has_parent:
+            added, removed = patch.changed_lines()
+            bits.append(f"相对父代 +{added}/-{removed} 行")
+        return AgentAction(
+            action_id=f"r{round_num}-{round_action}",
+            kind=kind,
+            # 模型没写理由 ⇒ 退回 harness 拼装（接线前的行为）。写了就用它的：
+            # 于是「理由是谁写的」在产物里分得开（`action_envelope` 那一格）。
+            rationale=(rationale or "; ".join(bits)),
+            # 父代的**身份**取它的内容哈希, 不取任务 id: 判据与回滚点必须指向同一份源码
+            # (`Patch.rollback_source()`), 而任务 id 对「改的是哪一份」一个字都没说。
+            parent_candidate=(
+                f"src:{patch.parent_hash()}"
+                if patch is not None and patch.has_parent else None),
+            patch=patch,
+            expected_bottleneck=bottleneck,
+            requested_tools=tools,
+            token_budget=self._llm_tokens_budget_claim(round_action),
+        )
+
+    @staticmethod
+    def _llm_tokens_budget_claim(round_action: str) -> int:
+        """本动作**声明**要花多少 token（§21.1 的 `token_budget`）
+
+        取的是生成侧真正用的那个上限（`CoderPipeline.GEN_MAX_TOKENS` / Fixer 的
+        `max_tokens`），不是拍一个数：预算校验的两侧必须同源，否则「声明 1000、实际花
+        8192」会让这道门看起来永远能过。模板轮不花 token ⇒ 1（正整数下限）。
+        """
+        from .coder_pipeline import CoderPipeline
+        if round_action == "template":
+            return 1
+        if round_action == "generate" or round_action == "optimize":
+            return int(CoderPipeline.GEN_MAX_TOKENS)
+        return int(FixerAgent.FIX_MAX_TOKENS)
+
+    def _answer_ask_and_retry(self, outcome: "FixOutcome", *, repair_base: str,
+                              task: TaskSchema, failed_results, route,
+                              evidence: str, record: dict) -> "FixOutcome":
+        """响应一次「不改候选」的动作，并**有界**地再要一次补丁（§21.1 生产者侧）
+
+        三类询问各有各的答法，但只有两种结局 —— **答得出**与**答不出**，而且必须说清
+        是哪一种（答不出的那两类要原样告诉模型，否则它会以为「观测结果是空」）：
+
+        * `explain_failure`：答得出（它不需要任何工具）。模型的话记进本轮失败记录的
+          `explanation`，然后要补丁。
+        * `request_profiler` / `request_new_shape`：今天**答不出** —— 判据来自
+          `agent_runtime.ask_unavailable_reason()`，与 §21.4 第 7 条读**同一个**注册表
+          （那两档工具在 `TOOLS` 里是 `None`）。原因原样进 prompt。
+        * 上界：第二次**还是**提问 ⇒ 返回 `code` 为空的结果，调用方据此停下并记
+          `ask_turns_exhausted`。不设这个上界，一条「模型只会提问」的环会白烧 token；
+          而设成「无限次」等于把 §21.1 的预算账本交给模型来花。
+
+        `ask_answer` 走**声明过的**模板段（`fixer_repair.md` 的 `{{ask_answer}}`），
+        不是拼进 §21.3 那八段证据里 —— 后者是「只有那八项」的那个拼装点，把答复塞进去
+        就是第二个注入通道，而且两臂对照也会被污染。
+        """
+        env = outcome.envelope
+        reason = ask_unavailable_reason(env.kind)
+        if env.kind == KIND_EXPLAIN_FAILURE:
+            answer = ("你的解释已记入本轮失败记录。现在请给出**补丁**: 完整修复代码，"
+                      "必要时在代码块之前带一行 `根因:`。")
+            record["ask_answer_kind"] = "accepted_explanation"
+            if env.rationale:
+                record["explanation"] = env.rationale
+        elif reason:
+            answer = (f"这条请求**答不出来**: {reason}。请在不依赖它的前提下给出补丁；"
+                      f"如果确实改不动，改用 `explain_failure` 说清卡在哪。")
+            record["ask_answer_kind"] = "refused_no_gauge"
+            record["ask_refusal"] = reason
+        else:
+            # 工具在注册表里有实现物、但今天没有任何一条路把它**跑起来**再把事实喂回去
+            # （producer 不在岗）—— 所以这里也不能说「观测结果是空」。
+            answer = ("已收到你的请求；本轮能给你的只有已有的那段证据。现在请给出**补丁**。")
+            record["ask_answer_kind"] = "accepted_without_running_it"
+        record["ask_field"] = env.kind
+        record["ask_turns"] = 1
+        print(f"  [Conductor] 响应动作信封 {env.kind} → {record['ask_answer_kind']}")
+        second = self.fixer.run_with_action(
+            repair_base, task, failed_results,
+            fix_not_rewrite=route.fix_not_rewrite,
+            structured_evidence=evidence,
+            error_shape=(getattr(route, "error_shape", "") or ""),
+            ask_answer=answer,
+        )
+        record["second_envelope"] = second.envelope.as_dict()
+        if second.asked:
+            record["ask_turns"] = 2
+            record["ask_outcome"] = "ask_turns_exhausted"
+        else:
+            record["ask_outcome"] = "patch_after_ask"
+        return second
+
+    def _round_action_context(self, *, route, current_code: str, test_inputs,
+                              task: TaskSchema, verified_parent,
+                              previous_results=(), spend_committed: bool = False,
+                              dep_baseline: str = "") -> ActionContext:
+        """§21 裁决的输入装配。**每个字段都有出处**，缺就是「这一条判不了」
+
+        * `escalation_allowed` 取**最近一次**门裁决（`self._escalation_log[-1]`）：
+          门是在每一轮的判决点算的，而它放行的是**下一轮**的结构改动 —— 读「本轮算的
+          那一份」等于用还没发生的事给自己发许可证。
+        * `abi_broken` 读上一轮 L1 发布的 `compile_status`（`interface_mismatch` 是
+          `verifier._verify_compile` 那条出口写的字），不重算判据。
+        * `input_key_sets` 走 `interface_contract.input_key_sets`：逐组判，不取并集。
+        * `tokens_left` 与 §10.2 的退化出口**同一个口径**（本次运行的用量）——
+          两处各算一遍会让「还剩多少」有两个答案。
+        """
+        from .interface_contract import input_key_sets
+        last_esc = self._escalation_log[-1] if self._escalation_log else None
+        abi_broken = False
+        for r in (previous_results or ()):
+            metrics = getattr(r, "metrics", None) or {}
+            if str(metrics.get("compile_status") or "") == "interface_mismatch" \
+                    and not getattr(r, "passed", True):
+                abi_broken = True
+        key_sets = tuple(tuple(sorted(str(k) for k in keys))
+                         for keys in (input_key_sets(test_inputs) or []) if keys)
+        used = self._llm_tokens_used()
+        return ActionContext(
+            route_kind=(getattr(route, "kind", "") if route is not None else ""),
+            error_shape=(getattr(route, "error_shape", None) if route is not None else None),
+            fix_not_rewrite=bool(getattr(route, "fix_not_rewrite", False)) if route else False,
+            escalation_allowed=bool(last_esc and last_esc.get("allowed")),
+            escalation_refusals=tuple(last_esc.get("refusals", ())) if last_esc else (),
+            abi_broken=abi_broken,
+            authorized_roots=self.agent_runtime.authorized_roots,
+            input_key_sets=key_sets,
+            language=task.target.dsl or "",
+            parent_verified=bool(verified_parent),
+            tokens_left=self._budget.tokens_left(used),
+            spend_committed=bool(spend_committed),
+            # 「新增依赖」的基线 = 上一次**过门**的候选 (I78)。空 = 用 patch 的父代。
+            dep_baseline_source=str(dep_baseline or ""),
+        )
+
+    def _fix_evidence(self, *, task, route, verify_results, current_code,
+                      parent_code, gate_ctx):
+        """§21.3 的生产者: 把这一轮**手里已有的结构化事实**渲染成修复提示里那一段
+
+        为什么由这里拼、而不是 Fixer 自己拼: `AgentRuntime.context_for(...).render()`
+        是唯一的拼装点 (`ActionContext` 的注释里写着同一条纪律)。本方法只负责**采集**
+        八个输入, 不做措辞 —— 措辞与上限都在 `ProposalContext` 那一侧, 于是「模型看到
+        的证据」与「判据看到的证据」不会各写一套。
+
+        三件**刻意不采**的东西 (采了就是自欺):
+          * profiler 指标只取 `verifier.COMPILE_FACT_KEYS`（编译产物的事实, 与 L3 写进
+            metrics 的是同一份名单）。本轮没有这些键就传空 dict ⇒ 上下文里那一段会说
+            「本轮没有编译产物事实」, 而不是拿错误计数冒充 profiler 读数;
+          * 失败分类/误差形态取**同一个** `route` 对象（gate 那一侧也用它）—— 再分类一次
+            就是第三个口径;
+          * 预算取 gate 那一份 `tokens_left`（同一个 `_llm_tokens_used`）。
+        """
+        from .agent_runtime import contract_digest
+        from .contract import freeze_from_task
+
+        # 父候选 diff 的基线是**本轮的上一份**(`_code_before_this_round`), 不是
+        # 「正在被修的那一份」: 后者与 `current_code` 常常同一份 ⇒ diff 恒空, 而
+        # 「这一轮的改动干了什么」恰好是修复时最该看到的证据。首轮没有上一份 ⇒ 空串,
+        # `Patch` 会说「没有父代」而不是拿空文件冒充。
+        patch = Patch(candidate_path(self.run_root), current_code, parent_code or "")
+        contract = freeze_from_task(task) if task is not None else None
+        first_error = ""
+        for r in (verify_results or ()):
+            if not getattr(r, "passed", True):
+                first_error = str(getattr(r, "error_log", "") or
+                                  getattr(r, "message", "") or "")
+                break
+        facts = {}
+        for r in (verify_results or ()):
+            for k in COMPILE_FACT_KEYS:
+                v = (getattr(r, "metrics", None) or {}).get(k)
+                if v is not None and not isinstance(v, bool):
+                    facts[k] = v
+        ctx = self.agent_runtime.context_for(
+            contract_summary=contract_digest(contract),
+            patch=patch,
+            route=route,
+            first_error=first_error,
+            profiler_metrics=facts,
+            budget_left=(gate_ctx.tokens_left if gate_ctx is not None else None),
+        )
+        record = {"injected": True,
+                  "chars": len(ctx.render()),
+                  "truncations": list(ctx.truncations()),
+                  "profiler_facts": sorted(facts),
+                  "has_parent_diff": bool(patch.has_parent),
+                  # diff 的规模 (新增/删除行数): 0 与「有父代但一字未改」在当时
+                  # 长得一样, 而这两种情形对「这一轮的改动干了什么」是相反的结论。
+                  "parent_diff_lines": list(patch.changed_lines()),
+                  "has_contract": bool(contract)}
+        return ctx.render(), record
+
+    @staticmethod
+    def _refusal_result(verdict) -> VerificationResult:
+        """被拒的动作 → 一条 **L1 失败**结果（不进编译、零 GPU 秒）
+
+        为什么是「合成一条 L1 失败」而不是另加一条控制流：本轮的候选确实没通过
+        「进编译之前的检查」，而下游（§8 路由 → Fixer → 负样本）对「候选不通过」只有
+        一条已存在的通道。合成本地失败结果 = 复用那条通道，并让拒绝理由**逐字**进
+        Fixer 的处方（Wave 3 的退出标准「编译失败和正确性失败都有结构化修复路径」）。
+        `metrics` 上的两个键是给读者用的：`agent_action_refused` 让
+        「这是被 §21 拦下的、根本没编译」与「远端编译真的失败了」分得开，
+        也用于跳过下面那条根本没意义的依赖分析（省一次 SSH 往返）。
+        """
+        note = verdict.refusal_note()
+        return VerificationResult(
+            level=VerificationLevel.L1_COMPILE, passed=False,
+            message="动作被拒 (未进编译): " + (note.split(";")[0][:200] or "无理由"),
+            error_log=("§21 动作裁决未通过, 这份候选**没有**被送去编译。\n"
+                       f"动作: {verdict.action.kind} ({verdict.action.action_id})\n"
+                       f"理由: {note}\n"
+                       "修法: 让下一份候选不再命中上面任何一条 —— 这些检查全部是"
+                       "零 GPU 时间的静态判据, 不修就会被同样拦下。"),
+            metrics={"compile_status": "agent_action_refused",
+                     "agent_action_refused": True,
+                     "agent_action": verdict.as_dict()},
+        )
+
+    def _llm_tokens_used(self) -> int:
+        """**本次运行**的 LLM token 用量。两个读者共用这一个口径（不是两次实现）：
+        §10.2 的退化出口（`note_llm_usage`）与 §21.1 的预算校验。"""
+        if self.llm is None or not hasattr(self.llm, "cost_tracker"):
+            return 0
+        return int(self.llm.cost_tracker.summary_since(self._cost_watermark)
+                   .get("total_tokens", 0) or 0)
 
     def _heartbeat_for_next_measurement(self):
         """下一次真值测量是否该伴随标定心跳 —— 该跑就**现在**跑掉 (同一个窗口)。
@@ -599,12 +979,22 @@ class Conductor:
         # §10.3 升级门的运行态: 判决词尾巴 (只进 valid 轮) 与逐轮裁决日志
         self._verdict_tail = []
         self._escalation_log = []
+        # §21 的记账同理 (与上面三条同一个理由): 「这一次运行拦下过几个动作」不许
+        # 跨任务累计 —— 第二个任务的产物里出现第一个任务拦下的动作, 复盘时会去找一个
+        # 不存在的现场。
+        self.agent_runtime.reset_run()
+        # 基线与记账同一条纪律: 单位是**一次运行** (同一个 Conductor 可以跑多个任务)
+        self._admitted_baseline = ""
         # 心跳计数同理: 「每 N 次真值测量」是**这一次运行**内的事, 跨任务累计会让
         # 第二个任务在错误的位置插入参照对。
         self._true_measurements = 0
         self._heartbeat_epoch = 0
         self._heartbeat_ran_for = 0
         self._last_heartbeat = None
+        # §22.1: 布局在**写任何 artifact 之前**建/核一次，单位与上面那一串运行态相同
+        # （同一个 Conductor 跑多个任务时，上一轮的目录不许被下一轮接着用）。
+        # `run_root` 为空时**不建**：空串不是「默认布局」，而是「这一档还没开」。
+        self.layout = run_layout(self.run_root) if self.run_root.strip() else None
         with capture_execution(
             task_id=task.task_id,
             operator=operator_name,
@@ -935,6 +1325,18 @@ class Conductor:
                 param_space_of(self.backend, task), self.backend)
             template_choice = None
             _template_sel = None
+            # §21.3 这一段进没进**本轮修复提示**的留痕 (读者: A/B 对照与复盘)。
+            # 初值必须在轮首: 上一轮修过的话, 这一轮的血缘会带着上一轮的记录 ——
+            # 「这一轮的提示里有没有结构化证据」这个问题就答错了 (`selection` 那一格
+            # 初值放晚了是同一种错误, 被用例抓过一次)。
+            # ⚠️ 必须是**会被后填的字典** (与 `_coverage_record` 同一处置): 血缘条目在
+            # 修复之前就 append 了, 直接填一个 None/字符串的话后填的值进不了产物 ——
+            # 第一版就是这么写的, 产物里每一轮都是 `null`, 用例当场抓到。
+            _fix_evidence_record: dict = {"injected": False}
+            # §21.1 生产者侧的动作留痕 (与上面同一种写法: 血缘在轮首就 append, 后填的值
+            # 靠引用进产物)。它记的是「动作是谁写的」以及询问类信封被怎么响应 ——
+            # 没有这一格，「模型写的理由」与「harness 拼的理由」在产物里长得一样。
+            _fix_action_record: dict = {"asked": False}
             # 本轮**可枚举**的候选全集 (§10.4 的覆盖判据要它): 模板型 = 剪枝后的点,
             # 代码型 = None (候选由 LLM/规则按需产生 ⇒ 覆盖无法确立)。初值必须在轮首 ——
             # 否则代码型轮会读到**上一轮**留下的一批点 (那会让覆盖判定拿旧全集说新话)。
@@ -1023,9 +1425,21 @@ class Conductor:
             # Step 3: 获取代码
             # - 首轮 / Search 优化后: Coder 根据 Sketch + OptimizationPlanner 配方重新生成
             # - Fixer 修复后: 直接使用修复版代码重新验证
+            # §21 的回滚点与 diff 基线: 本轮开始**之前**手里的那份代码 (= 上一轮的成品,
+            # 也就是本轮 Fixer 被要求去修的那一份)。必须在下面三支改写 `current_code`
+            # 之前取 —— 取晚了就成了「自己与自己比」。
+            _code_before_this_round = current_code
+            # 本轮候选的**来路**（§21.1 生产者侧）。轮首置空 —— 只有「本轮用的是 Fixer
+            # 交上来的那份」这一支会武装它, 于是生成轮/模板轮恒为 `absent`。
+            _model_envelope: Optional[ActionEnvelope] = None
             if pending_fix is not None:
                 current_code = pending_fix
                 pending_fix = None
+                # 信封与 `pending_fix` **同生同灭**（唯一的消费点就在这两行）: 拿出来的
+                # 是「这份候选是谁怎么提出来的」。它进不了别的轮次 —— 上面那一行已经把它
+                # 清空, 而下一轮的候选要么由 Coder 生成（没有信封）, 要么由新的修复轮武装。
+                _model_envelope = self._pending_action_envelope
+                self._pending_action_envelope = None
                 action = "fix"
                 print(f"\n[Conductor] 使用 Fixer 修复后的代码重新验证...")
             elif template_choice is not None:
@@ -1100,6 +1514,74 @@ class Conductor:
                 print(f"\n[Novelty] 第 {round_num} 轮与第 {dup_of} 轮结构相同 (签名 {sig}) "
                       f"—— 照常验证, 本轮只在量基率")
 
+            # ── §21 Agent Runtime: 候选进编译之前的独立检查 (§21.4) ──────────────
+            # 位置是判据的一部分: 它在**所有**候选来源（Coder / 模板实例化器 / Fixer
+            # 修复版 / 决赛选择）汇合之后、在**任何** GPU 与 SSH 之前。放到 producer
+            # 那一侧就漏掉三条路（模板、修复、决赛选择），放到 Verifier 里面则会把
+            # 「动作协议」塞进评测器。
+            #
+            # 被拒的后果是**定义好的**：本轮不进 L1/L2/L3，合成一条 L1 失败结果
+            # （`agent_action_refused`），于是 §8 的路由与 Fixer 的处方照旧工作 ——
+            # 拒绝不是「静默丢掉这个候选」。
+            _prev_route = (classify_failure(all_verification_results)
+                           if action == "fix" and all_verification_results else None)
+            # §21.1 生产者侧: 这一轮的候选如果是 Fixer 交上来的, 它可能同时交了**动作信封**
+            # （种类 / 理由 / 预期瓶颈 / 想用的工具）。信封只在这一轮有效 —— 消费点就在上面
+            # `current_code = pending_fix` 那一处（与 `pending_fix` 同生同灭），于是它不可能
+            # 泄漏到别的轮次。没有信封（生成轮 / 模板轮 / 快照续跑）⇒ `absent`，
+            # 动作由 harness 按轮次与路由拼（接线前的行为）。
+            _action_envelope_record: dict = {
+                "status": ENVELOPE_ABSENT,
+                "reason": ("这一轮不是修复轮 —— 只有 Fixer 会交信封"
+                           if action != "fix" else "这一次修复没有交出信封 (或快照续跑丢了它)"),
+                "used_for_action": False,
+                "source": ACTION_SOURCE_HARNESS,
+            }
+            if _model_envelope is not None:
+                _action_envelope_record = dict(_model_envelope.as_dict())
+                _action_envelope_record["used_for_action"] = bool(_model_envelope.usable)
+                _action_envelope_record["source"] = (
+                    ACTION_SOURCE_LLM if _model_envelope.usable else ACTION_SOURCE_HARNESS)
+            _used_envelope = _model_envelope
+            _model_envelope = None       # 一轮只用一次: 下一轮重新由修复轮武装
+            _agent_action = self._round_agent_action(
+                round_num=round_num, round_action=action, route=_prev_route,
+                current_code=current_code,
+                # 回滚点/ diff 基线: 修复轮是「本轮开始前的那一份」(Fixer 修的就是它,
+                # 而它不一定是**已验证**父代 —— 一份从未通过正确性的候选同样可以被修);
+                # 其余轮次用已验证父代 (它就是这份新候选要替换掉的那一份)。
+                # 两者都没有 ⇒ 空, 于是 `Patch.rollback_source()` 返回 None 而不是空源码。
+                parent_code=((_code_before_this_round or verified_parent or "")
+                             if action == "fix" else (verified_parent or "")),
+                task=task,
+                error_shape=(getattr(_prev_route, "error_shape", None)
+                             if _prev_route is not None else None),
+                envelope=_used_envelope,
+            )
+            _action_ctx = self._round_action_context(
+                route=_prev_route, current_code=current_code, test_inputs=test_inputs,
+                task=task, verified_parent=verified_parent,
+                previous_results=all_verification_results or (),
+                dep_baseline=self._admitted_baseline,
+                # 候选在这个位置**已经生成** ⇒ 钱花过了。预算问题照记, 但不据此拒绝
+                # (见 `ActionContext.spend_committed`)。
+                spend_committed=True,
+            )
+            _action_verdict = self.agent_runtime.admit(_agent_action, _action_ctx)
+            if _action_verdict.accepted:
+                # 过了门才配当下一轮的「新增依赖」基线 (I78): 被拒的那份从没进过流程,
+                # 它声明的 import 也就没进过环境 —— 拿它当基线等于把同一份违规候选的
+                # 第二次提交放行 (真机实测: 第 3 轮那份夹带 torch 的候选过了门, 真的上了
+                # 远端编译, 只有 L2 的反作弊静态审计把它拦住)。
+                self._admitted_baseline = current_code
+            if not _action_verdict.accepted:
+                print(f"\n[§21 Runtime] 动作被拒 (零 GPU 秒): "
+                      f"{_action_verdict.refusal_note()}")
+                if _action_verdict.fallback_available:
+                    print("  [§21 Runtime] 回退父代是一条可选出路 (§21.2) —— "
+                          "本轮的修复提示会把这一点带上")
+                verify_results = [self._refusal_result(_action_verdict)]
+
             # Step 4: Verifier 验证
             # P1-1 拼接: 候选选择里已经跑过 L1+L2, 这里只补缺的那一段 ——
             # 胜者补 L3; **全败**时那份 L1+L2 本身就是最终结果 (L2 已失败, 不跑 L3),
@@ -1113,7 +1595,11 @@ class Conductor:
             # 与 §10.2 的墙钟预算同一个货币 (同一个进程、同一个 `time.monotonic()`),
             # 于是「这一轮把秒换成数字花了多少」与预算拦人的口径是同一个。它不是卡上时间。
             _meas_started = time.monotonic()
-            if selected_l1_l2 is not None and l1_l2_is_final:
+            if not _action_verdict.accepted:
+                # 上一段已经把 `verify_results` 设成那条拒绝结果 —— 这里**不许**再碰
+                # 后端 (心跳也不跑: 这一轮没有任何「把时间换成数字」的动作)。
+                pass
+            elif selected_l1_l2 is not None and l1_l2_is_final:
                 print(f"\n[Verifier] 复用候选选择中的 L1+L2 失败结果 (不重跑真机)...")
                 verify_results = selected_l1_l2
             else:
@@ -1133,6 +1619,10 @@ class Conductor:
                         # 判定按 B」)—— CHECKLOG I65。
                         static_guards=flag_from_metrics(
                             *(r.metrics for r in selected_l1_l2 or [])),
+                        # 正确性凭据 (§14-10 / §20.4): 从**这次胜者**的 L2 结果里读 ——
+                        # L3 只跑胜者, 所以"胜者是靠正确性选出来的"这件事必须作为数据
+                        # 随读数走, 而不是靠"我们没走到这里就说明它对了"的隐含推理。
+                        correctness_verified=_correctness_credential(selected_l1_l2),
                     )
                 else:
                     print(f"\n[Verifier] 执行三级验证...")
@@ -1242,6 +1732,23 @@ class Conductor:
                 # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
                 "candidate_signature": sig,
                 "duplicate_of": dup_of,
+                # §21 的动作与裁决 (**审计与可回滚**的落点): 动作者、理由、patch 的
+                # 双向哈希、改了几行, 以及七条独立检查逐条的结论 + 覆盖率。
+                # 不进血缘的话, 「Agent 产生的每个 patch 都可审计、可回滚」(Wave 3 的
+                # 退出标准) 只能靠重跑一次才知道 —— 而拒绝过的那一轮连代码都不存在。
+                "agent_action": _action_verdict.as_dict(),
+                # §21.1 **生产者侧**: 这一轮的动作是哪来的（模型交的信封 / harness 拼的）、
+                # 信封读没读出来（`parsed` / `absent` / `malformed` + 原因）、模型声明的
+                # token 预算（**不进判据** —— 判据读的是 harness 那一份）、以及询问类信封
+                # 被怎么响应。缺了它，「动作是谁写的」与「模型自己声明了多少预算」这两件
+                # 事在产物里都无法区分 (本仓 I77 那一族)。
+                "action_envelope": _action_envelope_record,
+                "fix_action": _fix_action_record,
+                # §21.3 的**注入留痕**: 这一轮的修复提示里有没有那一段结构化证据、
+                # 它有多长、哪几段被截断了、profiler 那一格喂的是哪些键。没有这一格,
+                # 「筛过的证据 vs 全量错误日志」这个对照的产物侧无法区分两臂
+                # (`injected` 只由构造参数与这一轮有没有走修复共同决定)。
+                "fix_evidence": _fix_evidence_record,
                 # §12: 这一轮的候选如果是**模板点**产出的, 它的身份 (template_id /
                 # instantiator_ver / 参数) 与「怎么选的」(顺位/剪枝/被拒的点) 一起进血缘。
                 # 没有这一格, 「这个 tiling 更好」与「这个模板点更好」在产物里长得一样。
@@ -1497,7 +2004,7 @@ class Conductor:
 
                     break
 
-            # 缺口 4 的正解: 改善判据该看「离 roofline 上界还有多远」, 而不是继续拿
+            # 缺口 4 的正解: 改善判据该看「离 参考天花板还有多远」, 而不是继续拿
             # 一个标量比大小。绑定轴已经贴着上界的核, 换任何配方都不可能有可测收益 ——
             # 再跑一轮只是白烧 GPU 与 LLM token。
             #
@@ -1506,11 +2013,11 @@ class Conductor:
             # 所以拿得到 L3 就意味着 L1/L2 过了、且 L3 没过。在这里再写
             # `not l3_result.passed` 或 `not l1_l2_failed` 都是永不生效的条件
             # (同一文件里刚为 `can_disable_recipe` 删掉过一个)。
-            if l3_result is not None and roofline_converged(l3_result.metrics or {}):
+            if l3_result is not None and reference_ceiling_reached(l3_result.metrics or {}):
                 _att = binding_attainment(l3_result.metrics or {})
                 _rl = (l3_result.metrics or {}).get("roofline_analysis") or {}
                 print(f"\n[Conductor] 绑定轴已达 roofline {_att:.1f}% "
-                      f"(>= {ROOFLINE_CONVERGED_PCT:.0f}%), 判定已收敛, 停止后续优化轮")
+                      f"(>= {REFERENCE_CEILING_PCT:.0f}%), 判定已收敛, 停止后续优化轮")
                 # 这条 break 是整个循环里最贵的一次判定 (它决定不再花轮次), 所以把它
                 # 依赖的分母连同出处一起落进日志: 以后复查时不需要回头猜 90% 是相对
                 # 哪个数算出来的、那个数凭什么。
@@ -1519,7 +2026,7 @@ class Conductor:
                       f"bw={_rl.get('hw_peak_bandwidth_gbs', 0):.0f} GB/s "
                       f"({_rl.get('compute_used', '?')}) — {_rl.get('peak_source', '出处未知')}")
                 snapshot_target_dir = _snap()
-                self._record_stop(artifact, round_num, "converged", "绑定轴已达 roofline 上界")
+                self._record_stop(artifact, round_num, "converged", "绑定轴已达 参考天花板")
 
                 break
 
@@ -1546,7 +2053,10 @@ class Conductor:
                     # L1 编译失败可能是缺依赖: 分析代码 import 并按需补装
                     l1_result = next((r for r in verify_results
                                       if r.level == VerificationLevel.L1_COMPILE and not r.passed), None)
-                    if l1_result and Cap.DEP_ANALYSIS in self.backend.capabilities:
+                    # §21 拦下的候选**根本没被送进编译**, 为它跑一次远端依赖分析
+                    # (SSH 往返) 毫无意义 —— 那正是「不进编译」想省的机时。
+                    if l1_result and not (l1_result.metrics or {}).get("agent_action_refused") \
+                            and Cap.DEP_ANALYSIS in self.backend.capabilities:
                         deps = self.backend.analyze_dependencies(current_code)
                         if deps:
                             print(f"\n[Conductor] 代码依赖: {deps}, 尝试按需补装...")
@@ -1577,10 +2087,42 @@ class Conductor:
                         print(f"  [Conductor] 修订起点退回第 {verified_parent_round} 轮那份 "
                               f"L1/L2 已验证的实现 (本轮这一版没有通过正确性验证)")
                     try:
-                        fixed_code, fix_note = self.fixer.run(
+                        # §21.3: 结构化证据那一段 (**唯一拼装点** = `_fix_evidence`),
+                        # 默认开。关掉时传空串 ⇒ 只少那一段（其余段两臂同值，见构造参数注释）。
+                        _evidence = ""
+                        if self.structured_evidence:
+                            _evidence, _rec = self._fix_evidence(
+                                task=task, route=route, verify_results=failed_results,
+                                current_code=current_code,
+                                parent_code=_code_before_this_round,
+                                gate_ctx=_action_ctx,
+                            )
+                            _fix_evidence_record.update(_rec)
+                        # §21.1 生产者侧: 修复这一步现在**同时**取回模型交上来的动作信封。
+                        # `run` 保留给不关心信封的调用方, 而这里用的是带信封的那一个 ——
+                        # 于是「动作是谁写的」在内侧就分得开。
+                        _outcome = self.fixer.run_with_action(
                             repair_base, task, failed_results,
                             fix_not_rewrite=route.fix_not_rewrite,
+                            structured_evidence=_evidence,
+                            error_shape=(getattr(route, "error_shape", "") or ""),
                         )
+                        if _outcome.asked:
+                            # 模型交的是**不改候选**的意图 (解释 / 请求观测): 这一轮没有候选。
+                            # 响应它一次 (答或拒), 再要一次补丁 —— 有界: 第二次还是提问就停。
+                            # 「一直问」不设上限就是一条白烧 token 的环 (§21.1 的预算账)。
+                            _outcome = self._answer_ask_and_retry(
+                                _outcome, repair_base=repair_base, task=task,
+                                failed_results=failed_results, route=route,
+                                evidence=_evidence,
+                                record=_fix_action_record,
+                            )
+                        fixed_code, fix_note = _outcome.code, _outcome.summary
+                        # 信封交给**下一轮**的判据点 (它就是这份候选的来路)。只有改候选的
+                        # 那几类值得传（提问类在上面已经被响应掉了）。
+                        self._pending_action_envelope = (
+                            _outcome.envelope if _outcome.envelope.usable else None)
+                        _fix_action_record.update(_outcome.as_dict())
                     except Exception as e:
                         print(f"\n[Conductor] Fixer 修复失败 ({e})，停止迭代")
                         snapshot_target_dir = self._flush_snapshot(
@@ -1600,6 +2142,19 @@ class Conductor:
                         )
                         self._record_stop(artifact, round_num, "fix_error", "Fixer 修复抛异常, 停止迭代")
 
+                        break
+                    if not _outcome.code:
+                        # 响应过、又要过一次补丁，第二次**还是**提问 ⇒ 这一轮没有候选。
+                        # 停（不是「拿上一次的代码继续跑」）：模型已经明说它不改候选，
+                        # 再拿旧候选上去验证就是 harness 替它改了它的声明。
+                        print(f"\n[Conductor] 连续两次收到「不改候选」的动作信封 "
+                              f"({_outcome.envelope.kind})，本轮没有候选 —— 停止迭代")
+                        self._pending_action_envelope = None
+                        # 「紧邻 break 的三行内必须有 _record_stop」是 `test_stop_reason`
+                        # 的计数守卫 —— 详情写多行会把它顶出窗口, 于是那条守卫就漏了这一处。
+                        self._record_stop(artifact, round_num, "ask_turns_exhausted",
+                                          f"连续两次收到不改候选的意图 "
+                                          f"({_outcome.envelope.kind})，响应后仍无补丁")
                         break
                     print(f"  修复说明: {fix_note}")
                     pending_fix = fixed_code
@@ -1668,11 +2223,9 @@ class Conductor:
                 # BLOCK_K 还是小 BLOCK_M/N 排) 与 LLM 先验 (`agents.py:708` 读 speedup)。
                 # §10.2 第三行: LLM token 独立管, 超了退化成纯数值搜索。口径是
                 # **本次运行**的用量 (`summary_since(水位线)`), 不是这个进程到现在的累计。
-                _tokens_used = 0
-                if self.llm is not None and hasattr(self.llm, "cost_tracker"):
-                    _tokens_used = int(
-                        self.llm.cost_tracker.summary_since(self._cost_watermark)
-                        .get("total_tokens", 0) or 0)
+                # 口径只有一处 (`_llm_tokens_used`): §21.1 的预算校验也读它。两处各算
+                # 一遍同一件事, 迟早会出现两个「还剩多少」。
+                _tokens_used = self._llm_tokens_used()
                 _llm_broke = self._budget.note_llm_usage(_tokens_used)
                 if _llm_broke:
                     print(f"\n[Budget] LLM token 预算用尽 ({_tokens_used}/"
@@ -1960,11 +2513,12 @@ class Conductor:
             print(f"\n[Conductor] {self.llm.cost_tracker.pretty()}")
 
         if artifact.all_passed:
-            # 永久结论量两遍 (设计 §10.5-4): 只在**真会进语料**的这一支做重测。生产者与
-            # 消费者 (下面 `_save_to_db` 里那道门) 成对存在, 所以打开
-            # `require_double_confirm` 是可用状态, 不是「入库率归零」的自锁状态。
-            if self.require_double_confirm:
-                self._produce_remeasure(artifact, task, test_inputs, target_gflops)
+            # 永久结论量两遍 (设计 §10.5-4 / §3.5 的**不变量**, 不是开关): 只有真会进语料
+            # 的这一支做重测, 而这一支**一定**做 —— 曾经它挂在一个默认 `False` 的构造参数
+            # 后面, 于是默认配置下单次读数就能入库 (I79: 「默认关的安全装置等于不存在」)。
+            # 生产者与消费者 (下面 `_save_to_db` 里那道门) 成对存在, 所以无条件要求不是
+            # 「一律拒」: 先补一次独立重测, 再由判据读它。
+            self._produce_remeasure(artifact, task, test_inputs, target_gflops)
             self._save_to_db(artifact, task)
 
         # ── 报告产物 (设计 §17 第 3 条) ──
@@ -2325,7 +2879,11 @@ class Conductor:
                 # 重测也是一次资格判定: 适用性从**产物里记的那几级结果**里读
                 # (`flag_from_metrics` 取最保守的一档; 一条都没有 ⇒ None = 不改判)。
                 static_guards=flag_from_metrics(
-                    *(r.metrics for r in (artifact.verification_results or []))))
+                    *(r.metrics for r in (artifact.verification_results or []))),
+                # 正确性凭据同上 (§14-10 / §20.4): 重测是**晋级层**的那一次测量 ——
+                # 它比任何别的读数都更需要说清"这份核验过正确性", 而不是靠它当初
+                # 为什么会被记下来这个上下文。
+                correctness_verified=_correctness_credential(artifact.verification_results))
             # §10.2 的「最后 10% 不可挪用」: 这一次重测花的是**预留**那一格。记账放在
             # 调用之后 (它已经花了机时), 而且花的是 confirm —— 非 confirm 的开销碰不到它。
             self._budget.oracle_spend("confirm")
@@ -2389,9 +2947,11 @@ class Conductor:
             metrics,
             getattr(artifact, "remeasure", None),
             min_speedup=float(task.constraints.min_speedup or 1.0),
-            # 第 3 道门是不是强制, 是**机时承诺**而不是判据细节: 见 `admit_to_corpus`
-            # 的 docstring 与 `require_double_confirm` 的声明处。
-            requires_remeasure=bool(getattr(self, "require_double_confirm", False)),
+            # 第 3 道门**恒开** —— 它是设计 §3.5「不允许配置」那一栏里的一项
+            # (「长期记忆的独立确认」), 所以这里写死 True 而不是读某个开关:
+            # 一个能一键关掉的尺子会先被用在无人值守的夜里 (§3.5 规则 3)。
+            # 消融那一臂只能在 harness 侧 patch (见 `tests/test_spine_wiring.py`)。
+            requires_remeasure=True,
         )
         record = KernelRecord(
             kernel_id=artifact.kernel_id,

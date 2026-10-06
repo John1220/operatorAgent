@@ -193,8 +193,13 @@ class TestSelectionByL2(unittest.TestCase):
                          kernel_db=KernelDatabase(jsonl_path=None),
                          llm=llm)
 
-    def test_second_finalist_wins_and_l3_runs_once(self):
-        """低温候选 (默认) L2 失败 → 高温候选救场; L3 只跑胜者一次"""
+    def test_second_finalist_wins_and_l3_runs_only_for_the_winner(self):
+        """低温候选 (默认) L2 失败 → 高温候选救场; L3 只碰胜者
+
+        ⚠️ 2026-10-03 起 L3 在**胜者**上跑两次: 决赛那一次 + 进语料前的**独立重测**
+        (两次确认是设计 §3.5 的不变量, 见 CHECKLOG I79)。这条用例的靶子没变 ——
+        「前 2 名上 L2」折中省的是**别的候选不上 L3**, 仍由下面那条集合断言钉住。
+        """
         llm = MockLLM(by_temp={0.1: WRONG, 0.4: RIGHT, 0.7: WRONG})
         conductor = self._conductor(llm)
         l2_codes = _spy(conductor.verifier, "_verify_function")
@@ -208,8 +213,13 @@ class TestSelectionByL2(unittest.TestCase):
         # L2 按温度序跑过两个决赛候选: 先 WRONG (败) 后 RIGHT (胜)
         self.assertEqual([c.strip() for c in l2_codes],
                          [WRONG.strip(), RIGHT.strip()])
-        # L3 只跑胜者一次 —— 「前 2 名上 L2」折中要省的就是这里
-        self.assertEqual([c.strip() for c in l3_codes], [RIGHT.strip()])
+        # L3 只碰胜者 (落败的那两份一个都没上 L3) —— 「前 2 名上 L2」折中要省的就是这里
+        self.assertEqual({c.strip() for c in l3_codes}, {RIGHT.strip()},
+                         "除胜者外还有别的候选上了 L3")
+        # 次数也要钉: 决赛一次 + 进语料前的独立重测一次 (同一份码), 正好两次。
+        # 少了第二次 = 两次确认没生效; 多了 = 又有别的候选漏上 L3 了。
+        self.assertEqual(len(l3_codes), 2,
+                         f"L3 次数不是「决赛 1 + 重测 1」: {len(l3_codes)}")
         # P1-1 成本记账进血缘: 本轮生成 2 个决赛候选、真机 L2 跑 2 次。
         # 不记下来, 「翻为默认后机时涨了多少」在产物里就没有原料 (与 levels_passed 同类)。
         hist = artifact.iteration_history[0]

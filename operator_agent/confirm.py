@@ -136,10 +136,12 @@ class UnableToEstablish:
         # 它们此前**没有任何读者** —— 判据算了、日志也打了, 但没人把它收进「说不清」
         # 这一节, 于是报告里读起来像是「这一轮一切正常」。
         _rl = metrics.get("roofline_analysis") or {}
-        if _rl and _rl.get("peak_measured") is not True:
-            # 与 measurement.roofline_converged 同一个位: 分母没实测 ⇒ 收敛出口关闭,
-            # 于是「已经贴着上界了」这句话这一轮**没有**获得资格 (设计 §13.5)。
-            self.add("无法宣布已到 roofline 上界", "峰值分母未实测 (probe_peak 未落地)",
+        if _rl and _rl.get("reference_lower_bound") is not True:
+            # 与 measurement.reference_ceiling_reached 同一个位: 分母没有参考下界 ⇒
+            # 天花板出口关闭, 于是「已经贴着参考实现的天花板了」这句话这一轮**没有**
+            # 获得资格 (设计 §13.5)。这句说的是**参考下界**有没有, 不是器件峰值:
+            # 器件峰值那个量具 (`peak_measured`) 代码里还不存在。
+            self.add("无法宣布已到参考天花板", "参考下界未取得 (同一次 L3 的基线臂没过探针判据)",
                      kind="measurement",
                      evidence=f"peak_source={_rl.get('peak_source', '')!r}")
         _elig = metrics.get("eligibility")

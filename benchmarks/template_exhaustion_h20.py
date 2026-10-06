@@ -8,7 +8,7 @@ fire 过；§13.5 收敛出口同理。这一跑回答三件事：
       第一次在真机上被观测到「拒绝只因轮数停止」
   O2  全部点试完 + K 轮无改善（verdict 非 FAST, 带噪声带）⇒ 两条件停滞出口
       fire, 停机理由点名「已穷尽 (N/N)」
-  O3  §13.5 收敛出口预计**不** fire（最优模板点 ~36% of 实测峰值, 远低于阈值）——
+  O3  §13.5 天花板出口预计**不** fire（最优模板点 ~36% of 参考下界, 远低于阈值）——
       不 fire 也是读数, 如实记
 
 做法: smem 上界压到 32 KiB 把空间缩到 **12 点**（1×1×2×3×2 —— 缩格是
@@ -128,7 +128,7 @@ def main() -> int:
         print(f"  {'✓' if v else '✗'} {k}", flush=True)
     # 报告不设门: 收敛出口与升级门的读数
     best = max((r["gflops"] or 0) for r in rounds) if rounds else 0
-    print(f"  (读数) 最优 {best:.0f} GFLOPS ≈ {best / 70800 * 100:.0f}% of 实测峰值"
+    print(f"  (读数) 最优 {best:.0f} GFLOPS ≈ {best / 70800 * 100:.0f}% of 参考下界"
           f" 70.8T —— §13.5 收敛出口预期不 fire", flush=True)
     ok = all(checks.values())
     print(f"VERDICT {'PASS' if ok else 'FAIL'}", flush=True)

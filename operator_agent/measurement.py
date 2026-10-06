@@ -95,7 +95,7 @@ NOISE_BAND = {
     Validity.UNINFORMATIVE: 0.02,
 }
 
-# 绑定轴上达到 roofline 上界的这个比例, 就认为「再优化也不会有 measurable 收益」。
+# 绑定轴上达到 参考天花板的这个比例, 就认为「再优化也不会有 measurable 收益」。
 # 缺口 4 的正解在这里: 判据该看**离上界还有多远**, 而不是继续拿一个标量比大小。
 # 0.90 这个数以前写的理由是「真机上 matmul 4096³ fp16 实测 101% GFLOPS 利用率,
 # 峰值表本身有 ±5% 余量」—— 那条**已经不成立了** (2026-09-26 核实): 101% 不是余量,
@@ -114,7 +114,7 @@ NOISE_BAND = {
 #   记录), 而不是把阈值调回 84% 去迁就一个更好的分母。
 # ⚠️ 参照 KernelBench-Hard 的一句话: 人写的 Hopper 核常见只到峰值的 60~85% —— 按
 # 这个量级, 90 是一个**偏乐观**的出口, 打不开它才是常态 (docs/research/42)。
-ROOFLINE_CONVERGED_PCT = 90.0
+REFERENCE_CEILING_PCT = 90.0
 
 
 # ── 「正确性已验证」的单点定义 ────────────────────────────────────────────────
@@ -165,10 +165,10 @@ GATE_PARAM_KEYS: tuple = ("atol", "rtol", "required_matched_ratio")
 #     `gflops >= target_gflops * min_speedup` —— 同一个 `min_speedup=1.5` 在前者是
 #     「快 1.5 倍」的地板, 在后者是「把绝对目标乘 1.5」的系数。所以只看数值会把一次
 #     **换了量纲**的漂移读成「尺没变」。这一键就是为了让那种情况变成「尺变了」。
-#   * `bound_type` —— roofline 的绑定轴。收敛出口那条 (`roofline_converged`) 比的是
+#   * `bound_type` —— roofline 的绑定轴。天花板出口那条 (`reference_ceiling_reached`) 比的是
 #     「这条轴上达到上界的百分比」, 轴从 compute 翻到 memory 时, 同一个 90% 意思是两件事
 #     (本机两条轴的可达性实测不对称: compute 轴最好 94.7% 打得开口, memory 轴最好 84%
-#     永不开, 见上面 `ROOFLINE_CONVERGED_PCT` 那段)。
+#     永不开, 见上面 `REFERENCE_CEILING_PCT` 那段)。
 #: 绑定轴那个键的名字与它的占位值。**这里定义一次**, 因为「`unknown` 不算一个读数」这条
 #: 规则必须和键名待在一起 —— 抄两份字符串, 将来改键名时那条规则会安静地失去作用。
 #: ⚠️ 本模块因此成为 `bound_type` 的一个**读者** (tests/test_bound_axis_gate.py 那张读者
@@ -683,8 +683,8 @@ def persist_decision(metrics: dict) -> tuple:
                   f"validity={metrics.get('measurement_validity', '未知')}")
 
 
-def roofline_converged(metrics: dict) -> bool:
-    """已经贴着 roofline 上界 —— 继续换配方只会白烧 GPU 与 LLM token"""
+def reference_ceiling_reached(metrics: dict) -> bool:
+    """已经贴着参考实现的天花板 —— 继续换配方只会白烧 GPU 与 LLM token"""
     if (metrics.get("measurement_can_gate") is False
             or metrics.get("benchmark_contaminated")):
         return False          # 不可信的测量不能说「已经到顶」
@@ -693,16 +693,19 @@ def roofline_converged(metrics: dict) -> bool:
     # `not ...`: 老记录里没这个键时保持原有行为 (默认开), 新链路一律带 True/False。
     if (metrics.get("roofline_analysis") or {}).get("peak_trusted") is False:
         return False
-    # 分母**实测过**没有 (设计 §13.5)。「口径核过」不等于「实测过」: 表里的规格/推导行
-    # 给的是理论规格, 而收敛出口要说的是「这张卡这一刻贴着上界了」—— 那只能拿实测峰值当
-    # 分母。真机实测抓到的正是这个混同: H20 那行的出处自己写着「无公开官方页 + 算术推导」,
-    # 却因为不带 ⚠️ 而把出口**开着**。缺这个键的老记录同样不开 (fail-closed): 缺证据不是
-    # 有效证据 —— 与「地板未知」「峰值表行未核」同一条纪律, 而且方向是不对称的 (关着只会
-    # 白烧几轮, 还有停滞出口兜底; 开着会把还能优化的核提前判成到顶)。
-    if (metrics.get("roofline_analysis") or {}).get("peak_measured") is not True:
+    # 分母是**参考下界**不是器件峰值 (设计 §13.5 的三个概念: peak_trusted / peak_measured /
+    # reference_lower_bound)。「口径核过」不等于「有下界」: 表里的规格/推导行给的是
+    # datasheet 推算, 与「这次测量的上限」之间隔了时钟/温度/占用率。
+    # ⚠️ 因此本出口的名字是 `reference_ceiling_reached`(贴着**参考实现**的天花板), 不是
+    # `roofline_converged`: 参考下界是下界 ⇒ 拿它当分母利用率偏大、出口偏松, 它不配说
+    # 「贴着硬件峰值」。真正的硬件峰值出口只认 `peak_measured`, 而今天代码里没有那个量具。
+    # 缺这个键的老记录同样不开 (fail-closed): 缺证据不是有效证据 —— 与「地板未知」
+    # 「峰值表行未核」同一条纪律, 而且方向是不对称的 (关着只会白烧几轮, 还有停滞出口兜底;
+    # 开着会把还能优化的核提前判成到顶)。
+    if (metrics.get("roofline_analysis") or {}).get("reference_lower_bound") is not True:
         return False
     a = binding_attainment(metrics)
-    return a is not None and a >= ROOFLINE_CONVERGED_PCT
+    return a is not None and a >= REFERENCE_CEILING_PCT
 
 
 def noise_band_for(validity: Validity) -> Optional[float]:
@@ -1018,6 +1021,10 @@ class MeasurementAssessment:
     backend_real_device: Optional[bool] = None
     #: 与上一次运行相比变了哪些环境项; 空 = 比过了没漂移或无从比较 (见 EnvironmentDrift)
     environment_drift: tuple = ()
+    #: 这份候选的**正确性没有凭据** (设计 §14-10 / §20.4): 只有 `verify_l3_only` 那条
+    #: 绕开 L2 的路径可能带出 `True`。它不是"测得准不准", 而是"这个数有没有指称对象" ——
+    #: 所以与 `capability_shortfall` 同族: 拒 `passed` (见 `l3_pass_is_refused`)。
+    correctness_unverified: bool = False
 
     @property
     def can_gate(self) -> bool:
@@ -1049,9 +1056,35 @@ class MeasurementAssessment:
         """
         if self.capability_shortfall:
             return True
+        # 正确性没凭据 (设计 §14-10 / §20.4) 与出处缺失同族: 一份"我们还没确认它算得对"
+        # 的核, 它的速率读数不是测得不准, 而是**没有指称对象** ⇒「通过」不许为 True。
+        if self.correctness_unverified:
+            return True
         # 声明与载荷打架时, 只有「任务真的要过真卡」才够格拒绝通过: 否则一份本地
         # mock 运行会因为载荷老实写了 device="cpu" 而被判失败, 那是把观测当判据。
         return bool(self.provenance_conflict) and Cap.REAL_DEVICE.value in self.required_caps
+
+    @property
+    def l3_pass_refusal_causes(self) -> tuple:
+        """`l3_pass_is_refused` 的**成因**, 人可读, 给 message 用
+
+        判定本身只有一个是非题 (passed 收不收), 而读者要的是"为什么不收"。三个成因的
+        处置完全不同 —— 混成一句"能力没拿到"就是 I46 那一族: 判定对了, 说出来的却是
+        另一件事 (真机 §14-8 抓到的正是这个形状)。
+
+        分支顺序与 `l3_pass_is_refused` 一致; 两者**同时有内容/同时为空**由用例钉住
+        (`tests/test_measurement_validity.py`), 免得将来加了第四个成因只改一处。
+        """
+        causes = []
+        if self.correctness_unverified:
+            causes.append("这个候选的正确性没有凭据 "
+                          "(只有 `verify_l3_only` 这条绕开 L2 的路会这样)")
+        if self.capability_shortfall:
+            causes.append("任务声明要的执行侧能力没拿到 (缺 "
+                          + ", ".join(self.capability_shortfall) + ")")
+        if self.provenance_conflict and Cap.REAL_DEVICE.value in self.required_caps:
+            causes.append("出处自相矛盾: " + "; ".join(self.provenance_conflict))
+        return tuple(causes)
 
     def as_metrics(self) -> dict:
         """摊平进 VerificationResult.metrics 的部分"""
@@ -1131,7 +1164,8 @@ def assess(median_time_ms: Optional[float] = None,
            reported_mode: Optional[str] = None,
            reported_device: Optional[str] = None,
            environment_drift: Optional[List[str]] = None,
-           gpu_harness_peers: Optional[int] = None) -> MeasurementAssessment:
+           gpu_harness_peers: Optional[int] = None,
+           correctness_verified: Optional[bool] = None) -> MeasurementAssessment:
     """综合判定测量有效性: 信号各自独立判定, 合成时取更差的一档
 
     问「测得准不准」的三个: launch 地板支配 (`median_time_ms` vs `launch_floor_us`)、
@@ -1266,6 +1300,17 @@ def assess(median_time_ms: Optional[float] = None,
             "本轮加速比与上一次不可比, 不得据此禁用配方或累计停滞; "
             "**不据此判核失败** (观测先于判定)")
 
+    # ── 正确性凭据 (设计 §14-10 / §20.4) ──────────────────────────────
+    # 与出处那一条同族: 问的不是"测得准不准", 而是"这个数说的是不是这个东西"。
+    # 三态: 只有明确的 False 才拒 (`is False`), 缺键 = 老产物没带这一格 ⇒ 不改判 ——
+    # 与 `real_device=None`、`peak` 那几处同一边界 (measurement.py 里的既有写法)。
+    if correctness_verified is False:
+        validity = _worse(validity, Validity.UNINFORMATIVE)
+        reasons.append(
+            "这个候选的正确性**没有凭据** (correctness_verified=False): 它的速率读数是"
+            "关于另一个对象的, 「通过」没有指称对象 —— 只有 `verify_l3_only` 这条绕开 "
+            "L2 的路径会走到这里, 调用方应当把手里那份 L2 结果作为凭据传进来")
+
     return MeasurementAssessment(
         validity=validity,
         reasons=reasons,
@@ -1281,6 +1326,7 @@ def assess(median_time_ms: Optional[float] = None,
         required_caps=tuple(sorted(c.value for c in frozenset(required_caps or ()))),
         backend_real_device=real_device,
         environment_drift=drift,
+        correctness_unverified=(correctness_verified is False),
     )
 
 # ── 可归因证据门 (#103 第 1 片, 外部依据 HarnessLens `2608.27311v1` 行 99/715/878-880) ──

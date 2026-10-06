@@ -51,7 +51,7 @@ HEALTHY_METRICS = {
     "gflops": 123.0,
     "ruler_broken": False,
     "benchmark_contaminated": False,
-    "roofline_analysis": {"peak_measured": True, "peak_trusted": True,
+    "roofline_analysis": {"reference_lower_bound": True, "peak_trusted": True,
                           "peak_source": "实测探测 (probe_peak)"},
     "eligibility": {"can_verdict": True, "can_tune": True, "can_persist": True,
                     "can_report": True, "can_count_progress": True},
@@ -93,7 +93,7 @@ class TestUnestablishedSection(unittest.TestCase):
         text = u.render()
         self.assertIn("(无)", text)
         self.assertIn("依据", text)
-        self.assertIn("峰值分母已实测", text, "依据要逐项列出, 不是一句「一切正常」")
+        self.assertIn("峰值分母有参考下界", text, "依据要逐项列出, 不是一句「一切正常」")
 
     def test_an_empty_section_without_a_basis_is_itself_named(self):
         """反向: 手工造一个空且无依据的收集器 ⇒ 不许印成「无」就过去"""
@@ -104,9 +104,9 @@ class TestUnestablishedSection(unittest.TestCase):
     def test_each_bad_precondition_becomes_an_item(self):
         """八项前置逐条成对: 每一项坏掉都要有自己那条, 而且理由要指名道姓"""
         cases = [
-            ("峰值未实测", {"roofline_analysis": {"peak_measured": False,
+            ("峰值未实测", {"roofline_analysis": {"reference_lower_bound": False,
                                                   "peak_source": "规格表"}},
-             "roofline"),
+             "天花板"),
             ("心跳没记录", {"ruler_broken": None}, "心跳"),
             ("心跳失败", {"ruler_broken": True, "ruler_reason": "参照偏出"},
              "标定心跳失败"),
@@ -159,10 +159,12 @@ class TestUnestablishedSection(unittest.TestCase):
         `report._preconditions` 各产生一条, 措辞差一个词就去重不掉, 于是同一件事
         被数了两遍。这一节一旦复读就会被跳过不读。
         """
-        m = dict(HEALTHY_METRICS, roofline_analysis={"peak_measured": False,
+        m = dict(HEALTHY_METRICS, roofline_analysis={"reference_lower_bound": False,
                                                      "peak_source": "规格表推导"})
         items = collect_unable(artifact=_artifact(metrics=m)).items
-        hits = [i for i in items if "roofline" in i.claim]
+        # 去重键是 (claim, reason) **文本本身** ⇒ 这句话一改名, 两个生产者与这里的
+        # 定位必须同时改 (设计 §13.5 那次改名就是一次演练: 措辞一变, 这条用例当场红)。
+        hits = [i for i in items if "天花板" in i.claim]
         self.assertEqual(1, len(hits), [i.claim for i in items])
 
     def test_no_duplicate_claims(self):

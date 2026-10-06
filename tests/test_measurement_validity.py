@@ -32,7 +32,7 @@ from operator_agent.measurement import (
     CONTAMINATION_UTIL_PCT, DISPERSION_DEGRADED, DISPERSION_UNINFORMATIVE,
     INTRUDER_MAX_OVER_MEDIAN, LAUNCH_DOMINANCE_UNINFORMATIVE, LAUNCH_DOMINANCE_VALID,
     NOISE_BAND, MeasurementAssessment, Validity, Verdict, assess, binding_attainment,
-    launch_dominance, roofline_converged, verdict,
+    launch_dominance, reference_ceiling_reached, verdict,
 )
 from operator_agent.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
@@ -1127,41 +1127,41 @@ class TestFourStateVerdict(unittest.TestCase):
 
     #: 贴顶的那份读数。分母**实测过** (两个位都真) —— 见下面那条用例, 缺任一个都不开。
     HOT = {"gflops_utilization_pct": 101.0, "bandwidth_utilization_pct": 5.6,
-           "roofline_analysis": {"peak_trusted": True, "peak_measured": True}}
+           "roofline_analysis": {"peak_trusted": True, "reference_lower_bound": True}}
 
-    def test_roofline_converged_needs_a_trustworthy_measurement(self):
+    def test_reference_ceiling_reached_needs_a_trustworthy_measurement(self):
         hot = self.HOT
-        self.assertTrue(roofline_converged(dict(hot)))
-        self.assertFalse(roofline_converged(dict(hot, benchmark_contaminated=True)),
+        self.assertTrue(reference_ceiling_reached(dict(hot)))
+        self.assertFalse(reference_ceiling_reached(dict(hot, benchmark_contaminated=True)),
                         "不可信的测量没说得出「已经到顶」")
-        self.assertFalse(roofline_converged(dict(hot, measurement_can_gate=False)))
-        self.assertFalse(roofline_converged({"gflops_utilization_pct": 40.0}))
+        self.assertFalse(reference_ceiling_reached(dict(hot, measurement_can_gate=False)))
+        self.assertFalse(reference_ceiling_reached({"gflops_utilization_pct": 40.0}))
 
-    def test_roofline_converged_needs_a_measured_peak(self):
+    def test_reference_ceiling_reached_needs_a_measured_peak(self):
         """口径核过 ≠ 实测过: 收敛出口**只认后者** (设计 §13.5)
 
         真机实测抓到的混同: H20 那行的出处自己写着「flash-attention dense 表 + 算术推导;
         无公开官方页」, 却因为不以 ⚠️ 开头而被当成可信分母, 把收敛出口**开着**。两条判据
         成对写死在这里 —— `peak_trusted` 问的是「表行口径核过没有」(dense/sparse 没混),
-        `peak_measured` 问的是「有没有一次真探测」。
+        `reference_lower_bound` 问的是「有没有一次真探测」。
         """
         hot = {k: v for k, v in self.HOT.items() if k != "roofline_analysis"}
         rl = lambda **kw: {"roofline_analysis": kw}          # noqa: E731
         # 口径核过、从没实测 ⇒ 不开 (H20 今天的真实状态)
-        self.assertFalse(roofline_converged(dict(hot, **rl(peak_trusted=True))))
-        self.assertFalse(roofline_converged(
-            dict(hot, **rl(peak_trusted=True, peak_measured=False))))
+        self.assertFalse(reference_ceiling_reached(dict(hot, **rl(peak_trusted=True))))
+        self.assertFalse(reference_ceiling_reached(
+            dict(hot, **rl(peak_trusted=True, reference_lower_bound=False))))
         # 实测过、但表行口径没核 ⇒ 也不开 (老规矩保留)
-        self.assertFalse(roofline_converged(
-            dict(hot, **rl(peak_trusted=False, peak_measured=True))))
+        self.assertFalse(reference_ceiling_reached(
+            dict(hot, **rl(peak_trusted=False, reference_lower_bound=True))))
         # 两问都是真 ⇒ 才开
-        self.assertTrue(roofline_converged(
-            dict(hot, **rl(peak_trusted=True, peak_measured=True))))
+        self.assertTrue(reference_ceiling_reached(
+            dict(hot, **rl(peak_trusted=True, reference_lower_bound=True))))
         # 老记录连这个键都没有 ⇒ fail-closed (缺证据不是有效证据)
-        self.assertFalse(roofline_converged(dict(hot)))
+        self.assertFalse(reference_ceiling_reached(dict(hot)))
 
     def test_the_published_flag_reads_hardware_caps_not_the_peak_table(self):
-        """`peak_measured` 的来源必须是**探测结果** (HardwareCaps), 不是那张规格表
+        """`reference_lower_bound` 的来源必须是**探测结果** (HardwareCaps), 不是那张规格表
 
         反方向也要证 (否则这个位可能只是恒 False): 给 HardwareCaps 一个实测值 ⇒ 翻真。
         """
@@ -1176,17 +1176,96 @@ class TestFourStateVerdict(unittest.TestCase):
             "name": "h20", "device": "h20", "compute_capability": "9.0"})
         peak = Verifier(fake)._detect_theoretical_peak()
         self.assertIs(peak["peak_trusted"], True, "H20 表行口径是核过的")
-        self.assertIs(peak["peak_measured"], False, "但从来没探测过")
+        self.assertIs(peak["reference_lower_bound"], False, "但从来没探测过")
 
         real = hc.detect_hardware_caps
         with mock.patch("operator_agent.verifier.detect_hardware_caps",
                         lambda hw: dataclasses.replace(
-                            real(hw), measured_peak_tflops={"tf32": 150.0})):
+                            real(hw), reference_lower_bound_tflops={"tf32": 150.0})):
             peak2 = Verifier(fake)._detect_theoretical_peak()
-        self.assertIs(peak2["peak_measured"], True,
+        self.assertIs(peak2["reference_lower_bound"], True,
                       "HardwareCaps 里放进实测值之后这个位没翻真 —— 接线断了")
-        self.assertEqual(peak2["measured_peak_tflops"], {"tf32": 150.0},
-                         "实测峰值要按精度原样发布 —— 标量会被读者当成「哪个精度都对」")
+        self.assertEqual(peak2["reference_lower_bound_tflops"], {"tf32": 150.0},
+                         "参考下界要按精度原样发布 —— 标量会被读者当成「哪个精度都对」")
+
+
+class TestL3PassRefusalCauses(unittest.TestCase):
+    """拒绝通过的**成因**必须与判据同时有内容 / 同时为空
+
+    判据 (`l3_pass_is_refused`) 只有一个是非题, 而 message 只读成因 (设计 §14-10:
+    读者要的是"为什么不收")。三个成因的处置完全不同 —— 加了第四个成因只改判据、
+    不改成因, 读者读到的就是"「通过」没有指称对象"这种什么都没说的话,
+    或者更糟: 被说成另一个成因 (I46 那一族的"判定对了、说的是另一件事")。
+    """
+
+    def _mk(self, **kw):
+        base = dict(validity=Validity.VALID)
+        base.update(kw)
+        return MeasurementAssessment(**base)
+
+    def test_no_cause_means_not_refused(self):
+        a = self._mk()
+        self.assertFalse(a.l3_pass_is_refused)
+        self.assertEqual(a.l3_pass_refusal_causes, ())
+
+    def test_correctness_unverified_refuses_and_names_itself(self):
+        a = self._mk(correctness_unverified=True)
+        self.assertTrue(a.l3_pass_is_refused)
+        self.assertEqual(len(a.l3_pass_refusal_causes), 1)
+        self.assertIn("正确性", a.l3_pass_refusal_causes[0])
+
+    def test_capability_shortfall_names_itself(self):
+        a = self._mk(capability_shortfall=("real_device",))
+        self.assertTrue(a.l3_pass_is_refused)
+        self.assertIn("real_device", a.l3_pass_refusal_causes[0])
+
+    def test_two_causes_are_both_named(self):
+        a = self._mk(correctness_unverified=True, capability_shortfall=("real_device",))
+        self.assertTrue(a.l3_pass_is_refused)
+        self.assertEqual(len(a.l3_pass_refusal_causes), 2,
+                         "两个成因只报了一个 —— 读者会以为是另一件事")
+
+    def test_pairing_holds_on_a_grid(self):
+        """判据与成因一一对应: 拒了就必须说得出为什么, 没拒就不许列成因"""
+        for cu in (False, True):
+            for cap in ((), ("real_device",)):
+                for conflict in ((), ("mode=simulated",)):
+                    a = self._mk(correctness_unverified=cu, capability_shortfall=cap,
+                                 provenance_conflict=conflict,
+                                 required_caps=("real_device",) if conflict else ())
+                    self.assertEqual(
+                        a.l3_pass_is_refused, bool(a.l3_pass_refusal_causes),
+                        f"判据与成因不一致: refused={a.l3_pass_is_refused} "
+                        f"causes={a.l3_pass_refusal_causes} "
+                        f"(cu={cu}, cap={cap}, conflict={conflict})")
+
+
+class TestCorrectnessCredential(unittest.TestCase):
+    """凭据进 `assess` 之后的三态语义 (设计 §14-10 / §20.4)"""
+
+    def test_false_is_uninformative_not_degraded(self):
+        """没有正确性凭据 = "这个数没有指称对象", 而不是"数不可信"
+
+        与 `capability_shortfall` 同族: 档位必须落到 uninformative (⇒ can_gate=False),
+        而不是 degraded (那一档仍然可以判决与调参)。
+        """
+        a = assess(median_time_ms=1.0, correctness_verified=False)
+        self.assertIs(a.validity, Validity.UNINFORMATIVE)
+        self.assertFalse(a.can_gate)
+        self.assertTrue(a.correctness_unverified)
+        self.assertTrue(a.l3_pass_is_refused)
+
+    def test_absent_key_changes_nothing(self):
+        """三态: 没带凭据 (老产物 / 回放脚本) **不改判** —— 与 real_device=None 同边界"""
+        a = assess(median_time_ms=1.0, correctness_verified=None)
+        self.assertIs(a.validity, Validity.VALID)
+        self.assertTrue(a.can_gate)
+        self.assertFalse(a.correctness_unverified)
+
+    def test_true_changes_nothing(self):
+        a = assess(median_time_ms=1.0, correctness_verified=True)
+        self.assertIs(a.validity, Validity.VALID)
+        self.assertFalse(a.l3_pass_is_refused)
 
 
 if __name__ == "__main__":

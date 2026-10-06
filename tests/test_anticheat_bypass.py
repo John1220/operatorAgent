@@ -18,6 +18,7 @@ import ast
 import unittest
 from pathlib import Path, PurePosixPath
 
+from operator_agent import anticheat
 from operator_agent.anticheat import static_audit
 
 # ─── 两个 DSL 下都必须拦下 ───────────────────────────────────
@@ -158,27 +159,109 @@ class TestStaticAuditNoFalsePositive(unittest.TestCase):
         self.assertEqual(static_audit(code, "triton").violations, [])
 
 
-class TestHardwareWhitelist(unittest.TestCase):
-    """自研加速卡白名单: torch.* 是唯一能激活厂商 Tensor Core 的路径
+class TestVendorTorchWhitelist(unittest.TestCase):
+    """厂商卡白名单: torch.* 是唯一能激活厂商 Tensor Core 的路径
 
-    重构 static_audit 时这一段分支被改写过 (原先有两条等价的 `return []` 与一处
-    被后一行覆盖的 rules 赋值)，这里钉住行为，避免改回去。
+    ⚠️ 2026-10-03 改口径 (CHECKLOG I80 硬伤一 / I81)。此前白名单的输入是
+    `task.target.hardware`, 而且是**子串**匹配 (名单里含 `dc/ls/ft/rv` 这类两字母
+    token) ⇒ 一个任务字段就能让静态审计整段短路, 而设计 §3.5 明确要求安全判据
+    「不可被 Agent 或任务参数改写」。
+
+    现在的形状: 白名单只剩**一个**输入 —— `vendor_torch_ok`, 一个执行侧声明的布尔。
+    这一组用例钉三件事:
+      ① 任务字段那条通道**在 API 上不存在了** (`hardware=` 参数没了);
+      ② 执行侧声明仍然能放开它 (功能没被删掉, 只是换了输入);
+      ③ 生产路径 (`Verifier._verify_function`) 不再读任务字段 —— 端到端验一次。
     """
 
-    def test_ascend_python_dsl_allows_torch_matmul(self):
-        code = "import torch\n\ndef kernel(A,B):\n    return torch.matmul(A,B)\n"
-        self.assertEqual(static_audit(code, "python", hardware="Ascend910").violations, [])
+    TORCH_CODE = "import torch\n\ndef kernel(A,B):\n    return torch.matmul(A,B)\n"
 
-    def test_ascend_triton_dsl_allows_torch_but_blocks_numpy(self):
-        torch_code = "import torch\n\ndef kernel(A,B):\n    return torch.matmul(A,B)\n"
-        self.assertEqual(static_audit(torch_code, "triton", hardware="ascend").violations, [])
+    def test_the_task_field_channel_is_gone(self):
+        """① 参数名与子串匹配器都不在了 —— 一个任务字段再也走不进来
+
+        判 API 面而不是判某一次行为: 行为用例只能证明「这么传不会放行」, 证明不了
+        「没有别的传法」。`inspect.signature` 这一条同时把「有人把 `hardware=` 加回来」
+        与「有人偷偷读 task」两种回归都挡住前半段 (后半段见 ③)。
+        """
+        import inspect
+        params = set(inspect.signature(static_audit).parameters)
+        self.assertNotIn("hardware", params,
+                         "static_audit 又收 hardware 了 —— 那就是任务字段那条通道")
+        self.assertEqual({"code", "dsl", "vendor_torch_ok"}, params)
+        self.assertFalse(hasattr(anticheat, "_hardware_allows_torch_compute"),
+                         "子串匹配器还在 (它的名单里含 dc/ls/ft/rv, 任何含这些的串都命中)")
+        # 不带声明 ⇒ 该拦的还是拦 (这就是那个洞的行为面)
+        self.assertTrue(static_audit(self.TORCH_CODE, "python").violations,
+                        "没有执行侧声明却放行了 torch.matmul")
+
+    def test_the_execution_side_declaration_still_opens_it(self):
+        """② 功能保留: 声明为真时 torch 放行, 但 NumPy 在 host 侧算出结果仍算作弊"""
+        self.assertEqual(
+            static_audit(self.TORCH_CODE, "python", vendor_torch_ok=True).violations, [])
+        self.assertEqual(
+            static_audit(self.TORCH_CODE, "triton", vendor_torch_ok=True).violations, [])
         np_code = "import numpy as np\n\ndef kernel(A,B):\n    return np.matmul(A,B)\n"
-        self.assertTrue(static_audit(np_code, "triton", hardware="ascend").violations,
-                        "白名单只放开 torch, 用 NumPy 在 host 侧算出结果仍然是作弊")
+        self.assertTrue(
+            static_audit(np_code, "triton", vendor_torch_ok=True).violations,
+            "白名单只放开 torch, 用 NumPy 在 host 侧算出结果仍然是作弊")
 
-    def test_nvidia_not_whitelisted(self):
-        code = "import torch\n\ndef kernel(A,B):\n    return torch.matmul(A,B)\n"
-        self.assertTrue(static_audit(code, "python", hardware="nvidia_gpu").violations)
+    def test_the_verifier_never_reads_the_task_hardware(self):
+        """③ 端到端: 任务声明 `Ascend910` 也不再让 L2 的反作弊门放行
+
+        这是那个洞的**原始形状**: 只要任务里写一个厂商卡名, torch.matmul 就一路
+        绿灯 (而运行时屏蔽照样装着 ⇒ 两半互相矛盾)。现在两半读同一个声明, 而
+        生产路径没有声明者。
+        """
+        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+                                            TargetSpec, TaskSchema, TaskType)
+        from operator_agent.verifier import Verifier
+        import numpy as np
+        task = TaskSchema(
+            task_type=TaskType.OPERATOR_GENERATION,
+            source=SourceSpec(kernel_type="matmul"),
+            target=TargetSpec(hardware="Ascend910", dsl="python"),
+            constraints=ConstraintSpec(precision=Precision.FP32, min_speedup=1.0,
+                                       max_error=1e-3),
+        )
+        rng = np.random.default_rng(0)
+        inputs = {"A": rng.standard_normal((32, 32)).astype(np.float32),
+                  "B": rng.standard_normal((32, 32)).astype(np.float32)}
+        res = Verifier(MockGPU())._verify_function(self.TORCH_CODE, inputs, None, task)
+        self.assertFalse(res.passed, "任务里声明厂商卡就把反作弊门绕过去了 —— 洞回来了")
+        self.assertIn("反作弊", res.message, f"拒的理由不是反作弊: {res.message}")
+
+    def test_the_whitelist_input_is_not_wired_to_the_task_field(self):
+        """③ 的源码侧: `verifier` 里那份声明是常量, 且不许读到任务字段
+
+        行为用例只覆盖「这一次跑的这条任务」; 常量那一行是**唯一**的声明入口, 它一旦
+        变成 `task.target.hardware in (...)`, 上面那条端到端用例会红, 但把名单改成
+        另一个任务字段 (例如 `task.target.dsl`) 就不会 —— 所以这里直接钉住那一行。
+        """
+        src = (Path(__file__).resolve().parents[1]
+               / "operator_agent" / "verifier.py").read_text(encoding="utf-8")
+        self.assertIn("VENDOR_TORCH_OK: bool = False", src,
+                      "执行侧声明那行没了 —— 本守卫需要跟着复核")
+        # 逐个调用点取**括号配对**的那一段 (不写死窗口宽度: 窗口的失效方式是静默的,
+        # 注释一长守卫就在守一个不含目标的区间 —— 那时它是绿的, 但什么都没查)。
+        import re as _RE
+        calls = []
+        for m in _RE.finditer(r"static_audit\(", src):
+            depth, start = 0, m.end() - 1
+            for j in range(start, len(src)):
+                if src[j] == "(":
+                    depth += 1
+                elif src[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        calls.append(src[start:j + 1])
+                        break
+        self.assertEqual(len(calls), 1, f"static_audit 调用点数量变了 ({len(calls)}) —— 复核本守卫")
+        body = calls[0]
+        self.assertIn("vendor_torch_ok=VENDOR_TORCH_OK", body,
+                      "static_audit 调用点没接执行侧声明")
+        self.assertNotIn("task.target.hardware", body,
+                         "static_audit 又在读 task.target.hardware —— 洞回来了")
 
 
 class TestSyntaxErrorFailClosed(unittest.TestCase):
@@ -394,6 +477,33 @@ class TestRuntimeShieldCoverage(unittest.TestCase):
             for node in ast.walk(self.tree)
         )
         self.assertTrue(imported, "runner 未从 anticheat 导入 shield_torch")
+
+    def test_every_production_shield_call_is_bare(self):
+        """运行时屏蔽在生产路径上必须**无参**安装 (恒开) —— 这是今天守得住的那一侧
+
+        WHY: 静态审计那半曾经能被任务字段打开 (厂商卡白名单, 见 I80 硬伤一 / I81),
+        而运行时屏蔽在所有生产调用点都是无参的 ⇒ 两半互相矛盾 (静态放行、运行时抛
+        `CheatDetectedError`)。现在两侧读同一个**执行侧声明**, 而声明今天没有生产者,
+        所以「没有哪一处生产调用点偷偷传了 True」这件事本身就是那条不变量的守卫:
+        谁要是为了让厂商卡能跑而给单独一处传 True, 两半立刻又不一致了。
+
+        用 AST 而不是正则: 注释与文档字符串里出现 `shield_torch(...)` 是正当的
+        (docstring 里就写着用法), 正则会把它们算成调用点。
+        """
+        root = Path(__file__).resolve().parents[1]
+        targets = [root / "remote_scripts" / "run_kernel.py",
+                   root / "operator_agent" / "remote_executor.py",
+                   root / "operator_agent" / "mock_gpu.py"]
+        offenders = []
+        for path in targets:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == "shield_torch"
+                        and (node.args or node.keywords)):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(offenders, [],
+                         f"这些生产调用点给 shield_torch 传了参数 ⇒ 运行时那半不再恒开: {offenders}")
 
     def test_candidate_calls_are_shielded(self):
         outside = [f"{label} @ 第 {line} 行"

@@ -550,6 +550,37 @@ def _reference_torch(kernel_type: str, inputs: dict):
     return None, None
 
 
+def _error_shape_torch(bad, *, n_bad: int, total: int, has_nonfinite: bool):
+    """坏点掩码 → 误差形态标签 (torch 侧的归约; 规则在 `tolerance`)
+
+    与本地路径 (`verifier._error_shape_of`) 的分工完全对称: 归约在各自的数组后端上做
+    (这里 torch, 那面 numpy), **分类规则只有一份** (`tolerance.classify_error_shape`,
+    `deploy()` 会把同一个 tolerance.py 推到远端)。两边传进去的东西必须一样 ——
+    这一点由 `tests/test_tolerance_error_shape.py` 的一致性用例钉住。
+
+    形状折叠成二维 (除最后一维外全部折叠), 于是 (M,N) 与 (B,H,S,D) 用同一套规则。
+    """
+    if bad.dim() == 0 or bad.numel() == 0:
+        # 拿不到二维视图时仍然问一次规则: `nonfinite` 不依赖任何形状
+        return tolerance.classify_error_shape(tolerance.ErrorShapeInputs(
+            n_bad=int(n_bad), total=int(total), rows=0, cols=0, bad_rows=0, bad_cols=0,
+            rows_all_bad=0, cols_all_bad=0, bad_row_prefix=0, bad_row_suffix=0,
+            bad_col_prefix=0, bad_col_suffix=0, has_nonfinite=bool(has_nonfinite)))
+    cols = int(bad.shape[-1])
+    if cols <= 0:
+        return None
+    mask = bad.reshape(-1, cols)
+    n_rows = int(mask.shape[0])
+    per_row = (mask.sum(dim=1) > 0).tolist()
+    per_col = (mask.sum(dim=0) > 0).tolist()
+    return tolerance.error_shape_from_axis_flags(
+        per_row=per_row, per_col=per_col,
+        n_bad=int(n_bad), total=int(total),
+        rows_all_bad=int((mask.sum(dim=1) == cols).sum().item()),
+        cols_all_bad=int((mask.sum(dim=0) == n_rows).sum().item()),
+        has_nonfinite=bool(has_nonfinite))
+
+
 def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
               precision: str = "", reference_source: str = "") -> dict:
     """Run candidate and reference on one device; return only verification summary."""
@@ -630,6 +661,16 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             first_bad_index = first_bad_actual = first_bad_expected = None
 
         passed, matched_ratio = tolerance.evaluate(n_bad, total, has_nonfinite, rho)
+
+        # 误差**形态** (设计 §8.2): 与本地路径 (verifier._error_shape_of) 用**同一份规则**
+        # (`tolerance.classify_error_shape`), 这里只做 torch 侧的归约。
+        # ⚠️ 触发条件是"判失败", 不是"有坏点": 含 NaN/Inf 时 `bad` 恒 False (NaN 比较恒假),
+        # 挂在坏点计数上的话, 最该说出口的那一种形态会是唯一永远报不出来的。
+        error_shape = None
+        if not passed:
+            error_shape = _error_shape_torch(bad, n_bad=n_bad, total=total,
+                                             has_nonfinite=has_nonfinite)
+
         if has_nonfinite:
             reason = "输出含 NaN/Inf"
         elif not passed:
@@ -657,6 +698,9 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             "first_bad_index": first_bad_index,
             "first_bad_actual": first_bad_actual,
             "first_bad_expected": first_bad_expected,
+            # 误差形态 (设计 §8.2): None = 判不了 (三态), 缺键与"判不了"在产物里同形,
+            # 所以一律带上这个键 —— 控制端读的是它, 而不是去猜。
+            "error_shape": error_shape,
             "error": reason,
             "device": str(device),
         }

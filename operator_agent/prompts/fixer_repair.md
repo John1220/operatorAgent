@@ -23,6 +23,8 @@
   → 如果报错信息明确写了 "Triton not supported" 等字样，请**彻底重写为纯 Python/PyTorch 代码**，不要保留任何 tl.* 行或 @triton.jit 装饰器
 - 当 `硬件 = nvidia_gpu` 且 `DSL = triton`：按 SKILL 规范用 Triton 修复
 
+{{structured_evidence}}
+
 ## 历史修复案例 (同类算子的失败-修复经验)
 
 {{history_cases}}
@@ -44,6 +46,28 @@
 ## 待修复代码
 
 {{code}}
+
+{{ask_answer}}
+
+## 动作信封 (可选; 想先要观测、而不是改代码时用它)
+
+在代码块之外，你可以先交一段 ```agent-action 的 JSON 信封，声明**这一步你要做什么**:
+
+```agent-action
+{"kind": "repair_compile", "rationale": "为什么这么改", "expected_bottleneck": null, "requested_tools": []}
+```
+
+- `kind` 只能取这七个: `propose_template` / `propose_source_patch` / `repair_compile` /
+  `repair_correctness` / `request_profiler` / `request_new_shape` / `explain_failure`
+- **修数值/精度类错误时 `rationale` 必须点名本轮的误差形态**: {{error_shape}}
+  —— 动作判据会逐字检查它，不点名会被拒（白烧一轮；拒绝理由会在下一轮的错误信息里告诉你）
+- `expected_bottleneck` 与 `requested_tools` 是**闭合词汇**: 瓶颈只能填今天有量具的那几类，
+  工具只能填注册表里有的名字；表外的名字等于「引用不存在的能力」，会被拒
+- `request_profiler` / `request_new_shape` / `explain_failure` 这三类是**不改代码**的动作:
+  只交信封、**不要**交代码块 —— 同时交代码会被判据拒掉（借请求之名改代码）
+- 信封里**不许**写 `path` 与 token 预算: 写哪个文件由 harness 按 §22.1 的布局给，
+  预算是 harness 的账（模型自己填预算 = 让被判的人填判据里的数）
+- 不交信封也可以: 那 harness 会按轮次与路由替你拼一个动作（与接线前逐字同形）
 
 ## 输出要求
 

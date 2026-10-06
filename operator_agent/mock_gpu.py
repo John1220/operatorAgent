@@ -15,6 +15,15 @@ from typing import Callable, Optional
 from dataclasses import dataclass, field
 from .anticheat import CheatDetectedError, lib_fallback_metrics, shield_torch
 from .backend_caps import Backend, Cap
+from .exec_guard import (MODE_COMPILE, MODE_RUN, STATUS_CRASHED, GuardRefusal,
+                         Limits, candidate_error, limits_for, refusal_from,
+                         run_candidate, run_compile)
+
+#: Triton 那条「真编译」路径要预置进命名空间的模块（子进程里现 import）。
+#: 与搬进受控子进程之前那一行 `local_ns = {"triton": triton, "tl": triton.language,
+#: "torch": torch}` 逐字对应 —— 少了它，「用了 `tl` 却没自己 import」的候选会从过门
+#: 变成不过门，而那是执行方式变更**不该**带来的差别。
+TRITON_COMPILE_IMPORTS = {"triton": "triton", "tl": "triton.language", "torch": "torch"}
 
 
 @dataclass
@@ -61,7 +70,9 @@ class MockGPU(Backend):
     - 性能采集: 计时并计算 GFLOPS (Triton 优先实测, 无 CUDA 模拟估算)
     """
 
-    def __init__(self, name: str = "MockGPU", compute_units: int = 64, warp_size: int = 32):
+    def __init__(self, name: str = "MockGPU", compute_units: int = 64, warp_size: int = 32,
+                 exec_limits: Optional["Limits"] = None,
+                 compile_limits: Optional["Limits"] = None):
         self.name = name
         self.compute_units = compute_units
         self.warp_size = warp_size
@@ -71,6 +82,12 @@ class MockGPU(Backend):
         self._compiled_kernels: dict = {}
         self._triton_available = self._check_triton()
         self._caps = None
+        #: §22.2 的上限**按阶段**声明（这一段是传递链的中段：调用方 → 后端 → `exec_guard`）。
+        #: `None` = 用 `exec_guard` 那一档的默认值（编译与运行**不是**同一个默认，见
+        #: `exec_guard.COMPILE_LIMITS` 的说明）。刻意只走显式构造参数：不接配置文件、
+        #: 不接环境变量、不接命令行（§3.5 的「不允许配置」清单）。
+        self.exec_limits = exec_limits
+        self.compile_limits = compile_limits
 
     @property
     def capabilities(self) -> frozenset:
@@ -122,21 +139,35 @@ class MockGPU(Backend):
         L1 编译验证: 检查代码是否可编译/可执行
         - Triton 代码: 检查语法 + 验证 Triton 模式 (import triton, @triton.jit, kernel wrapper)
         - Python 代码: exec() 检查语法和可导入性
+
+        ⚠️ 2026-10-06（§22.2 第一项「编译超时」）: 「`exec()` 检查语法和可导入性」这一步
+        **不再在本进程里做** —— 它走 `exec_guard.run_compile`（墙钟 + rlimit + 进程组 +
+        逐项强制读数）。搬走的理由：编译期原先既没有墙钟也没有任何上限，候选只要在模块
+        顶层写一个死循环或一次巨型分配，就能在**进入 L1 之前**把评测进程拖死，而那时运行期
+        那道门（`_execute_python`）还根本没轮到。
+
+        逐字保持的对外契约（有守卫钉住）:
+        * `SyntaxError` 原样重抛（含 exec 抛出的那条 `invalid syntax (<string>, line N)`）；
+        * 其余异常包成 `RuntimeError(f"Compile error: {str(e)}")`；
+        * `"kernel"` 缺失 / 不可调用的两种文案与判定顺序不变。
+        **新增**的一档：编译期被 §22.2 拦下（超时 / 撞上限 / 盾命中）⇒ 抛 `GuardRefusal`
+        —— 它不是候选的编译错误，不许与上面两支混在一起（那是 I65/I11 那一族的形状）。
         """
         is_triton = _detect_triton(kernel_code)
 
         try:
-            local_ns = {}
             if is_triton:
-                # Triton 编译验证
+                # Triton 编译验证: 静态检查仍在父侧（纯文本判据, 不 exec）
                 self._validate_triton_syntax(kernel_code)
-
-                # 如果有 triton 环境, 尝试真正编译
-                if self._triton_available and _has_cuda():
-                    import triton
-                    import torch
-                    local_ns = {"triton": triton, "tl": triton.language, "torch": torch}
-                    exec(kernel_code, local_ns)
+                real = bool(self._triton_available and _has_cuda())
+                has_kernel = False
+                if real:
+                    # 有 triton 环境 ⇒ 真的 exec 一遍（搬进受控子进程）。
+                    # 预置模块与搬走之前的 `local_ns = {"triton": …, "tl": …, "torch": …}`
+                    # 逐字对应，否则「用了 tl 但没自己 import」的候选会从过门变成不过门。
+                    _has, _callable = self._compile_in_guard(
+                        kernel_code, imports=TRITON_COMPILE_IMPORTS)
+                    has_kernel = _has
                 else:
                     # 无 Triton 环境, 仅做语法检查 (不实际 import triton)
                     try:
@@ -144,28 +175,45 @@ class MockGPU(Backend):
                     except SyntaxError as e:
                         raise SyntaxError(f"Triton syntax error: {e}")
 
-                if "kernel" not in local_ns and not (self._triton_available and _has_cuda()):
+                if not has_kernel and not real:
                     # 无 Triton 环境时, 检查代码中是否定义了 kernel 函数
                     if "def kernel" not in kernel_code:
                         raise SyntaxError("Missing 'kernel' function in Triton code")
-                elif "kernel" not in local_ns or not callable(local_ns.get("kernel", None)):
+                elif not has_kernel:
                     if "def kernel" not in kernel_code:
                         raise SyntaxError("Missing 'kernel' function in Triton code")
 
                 return True
             else:
                 # Python 编译验证
-                exec(kernel_code, local_ns)
-                if "kernel" not in local_ns:
+                has_kernel, callable_kernel = self._compile_in_guard(kernel_code)
+                if not has_kernel:
                     raise SyntaxError("Missing 'kernel' function in code")
-                if not callable(local_ns["kernel"]):
+                if not callable_kernel:
                     raise TypeError("'kernel' is not callable")
                 return True
 
-        except SyntaxError:
+        except (SyntaxError, GuardRefusal):
             raise
         except Exception as e:
             raise RuntimeError(f"Compile error: {e}")
+
+    def _compile_in_guard(self, kernel_code: str,
+                          imports: Optional[dict] = None) -> tuple:
+        """在受控子进程里 `exec` 一次，返回 `(有 kernel, kernel 可调用)`。
+
+        候选自己抛的异常**按原类型重建**（`SyntaxError` 由 `compile()` 原样重抛，其余由
+        调用方包成 `RuntimeError("Compile error: …")`）；执行器自己拦下的那一档抛
+        `GuardRefusal`，由调用方的 `except (SyntaxError, GuardRefusal)` 放行。
+        """
+        guard = run_compile(kernel_code, imports=imports,
+                            limits=limits_for(MODE_COMPILE, self.compile_limits))
+        if guard.ok:
+            return (bool(guard.metrics.get("has_kernel")),
+                    bool(guard.metrics.get("kernel_callable")))
+        if guard.status == STATUS_CRASHED:
+            raise candidate_error(guard)
+        raise refusal_from(guard, where="编译期")
 
     def _validate_triton_syntax(self, code: str):
         """验证 Triton 代码的语法正确性和模式完整性"""
@@ -366,31 +414,54 @@ class MockGPU(Backend):
         return 0.001  # 默认 1ms
 
     def _execute_python(self, kernel_code: str, inputs: dict) -> ExecutionResult:
-        """执行纯 Python kernel"""
+        """执行纯 Python kernel —— 在 §22.2 的**受控子进程**里（`operator_agent.exec_guard`）
+
+        WHY（2026-10-04，§22.2 最小一块）: 这一处原先就是本进程内 `exec(kernel_code, {})`
+        —— 候选与 harness 共享地址空间、文件系统与网络，一个死循环、一次内存跑飞、
+        一个进程爆炸就能把评测拖死，而「候选改不了 harness 的内存」只能靠候选自觉。
+        搬进受控子进程之后：
+
+        * 墙钟到点 = **杀掉整个进程组**（含候选自己起的孙子进程），不留孤儿；
+        * CPU 时间 / 单文件大小 / 进程数由子进程自己的 rlimit 兜住（逐项读数进
+          `metrics["exec_guard_not_enforced"]`，**设不上的项如实报**，不许读成「没超限」）；
+        * 返回值字节数封顶，超了是 `limit_exceeded`（失败，不是截断后当通过）；
+        * 候选改 `numpy` / `torch` 的模块属性、改环境变量、`chdir`，都**影响不到 harness**
+          （各自一份地址空间）—— 这一条是原先进程内 `exec` 做不到的。
+
+        ⚠️ 不许读成的事（`exec_guard` 模块 docstring 里那张实测表是唯一出处）：
+        这**不是**敌意候选的沙箱 —— 同一个 uid、网络没关、没有容器；本机（macOS）上
+        **内存这一项设不上**（`RLIMIT_AS` 内核 EINVAL），所以本地的内存跑飞仍然拦不住；
+        CUDA 执行路径（`_execute_triton_cuda`）**没有**接进来。
+
+        语义与搬走之前逐字等价: `ns = {}`、`ns["kernel"]`、只量 `kernel(**inputs)` 这一次、
+        失败时 `result.error = str(e)`（子进程把这句话原样带回来）。
+        """
         result = ExecutionResult(language="python", device="cpu")
 
-        # 反作弊: 执行期间屏蔽 torch 原生算子回退
-        try:
-            with shield_torch():
-                local_ns = {}
-                exec(kernel_code, local_ns)
-                kernel_func: Callable = local_ns["kernel"]
+        # §22.2 的阶段级上限：这一段是传递链的**消费端**（`self.exec_limits` 来自构造参数，
+        # `None` ⇒ `exec_guard` 的运行默认值）。编译那一档用的是另一个默认（见 `compile()`）。
+        guard = run_candidate(kernel_code, inputs,
+                              limits=limits_for(MODE_RUN, self.exec_limits))
+        if not guard.fully_enforced:
+            # 「哪一项今天没设上」是一条**读数**，不是报错 —— 读者要能不猜
+            result.metrics["exec_guard_not_enforced"] = list(guard.not_enforced)
+        result.metrics["exec_guard_executor"] = guard.executor
 
-                start = time.perf_counter()
-                output = kernel_func(**inputs)
-                elapsed = time.perf_counter() - start
-        except CheatDetectedError as e:
-            result.success = False
-            result.error = str(e)
-            result.metrics.update(lib_fallback_metrics())
+        if guard.ok:
+            result.output = np.asarray(guard.output)
+            result.execution_time_ms = guard.elapsed_ms
+            result.success = True
+            result.metrics.update(guard.metrics)
+            self._compute_metrics(result, inputs, guard.elapsed_ms / 1000.0)
             return result
 
-        result.output = np.asarray(output)
-        result.execution_time_ms = elapsed * 1000
-        result.success = True
-        result.metrics.update(lib_fallback_metrics())
-
-        self._compute_metrics(result, inputs, elapsed)
+        # 失败路径: 反作弊命中 / 超时 / 超限 / 候选自己炸 —— 四档在 metrics 里分得开
+        result.success = False
+        result.error = guard.error or guard.detail
+        result.metrics.update(guard.metrics)
+        result.metrics["exec_guard_status"] = guard.status
+        if guard.kind:
+            result.metrics["exec_guard_kind"] = guard.kind
         return result
 
     def _compute_metrics(self, result: ExecutionResult, inputs: dict, elapsed: float):

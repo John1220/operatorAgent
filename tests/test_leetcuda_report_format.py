@@ -81,7 +81,10 @@ class TestFirstBadIndexPointsAtTheBrokenElement(unittest.TestCase):
         self.assertLess(r.metrics["first_bad_index"], 16)
 
     def test_remote_metric_whitelist_carries_first_bad(self):
-        for k in ("first_bad_index", "first_bad_actual", "first_bad_expected"):
+        # `error_shape` (设计 §8.2) 与 first_bad_* 是同一族: 都在**远端**算完, 都靠这张
+        # 白名单搬回来 —— 漏登记 = 真机路径上静默消失 (本地用例照样全绿)。
+        for k in ("first_bad_index", "first_bad_actual", "first_bad_expected",
+                  "error_shape"):
             self.assertIn(k, _REMOTE_L2_METRIC_KEYS,
                           f"远端算出来 {k} 也会在搬运时被丢掉")
 

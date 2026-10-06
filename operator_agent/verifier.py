@@ -38,7 +38,7 @@ from .measurement import (GATE_PARAM_KEYS, PERF_CRITERION_ABSOLUTE_GFLOPS,
                           aggregate_note, single_ruler, transport_outcome_of_result)
 from .hardware_caps import (
     detect_hardware_caps, device_key_of, measured_peak_record,
-    measured_peaks_for, remember_measured_peak,
+    measured_peaks_for, remember_reference_lower_bound,
 )
 from .peak_probe import precision_key_of, probe_peak, sample_from_l3_metrics
 from .placement import lease_evidence, observed_lease
@@ -46,6 +46,27 @@ from .placement import (observed_pairing, observed_windows,
                         SCOPE_SAME, SCOPE_CROSS, SCOPE_UNOBSERVED,
                         WINDOW_DIFFERENT)
 from .backend_caps import Backend, Cap, CapabilityMissing
+from .exec_guard import GuardRefusal
+
+
+#: 编译产物的**事实**（远端 runner 报了才带上，缺失 ≠ 0 ≠ 没有上限）。
+#: 名单抽成模块级常量有两个读者, 各写一遍就会各自漂:
+#:   * 本模块 L3 判据要的那几个（下面 metrics 的组装，§10.3 条件 2 的真源）；
+#:   * §21.3 的「相关 profiler 指标」（`agent_runtime` 的上下文里给模型看的那一段）。
+COMPILE_FACT_KEYS: tuple = ("num_warps", "num_stages", "n_regs", "n_spills",
+                            "n_max_threads", "shared_bytes_per_cta")
+
+
+#: 「在这台**执行设备**上, torch 高层 API 是激活算力的正当路径」—— 反作弊静态审计
+#: (`anticheat.static_audit`) 的白名单输入。为什么是一个常量而不是读任务字段:
+#: 设计 §3.5 要求安全判据「不可被 Agent 或任务参数改写」, 而这里以前传的是
+#: `task.target.hardware` —— 一个任务只要声明 `hardware="Ascend910"` 就能让静态审计
+#: 零违规 (CHECKLOG I80 硬伤一; 白名单当时还是子串匹配, 含 `dc/ls/ft/rv` 这类两字母 token)。
+#: ⚠️ 今天**没有生产者**: 没有任何后端声明这件事 (加一条 `Cap` 必须同时给出声明者与读者,
+#: 而真正的声明者还要把运行时屏蔽那一半一起接通 —— 真机 runner 的 `shield_torch()` 今天
+#: 全是无参的) ⇒ 恒 False ⇒ 静态与运行时**两眼一致地拒绝**。厂商卡上「torch 合法」那条路
+#: 要开通必须两半一起做, 记在 CHECKLOG I81。**不许**把它接到任务字段上。
+VENDOR_TORCH_OK: bool = False
 
 
 # 远端 L2 返回的指标里需要透传到控制端的键。matched_ratio / bad_elements / atol /
@@ -64,6 +85,10 @@ _REMOTE_L2_METRIC_KEYS = (
     # Fixer 拿它定位坏 tile, 比只有 max_error 有用一个量级 ——
     # 「哪错了」和「错了多少」是两个问题。
     "first_bad_index", "first_bad_actual", "first_bad_expected",
+    # 误差**形态** (设计 §8.2): 「哪错了」的下一问是「该怎么修」。它由远端用**同一份**
+    # `tolerance` 规则算出来 (与本地路径对称), 控制端只是把它带过来 —— 忘了放进这张
+    # 白名单, 真机路径上它就会静默消失 (本地用例照样全绿, 那正是最坏的一种缺法)。
+    "error_shape",
 )
 
 # 常见 GPU 硬件 **dense 规格峰值** (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
@@ -74,7 +99,7 @@ _REMOTE_L2_METRIC_KEYS = (
 # ⚠️ **这一张表回答的是「离理论上限还有多远」, 所以只能放 dense 规格, 不能放实测值。**
 # 原先 h20 那行写的是 138.2/138.3/71.6/31.6/3680, 注释老实标着「实测 (cuBLAS 8192³)」——
 # 出处没错, **用途错了**: 一次库实现的读数是「已达成的成绩」, 拿它当上界就会出现
-# 「达成率 101.5%」(真机 4096³ 跑到 140.0 TFLOPS), 而 D4 的收敛出口正是拿达成率判停的。
+# 「达成率 101.5%」(真机 4096³ 跑到 140.0 TFLOPS), 而 D4 的天花板出口正是拿达成率判停的。
 # 实测值仍然有用, 但它不进这张表、也不进 roofline 分母 —— 理由见 _PEAK_BY_CC 之前那段。
 # 每一行的口径记在 _PEAK_SOURCE 里, 并随 Roofline 日志一起打出来 —— 未经核实的行
 # 会带着「口径不明」出现在每一轮验证的输出里, 而不是安静地假装是权威。
@@ -101,7 +126,7 @@ _PEAK_BY_NAME: dict[str, tuple[float, float, float, float, float]] = {
 }
 
 # 逐行可信度**不另立一张表**, 而是由下面的出处字符串自己承担: 以 ⚠️ 开头的行视为
-# 「口径未核」, `measurement.roofline_converged` 据此拒绝开「已到 roofline」这个出口。
+# 「口径未核」, `measurement.reference_ceiling_reached` 据此拒绝开「已到 roofline」这个出口。
 # 为什么默认关: 不对称在于分母偏大只是让出口不开 (白烧几轮, 还有停滞出口兜底),
 # 分母偏小会把还能优化的核**提前**判成到顶。所以新加行时不写出处 = 不配拿来判停,
 # 这个默认值就是要逼着写。
@@ -132,7 +157,7 @@ _PEAK_BY_CC: dict[str, tuple[float, float, float, float, float]] = {
     # 原先 "8.9"/"9.0" 两行都填着 H100 的数字, 而 fp16 那一列用的是 **2:4 sparse** 的
     # 1979 (被删掉的那行注释自己写着 "FP8=1979") —— 表里其余每行都满足 fp16 == bf16,
     # 只有它们差 2.0 倍, 列错位不需要外部资料也能看出来。后果是有后果的: fp16 核的
-    # 达成率被这个分母砍半, D4 的收敛出口在这类卡上永不打开。
+    # 达成率被这个分母砍半, D4 的天花板出口在这类卡上永不打开。
     # 两个死键 "9.0a"/"8.9-bw" 已删 (匹配只用 `cc in 表` 与 `cc.startswith(键)`, 而 cc
     # 来自 f"{major}.{minor}", 永远不会以 "…a" 结尾)。
     #
@@ -225,6 +250,24 @@ def baseline_plan(kernel_type: str, precision: str) -> list:
     return ["pytorch_eager", "torch_compile"]
 
 
+def _bad_mask_as_2d(mask):
+    """把坏点掩码看成二维 (除最后一维外全部折叠) ⇒ `(二维掩码, rows, cols)`; 判不了 ⇒ None
+
+    为什么要折叠: 设计 §8.2 的形态判据问的是"坏点是不是集中在某几行/某几列", 而输出可能
+    是 (M,N) 也可能是 (B,H,S,D) —— 折叠成 (rows, cols) 之后同一套规则管所有 rank。
+    一维输出视作 `(1, N)` (整体当一行): 它没有"行"可谈, "整行坏"自然落不到它头上。
+    """
+    a = np.asarray(mask)
+    if a.ndim == 0 or a.size == 0:
+        return None
+    if a.ndim == 1:
+        return a.reshape(1, -1), 1, int(a.size)
+    cols = int(a.shape[-1])
+    if cols <= 0:
+        return None
+    return a.reshape(-1, cols), int(a.size // cols), cols
+
+
 class Verifier:
     """
     验证器 - 执行三级验证
@@ -294,7 +337,11 @@ class Verifier:
                                       environment_drift=environment_drift,
                                       heartbeat=heartbeat,
                                       heartbeat_expected=heartbeat_expected,
-                                      static_guards=l1.metrics.get("static_guards"))
+                                      static_guards=l1.metrics.get("static_guards"),
+                                      # 走到这里 L2 必已通过 (上面 `if not l2.passed: return`)。
+                                      # 仍然显式传: 「正确性是性能观测的前置条件」必须是**数据**,
+                                      # 不是这条控制流的隐含性质 (§20.4)。
+                                      correctness_verified=l2.passed)
         results.append(l3)
         return results
 
@@ -302,6 +349,7 @@ class Verifier:
                        task: TaskSchema, environment_drift=None,
                        heartbeat=None, heartbeat_expected: bool = False,
                        static_guards: Optional[bool] = None,
+                       correctness_verified: Optional[bool] = None,
                        ) -> list[VerificationResult]:
         """只跑 L3 (P1-1): 胜出候选已带 L1+L2 结果时的续接入口
 
@@ -313,12 +361,20 @@ class Verifier:
         (`metrics["static_guards"]`)。为什么必须由调用方传: 它属于**那一份源码**, 而
         Verifier 一个实例会连着验多个候选 —— 存成实例字段就是「记录说 A、判定按 B」
         那个坑 (CHECKLOG I65)。None = 没观测 ⇒ 不改判。
+
+        `correctness_verified`: 这份候选的**正确性凭据** (设计 §14-10 / §20.4)。本方法是
+        **唯一能绕开 L2 产出 L3 观测的入口** —— 一个没验过正确性的候选在这里同样能拿到
+        gflops 与资格位, 而那正是"错误候选不得产生可用于晋级的性能观测"的缺口。
+        凭据必须由调用方按**它手里那份 L2 结果**给出 (`Conductor._correctness_credential`),
+        不由本方法假设、也不看实例状态。三态: `None` = 没带凭据 (回放/脚本) ⇒ 不写键、
+        不追溯改判; **`False` ⇒ 该读数全资格 False** (规则 3 那一族: 这个数没有指称对象)。
         """
         l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
                                       environment_drift=environment_drift,
                                       heartbeat=heartbeat,
                                       heartbeat_expected=heartbeat_expected,
-                                      static_guards=static_guards)
+                                      static_guards=static_guards,
+                                      correctness_verified=correctness_verified)
         return [l3]
 
     def _verify_compile(self, kernel_code: str, dsl: str = "python",
@@ -419,17 +475,35 @@ class Verifier:
             # 远程编译错误全文可达上千字符 (gcc/Triton 会回显源码), 只把首行放进 message,
             # 否则 Fixer prompt 里同一份全文会出现两遍
             head, full = failure_pair(e)
+            metrics = dict(_guard_metrics)
+            # §22.2 的执行器**拦下**候选（编译超时 / 撞上限 / 盾命中 / 起不来）与「候选
+            # 自己编译失败」必须在产物里分得开 —— 前者是本层新出现的一档（进程内 exec
+            # 既没有墙钟也没有上限，它根本不会有），不写出来就成了「无名编译失败」。
+            # 取值单独一族（`compile_*`）：`compile_status` 的既有消费者做的是**相等判据**
+            # （`interface_mismatch` / `resource_infeasible` / `cached` / `success`），
+            # 加一个新取值不会让它们误判；`benchmarks/verify_corpus_honesty.py` 的
+            # `origin_of()` 已同步认这一族是**本地**失败。
+            if isinstance(e, GuardRefusal):
+                metrics["compile_status"] = f"compile_{e.status}"
+                metrics["exec_guard_status"] = e.status
+                if e.kind:
+                    metrics["exec_guard_kind"] = e.kind
+                metrics["exec_guard_executor"] = e.executor
+                if e.not_enforced:
+                    metrics["exec_guard_not_enforced"] = list(e.not_enforced)
             return VerificationResult(level=VerificationLevel.L1_COMPILE, passed=False,
                                       message=f"编译失败: {head}", error_log=full,
-                                      metrics=dict(_guard_metrics))
+                                      metrics=metrics)
 
     def _verify_function(self, kernel_code: str, test_inputs, expected_output, task: TaskSchema) -> VerificationResult:
         print("  [Verifier] L2: 功能验证...")
 
-        # 反作弊静态审计: 执行前先检查是否存在原生算子回退调用
-        #   注意: 昇腾等自研加速卡白名单放开 torch.matmul 等 (因为它们的 Tensor Core
-        #   只能通过厂商的 torch 后端下放激活)
-        audit = static_audit(kernel_code, task.target.dsl, hardware=task.target.hardware)
+        # 反作弊静态审计: 执行前先检查是否存在原生算子回退调用。
+        # ⚠️ 白名单的输入是**执行侧声明** (`VENDOR_TORCH_OK`), **不是**任务字段 ——
+        # 以前这里传 `task.target.hardware`, 于是一个任务声明 `hardware="Ascend910"`
+        # 就能让静态审计整段放行 (CHECKLOG I80 硬伤一)。今天没有声明者 ⇒ 恒 False。
+        audit = static_audit(kernel_code, task.target.dsl,
+                             vendor_torch_ok=VENDOR_TORCH_OK)
         violations = audit.violations
         if violations:
             print(f"  [Verifier] L2 FAILED: 反作弊静态审计未通过 ({len(violations)} 处违规)")
@@ -572,6 +646,29 @@ class Verifier:
             level=VerificationLevel.L2_FUNCTION, passed=True, message=msg, metrics=metrics,
         )
 
+    @staticmethod
+    def _error_shape_of(bad, *, n_bad: int, total: int, has_nonfinite: bool):
+        """坏点掩码 → 误差形态标签 (numpy 侧的归约; 规则在 `tolerance`)
+
+        归约与规则分开是有意的: 规则只有一份 (`tolerance.classify_error_shape`),
+        而"在哪个后端上归约"是每个生产者自己的事 (这里是 numpy, 真机那边是 torch)。
+        二维视图拿不到时 (空张量/标量) 仍然问一次规则 —— `nonfinite` 不依赖任何形状。
+        """
+        shape2d = _bad_mask_as_2d(bad)
+        if shape2d is None:
+            return tolerance.classify_error_shape(tolerance.ErrorShapeInputs(
+                n_bad=n_bad, total=total, rows=0, cols=0, bad_rows=0, bad_cols=0,
+                rows_all_bad=0, cols_all_bad=0, bad_row_prefix=0, bad_row_suffix=0,
+                bad_col_prefix=0, bad_col_suffix=0, has_nonfinite=has_nonfinite))
+        mask, n_rows, n_cols = shape2d
+        return tolerance.error_shape_from_axis_flags(
+            per_row=(mask.sum(axis=1) > 0).tolist(),
+            per_col=(mask.sum(axis=0) > 0).tolist(),
+            n_bad=n_bad, total=total,
+            rows_all_bad=int((mask.sum(axis=1) == n_cols).sum()),
+            cols_all_bad=int((mask.sum(axis=0) == n_rows).sum()),
+            has_nonfinite=has_nonfinite)
+
     def _verify_single_set(self, kernel_code: str, inputs: dict, expected_output, task: TaskSchema) -> VerificationResult:
         """对单组输入执行功能验证
         metrics 中含 max_error 表示完成了参考比对，否则仅为可执行性验证"""
@@ -594,9 +691,14 @@ class Verifier:
             if not remote_verify.get("success", False):
                 # ``success=False`` 也可能是数值误差超标；保留远端的精确诊断。
                 if "max_error" in remote_verify:
+                    # 形态与本地的 message 一样要进 message (Fixer / 失败语料读它),
+                    # 远端老版本不带这个键 ⇒ 如实说"未能确立", 不假装没有形态这回事。
+                    _shape = remote_verify.get("error_shape")
                     return VerificationResult(
                         level=VerificationLevel.L2_FUNCTION, passed=False,
-                        message=f"远程功能验证失败: 误差 {remote_verify['max_error']:.2e}",
+                        message=(f"远程功能验证失败: 误差 {remote_verify['max_error']:.2e}"
+                                 + (f", 形态={_shape}" if _shape else
+                                    ", 形态未能确立")),
                         error_log=remote_verify.get("error", ""),
                         metrics={k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
                                  if k in remote_verify},
@@ -798,6 +900,17 @@ class Verifier:
             metrics["first_bad_index"] = fb
             metrics["first_bad_actual"] = float(actual_f.reshape(-1)[fb])
             metrics["first_bad_expected"] = float(expected.reshape(-1)[fb])
+
+        # 误差**形态** (设计 §8.2): 位置回答"哪错了", 形态回答"该怎么修"。
+        # ⚠️ 触发条件是**这一组判失败**, 不是"有坏点": 含 NaN/Inf 时坏点计数是 0
+        # (NaN 的比较恒假), 而那恰恰是最该说出口的一种形态 —— 挂在坏点计数上的话,
+        # 它会是唯一永远报不出来的那一类。
+        # 归约在这里 (numpy), 分类规则在 `tolerance` (与真机路径共用一份); 把张量看成
+        # 二维 (除最后一维外全部折叠), 于是 matmul 与 attention 同一套规则。
+        if not passed:
+            metrics["error_shape"] = self._error_shape_of(
+                bad, n_bad=int(bad.sum()), total=int(n_compared),
+                has_nonfinite=has_nonfinite)
         if passed:
             extra = (f" (参考另有 {n_ref_nonfinite} 个非有限值, 已从分母剔除)"
                      if n_ref_nonfinite else "")
@@ -824,6 +937,11 @@ class Verifier:
             reason += (f", first_bad@{metrics['first_bad_index']}"
                        f" (got {metrics['first_bad_actual']:.6g},"
                        f" want {metrics['first_bad_expected']:.6g})")
+        # 形态进 message 是**有意的**: message 会进 Fixer 与失败语料 (它们是唯一保证被
+        # 下游看到的那条通道), 而"哪一类错"比"错了多少"更能决定该改哪里 (设计 §8.2)。
+        # `None` (判不了) 也要说出来 —— 沉默会被读成"形态没问题"。
+        reason += (f", 形态={metrics['error_shape']}" if metrics.get("error_shape")
+                   else ", 形态未能确立 (坏点分布不落在已知的几类上)")
         return VerificationResult(
             level=VerificationLevel.L2_FUNCTION, passed=False,
             message=(f"功能验证失败: {reason}"
@@ -951,6 +1069,7 @@ class Verifier:
                             environment_drift: Optional[list] = None,
                             heartbeat=None, heartbeat_expected: bool = False,
                             static_guards: Optional[bool] = None,
+                            correctness_verified: Optional[bool] = None,
                             ) -> VerificationResult:
         min_required = task.constraints.min_speedup
         print(f"  [Verifier] L3: 性能验证 (要求加速比 >= {min_required:.2f}x vs baseline)...")
@@ -1004,9 +1123,7 @@ class Verifier:
                    # 三态, 不许在这里补默认值 (缺失 ≠ 0 ≠ 没有上限)。控制侧此前是手写
                    # 白名单, 于是 runner 报的新键会被静默丢掉 (实测: 远端已报、L3 无键)。
                    # 只放与我们判据有关的那几个, 不把 runner 的整个信封灌进 metrics。
-                   **{k: bench[k] for k in ("num_warps", "num_stages", "n_regs",
-                                            "n_spills", "n_max_threads",
-                                            "shared_bytes_per_cta") if k in bench},
+                   **{k: bench[k] for k in COMPILE_FACT_KEYS if k in bench},
                    "memory_bandwidth_gbs": round(bandwidth, 4),
                    "bound_type": bound, "primary_metric": "speedup_vs_baseline",
                    "backend": str(self.backend)}
@@ -1067,6 +1184,14 @@ class Verifier:
         if static_guards is not None:
             metrics["static_guards"] = bool(static_guards)
 
+        # 正确性凭据 (设计 §14-10 / §20.4): 同上 —— 发布事实, 判据在资格层
+        # (`eligibility.derive_eligibility` 规则 3 那一族: 没有指称对象的数全资格 False)。
+        # 为什么必须由调用方传: L3 观测可以由两条路产生, 而 `verify_l3_only` **绕开了 L2** ——
+        # 「这个核是对的」是调用方手里的事实, 不是本方法能假设的。`None` = 没带凭据 ⇒ 不写键
+        # (老产物/回放脚本不因此被追溯改判), 只有明确的 `False` 才拒。
+        if correctness_verified is not None:
+            metrics["correctness_verified"] = bool(correctness_verified)
+
         # ---- 注入 Roofline 指标, 供 SearchAgent 做结构化优化决策 ----
         metrics.update({
             "roofline_analysis": roofline,
@@ -1086,13 +1211,13 @@ class Verifier:
 
         if roofline["hw_peak_gflops"] > 0 and roofline["hw_peak_bandwidth_gbs"] > 0:
             compute_label = roofline.get("compute_used", "fp32_cuda_core")
-            # 分母的出处必须出现在分母被读到的那一行: 判停出口 (ROOFLINE_CONVERGED_PCT)
+            # 分母的出处必须出现在分母被读到的那一行: 判停出口 (REFERENCE_CEILING_PCT)
             # 直接拿达成率当证据, 而「这个 peak 凭什么」以前只在源码注释里, 日志里看不到。
             print(f"  [Verifier] Roofline: {roofline['roofline_bound']} "
                   f"(AI={roofline['arithmetic_intensity']:.2f} FLOP/Byte, "
                   f"peak={roofline['hw_peak_gflops']/1000:.1f} TFLOPS ({compute_label}|"
                   f"分母[{roofline['peak_table_key']}] {roofline['peak_source']}"
-                  f"{'' if roofline.get('peak_measured') else '; ⚠️未实测⇒收敛出口关闭'}), "
+                  f"{'' if roofline.get('reference_lower_bound') else '; ⚠️未实测⇒天花板出口关闭'}), "
                   f"GFLOPS利用率={roofline['gflops_utilization_pct']:.1f}%, "
                   f"带宽利用率={roofline['bandwidth_utilization_pct']:.1f}%)")
 
@@ -1342,6 +1467,11 @@ class Verifier:
             median_time_ms=candidate_ms,
             launch_floor_us=self._detect_theoretical_peak().get("launch_floor_us"),
             gpu_util_pct=gpu_util_pct,
+            # 正确性凭据 (§14-10 / §20.4): 读**已经发布进 metrics 的那一份** (与
+            # static_guards / arm_device_labels 同一写法) —— `_verify_performance` 是
+            # 另一个方法, 它的局部量在这里根本看不见, 而 `observation_error` 会把那种
+            # 漏接吞成一行日志。缺键 = 没带凭据 ⇒ 三态里的"未观测", 不改判。
+            correctness_verified=metrics.get("correctness_verified"),
             # I68: harness 同卡声明从**已搬进 metrics 的**那份读 —— 判定看的必须
             # 就是产物里记的 (与 mode/device 同一条规矩), 不回头再问载荷。
             gpu_harness_peers=metrics.get("gpu_harness_peers"),
@@ -1355,7 +1485,7 @@ class Verifier:
         )
         metrics.update(assessment.as_metrics())
         metrics["benchmark_contaminated"] = assessment.contaminated
-        # §13.5: 拿**这一次**已经付过钱的基线臂做一次实测峰值标定 (零额外 GPU 秒,
+        # §13.5: 拿**这一次**已经付过钱的基线臂做一次参考下界标定 (零额外 GPU 秒,
         # 也不占 §10.2 那 5% 的标定额度 —— 那个额度留给心跳)。产物里永远留下裁决
         # (包括拒绝与拒绝的理由): 「没标定」与「没接线」必须分得开。
         self._publish_peak_probe(metrics)
@@ -1421,6 +1551,10 @@ class Verifier:
                         # arm_windows 同一个写法)。它由 `_verify_performance` 从 L1 结果
                         # 搬进来, 不是 Verifier 实例字段 (一个实例验多个候选)。
                         "static_guards": metrics.get("static_guards"),
+                        # 正确性凭据 (§14-10 / §20.4): 同上 —— 读**已经发布进 metrics 的
+                        # 那一份**, 不回头问调用方的局部量 (`_assess_measurement` 是另一个
+                        # 方法, 拿不到 `verify_l3_only` 的参数)。缺键 = 没带凭据 = 不改判。
+                        "correctness_verified": metrics.get("correctness_verified"),
                     },
                     record_hash=carried or None,
                     fresh=not carried,
@@ -1484,9 +1618,12 @@ class Verifier:
             msg += (f"  ⚠️ 测量有效性={assessment.validity.value}: "
                     + "; ".join(assessment.reasons))
         if assessment.l3_pass_is_refused:
-            msg += ("  ⛔ 本轮 L3 不记为通过: 任务声明要的执行侧能力没拿到 "
-                    f"(缺 {', '.join(assessment.capability_shortfall) or '—'}"
-                    f"{'; 且 ' + '; '.join(assessment.provenance_conflict) if assessment.provenance_conflict else ''})")
+            # 成因由 `assessment` 自己点名 (与判据同处一个类, 按同一分支顺序) ——
+            # 这里只拼接, 不再写一遍判据。原先那句写死了"能力没拿到", 而凭据这条
+            # 新增成因会印出「缺 —」: 判定对了、说的是另一件事 (I46 那一族)。
+            _refusal_causes = "; ".join(assessment.l3_pass_refusal_causes)
+            msg += ("  ⛔ 本轮 L3 不记为通过: "
+                    + (_refusal_causes or "「通过」没有指称对象"))
         return msg, assessment
 
     # 算子类型 -> bound 分类 (决定优化时关注的参考指标)
@@ -1508,7 +1645,7 @@ class Verifier:
     # ---- Roofline 分析 ----
 
     def _refresh_measured_peak(self) -> None:
-        """把存放处里的实测峰值重新合并进已缓存的 peak 字典 (零成本, 不探硬件)
+        """把存放处里的参考下界重新合并进已缓存的 peak 字典 (零成本, 不探硬件)
 
         为什么需要: `_detect_theoretical_peak` 是缓存的, 而 `probe_peak` 的发布发生在
         同一次运行的**第 1 轮** L3 之后 —— 不重读的话第 2 轮读到的还是「没实测」, 于是
@@ -1519,15 +1656,15 @@ class Verifier:
         key = device_key_of({"name": peak.get("name", ""),
                              "compute_capability": peak.get("compute_capability", "")})
         measured = measured_peaks_for(key)
-        peak["measured_peak_tflops"] = dict(measured)
-        peak["peak_measured"] = any(
+        peak["reference_lower_bound_tflops"] = dict(measured)
+        peak["reference_lower_bound"] = any(
             isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
             for x in measured.values())
 
     def _detect_theoretical_peak(self) -> dict:
         """探测硬件理论峰值 (GFLOPS, 带宽)，优先按设备名匹配，回退 compute_capability
 
-        ⚠️ 缓存的是**表那一半**; 实测峰值那一半会变 (§13.5: 同一次运行里第 1 轮的 L3 标定
+        ⚠️ 缓存的是**表那一半**; 参考下界那一半会变 (§13.5: 同一次运行里第 1 轮的 L3 标定
         完, 第 2 轮就该读到), 所以每次调用都从存放处重读。这里不重新探测硬件 ——
         `get_hardware_info()` 在 SSH 路径上是一次真实往返, 而设备身份没变。
         """
@@ -1583,7 +1720,7 @@ class Verifier:
         # 或者根本没命中表的行, 都**不配**用来开「已到 roofline」这个判停出口。
         peak_trusted = matched_key is not None and not peak_source.startswith("⚠️")
 
-        # launch 地板与**实测峰值**都走 hardware_caps 而不是上面这两张表: 它们是实测值
+        # launch 地板与**参考下界**都走 hardware_caps 而不是上面这两张表: 它们是实测值
         # 而非 datasheet 推算值, 且按缺口 3 的方向, 硬件知识应该收敛到 HardwareCaps 一处。
         # 取不到 (未知设备 / get_hardware_info 抛错) 时为 None, 下游会显式记录
         # 「未做地板支配检查」而不是默认放行。
@@ -1595,14 +1732,14 @@ class Verifier:
         launch_floor_us = getattr(caps, "launch_floor_us", None)
         # 分母**实测过**没有 (设计 §13.5)。与 `peak_trusted` 刻意分开: 后者问的是「表行
         # 口径核过没有」(dense/sparse 没混、算术自洽), 前者问的是「有没有一次真探测」。
-        # H20 今天两问的答案是「核过」+「从没探测」, 而收敛出口只认后者。
-        # §13.5 起 `measured_peak_tflops` 是**按精度**的字典 (`{"tf32": 68.1}`), 由
-        # `peak_probe` 判过、`hardware_caps` 存放处发布。这里的标量 `peak_measured`
-        # 只回答「这张卡**任何一个**精度有没有实测过」(透明用); 让收敛出口开的那一位是
+        # H20 今天两问的答案是「核过」+「从没探测」, 而天花板出口只认后者。
+        # §13.5 起 `reference_lower_bound_tflops` 是**按精度**的字典 (`{"tf32": 68.1}`), 由
+        # `peak_probe` 判过、`hardware_caps` 存放处发布。这里的标量 `reference_lower_bound`
+        # 只回答「这张卡**任何一个**精度有没有实测过」(透明用); 让天花板出口开的那一位是
         # `_roofline_analysis` 里**按这一轮实际分母的精度键**算出来的那个 —— 两者混用
         # 会拿 tf32 的实测值去开 fp32 那一轮的出口, 数值差近一倍而日志里长得一样。
-        _mp = getattr(caps, "measured_peak_tflops", None)
-        peak_measured = bool(_mp) and any(
+        _mp = getattr(caps, "reference_lower_bound_tflops", None)
+        reference_lower_bound = bool(_mp) and any(
             isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
             for x in _mp.values()) if isinstance(_mp, dict) else False
 
@@ -1612,11 +1749,11 @@ class Verifier:
             "memory_bandwidth_gbs": bw,
             "peak_source": peak_source,
             "peak_trusted": peak_trusted,
-            # 收敛出口判停用的**唯一**那个位 (measurement.roofline_converged)。
-            # `probe_peak` 落地时: 按精度把实测值写进 HardwareCaps.measured_peak_tflops,
+            # 天花板出口判停用的**唯一**那个位 (measurement.reference_ceiling_reached)。
+            # `probe_peak` 落地时: 按精度把实测值写进 HardwareCaps.reference_lower_bound_tflops,
             # 这个位才会翻真 —— 在那之前出口是关的, 这是设计要的行为, 不是缺陷。
-            "peak_measured": peak_measured,
-            "measured_peak_tflops": dict(_mp) if isinstance(_mp, dict) else {},
+            "reference_lower_bound": reference_lower_bound,
+            "reference_lower_bound_tflops": dict(_mp) if isinstance(_mp, dict) else {},
             "peak_table_key": matched_key or "",
             "launch_floor_us": launch_floor_us,
             # 每 SM 的 smem 上界: §12 的**便宜代理剪枝**要它 (不花 GPU 秒就能摘掉
@@ -1661,7 +1798,7 @@ class Verifier:
         时 `.to(torch.float16)`), 所以控制端手里那份 float32 数组是核**根本见不到**的形态。
         第一版就是这么写的: matmul 4096³ 声明 FP16 而输入是 float32, AI 算成 682.67
         而不是 1365.33 —— 正好差 2 倍 (doc 48 §6.5)。达成率与计时对比都不受影响,
-        但 AI 决定脊点两侧的分类, 而分类决定收敛出口与 SearchAgent 走哪条建议。
+        但 AI 决定脊点两侧的分类, 而分类决定天花板出口与 SearchAgent 走哪条建议。
         """
         kt = (task.source.kernel_type or "").lower()
         nbytes = task.constraints.precision.itemsize
@@ -1750,23 +1887,23 @@ class Verifier:
                 hw_peak_gflops = peak.get("tf32_tflops", hw_peak_gflops / 1000) * 1000
                 compute_used = "tf32_tensor_core"
 
-        # §13.5: 这个精度的分母**实测过**没有 —— 只有这一位能让收敛出口开
-        # (`measurement.roofline_converged` 只认 `peak_measured`)。键必须与上面选分母
+        # §13.5: 这个精度的分母**实测过**没有 —— 只有这一位能让天花板出口开
+        # (`measurement.reference_ceiling_reached` 只认 `reference_lower_bound`)。键必须与上面选分母
         # 用的那个精度**同一个** (`compute_used`), 取不到就当作未实测: 不许借用别的
         # 精度 (tf32 vs fp32 差近一倍, 借用会把还能优化的核提前判成到顶)。
         peak_key = precision_key_of(compute_used)
-        _measured = peak.get("measured_peak_tflops") or {}
+        _measured = peak.get("reference_lower_bound_tflops") or {}
         _measured_tflops = _measured.get(peak_key) if peak_key else None
-        peak_measured = bool(isinstance(_measured_tflops, (int, float))
+        reference_lower_bound = bool(isinstance(_measured_tflops, (int, float))
                              and not isinstance(_measured_tflops, bool)
                              and _measured_tflops > 0)
-        if peak_measured:
+        if reference_lower_bound:
             hw_peak_gflops = float(_measured_tflops) * 1000.0
         # 设备身份取 `_detect_theoretical_peak` 发布的那两个字段 (name/cc) ——
         # 它是 `detect_hardware_caps` 认卡用的同一批字段, 也是存放处的分组键。
         _dev_key = device_key_of({"name": peak.get("name", ""),
                                   "compute_capability": peak.get("compute_capability", "")})
-        _measured_rec = (measured_peak_record(_dev_key, peak_key) if peak_measured
+        _measured_rec = (measured_peak_record(_dev_key, peak_key) if reference_lower_bound
                          else {"method": "", "evidence": {}})
 
         ai = self._compute_arithmetic_intensity(task, bench_inputs)
@@ -1822,27 +1959,27 @@ class Verifier:
             # 看不出它有多可信**: 138.2 和 1979 在日志里长得一模一样。
             "peak_source": peak.get("peak_source", ""),
             "peak_trusted": peak.get("peak_trusted", False),
-            # 收敛出口判停**只认这一个位** (设计 §13.5)。发布出去是必要的: 它不在这里,
+            # 天花板出口判停**只认这一个位** (设计 §13.5)。发布出去是必要的: 它不在这里,
             # 下游拿到的是一份「核过口径」的记录, 而「实测过没有」这件事实就丢了 ——
             # 与 I45/I46/I48 同族的「算了一处、判在另一处」。
-            # **按精度**的那一位: 收敛出口读的就是它 (不是上面那个「任何精度都算」的标量)。
-            "peak_measured": peak_measured,
+            # **按精度**的那一位: 天花板出口读的就是它 (不是上面那个「任何精度都算」的标量)。
+            "reference_lower_bound": reference_lower_bound,
             "peak_key": peak_key or "",
-            "peak_measured_source": _measured_rec.get("method", ""),
-            "peak_measured_evidence": _measured_rec.get("evidence", {}),
+            "reference_lower_bound_source": _measured_rec.get("method", ""),
+            "reference_lower_bound_evidence": _measured_rec.get("evidence", {}),
             "peak_table_key": peak.get("peak_table_key", ""),
         }
 
     def _publish_peak_probe(self, metrics: dict) -> None:
-        """§13.5: 实测峰值标定 —— 判据在 `peak_probe.probe_peak`, 这里只装配与发布
+        """§13.5: 参考下界标定 —— 判据在 `peak_probe.probe_peak`, 这里只装配与发布
 
         样本来自同一次 L3 调用里的**基线臂**(同机、同形状、同精度的已知好参考核),
         即「这台机器上这个精度**至少**能跑这么快」。它是下界 ⇒ 拿它当分母, 利用率偏大、
-        收敛出口偏松; 这条残余风险明写在 `peak_probe` 的模块 docstring 里(约束是
+        天花板出口偏松; 这条残余风险明写在 `peak_probe` 的模块 docstring 里(约束是
         「样本自己必须 compute-bound 且 valid」两条), 这里不再复述一遍。
 
         发布进 `hardware_caps` 的**进程级**存放处 ⇒ 下一次 `detect_hardware_caps` 才读得到,
-        于是收敛出口从下一轮开始有分母可用。**不现场改这一轮的分母**: 这一轮的 roofline
+        于是天花板出口从下一轮开始有分母可用。**不现场改这一轮的分母**: 这一轮的 roofline
         已经用表算了, 事后替换会让同一份产物里的分子分母来自两个时刻。
         """
         roofline = metrics.get("roofline_analysis") or {}
@@ -1859,16 +1996,16 @@ class Verifier:
         decision = probe_peak(sample)
         metrics["peak_probe"] = decision.as_dict()
         if not decision.measured:
-            print(f"  [Verifier] 峰值标定未成立 ⇒ 收敛出口继续关闭: "
+            print(f"  [Verifier] 参考下界标定未成立 ⇒ 天花板出口继续关闭: "
                   f"{decision.refusal_note()}")
             return
         profile = decision.profile
         key = device_key_of({"name": table.get("name", ""),
                              "compute_capability": table.get("compute_capability", "")})
-        remember_measured_peak(key, profile.precision, profile.tflops,
+        remember_reference_lower_bound(key, profile.precision, profile.tflops,
                                profile.method, profile.evidence)
-        print(f"  [Verifier] 实测峰值标定: {profile.precision} = "
-              f"{profile.tflops:.2f} TFLOPS ({profile.method}) ⇒ 下一轮的收敛出口有分母了")
+        print(f"  [Verifier] 参考下界标定: {profile.precision} = "
+              f"{profile.tflops:.2f} TFLOPS ({profile.method}) ⇒ 下一轮的天花板出口有分母了")
 
     def _build_reference_fn(self, task: TaskSchema, inputs: dict,
                             high_precision: bool = False):

@@ -53,6 +53,15 @@ def _round(n, l1=True, l2=None, l3=None, validity=None, speedup=None, action="op
             "template_selection": None,
             # 这一轮的回报记到哪个臂头上 (模板点去重键 / tiling 三元组 / None)
             "bandit_arm": None,
+            # §21: 这一轮的 Agent 动作与裁决 (含七条独立检查逐条的结论与覆盖率)。
+            # 聚合逻辑不消费它, 但键必须在 —— 与上面几行同一条纪律。
+            "agent_action": None,
+            # §21.3: 这一轮的修复提示里有没有注入那一段结构化证据 (注入留痕)。
+            "fix_evidence": None,
+            # §21.1 生产者侧 (接线后新增的两格): 这一轮的动作是哪来的（模型交的信封 /
+            # harness 拼的）与修复那一步的询问留痕。聚合逻辑不消费它们, 但键必须在 ——
+            # 与上面几行同一条纪律 (这条守卫就是靠它抓到「假血缘比真血缘少键」)。
+            "action_envelope": None, "fix_action": None,
             # §10.3: 这一轮的选择 (模式/抽签/分数/顺序) 与它花的预算相位, 以及分母原料
             "selection": None, "phase": None, "measurement_wall_s": None,
             # §10.4: 覆盖判定 (轮首 append、轮中后填的空 dict —— 真实运行里也是这个形状)

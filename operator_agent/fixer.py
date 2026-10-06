@@ -13,7 +13,13 @@
 
 import re
 import textwrap
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+from .agent_runtime import (  # §21.1 的生产者侧: 动作信封的解析只有一处
+    ActionEnvelope,
+    ENVELOPE_ABSENT,
+    parse_action_envelope,
+)
 from .schemas import TaskSchema, VerificationResult
 from .prompt_manager import PromptManager
 from .kernel_db import (  # 用于回写 Reflexion 教训 + 本轮取向的归类
@@ -245,6 +251,32 @@ def stage_directive(levels: set, failure_cls: str = "",
     return _L2_RETREAT if "L2" in levels else _L1_INPLACE
 
 
+@dataclass(frozen=True)
+class FixOutcome:
+    """一次修复尝试的**完整**产物：候选 + 说明 + 模型交上来的动作信封。
+
+    为什么信封要**随返回值**走、而不是存在实例属性上：本仓 I77 那一族缺陷的形状正是
+    「留痕成了普通变量」—— 写进去、下一个读的人不知道该在什么时候读、于是它悄悄失效。
+    随返回值走 ⇒ 「谁产它、谁读它」在类型上就写死了。
+
+    `code` 为空**不是错误**：`envelope.asks_without_patch` 为真时这一轮是**提问**
+    （解释 / 请求观测），而不是一次失败的修复 —— 两者在调用方要分开处理。
+    """
+
+    code: str
+    summary: str
+    envelope: ActionEnvelope
+
+    @property
+    def asked(self) -> bool:
+        """这一轮是不是「不改候选」的提问。"""
+        return not self.code and self.envelope.usable and self.envelope.asks_without_patch
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"code_chars": len(self.code or ""), "summary": self.summary,
+                "asked": self.asked, "envelope": self.envelope.as_dict()}
+
+
 class FixerAgent:
     """
     Fixer Agent (错误修复)
@@ -254,6 +286,10 @@ class FixerAgent:
 
     MAX_ERROR_CHARS = 1500  # 单条错误日志注入 prompt 的最大长度
     MAX_FIX_ATTEMPTS = 3    # 修复代码的预检重试次数
+    #: 修复那一次 LLM 调用的 token 上限。**唯一一份**：§21.1 的动作预算声明读的就是它
+    #: （`token_budget`）。写成两处（一处调用、一处声明）会让「声明 1000、实际花 4096」
+    #: 这种漂移无法被发现, 而那道门看起来永远能过。
+    FIX_MAX_TOKENS = 4096
 
     def __init__(self, llm=None, prompt_manager: Optional[PromptManager] = None,
                  failure_db=None):
@@ -271,13 +307,50 @@ class FixerAgent:
         task: TaskSchema,
         failed_results: list[VerificationResult],
         fix_not_rewrite: bool = False,
+        structured_evidence: str = "",
+        error_shape: str = "",
+        ask_answer: str = "",
     ) -> tuple[str, str]:
+        """`run_with_action` 的**两格投影**（唯一的差别是丢掉动作信封）。
+
+        保留这个入口有两个理由：① 与接线前逐字同形，于是「接线有没有改修复行为」
+        可以只差一个返回值就判开；② 不关心 §21.1 的调用方（与既有用例）不必知道信封。
+        守卫钉住「它就是投影」：同一个替身 LLM 下 `run(...) == run_with_action(...)` 的前两格。
         """
-        修复失败代码 (带预检+重试闭环，和 CoderAgent._llm_generate_code 一致)
+        outcome = self.run_with_action(
+            code, task, failed_results, fix_not_rewrite=fix_not_rewrite,
+            structured_evidence=structured_evidence, error_shape=error_shape,
+            ask_answer=ask_answer,
+        )
+        return outcome.code, outcome.summary
+
+    def run_with_action(
+        self,
+        code: str,
+        task: TaskSchema,
+        failed_results: list[VerificationResult],
+        fix_not_rewrite: bool = False,
+        structured_evidence: str = "",
+        error_shape: str = "",
+        ask_answer: str = "",
+    ) -> "FixOutcome":
+        """修复失败代码 (带预检+重试闭环，和 CoderAgent._llm_generate_code 一致)
 
         `fix_not_rewrite=True` (§8 路由: 编译过、仅数值失败): 把取向钉成
         **最小改动** —— 外部实测 (Don't Regenerate, Debug) 修比重写省 92.8% token,
         且方法效应大于模型效应。此时 prompt 不许推倒重来。
+
+        `structured_evidence` (§21.3): Conductor 现算并渲染好的**结构化证据**那一段
+        (契约摘要 / 父候选 diff / 失败分类 / 首个错误与形态 / profiler 事实 / 可用工具 /
+        剩余预算 / 可写路径)。空串 = 这一次不给这一段 (A/B 对照的关闭侧)。
+        ⚠️ 本方法**不自己拼**这一段: 拼装只有 `AgentRuntime.context_for(...).render()`
+        一处 —— 在这里再拼一遍就是第二个注入通道, 而「只有这八项」正是靠只有一个拼装点
+        成立的。
+
+        **动作信封 (§21.1 的生产者侧)**: 回复里可以带一段 ```agent-action 的意图
+        (种类 / 理由 / 预期瓶颈 / 想用的工具)。解析在这里做、**并且在这里就把这一段从
+        文本里切掉** —— 于是代码提取看到的只有源码, 信封里写什么都不可能被当成候选。
+        读不出来 (`absent` / `malformed`) 不是错误: 沿用接线前的行为 (由 harness 拼装动作)。
 
         关键防御:
         - 当 task.target.dsl != "triton" (昇腾等非 NVIDIA 硬件) 时, 不注入 triton_skill
@@ -324,19 +397,37 @@ class FixerAgent:
             error_details=error_details,
             history_cases=history_cases or "无",
             code=code,
+            structured_evidence=structured_evidence,
+            error_shape=error_shape or "(这一轮没有确立误差形态)",
+            ask_answer=ask_answer,
         )
 
         feedback = ""
         fixed = ""
         succeeded = False
+        envelope = ActionEnvelope(status=ENVELOPE_ABSENT, reason="一次 LLM 调用都没成功")
+        asked = False
         for attempt in range(1, self.MAX_FIX_ATTEMPTS + 1):
             raw = self.llm.chat(
                 [{"role": "user", "content": base_prompt + feedback}],
                 temperature=0.1,
-                max_tokens=4096,
+                max_tokens=self.FIX_MAX_TOKENS,
                 caller_tag="Fixer",
             )
-            fixed = self._extract_code(raw)
+            # 先取信封再提代码: 信封那一段**被切掉**了, 于是代码提取只看得到源码
+            envelope, body = parse_action_envelope(raw)
+            fixed = self._extract_code(body)
+            if envelope.usable and envelope.asks_without_patch:
+                # 「不改候选」的那几类 (解释 / 请求观测)。**这一轮没有候选** ——
+                # 不重试、也不抛: 它不是一次失败的修复, 是一次提问。响应它 (答/拒)
+                # 是 Conductor 的事 (`_answer_ask`), 而它决定要不要再问一次。
+                asked = True
+                if not fixed:
+                    break
+                print(f"  [Fixer] 信封是 {envelope.kind}, 同时带了代码 —— "
+                      f"按声明**不收**这份代码 (借请求之名改代码正是 §21.1 要挡的)")
+                fixed = ""
+                break
             if not fixed:
                 issues = ["Fixer 未能从 LLM 回复中提取有效代码"]
             else:
@@ -362,8 +453,17 @@ class FixerAgent:
                 f"括号配对完整；除 `根因:` 那几行外不要输出解释；"
                 f"特别注意当前 dsl={dsl!r} 的 API 禁令。"
             )
-        if not fixed:
+        if not fixed and not asked:
             raise ValueError("Fixer 未能从 LLM 回复中提取有效代码")
+
+        if asked:
+            # 提问轮: 不进 Reflexion 上下文 (`_last_fixed_code` 留空 ⇒ `produce_reflexion`
+            # 返回 None) —— 那一份是「修复成功后的教训」, 而这一轮根本没有候选。
+            summary = (f"基于 {len(failed_results)} 个失败结果提问 "
+                       f"({levels}): {envelope.kind}")
+            print(f"  [Fixer] 收到动作信封 {envelope.kind} (无候选): "
+                  f"{envelope.rationale[:80] or '(未写理由)'}")
+            return FixOutcome(code="", summary=summary, envelope=envelope)
 
         summary = f"基于 {len(failed_results)} 个失败结果修复 ({levels})"
         print(f"  [Fixer] LLM 修复完成: {len(fixed)} chars")
@@ -371,7 +471,7 @@ class FixerAgent:
         if succeeded:
             self._last_fixed_code = fixed
             self._last_fix_summary = summary
-        return fixed, summary
+        return FixOutcome(code=fixed, summary=summary, envelope=envelope)
 
     def produce_reflexion(self) -> Optional[FailureRecord]:
         """Reflexion: 修复后让 LLM 生成结构化自我反思并封装为 FailureRecord。

@@ -147,6 +147,11 @@ def origin_of(result):
     metrics = result.metrics or {}
     if metrics.get("compile_status") == "interface_mismatch":
         return "local"
+    # §22.2 的执行器拦下候选（编译超时 / 撞上限）是**本地**发生的事：`compile_status`
+    # 取 `compile_<status>` 那一族（生产者 `verifier._verify_compile`）。漏了这一支，
+    # 一次本地超时会被这条探针读成「远端报的」—— 结论方向正好相反。
+    if str(metrics.get("compile_status") or "").startswith("compile_"):
+        return "local"
     if "本地语法预检失败" in (result.message or ""):
         return "local"
     return "remote"

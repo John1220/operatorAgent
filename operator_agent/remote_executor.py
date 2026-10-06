@@ -43,6 +43,8 @@ from typing import Optional
 
 from .environment import EnvironmentChecker, DependencyAnalyzer, EnvironmentReport, CheckItem
 from .backend_caps import Backend, Cap
+from .exec_guard import (MODE_COMPILE, STATUS_CRASHED, Limits, candidate_error,
+                         limits_for, refusal_from, run_compile)
 from .hardware_caps import detect_hardware_caps
 from .measurement import (TRANSPORT_ANSWERED, TRANSPORT_KEY, safe_error_text,
                           transport_outcome)
@@ -1274,8 +1276,14 @@ class LocalExecutor(Backend):
     本地 CPU 执行 (fallback)
     """
 
-    def __init__(self):
+    def __init__(self, *, compile_limits: Optional[Limits] = None):
         self.name = "LocalExecutor (CPU)"
+        #: §22.2 的编译期上限（与 `MockGPU.compile_limits` 同一档语义；`None` ⇒ `exec_guard`
+        #: 的编译默认值）。这一段是传递链的消费端。
+        #: ⚠️ 只声明了**编译**这一档：本后端的 `execute` / `benchmark` 仍在 harness 进程里
+        #: `exec`（见 `compile()` 的注释与状态文档的 §22 行），运行那一档的上限今天在这里
+        #: **没有消费端** —— 加一个没人读的 `exec_limits` 字段就是「声明 + 无消费」。
+        self.compile_limits = compile_limits
 
     @property
     def label(self) -> str:
@@ -1311,11 +1319,29 @@ class LocalExecutor(Backend):
         }
 
     def compile(self, kernel_code: str) -> bool:
-        ns = {}
-        exec(kernel_code, ns)
-        if "kernel" not in ns or not callable(ns["kernel"]):
-            raise SyntaxError("Missing 'kernel' function")
-        return True
+        """L1 编译：在 §22.2 的**受控子进程**里 `exec`（与 `MockGPU.compile` 同一档）
+
+        WHY（2026-10-06）: 这一处原先与 `MockGPU.compile` 一样是 harness 进程内
+        `exec(kernel_code, ns)` —— 没有墙钟、没有 rlimit、没有进程组，候选在模块顶层写一个
+        死循环就能在「进 L1 之前」把评测进程拖死。本后端是**降级梯子的终点**（远端连不上
+        就是它），所以这条路上没有任何别的门兜着。
+
+        逐字保持的契约: 候选抛什么类型就重抛什么类型（`SyntaxError` 就是 `SyntaxError`，
+        与搬走之前一致 —— 本方法**不**做 `MockGPU` 那种 `RuntimeError("Compile error: …")`
+        包装）；`"kernel"` 缺失或不可调用仍是 `SyntaxError("Missing 'kernel' function")`。
+        **新增**的一档: 执行器自己拦下（超时 / 撞上限 / 盾命中）⇒ 抛 `GuardRefusal`，
+        与「候选自己编译失败」分开报（把撞上限读成语法错正是 I65/I11 那一族）。
+        """
+        guard = run_compile(kernel_code,
+                            limits=limits_for(MODE_COMPILE, self.compile_limits))
+        if guard.ok:
+            if not (guard.metrics.get("has_kernel")
+                    and guard.metrics.get("kernel_callable")):
+                raise SyntaxError("Missing 'kernel' function")
+            return True
+        if guard.status == STATUS_CRASHED:
+            raise candidate_error(guard)
+        raise refusal_from(guard, where="编译期")
 
     def execute(self, kernel_code: str, inputs: dict) -> RemoteExecutionResult:
         import numpy as np

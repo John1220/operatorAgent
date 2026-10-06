@@ -338,9 +338,9 @@ def main() -> int:
 
     # ── §14-3 库回退假候选 ────────────────────────────────────────
     print("\n" + "=" * 66 + "\n§14-3 回退到库的假候选 (两层反作弊)\n" + "=" * 66)
-    stat = static_audit(LIB_PLAIN, dsl="triton", hardware="nvidia_gpu")
+    stat = static_audit(LIB_PLAIN, dsl="triton")
     check("§14-3 静态审计看得见直白调用", bool(stat), f"{stat[:2]}")
-    stat_obf = static_audit(LIB_OBFUSCATED, dsl="triton", hardware="nvidia_gpu")
+    stat_obf = static_audit(LIB_OBFUSCATED, dsl="triton")
     print(f"  拼名字那版的静态审计结果: {stat_obf or '（空 —— 这正是需要运行时盾的原因）'}")
     for label, code, expect_static in (("直白", LIB_PLAIN, True),
                                        ("拼名字", LIB_OBFUSCATED, False)):

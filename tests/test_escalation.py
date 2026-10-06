@@ -3,9 +3,11 @@
 判据本体 (`operator_agent/escalation.py`) 只证算得对; 这里同时证**它接在生产链路上**:
 门关 ⇒ 不问 LLM 要结构改动 (只做参数搜索), 门开 ⇒ 问, 且升级买到 K 轮。
 
-最要紧的一条边界: 门开需要**三条件同时成立**, 而条件 2 今天只有 `smem-bound` 有量具
-(`spill` / `bank conflict` / 占用率上限都还没有) —— 所以「门关着」是**预期的**默认状态,
-不是接线坏了。用例把两端都钉住, 免得日后有人把「门一直关着」读成「门没接上」。
+最要紧的一条边界: 门开需要**三条件同时成立**, 而条件 2 今天有**两把**量具 (`smem-bound`
+与占用率上限; `spill` / `bank conflict` 还没有) —— 所以「门关着」是**预期的**默认状态,
+不是接线坏了。用例把两端都钉住, 免得日后有人把「门一直关着」读成「门没接上」;
+`TestGaugeInventory` 另外钉住"量具清单与代码一致"这件事 —— 清单写 stale 会让读者
+(含外部评审)得出「这一层今天到不了」的结论, 而那是一个由注释产生的设计判断。
 
 运行: python3 -m unittest tests.test_escalation -v
 """
@@ -13,6 +15,7 @@
 import contextlib
 import io
 import os
+import re as _RE
 import shutil
 import sys
 import tempfile
@@ -22,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from operator_agent import escalation
 from operator_agent.conductor import MAX_STAGNANT_ROUNDS, Conductor
 from operator_agent.escalation import (
     COND_DIRECTION, COND_HARD_LIMIT, COND_PLATEAU, EscalationInputs, decide,
@@ -248,6 +252,58 @@ class TestTheGateInTheProductionLoop(unittest.TestCase):
         self.assertIn("valid_rounds_seen", last["detail"])
         self.assertEqual(MAX_STAGNANT_ROUNDS, last["detail"]["k_valid_rounds"],
                          "K 必须与停滞上限是同一个数")
+
+
+class TestGaugeInventory(unittest.TestCase):
+    """量具清单必须与代码一致 (设计 §10.3 条件 2)
+
+    为什么这值得一条守卫: 这份清单曾经写着「只有 `smem-bound` 有量具, 占用率上限还没有」,
+    而兑现占用率那把量具的函数就在同一个文件里。一份 stale 的注释不需要让任何用例变红,
+    却足以让读者 (含外部评审) 得出「杠杆最大的一层今天到不了」的结论。
+
+    口径: 设计 §10.3 明列的四类量具 → 今天兑现它的函数 (None = 还没有)。已实现的那几类
+    不许在任何一句话里被说成"没有量具"。清单本体在 `escalation.GAUGES`（§21 的
+    `agent_runtime` 也读它），这四条用例继续逐条核「函数在不在 / docstring 提没提」。
+    """
+
+    #: 设计的四类量具（**硬写在测试里**）。清单本体在 `escalation.GAUGES`（唯一一份，
+    #: `agent_runtime` 也读它 —— 「有量具的瓶颈」在门与动作协议两侧是同一句话）。
+    #: 四个标签必须在这里再写一遍：否则有人从模块里删掉一行，`GAUGES` 会跟着缩水，
+    #: 而下面几条用例照样绿 —— 测试就被被测量物吸收了。
+    ALL_FOUR = ("smem-bound", "占用率上限", "spill-bound", "bank conflict")
+    #: 四类量具 → 兑现它的函数名 (None = 今天还没有量具)
+    GAUGES = {g.label: g.fn for g in escalation.GAUGES}
+
+    def test_the_inventory_is_the_designs_four_classes(self):
+        self.assertEqual(set(self.ALL_FOUR), {g.label for g in escalation.GAUGES},
+                         "模块里的量具清单不再等于设计正文的四类")
+        self.assertEqual(set(self.ALL_FOUR), set(self.GAUGES))
+
+    def _sentences(self):
+        return [s for s in _RE.split(r"[。；\n]", escalation.__doc__ or "") if s.strip()]
+
+    def test_every_implemented_gauge_exists_as_a_function(self):
+        for label, fn in self.GAUGES.items():
+            if fn is None:
+                continue
+            self.assertTrue(hasattr(escalation, fn),
+                            f"{label} 的函数没了 ({fn}) —— 门会静默少一把量具")
+
+    def test_the_docstring_lists_all_four_gauges(self):
+        doc = escalation.__doc__ or ""
+        for label in self.GAUGES:
+            self.assertIn(label, doc, f"docstring 没提量具 {label}")
+
+    def test_no_implemented_gauge_is_declared_missing(self):
+        """已有量具的那几类, 不许在**同一句话**里被说成"还没有 / 没有量具\""""
+        for label, fn in self.GAUGES.items():
+            if fn is None:
+                continue
+            for s in self._sentences():
+                if label in s:
+                    self.assertNotRegex(
+                        s, r"还没有|没有量具|都还没有",
+                        f"docstring 把已有量具的「{label}」说成了没有: {s.strip()}")
 
 
 if __name__ == "__main__":

@@ -606,6 +606,11 @@ _FAILURE_CLASS_MARKERS = (
     ("最大误差", "numeric_tolerance"),
     ("No usable remote baseline", "infra_no_baseline"),
     ("Missing 'kernel' function", "no_kernel_entry"),
+    # §22.2 的执行器**拦下**候选（编译超时 / 撞上限 / 盾命中）。文案的真源是
+    # `exec_guard.refusal_from`（两个后端都从那里拿同一句），所以这是一条
+    # 「仓里能找到的字面量」。不加它，这一族会落成 `L1|unknown|-` —— 处方通道照样收到
+    # 文本，但跨任务复发计数会把它与「说不清是什么错」混进同一个桶。
+    ("被 §22.2 拦下", "exec_guard_refused"),
     # 真机探针 (doc 49 §7.17) 撞出来的过度合并: 接口契约那条处方文案里写着
     # 「真跑起来必然抛 `TypeError: kernel() got an unexpected keyword argument …`」,
     # 于是**它自己举的那个假设异常名**把这条静态检查归成了 TypeError —— 与一条真的

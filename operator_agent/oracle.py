@@ -201,8 +201,9 @@ def evaluate(contract: FrozenContract,
     # ── 3. 心跳: 失败窗口内全资格 False, 但仍要记下数 (只是不让它造成后果) ──
     # 「没做心跳」不许读成「心跳通过」(spine-review P1-5)。但判据是**到期**而不是
     # 「永远要求」: 短跑 / 离线路径上心跳本就不到期, 一律要求会把每一次读数都降级
-    # —— 那与打开 `require_double_confirm` 就把入库率归零是同一个陷阱。于是由调用方
-    # 明说 `heartbeat_expected`: 到期而没跑 = 尺子状态**未知**, 无人值守下未知按坏处理。
+    # —— 那与「把某道确认门一律要求」而适得其反是同一个陷阱 (全要求 = 入库率归零,
+    # 于是所有人都会去关掉它)。于是由调用方明说 `heartbeat_expected`: 到期而没跑 =
+    # 尺子状态**未知**, 无人值守下未知按坏处理。
     hb_checked = heartbeat is not None
     hb_window = str(getattr(heartbeat, "window_id", "") or "")
     # 只有**本窗**的心跳才算数 —— §13.5 的两面: 别窗坏了不牵连本次, 别窗好了也不给本次
@@ -252,6 +253,11 @@ def evaluate(contract: FrozenContract,
         "l3_pass_is_refused": bool(raw.get("l3_pass_is_refused")),
         "real_device": raw.get("real_device"),
         "require_real_device": bool(require_real_device),
+        # 正确性凭据 (§14-10 / §20.4): 三态, 缺键时是 None = 没观测 ⇒ 不改判。
+        # 只有明确的 False («这个核的正确性没被验证过») 才整组拒绝 —— 它属于规则 3
+        # 那一族: 速率读数没有指称对象。发布者是 Verifier (`_verify_performance`),
+        # 而 `verify_l3_only` 那条绕开 L2 的路, 凭据由调用方按**它手里那份 L2 结果**给。
+        "correctness_verified": _tri_state(raw.get("correctness_verified")),
         # 静态守卫的**适用性** (CHECKLOG I65): 三态, 缺键时是 None = 没观测 ⇒ 不改判。
         # 只有明确的 False («这两道守卫对这份源码判不了») 才降级。
         "static_guards": _tri_state(raw.get("static_guards")),
@@ -262,6 +268,7 @@ def evaluate(contract: FrozenContract,
         heartbeat_ok=hb_ok,
         requires_real_device=require_real_device,
         real_device=rule_inputs["real_device"],
+        correctness_verified=rule_inputs["correctness_verified"],
         lib_fallback=rule_inputs["lib_fallback"],
         peak_exceeded=peak_exceeded,
         cv_exceeded=rule_inputs["cv_exceeded"],
@@ -278,6 +285,17 @@ def evaluate(contract: FrozenContract,
     elif rule_inputs["static_guards"] is None:
         reasons.append("静态守卫的适用性**未观测** (调用方没带 static_guards): 不改判, "
                        "但这一格空着不等于查过")
+    # 正确性凭据 (§14-10 / §20.4): 缺凭据与凭据为假都要说清楚 —— 前者是"没带",
+    # 后者是"没验过", 两者的成因与处置完全不同 (与 static_guards 那两行同一纪律)。
+    if rule_inputs["correctness_verified"] is False:
+        reasons.append(
+            "正确性**没有凭据** (correctness_verified=False): 这个候选的正确性没被验证过 ⇒ "
+            "它的速率读数是关于另一个对象的, 全资格 False (规则 3 那一族)。"
+            "出现在这里是 `verify_l3_only` 这条绕开 L2 的路径, 调用方应当把"
+            "手里那份 L2 结果作为凭据传进来")
+    elif rule_inputs["correctness_verified"] is None:
+        reasons.append("正确性凭据**未观测** (调用方没带 correctness_verified): 不改判, "
+                       "但这一格空着不等于验过")
     if not hb_ok:
         reasons.append(f"{RULER_BROKEN}: 标定心跳失败, 同窗观测全资格 False")
         reasons.extend(hb_reasons)
@@ -340,7 +358,8 @@ def admit_to_corpus(metrics: Mapping,
     三道门, 顺序即短路顺序:
       1. `persist_decision(metrics)` —— 这一次读数够不够格 (缺证据 / 不是真卡 / 被抢占)
       2. 资格位 `can_persist` —— DEGRADED 不许写长期记忆
-      3. (可选) 两次独立确认 —— `requires_remeasure=True` 时由 `confirm_persist` 判
+      3. 两次独立确认 —— `requires_remeasure=True` 时由 `confirm_persist` 判
+         (**生产路径恒开**: 见下面那段 ⚠️)
 
     返回 (允许?, 理由)。任一关不过就拒。
 
@@ -358,10 +377,17 @@ def admit_to_corpus(metrics: Mapping,
         按 `confirm_persist` 的既有规矩「无从证明两次量的是同一条判据」时**没带就拒**
         (它只在首次那头给了哈希时才判同一性 —— 这里退化成不判, 不是判过)。
 
-    ⚠️ 第 3 道门默认**开**, 但生产路径把它接到 `Conductor.require_double_confirm` (默认
-    **False**) —— 多量一遍等于每个要入库的产物多付一次 L3, 那是机时承诺, 所以要显式打开。
-    代价必须写清楚: **默认配置下单次读数即可入库**, 理由文本里会写明本次没要求两次确认,
-    免得日后有人把「入库了」读成「两次确认通过了」。
+    ⚠️ **第 3 道门在生产路径上恒开** (2026-10-03, CHECKLOG I79)。设计 §3.5 把「长期记忆的
+    独立确认」列在**不允许配置**那一栏 —— 无开关、无环境变量、不可被任务参数改写 ——
+    所以生产调用方 (`Conductor._save_to_db`) 写死 `requires_remeasure=True`, 而
+    `Conductor` 上那个默认 `False` 的构造参数已经删掉 (它正是「默认关的安全装置等于
+    不存在」那条纪律的反例: 默认配置下单次读数即可入库)。
+
+    `requires_remeasure` 这个参数今天只服务**消融臂** (§14-9 要的「关掉这道门会怎样」):
+    它必须由 harness 侧的用例/补丁直接传, **不许**接到配置文件、环境变量、命令行或任务
+    字段上 (§3.5 规则 3: 一个能一键关安全门的环境变量就是那把尺子)。默认 `True` 也是
+    刻意的: 忘了传 = 要求, 而不是放行。传 `False` 时允许入库的理由文本里会写明「本次
+    未要求两次确认」—— 免得有人把「入库了」读成「两次确认通过了」。
     """
     allow, why = persist_decision(metrics)
     if not allow:

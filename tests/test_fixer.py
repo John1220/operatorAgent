@@ -16,7 +16,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pathlib
+
 import numpy as np
+
+import operator_agent.conductor as conductor
 
 from operator_agent.fixer import FixerAgent
 from operator_agent.conductor import Conductor
@@ -225,22 +229,39 @@ class TestFixerAgent(unittest.TestCase):
 # ─── 4. Conductor 修复闭环 (端到端) ─────────────────────────
 
 def _counting_fixer_runs(conductor: Conductor) -> list:
-    """数 `fixer.run` 被**调用**了几次 (包住真实现, 不换行为)
+    """数修复被**调用**了几次 (包住真实现, 不换行为)
 
     「不无限循环」是一件关于调用次数的事, 不是关于 prompt 条数的事: Fixer 内部还有
     `MAX_FIX_ATTEMPTS` 次预检重试, 一次 run 会烧掉好几条 prompt。原先这两条用例断言的是
     prompt 总数 (5 / 1), 于是 P1-1 的重试、Designer 的那次调用都会把它撞红 —— 红的时候
     分不清是循环失控还是管线多了一个正常环节。
+
+    ⚠️ 包的是 `run_with_action`（生产入口）而**不是** `run`（两格投影）: §21.1 生产者侧
+    接线后 Conductor 走的是带动作信封的那一个。包错一格的后果不是红、而是**恒零** ——
+    `test_the_conductor_uses_the_action_bearing_entry` 就是为这件事设的。
     """
     counter: list = []
-    real = conductor.fixer.run
+    real = conductor.fixer.run_with_action
 
     def wrapper(*args, **kwargs):
         counter.append(1)
         return real(*args, **kwargs)
 
-    conductor.fixer.run = wrapper
+    conductor.fixer.run_with_action = wrapper
     return counter
+
+
+def test_the_conductor_uses_the_action_bearing_entry():
+    """计数器的证人是**真调用点**: Conductor 里必须调 `run_with_action`
+
+    包住 `run` 而生产走 `run_with_action` 时, 上面两条用例的数会恒为 0 并**假装**
+    通过了「不无限循环」这条断言（0 <= 任何上界）。结构性守卫把这一格钉住:
+    「调用形状」变了就必须有人改这里, 而不是让计数器悄悄失效。
+    """
+    src = pathlib.Path(conductor.__file__).read_text("utf-8")
+    assert "self.fixer.run_with_action(" in src
+    assert "self.fixer.run(" not in src, \
+        "Conductor 又调回了两格投影 —— 动作信封不会再有生产者"
 
 
 class TestConductorRepairLoop(unittest.TestCase):

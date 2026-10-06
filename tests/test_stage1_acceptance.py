@@ -11,10 +11,16 @@
 | 6 | 人为改契约文件      | 评测器拒评 (哈希不匹配) |
 | 7 | 候选与基线放不同卡  | 配对检查拒绝该观测 |
 | 8 | 关掉心跳            | 该窗口观测全部不可用, 不写记忆 |
+| 9 | 两臂消融 (照常 / 关掉后果) | 五态判决, "没有收益"必须进报告 (在 test_ablation_eligibility) |
+| 10 | **喂数值错的候选** | **被 G2 拒, 理由指向该处, 且不产生 L3 观测** |
 
 **全绿才允许往上盖 Stage 3/4**。本文件是验收编排: 底层判据在
 `measurement` / `eligibility` / `contract` / `calibration` / `oracle`,
-这里按 §14 的原句一一对上, 并补上原先缺口 (7 的运行时配对检查)。
+这里按 §14 的原句一一对上, 并补上原先缺口 (7 的运行时配对检查、**10 的正确性门禁**)。
+
+§14 要分两节读: **1–9 问"资格审计在不在岗 / 在不在值", 10 问"尺子量的是不是对的东西"** ——
+前者不蕴含后者。缺第 10 条时, 一个完全不检查数值的实现只要通过前九条,
+就能按设计文档的规则合法地盖起 Stage 3 (搜索) 与 Stage 4 (LLM 提议)。
 """
 import json
 import tempfile
@@ -351,6 +357,158 @@ class Acceptance8_HeartbeatOffInvalidatesWindow(unittest.TestCase):
         u = UnableToEstablish()
         u.extend_metrics({"ruler_broken": True, "ruler_reason": "RULER_BROKEN"})
         self.assertTrue(any(i.kind == "ruler" for i in u.items))
+
+
+# ─── §14-10 数值错的候选必须被 G2 拒, 且理由指向该处 ──────────────
+class Acceptance10_WrongKernelIsRefused(unittest.TestCase):
+    """验收的形状问题, 不是覆盖率问题。
+
+    正确性本身测得很好 (`tests/test_l2_tolerance.py` 22 条: 缩放核被拒、多输入套件
+    一组错则整体失败、非有限值必败、分精度 rtol), 但**那些都不在 §14 这道门禁里** ——
+    而 §14 是"全绿才允许往上盖 Stage 3/4"的那张表。于是"正确性没被这一道门禁考过"
+    这件事, 与"正确性没被考过"在文档上长得一样。
+
+    本类钉三件事:
+      1. 错的候选**止步于 L2, 不产生任何 L3 性能观测** —— 这是门禁的形状:
+         没有性能读数, 就没有东西可以拿去晋级 `best` 或入库;
+      2. 拒绝理由**指向坏在哪里** (`first_bad_index` 落在出错的那一行上),
+         而不是只说"误差超阈值" —— 后者既修不了也路由不了 (§8.2);
+      3. 正确的候选**照常走到 L3** —— 门是针对性, 不是"什么都拒"。
+    """
+
+    N = 64
+
+    #: 整体缩放 3%: 原门禁 (纯绝对容差, driver 传 5e-1) 会放行它
+    SCALED = "import numpy as np\n\ndef kernel(A, B):\n    return (A @ B) * 0.97\n"
+    #: 只错最后一行 (尾块): 坏点必须被定位到第 63 行
+    TAIL = ("import numpy as np\n\ndef kernel(A, B):\n    C = A @ B\n"
+            "    C[-1, :] = 0.0\n    return C\n")
+    #: 丢了 B: 全错
+    DROPPED_INPUT = "import numpy as np\n\ndef kernel(A, B):\n    return A @ A\n"
+    CORRECT = "import numpy as np\n\ndef kernel(A, B):\n    return A @ B\n"
+
+    def setUp(self):
+        self.verifier = Verifier(MockGPU())
+        task = TaskSchema(
+            task_type=TaskType.OPERATOR_GENERATION,
+            source=SourceSpec(kernel_type="matmul", complexity=TaskComplexity.LOW),
+            target=TargetSpec(hardware="mock_gpu", dsl="python"),
+            constraints=ConstraintSpec(precision=Precision.FP32, min_speedup=0.0,
+                                       max_error=1e-5))
+        rng = np.random.default_rng(0)
+        self.inputs = {"A": rng.standard_normal((self.N, self.N)).astype(np.float32),
+                       "B": rng.standard_normal((self.N, self.N)).astype(np.float32)}
+        self.task = task
+
+    def _verify(self, code):
+        return self.verifier.verify(code, self.task, self.inputs)
+
+    def _l2(self, results):
+        l2 = [r for r in results if r.level.name == "L2_FUNCTION"]
+        self.assertEqual(len(l2), 1, "L2 结果缺失 —— 验收对象不是 L2 判据")
+        return l2[0]
+
+    def test_wrong_candidate_produces_no_l3_observation(self):
+        """门禁的形状: 数值错 ⇒ 没有性能读数可拿去晋级/入库
+
+        只断言 "L2 没过" 是不够的: 一个"L2 报了 false 但仍然跑 L3 并把 gflops 发布出去"
+        的实现同样会绿, 而它恰恰是本节要防的那种 (算了但没接上)。
+        """
+        results = self._verify(self.SCALED)
+        self.assertEqual([r.level.name for r in results], ["L1_COMPILE", "L2_FUNCTION"],
+                         "错的候选跑到了 L3 —— 性能观测没有对错前置条件")
+        l2 = self._l2(results)
+        self.assertFalse(l2.passed, f"缩放 3% 的核竟然通过了: {l2.message}")
+        self.assertLess(l2.metrics["matched_ratio"], 0.01)
+        # 「没有可晋级的读数」在数据上的样子: 没有任何一级产出速率类指标
+        for r in results:
+            self.assertNotIn("speedup_vs_baseline", r.metrics,
+                             f"{r.level.name} 发布了一个没有正确性凭据的性能读数")
+
+    def test_refusal_points_at_the_fault(self):
+        """理由必须指向坏处 —— 只说"误差超阈值"既修不了也路由不了
+
+        尾块错 (最后一行全 0) 是最好定位的一种: 坏点数 = 一行 = N, 首个坏点下标必须落在
+        最后一行 (>= (N-1)*N)。这条同时钉住 `first_bad_index` 的**语义** (展平下标),
+        将来若把它改成"第几个坏点"或"行号", 这里会红。
+        """
+        results = self._verify(self.TAIL)
+        l2 = self._l2(results)
+        self.assertFalse(l2.passed)
+        m = l2.metrics
+        self.assertEqual(m["bad_elements"], self.N, "坏点数应当正好是一行")
+        self.assertEqual(m["first_bad_index"], (self.N - 1) * self.N,
+                         "首个坏点没有被定位到最后一行 —— 理由没指向坏处")
+        # 「哪错了」的下一问是「该怎么修」: 形态要跟着位置一起出来 (设计 §8.2)。
+        # 尾块写零在形态上就是 tail_block —— 这条把 §8.2 挂到 §14 这道门禁上。
+        self.assertEqual(m.get("error_shape"), "tail_block")
+        # actual = 候选算出来的那一格 (我们把这一行写成了 0), expected = 参考值。
+        # 两侧取值都带上, 才分得清「整体缩放错」与「局部炸」(§8.2 的形态判据要用它)。
+        self.assertAlmostEqual(m["first_bad_actual"], 0.0, places=6)
+        self.assertNotAlmostEqual(
+            m["first_bad_expected"], 0.0, places=6,
+            msg="参考值不该是 0 —— 否则这个用例定位不了任何东西")
+        self.assertIn(f"first_bad@{m['first_bad_index']}", l2.message,
+                      "理由文本里没有坏点位置")
+
+    def test_dropped_input_is_refused(self):
+        """静默忽略一个输入 = 在测另一个算子 (与 §14-3 的库回退同族, 但发生在数值上)"""
+        l2 = self._l2(self._verify(self.DROPPED_INPUT))
+        self.assertFalse(l2.passed, f"丢了 B 的核竟然通过了: {l2.message}")
+        self.assertEqual(l2.metrics["bad_elements"], l2.metrics["compared_elements"],
+                         "应当是全错")
+
+    def test_l3_only_without_a_credential_cannot_be_promoted(self):
+        """唯一绕开 L2 的入口: 没凭据 ⇒ 不给"通过", 也不给任何可晋级/可入库的资格
+
+        上一个用例钉住的是正常路径 (数值错 ⇒ 到不了 L3); 缺口只在 `verify_l3_only`
+        上开着 —— 而它正好是**晋级层**那次测量 (重测确认) 的入口。
+        "不产生可用于晋级的性能观测" 在数据上的样子就是: `passed=False` +
+        档位 uninformative + 五位资格全 False。
+        """
+        l3 = self.verifier.verify_l3_only(self.CORRECT, self.inputs, 0.0, self.task,
+                                          correctness_verified=False)[0]
+        m = l3.metrics
+        self.assertFalse(l3.passed, "没有正确性凭据的速率读数被记成了通过")
+        self.assertEqual(m["measurement_validity"], "uninformative")
+        self.assertFalse(m["measurement_can_gate"])
+        for bit in ("can_verdict", "can_tune", "can_persist", "can_report",
+                    "can_count_progress"):
+            self.assertFalse(m["eligibility"][bit],
+                             f"{bit} 仍为真 —— 没有凭据的读数还能造成后果")
+        self.assertIn("正确性", l3.message)
+
+    def test_l3_only_with_a_credential_is_normal(self):
+        """对照组: 带了凭据就照常 —— 否则把凭据写成恒拒也能让上一条绿"""
+        l3 = self.verifier.verify_l3_only(self.CORRECT, self.inputs, 0.0, self.task,
+                                          correctness_verified=True)[0]
+        self.assertTrue(l3.passed)
+        self.assertIs(l3.metrics["correctness_verified"], True)
+        self.assertTrue(l3.metrics["eligibility"]["can_persist"])
+
+    def test_l3_only_without_the_key_does_not_retroactively_judge(self):
+        """三态: 没带凭据 = 未观测 ⇒ 不改判, 但必须留下"这一格空着"的痕迹
+
+        与 `real_device=None` / `static_guards=None` 同一边界: 回放脚本与老产物
+        不因为缺这一格被判死, 但"空着"不等于"验过" —— 理由文本里要说出来,
+        否则这一格会静默退化成"反正没人看"。
+        """
+        l3 = self.verifier.verify_l3_only(self.CORRECT, self.inputs, 0.0, self.task)[0]
+        self.assertNotIn("correctness_verified", l3.metrics)
+        self.assertTrue(l3.passed, "缺键被读成了不合格")
+        reasons = " ".join((l3.metrics.get("observation") or {}).get("reasons") or [])
+        self.assertIn("凭据", reasons, "缺凭据这件事在产物里没有痕迹")
+
+    def test_correct_candidate_still_reaches_l3(self):
+        """对照组: 门是针对性, 不是"什么都拒"
+
+        没有这一条, 把 L2 写成恒 False 也能让上面三条全绿 —— 那是个更坏的实现。
+        """
+        results = self._verify(self.CORRECT)
+        self.assertTrue(self._l2(results).passed, "正确核被误杀")
+        self.assertEqual([r.level.name for r in results],
+                         ["L1_COMPILE", "L2_FUNCTION", "L3_PERFORMANCE"],
+                         "正确核没有走到 L3 —— 门禁在误杀之后又堵死了正常路径")
 
 
 if __name__ == "__main__":

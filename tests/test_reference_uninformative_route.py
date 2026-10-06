@@ -66,10 +66,11 @@ import numpy as np
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
+from operator_agent.agent_runtime import ENVELOPE_ABSENT, ActionEnvelope  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402
 from operator_agent.fixer import (  # noqa: E402
-    FixerAgent, _ATTRIBUTION, _HOLD_NOTE, _L1_INPLACE, _L1_INTERFACE, _L2_RETREAT,
-    _REFERENCE_HOLD, failure_class, stage_directive,
+    FixOutcome, FixerAgent, _ATTRIBUTION, _HOLD_NOTE, _L1_INPLACE, _L1_INTERFACE,
+    _L2_RETREAT, _REFERENCE_HOLD, failure_class, stage_directive,
 )
 from operator_agent.kernel_db import (  # noqa: E402
     FAILURE_CLASS_INTERFACE, FAILURE_CLASS_REFERENCE, FailureDatabase, FailureRecord,
@@ -366,9 +367,17 @@ class _CountingFixer:
         self.bases: list[str] = []
         self.reflexion_calls = 0
 
-    def run(self, code, task, failed_results, **kw):
+    def run_with_action(self, code, task, failed_results, **kw):
+        """生产入口 (§21.1 生产者侧接线后 Conductor 走的是带信封的那一个)。
+
+        ⚠️ 只有 `run` 的假件会让「被调用了几次」恒为 0 —— 那时本组的断言会在
+        「控制流已经改了」与「例在空转」之间说不清 (见文件头那条限制)。信封给
+        `absent`: 这一组只观测反思有没有被问。
+        """
         self.bases.append(code)
-        return FIXED, "fake fix"
+        return FixOutcome(code=FIXED, summary="fake fix",
+                          envelope=ActionEnvelope(status=ENVELOPE_ABSENT,
+                                                  reason="假件不交信封"))
 
     def produce_reflexion(self):
         self.reflexion_calls += 1

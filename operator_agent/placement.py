@@ -326,7 +326,8 @@ def lease_waves(devices: Iterable[DeviceKey], n: int,
     `exclusive` 仍然恒 `None` (不租卡就没有独占性观测 —— 见 `DeviceLease` 的三态说明)。
 
     ⚠️ **今天没有多卡消费者**: 真机是单卡串行、一次调用跑完两臂。这一条链路的诚实状态
-    写在 doc 71 与设计 §15 的缺件表里, 不许读成「已经并行了」。
+    写在 doc 71 与 docs/status/autonomous-operator-agent-status.md 的缺件表里
+    (设计正文只留规范: 见设计 §11.3「多卡能力的最小闭环」), 不许读成「已经并行了」。
     """
     loads = loads or {}
     return [[DeviceLease(device=d, exclusive=None,

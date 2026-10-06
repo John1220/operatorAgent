@@ -205,7 +205,8 @@ def scene_3():
 def scene_4():
     head("场景 4  永久结论量两遍: 两次确认 + 判据同一性 (设计 §10.5-4 / §10.2)")
     print("  §10.2 把「最后 10% 预算」留给最终确认: 任何要写进长期记忆的结论,")
-    print("  必须留有**一次独立重测**的预算。下面看生产者与消费者是否接得上。\n")
+    print("  必须留有**一次独立重测**的预算；而 §3.5 把「长期记忆的独立确认」列在")
+    print("  **不允许配置**那一栏 —— 所以它今天没有开关, 消融只能在 harness 侧 patch。\n")
     from operator_agent.conductor import Conductor
     from operator_agent.kernel_db import KernelDatabase
     from operator_agent.mock_gpu import MockGPU
@@ -225,10 +226,9 @@ def scene_4():
     inputs = {"A": rng.standard_normal((64, 64)).astype(np.float32),
               "B": rng.standard_normal((64, 64)).astype(np.float32)}
 
-    cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase(),
-                     require_double_confirm=True)
-    print(f"  require_double_confirm = {cond.require_double_confirm}  "
-          f"(它现在不再是「打开就一律拒」的自锁开关)")
+    cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
+    print(f"  开关: {'有' if hasattr(cond, 'require_double_confirm') else '**没有**'}"
+          f"  (曾经是一个默认 False 的构造参数 ⇒ 默认配置下单次读数即可入库; I79)")
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -239,7 +239,6 @@ def scene_4():
     rm = art.remeasure
     print(f"\n  ① 没有重测记录时 → 拒: ", end="")
     cond2 = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
-    cond2.require_double_confirm = True
     io2 = io.StringIO()
     with contextlib.redirect_stdout(io2):
         bare = KernelArtifact(kernel_id="k-bare", code="def kernel(A, B):\n    return A @ B\n",
@@ -293,7 +292,7 @@ def scene_5():
             "measurement_can_gate": True, "measurement_validity": "valid",
             "speedup_vs_baseline": 1.31, "gflops": 210.0, "ruler_broken": False,
             "benchmark_contaminated": False,
-            "roofline_analysis": {"peak_measured": True, "peak_source": "实测探测"},
+            "roofline_analysis": {"reference_lower_bound": True, "peak_source": "实测探测"},
             "eligibility": {"can_verdict": True, "can_tune": True, "can_persist": True,
                             "can_report": True, "can_count_progress": True},
         }, **m)
@@ -313,7 +312,7 @@ def scene_5():
     print("  ── ① 全项核过的读数 ──")
     print(_section3(_art()))
     print("\n  ── ② 同一条 1.31x, 但峰值分母从没实测过 (今天所有真机的状态) ──")
-    print(_section3(_art(roofline_analysis={"peak_measured": False,
+    print(_section3(_art(roofline_analysis={"reference_lower_bound": False,
                                             "peak_source": "规格表推导"})))
     print("\n  差别只有一位。这一位开着 ⇒ 收敛出口开着; 关着 ⇒ 除了「没测出上限」")
     print("  之外, 报告还得明说「这一轮没能确立『已经到顶』」。\n")

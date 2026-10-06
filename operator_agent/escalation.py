@@ -18,10 +18,18 @@
    不能替一个 valid 轮 —— 「没测准」与「调不动了」是两件事，前者不构成平台化证据。
    调用方喂进来的判决里如果混进了非 valid 轮的判决，那是调用方**用错了**（本模块不替它猜：
    判据的输入口径写在 `EscalationInputs.verdicts` 上，生产侧那一个点只会有 valid 轮）。
-2. **缺证据 = 条件不成立**（fail-closed）：条件 2 只认**能指出出处**的证据；今天仓里有量具的
-   只有 `smem-bound`（`resource_check` 的估算 + `HardwareCaps.shared_mem_per_sm_kb`），
-   spill / bank conflict / 占用率上限**都还没有量具** —— 那就一条证据都没有、门就是关的，
+2. **缺证据 = 条件不成立**（fail-closed）：条件 2 只认**能指出出处**的证据。设计 §10.3 明列
+   四类量具（`spill-bound` / `smem-bound` / `占用率上限` / `bank conflict`），仓里今天有**两把**：
+   `smem_bound_evidence`（`resource_check` 的估算 + `HardwareCaps.shared_mem_per_sm_kb`）与
+   `occupancy_bound_evidence`（线程侧每 SM 能驻留几个 CTA，输入是 `num_warps` 与
+   `max_threads_per_sm` —— 都由远端编译元数据与 `HardwareCaps` 发布）。`spill` 与
+   `bank conflict` **还没有量具** —— 那两类就一条证据都没有、门就是关的，
    而不是用一个「感觉调不动了」的代理量把门撬开。
+   清单本身只有一份（`GAUGES`，本模块），`agent_runtime` 也读它 —— 于是「有量具的瓶颈」
+   在门与动作协议两侧是同一句话，不可能一边多一把量具。
+   ⚠️ 这份清单**必须跟着代码走**（`tests/test_escalation.py::TestGaugeInventory` 钉住它）：
+   量具清单写 stale 的代价不是"少一句话"，而是读者（含外部评审）会据此得出
+   「这一层今天到不了」的结论。
 3. **SLOW 不算平台化**：退步是「还在动」（而且它自己有一条出路：禁用配方），
    平台化要的是「既没变好也没变坏」的平坦区。
 
@@ -44,6 +52,50 @@ COND_DIRECTION = "还存在可探索的结构方向"
 
 #: 平台化容忍的判决词。SLOW 刻意不在内: 退步是「还在动」, 不是「调不动了」。
 PLATEAU_VERDICTS = ("SAME", "AMBIGUOUS")
+
+
+@dataclass(frozen=True)
+class Gauge:
+    """一类硬限制 → 兑现它的量具函数名（`None` = 今天没有量具）
+
+    `key` 是**协议**用的词（`AgentAction.expected_bottleneck` 那一格，见 `agent_runtime`），
+    `label` 是设计 §10.3 正文里的原话（docstring 与产物里出现的就是它）。
+    两个名字都在这里，于是「协议说的瓶颈」与「文档说的量具」不会各自漂移。
+    """
+
+    key: str
+    label: str
+    fn: Optional[str] = None
+
+    @property
+    def has_gauge(self) -> bool:
+        return bool(self.fn)
+
+
+#: 设计 §10.3 条件 2 明列的四类硬限制。**唯一一份清单**，两个读者：
+#:   * `tests/test_escalation.py::TestGaugeInventory` —— 核「函数在不在」与「docstring 提没提」；
+#:   * `agent_runtime` —— 判「动作声明的预期瓶颈是不是一个**存在**的能力」（§21.4 第 7 条）。
+#: 为什么会多出第二个读者：把一个没有量具的瓶颈写进动作，就是设计 §21.4 点名的
+#: 「引用不存在的能力」，而它必须在**零 GPU 时间**上被拦住。清单只留一份，
+#: 是因为两份清单的漂移方向恰好是最坏的那个：门看起来多了一把量具。
+GAUGES: Tuple[Gauge, ...] = (
+    Gauge("smem-bound", "smem-bound", "smem_bound_evidence"),
+    Gauge("occupancy-bound", "占用率上限", "occupancy_bound_evidence"),
+    Gauge("spill-bound", "spill-bound", None),
+    Gauge("bank-conflict", "bank conflict", None),
+)
+
+#: 协议词 → 量具函数名（`None` = 没有量具）。旧读者用这个形状。
+GAUGE_FUNCTIONS: Dict[str, Optional[str]] = {g.key: g.fn for g in GAUGES}
+
+
+def gauged_bottlenecks() -> Tuple[str, ...]:
+    """今天**有量具**的瓶颈（协议词）。动作的 `expected_bottleneck` 只能取这里的值。
+
+    空集也是合法答案（一个量具都没有的日子）：那时任何瓶颈声明都是「引用不存在的能力」，
+    而不是「随便写一个反正没人读」。
+    """
+    return tuple(g.key for g in GAUGES if g.has_gauge)
 
 
 @dataclass(frozen=True)
@@ -97,7 +149,7 @@ def plateaued(verdicts: Sequence[str], k: int) -> bool:
 
 def smem_bound_evidence(tile_smem_bytes: Optional[int],
                         limit_bytes: Optional[int]) -> Tuple[str, ...]:
-    """`smem-bound` 证据（唯一今天有量具的那一条）。缺任一侧 ⇒ 空（= 没有证据）
+    """`smem-bound` 证据（四类量具里的第一把）。缺任一侧 ⇒ 空（= 没有证据）
 
     判据是「tile 已经**贴到**上界」（`est ≥ limit`，不带宽松系数）：宽松系数是给
     「拦不拦」用的，而这里是**归因**用的 —— 说「这套 tile 再也长不大了」比说

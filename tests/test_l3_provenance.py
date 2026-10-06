@@ -11,7 +11,7 @@
 
 接上的读者是 `measurement.py` 既有的那套词汇 (三档 Validity + 四态 Verdict), **不是**
 另立一道门: 出处不对 ⇒ UNINFORMATIVE ⇒ `can_gate=False`, 于是配方禁用、停滞计数、
-入库门 (`persist_decision`)、roofline 收敛出口一起停止把它当证据; 任务在
+入库门 (`persist_decision`)、参考天花板出口一起停止把它当证据; 任务在
 `target.required_caps` 里声明了 `REAL_DEVICE` 时再进一步 —— L3 不许 `passed=True`。
 
 判据走 `Cap` 的**声明**, 不从 `device`/`name` 的字符串猜能力 (doc 49 §3.1 记过三处

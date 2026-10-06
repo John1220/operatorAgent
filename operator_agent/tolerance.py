@@ -36,7 +36,8 @@ AND 而非 OR 是关键: 近零参考处 rel_err 会爆, 但只要 abs_err 在 a
     scaled_0.999       3.350e-03      PASS         PASS             PASS
 """
 
-from typing import Tuple
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 # 参考输出接近 0 时 rel_err 的分母保护。取 1e-8 与 FlashInfer-Bench 一致;
 # 原 runner 用的 clamp_min(1e-12) 太小, 会让近零点上的 rel_err 再放大 4 个数量级。
@@ -113,6 +114,166 @@ def evaluate(n_bad: int, total: int, has_nonfinite: bool,
     elif matched_ratio > 1.0:
         matched_ratio = 1.0
     return matched_ratio >= rho, matched_ratio
+
+
+# ---- 误差形态 (设计 §8.2) ----------------------------------------------------
+#
+# 「第一个坏点」回答**哪错了** (位置); 「误差形态」回答**该怎么修** (类别) ——
+# 形态才是「修 vs 重写」最直接的依据 (设计 §8.2 / §21.2)。
+#
+# 与 `evaluate` 同一个约定: 元素级归约由调用方在自己的数组后端上做 (numpy / torch),
+# 这里只收**两个小布尔向量** (每行 / 每列有没有坏点) 与几个计数 —— 于是分类规则只有
+# 一份, 两个生产者 (`verifier.py` 的本地路径与 `remote_scripts/run_kernel.py` 的真机
+# 路径) 不会各写一套, 而"首/末/尾部连续"这类最容易写歪的逻辑也只有一个实现。
+#
+# ⚠️ 形态是**证据**, 不是判据: 它进 reason 与 Fixer 的 prompt, **不改路由决策**。
+# 判歪的代价是"提示指歪了", 不是"候选被误杀" —— 这条边界是刻意的 (设计 §8.2)。
+
+ERROR_SHAPE_NONFINITE = "nonfinite"
+ERROR_SHAPE_WHOLE_TENSOR = "whole_tensor"
+ERROR_SHAPE_TAIL_BLOCK = "tail_block"
+ERROR_SHAPE_WHOLE_ROW = "whole_row"
+ERROR_SHAPE_BROADCAST_AXIS = "broadcast_axis"
+
+#: 今天**有量具**的五种形态。设计 §8.2 还列了 `precision_accumulation`(误差随 k 增长):
+#: 它要的是"误差对归约维度的依赖"这类证据, 今天没有量具 ⇒ 分类器返回 `None`(无法确立),
+#: 而不是拿一个看着像的标签去顶替 (与 §4.3 规则 8、"未观测不改判" 同一条纪律)。
+ERROR_SHAPES = (ERROR_SHAPE_NONFINITE, ERROR_SHAPE_WHOLE_TENSOR,
+                ERROR_SHAPE_TAIL_BLOCK, ERROR_SHAPE_WHOLE_ROW,
+                ERROR_SHAPE_BROADCAST_AXIS)
+
+#: 「整张量都错」的坏点占比门 (整体缩放 / 累加精度错都落在这一格)
+WHOLE_TENSOR_MIN_BAD_RATIO = 0.99
+#: 尾块判据的宽度分母: 坏行/坏列只占不到 1/8 才叫"尾块", 否则是整片错
+TAIL_MAX_FRACTION_DENOM = 8
+
+
+@dataclass(frozen=True)
+class ErrorShapeInputs:
+    """分类器的输入 —— 全部是整数 / 布尔, 由 `summarize_bad_axes` 从两个小向量算出。
+
+    `rows`/`cols` 是**把张量看成二维**之后的形状 (除最后一维外全部折叠): 于是 matmul 的
+    (M,N)、attention 的 (B,H,S,D)→(B*H*S,D) 用同一套规则。
+    """
+
+    n_bad: int
+    total: int
+    rows: int
+    cols: int
+    bad_rows: int                 # 至少有一个坏点的行数
+    bad_cols: int
+    rows_all_bad: int             # **整行**全坏的行数
+    cols_all_bad: int
+    bad_row_prefix: int           # 行方向**开头**连续"有坏点"的行数
+    bad_row_suffix: int           # 行方向**末尾**连续"有坏点"的行数
+    bad_col_prefix: int
+    bad_col_suffix: int
+    first_bad_row: Optional[int] = None
+    last_bad_row: Optional[int] = None
+    first_bad_col: Optional[int] = None
+    last_bad_col: Optional[int] = None
+    has_nonfinite: bool = False
+
+
+def _prefix_len(flags) -> int:
+    n = 0
+    for v in flags:
+        if not v:
+            break
+        n += 1
+    return n
+
+
+def _suffix_len(flags) -> int:
+    n = 0
+    for v in reversed(list(flags)):
+        if not v:
+            break
+        n += 1
+    return n
+
+
+def summarize_bad_axes(per_row, per_col) -> dict:
+    """从"每行/每列有没有坏点"两个小布尔向量算出分类器要的计数 (纯 stdlib)
+
+    为什么只收这两个向量: 全量掩码可能上 GB, 而它们的长度分别只有 rows / cols ——
+    归约在调用方自己的后端上做 (torch 在设备上, numpy 直接), 这里只做**纯整数**统计。
+    """
+    row = [bool(v) for v in per_row]
+    col = [bool(v) for v in per_col]
+    row_idx = [i for i, v in enumerate(row) if v]
+    col_idx = [i for i, v in enumerate(col) if v]
+    return {
+        "rows": len(row),
+        "cols": len(col),
+        "bad_rows": len(row_idx),
+        "bad_cols": len(col_idx),
+        "first_bad_row": row_idx[0] if row_idx else None,
+        "last_bad_row": row_idx[-1] if row_idx else None,
+        "first_bad_col": col_idx[0] if col_idx else None,
+        "last_bad_col": col_idx[-1] if col_idx else None,
+        "bad_row_prefix": _prefix_len(row),
+        "bad_row_suffix": _suffix_len(row),
+        "bad_col_prefix": _prefix_len(col),
+        "bad_col_suffix": _suffix_len(col),
+    }
+
+
+def classify_error_shape(inp: ErrorShapeInputs) -> Optional[str]:
+    """按设计 §8.2 判定误差形态; **判不了就返回 `None`**(无法确立), 不猜
+
+    规则顺序即优先级, 理由写在各条上:
+
+    1. `nonfinite` —— NaN/Inf 压倒一切: 别的形态都是从"哪几个元素错"推出来的, 而
+       含非有限值时那些位置统计本身就没有意义。
+    2. 坏点占比 ≥ 99% ⇒ `whole_tensor`: 整体缩放 (rel_err 处处相同) 与累加精度错
+       都落在这一格。这是**形状**的描述, 不是成因的断言 —— 例如"丢了输入 B"(A@A)
+       同样整张量错, 它也是 `whole_tensor`, 而"是什么错"由理由文本承担。
+    3. `tail_block`: 坏点集中在行/列方向的**末尾连续一小段** (非对齐尾块 / 最后一行 /
+       最后一列)。判据同时要求"连续"与"够小": 只满足"在一行里"而落在中间的, 是下一格的
+       `whole_row`, 不是尾块 —— 这两者要修的地方完全不同。
+    4. `whole_row` / 5. `broadcast_axis`: 坏点恰好是若干**完整行** / **完整列**
+       (广播轴选错、索引少一维的典型形状)。两者对称, 分开命名是为了让提示能直接说
+       "检查行方向的广播"还是"检查列方向"。
+    6. 其余 ⇒ `None`。**这是三态里的一态, 不是失败**: 一个"看着像但不成立"的标签会把
+       修复引到错的地方, 比没有标签更坏。
+    """
+    rows, cols = int(inp.rows), int(inp.cols)
+    total, n_bad = int(inp.total), int(inp.n_bad)
+    if inp.has_nonfinite:
+        return ERROR_SHAPE_NONFINITE
+    if n_bad <= 0 or total <= 0 or rows <= 0 or cols <= 0:
+        return None                      # 没有失败 ⇒ 没有形态可谈
+    if float(n_bad) / float(total) >= WHOLE_TENSOR_MIN_BAD_RATIO:
+        return ERROR_SHAPE_WHOLE_TENSOR
+    tiny_r = max(1, rows // TAIL_MAX_FRACTION_DENOM)
+    tiny_c = max(1, cols // TAIL_MAX_FRACTION_DENOM)
+    if 0 < inp.bad_row_suffix <= tiny_r and inp.bad_rows <= tiny_r:
+        return ERROR_SHAPE_TAIL_BLOCK
+    if 0 < inp.bad_col_suffix <= tiny_c and inp.bad_cols <= tiny_c:
+        return ERROR_SHAPE_TAIL_BLOCK
+    if inp.bad_rows and inp.rows_all_bad == inp.bad_rows and inp.bad_rows * cols == n_bad:
+        return ERROR_SHAPE_WHOLE_ROW
+    if inp.bad_cols and inp.cols_all_bad == inp.bad_cols and inp.bad_cols * rows == n_bad:
+        return ERROR_SHAPE_BROADCAST_AXIS
+    return None
+
+
+def error_shape_from_axis_flags(*, per_row, per_col,
+                                n_bad: int, total: int,
+                                rows_all_bad: int = 0, cols_all_bad: int = 0,
+                                has_nonfinite: bool = False) -> Optional[str]:
+    """两个生产者唯一的入口: 交两个小布尔向量 + 三个计数, 拿一个形态标签
+
+    `rows_all_bad` / `cols_all_bad` 是"整行/整列全坏"的计数 (各一次归约), 其余统计由
+    `summarize_bad_axes` 做。收成一个入口是为了让"两个生产者传的东西必须一样"这件事
+    在签名上就成立 —— 少传一个计数, 类型上就看得出。
+    """
+    summ = summarize_bad_axes(per_row, per_col)
+    return classify_error_shape(ErrorShapeInputs(
+        n_bad=int(n_bad), total=int(total),
+        rows_all_bad=int(rows_all_bad), cols_all_bad=int(cols_all_bad),
+        has_nonfinite=bool(has_nonfinite), **summ))
 
 
 # ---- 高精度参考那把尺 (KernelOPT `2609.30059v1` 行 372-389 与行 1344-1362) ----------------

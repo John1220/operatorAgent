@@ -154,17 +154,17 @@ def _preconditions(artifact: Any) -> List[Tuple[str, bool, str, Optional[UnableI
             kind="measurement"),
     ))
 
-    # 6. 峰值分母**实测过** —— 没实测则 roofline 收敛出口关闭 (设计 §13.5, CHECKLOG I49)。
-    #    这条与 measurement.roofline_converged 读的是同一个位。
-    peak_measured = _get(rl, "peak_measured", None)
+    # 6. 峰值分母**有参考下界** —— 没有则参考天花板出口关闭 (设计 §13.5, CHECKLOG I49)。
+    #    这条与 measurement.reference_ceiling_reached 读的是同一个位。
+    reference_lower_bound = _get(rl, "reference_lower_bound", None)
     checks.append((
-        "峰值分母已实测", peak_measured is True, f"peak_measured={peak_measured!r}",
+        "峰值分母有参考下界", reference_lower_bound is True, f"reference_lower_bound={reference_lower_bound!r}",
         # 条目文本与 `confirm.extend_metrics` 里那一条**逐字相同** —— 不是巧合:
         # 两处都会对同一份读数说话, 而措辞差一点就会被读成「两件事」(去重键是
         # (claim, reason))。同一条判据在两个地方发话, 说法就必须只有一种。
-        None if peak_measured is True else UnableItem(
-            claim="无法宣布已到 roofline 上界",
-            reason="峰值分母未实测 (probe_peak 未落地)",
+        None if reference_lower_bound is True else UnableItem(
+            claim="无法宣布已到参考天花板",
+            reason="参考下界未取得 (同一次 L3 的基线臂没过探针判据)",
             kind="measurement",
             evidence=f"peak_source={_get(rl, 'peak_source', '')!r}"),
     ))

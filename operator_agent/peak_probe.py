@@ -1,19 +1,24 @@
-"""§13.5 的 `probe_peak`：**实测**峰值 —— roofline 收敛出口唯一认的那个分母
+"""§13.5 的 `probe_peak`：**参考下界** —— 参考天花板出口唯一认的那个分母
 
 设计的原话：
 
 > `probe_peak` 必须实测：拿一个已知好 GEMM 打到真实峰值，而不是读 spec 表。
-> 探测失败 → **roofline 收敛出口永久关闭**。
+> 探测失败 → **天花板出口永久关闭**。
+
+⚠️ 上面那句里的「打到真实峰值」是**器件峰值** (`peak_measured`) 那一半的字面口径 ——
+它需要独立、compute-bound、按精度标定的 microbenchmark，今天**代码里没有**。本模块实现的是
+设计 §13.5 三个概念里的第三个：`reference_lower_bound`（同一次 L3 里基线臂的实测可达值）。
+两个名字不能互借：拿参考核的可达值说「贴着硬件峰值」，就是拿一个**下界**当上限用。
 
 两问必须分开存放（CHECKLOG I49）：
 ① `peak_trusted`：表行**口径核过**没有（dense/sparse 没混、算术自洽）；
-② `peak_measured`：**真探测过一次**没有 —— 收敛出口只认这一个位。
+② `reference_lower_bound`：**真探测过一次**没有 —— 天花板出口只认这一个位。
 
 本模块负责第 ② 问的**判据与发布**，并坚持三件事：
 
 1. **探针自己也要过尺子的档位**：样本必须是 `valid` 档的读数。拿一个 degraded 的读数
-   当分母，等于把「这张卡这一刻贴着上界了」建在一份自己都不可信的测量上 —— 与 §10.4
-   那句「roofline 收敛只认 peak_measured」是同一族纪律的下一层。
+   当分母，等于把「这张卡这一刻贴着参考实现的天花板了」建在一份自己都不可信的测量上 ——
+   与 §10.4 那句「天花板出口只认有效档位的读数」是同一族纪律的下一层。
 2. **样本必须真的打到算力峰值**：算术强度低于 ridge point 的样本量的是**带宽**，不是
    FLOPS。用它当分母会把「访存受限的快」误读成「算力接近到顶」。缺 AI / 缺 ridge
    （未知设备、表没命中）同样**不发布**（缺证据不是证据）。
@@ -22,7 +27,7 @@
 
 **今天的分母语义（要明写，别读成 datasheet）**：实测值来自同一次 L3 调用里**基线臂**
 （同一 harness、同一形状、同一精度的已知好参考核）的实测可达值，即「这台机器上这个
-精度**至少**能跑这么快」。它是**下界** ⇒ 拿它当分母，利用率会偏大、收敛出口会偏松。
+精度**至少**能跑这么快」。它是**下界** ⇒ 拿它当分母，利用率会偏大、天花板出口会偏松。
 这条风险靠两个条件约束：样本自己必须是 compute-bound（第 2 条）且是 valid 档（第 1 条）。
 残余风险明写在此：若参考核自己没打到顶（形状太小、调度差），出口仍会偏松 —— 那时该修
 的是参考核，不是放宽判据。
@@ -36,7 +41,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
-#: 可以发布实测峰值的精度键（与 verifier 里 `compute_used` 的取值一一对应）
+#: 可以发布参考下界的精度键（与 verifier 里 `compute_used` 的取值一一对应）
 PEAK_PRECISIONS = ("fp32", "tf32", "fp16", "bf16")
 
 #: `verifier` 选分母时用的名字 → 精度键。**一个判据一处实现**：这里是唯一的映射表，
@@ -86,7 +91,7 @@ class PeakSample:
 
 @dataclass(frozen=True)
 class PeakProfile:
-    """可以发布进 `HardwareCaps.measured_peak_tflops` 的实测峰值"""
+    """可以发布进 `HardwareCaps.reference_lower_bound_tflops` 的参考下界"""
 
     precision: str
     tflops: float
@@ -121,7 +126,7 @@ def probe_peak(sample: PeakSample) -> PeakProbeDecision:
     refusals = []
     if sample.real_device is not True:
         refusals.append("不是真实设备 (能力位 REAL_DEVICE 未声明) —— "
-                        "仿真读数可以驱动搜索, 但不能当实测峰值")
+                        "仿真读数可以驱动搜索, 但不能当参考下界")
     if sample.precision not in PEAK_PRECISIONS:
         refusals.append(f"精度键不可识别 ({sample.precision!r}) —— 分母按精度发布, "
                         f"认不出就不发布 (认得出的是 {', '.join(PEAK_PRECISIONS)})")

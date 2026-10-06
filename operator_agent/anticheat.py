@@ -198,29 +198,19 @@ def _strip_non_kernel_regions(code: str) -> str:
     return code
 
 
-def _hardware_allows_torch_compute(hardware: str) -> bool:
-    """
-    对于「昇腾 NPU / 其他非 NVIDIA 自研加速卡」+ python DSL 组合：
-    此时根本无法写 Triton/CUDA kernel，唯一能激活厂商自研 Tensor Core 的路径
-    就是调用 torch.matmul / torch.mm 等高层 API (由厂商的 torch 后端接管下放)。
-
-    在这种组合下如果还禁止 torch.* compute，等于强制写 6 层嵌套 Python 循环，
-    不仅性能差 1000 倍、还根本不可能通过 benchmark。因此这里把这些硬件列入白名单：
-    对它们 torch.matmul 等不算「作弊」，而算「正确的硬件调用方式」。
-    """
-    if not hardware:
-        return False
-    hw = hardware.lower()
-    return any(tok in hw for tok in (
-        "ascend", "npu", "昇腾", "huawei",          # 昇腾 / 华为
-        "cambricon", "mlu",                         # 寒武纪
-        "hygon", "dc", "海光",                      # 海光
-        "loongson", "ls",                           # 龙芯
-        "phytium", "ft",                            # 飞腾
-        "zhaoxin", "兆芯",                          # 兆芯
-        "sunway", "神威",                           # 神威
-        "rv", "riscv", "玄铁",                      # RISC-V 生态
-    ))
+# ⚠️ 这里**曾经**有一个 `_hardware_allows_torch_compute(hardware: str) -> bool`:
+#    把任务里声明的硬件名做**子串**匹配 (`"ascend"/"npu"/"hygon"/"dc"/"ls"/"ft"/"rv"` …),
+#    命中就整段放开 torch compute。它有两个洞 (CHECKLOG I80 的硬伤一):
+#      1. **输入是任务字段** (`task.target.hardware`) —— 设计 §3.5 要求安全判据
+#         「不可被任务参数改写」, 而一个任务只要声明 `hardware="Ascend910"` 就能让静态
+#         审计零违规 (白名单里还含 `"dc"/"ls"/"ft"/"rv"` 这类两字母 token, 任何含它们的
+#         串都命中);
+#      2. 它只放开了**静态**那半 —— 运行时屏蔽 (`shield_torch`) 在所有生产调用点都是
+#         无参安装的, 于是这类硬件上「静态放行、运行时抛 CheatDetectedError」,
+#         两半互相矛盾。
+#    现在的口径: 白名单只有一个输入 —— `vendor_torch_ok`, 一个**执行侧声明**的布尔;
+#    静态与运行时两侧读同一个声明, 于是两半永远不会不一致。今天没有任何声明者 (见下面
+#    `vendor_torch_ok` 的说明与 CHECKLOG I81), 所以两眼一致地拒绝。
 
 
 # ─── AST 审计 ────────────────────────────────────────────────
@@ -439,14 +429,27 @@ class AuditVerdict(list):
 
 
 def static_audit(code: str, dsl: str = "python",
-                 hardware: Optional[str] = None) -> AuditVerdict:
+                 vendor_torch_ok: bool = False) -> AuditVerdict:
     """
     静态审计: 扫描代码中禁用的原生算子调用
 
     Args:
         code: 待审计的 kernel 代码
         dsl: 目标 DSL (python 与其他 GPU DSL 规则不同)
-        hardware: 目标硬件 (新增, 可选)；用于对白名单自研加速卡放开 torch.* 计算
+        vendor_torch_ok: 「在这台执行设备上, torch 高层 API 是激活算力的**正当**路径」
+            —— 一个**执行侧声明** (昇腾/寒武纪/海光… 这类卡的 Tensor Core 只能经厂商
+            的 torch 后端下放, 禁掉 torch 等于强制写 6 层嵌套 Python 循环)。
+            ⚠️ 三件事必须一起读:
+              1. 它**不是**任务字段。设计 §3.5: 安全判据不可被 Agent 或任务参数改写;
+                 以前这里收的是 `task.target.hardware` (子串匹配), 那个通道已删除 ——
+                 见文件头那段说明与 CHECKLOG I80 硬伤一 / I81。
+              2. 它**不是**开关: 只有「执行侧自己声明它跑在厂商卡上」这一条路可以传 True,
+                 并且**必须与运行时屏蔽 (`shield_torch`) 读同一个值** —— 否则会出现
+                 「静态放行、运行时抛错」的两半矛盾 (那正是删除前那个版本的病)。
+              3. 今天**没有生产者**: 没有任何后端声明这件事 (要加一条 `Cap` 就必须同时
+                 给出声明者与读者, 而真正的声明者还要把运行时那一半一起接通 —— 远端
+                 runner 的 `shield_torch()` 调用点今天都是无参的)。所以生产路径恒 False,
+                 两眼一致地拒绝; 厂商卡上「torch 合法」这条路要开通得**两半一起做**。
 
     Returns:
         `AuditVerdict`: 违规列表 + 适用性。**不适用的源码不会被读成「没有违规」** ——
@@ -458,13 +461,12 @@ def static_audit(code: str, dsl: str = "python",
     normalized_dsl = (dsl or "").lower()
     is_python_dsl = normalized_dsl == "python"
 
-    # ── 硬件白名单：昇腾等自研加速卡放开 torch compute 限制 ──
-    #   cuda_c DSL: C++ 源码中的 torch::matmul / at::matmul 等写在字符串常量里，
-    #   AST 只会看到一个 Constant 节点，天然不报；且这些硬件的 Tensor Core
-    #   只能通过 torch API 激活
-    #   白名单下唯一保留的禁令是「GPU DSL 不得用 NumPy 在 host 侧算出结果」，
-    #   而 python / cuda_c 两个 DSL 连这条都不适用 → 直接放行。
-    whitelisted = _hardware_allows_torch_compute(hardware)
+    # ── 厂商卡白名单：由**执行侧声明**打开, 不由任务字段打开 ──
+    #   命中时的语义 (与删除前那版逐字一致, 只是输入换了):
+    #     · python / cuda_c DSL 直接放行 (cuda_c 里 torch::matmul 写在字符串常量里,
+    #       AST 只看到一个 Constant 节点, 天然不报);
+    #     · 其余 DSL 只保留「不得用 NumPy 在 host 侧算出结果」这一条。
+    whitelisted = bool(vendor_torch_ok)
     numpy_only = whitelisted and normalized_dsl not in ("python", "cuda_c")
     if whitelisted and not numpy_only:
         return AuditVerdict([], lang)
@@ -507,20 +509,31 @@ def _make_blocked(qualified_name: str):
 
 
 @contextmanager
-def shield_torch(hardware: Optional[str] = None):
+def shield_torch(vendor_torch_ok: bool = False):
     """
     运行时屏蔽上下文: 将 torch 原生计算算子临时替换为抛 CheatDetectedError 的桩，
     退出时恢复原实现。torch 未安装时为 no-op。
 
-    参数 (新增):
-        hardware: 目标硬件，用于对白名单自研加速卡 (昇腾/寒武纪等) 关闭屏蔽。
-                  这些硬件只能通过 torch.matmul / torch.mm 等高层 API 激活其厂商
-                  Tensor Core 实现，屏蔽了反而等于禁用了唯一的高性能路径。
+    参数:
+        vendor_torch_ok: 与 `static_audit` 的**同名参数读同一个声明** —— 「在这台执行
+            设备上 torch 高层 API 是激活算力的正当路径」(昇腾/寒武纪等卡的 Tensor Core
+            只能经厂商 torch 后端下放, 屏蔽了等于禁掉唯一的高性能路径)。
+
+    ⚠️ 两条纪律:
+      1. **生产调用点今天一个都不传它** (`remote_executor` / `mock_gpu` / 真机 runner 里
+         十几处都是裸 `with shield_torch():`) ⇒ 运行时屏蔽在生产路径上**恒开**。
+         这是当前唯一守得住的一侧, 顺带也是那个「静态白名单放宽、运行时照旧屏蔽」的
+         两半矛盾的根源 —— 见 `static_audit` 的说明与 CHECKLOG I81。**不许**为了
+         「让厂商卡能跑」而把某一处生产调用点改成传 True: 那要先有执行侧声明, 并且
+         静态与运行时**同一时刻**一起打开。
+      2. 它也**不许**接到 `task.target.hardware` 上 —— 这里以前正是那么写的 (docstring
+         的「用法」里就摆着这一行), 那等于把安全判据交给任务参数 (§3.5, CHECKLOG I80
+         硬伤一)。
 
     用法:
-        with shield_torch(hardware=task.target.hardware):
+        with shield_torch():
             exec(kernel_code, ns)   # kernel 内 import torch
-            ns["kernel"](**inputs)  # 对 NVIDIA GPU: torch.matmul 抛错；白名单硬件: 正常放行
+            ns["kernel"](**inputs)  # torch.matmul 抛错 (厂商卡那条路今天没接通)
     """
     try:
         import torch
@@ -528,8 +541,8 @@ def shield_torch(hardware: Optional[str] = None):
         yield
         return
 
-    # ── 自研加速卡白名单: 不做任何 torch 屏蔽 ──
-    if _hardware_allows_torch_compute(hardware or ""):
+    # ── 厂商卡白名单: 同一个声明, 静态与运行时两侧一致 ──
+    if vendor_torch_ok:
         yield
         return
 

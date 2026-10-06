@@ -50,8 +50,10 @@ from pathlib import Path
 
 import numpy as np
 
+from operator_agent.agent_runtime import ENVELOPE_ABSENT, ActionEnvelope
 from operator_agent.conductor import (Conductor, correctness_verified,
                                       verified_parent_from)
+from operator_agent.fixer import FixOutcome
 from operator_agent.kernel_db import KernelDatabase
 from operator_agent.mock_gpu import MockGPU
 from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
@@ -168,10 +170,17 @@ class _RecordingFixer:
         self.bases: list[str] = []
         self.n_failed_results: list[int] = []
 
-    def run(self, code, task, failed_results, **kw):
+    def run_with_action(self, code, task, failed_results, **kw):
+        """⚠️ 假件的入口必须是**生产入口** `run_with_action`: §21.1 生产者侧接线后
+        Conductor 走的是带动作信封的那一个, 而只有一个 `run` 的假件会让 Fixer
+        「一次都没被调用」—— 这一组用例就会在空转里全绿 (`fixer.bases == []`)。
+        信封给 `absent`（与「模型没交信封」同一档）: 这组用例只观测**起点**这一件事。
+        """
         self.bases.append(code)
         self.n_failed_results.append(len(failed_results))
-        return self.fixed, "fake fix"
+        return FixOutcome(code=self.fixed, summary="fake fix",
+                          envelope=ActionEnvelope(status=ENVELOPE_ABSENT,
+                                                  reason="假件不交信封"))
 
     def produce_reflexion(self):
         return None
@@ -334,20 +343,36 @@ class TestTheGuardIsWiredInTheRightOrder(unittest.TestCase):
     SRC = Path("operator_agent/conductor.py")
 
     def _holder(self):
+        """主循环那一处调用 (起点规则管的就是它)
+
+        接线后 `self.fixer.run_with_action(...)` 有**两处**: 主循环里那次修复, 与
+        `_answer_ask_and_retry` 里「响应询问后再要一次补丁」的那次。判据是「哪一处的
+        **起点**是 `repair_base`」⇒ 取**同时**有 `repair_base = ...` 赋值的那一个函数,
+        并要求它唯一 (两处都赋值会让人分不清哪一处是起点)。
+        """
         tree = ast.parse(self.SRC.read_text(encoding="utf-8"))
+        holders = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef):
                 continue
             call = self._fixer_call(node)
-            if call is not None:
-                return node, call
-        self.fail("整个 conductor 里找不到 self.fixer.run(...) —— 这条守卫的前提已变")
+            if call is None:
+                continue
+            assigns = [n for n in ast.walk(node)
+                       if isinstance(n, ast.Assign)
+                       and any(getattr(t, "id", None) == "repair_base" for t in n.targets)]
+            if assigns:
+                holders.append((node, call))
+        if len(holders) != 1:
+            self.fail(f"带 `repair_base` 赋值的修复调用点有 {len(holders)} 处 (要恰好 1) "
+                      "—— 这条守卫的前提已变: 生产入口换名 / 多了一条不退回起点的修复路")
+        return holders[0]
 
     @staticmethod
     def _fixer_call(fn):
         for sub in ast.walk(fn):
             f = getattr(sub, "func", None)
-            if (isinstance(f, ast.Attribute) and f.attr == "run"
+            if (isinstance(f, ast.Attribute) and f.attr == "run_with_action"
                     and isinstance(f.value, ast.Attribute) and f.value.attr == "fixer"):
                 return sub
         return None
@@ -359,6 +384,28 @@ class TestTheGuardIsWiredInTheRightOrder(unittest.TestCase):
                               "第一个实参不再是变量名 —— 这条守卫需要重读 (它钉的是起点)")
         self.assertEqual("repair_base", arg.id,
                          "Fixer 又直接拿 `current_code` 了 ⇒ 那片规则没了")
+
+    def test_the_ask_retry_path_also_starts_from_the_retreat_variable(self):
+        """第二个调用点 (响应询问后再要补丁) **也**必须拿 `repair_base`
+
+        少这一条时: 那条路若直接拿 `current_code`, 于是「你问了一次 profiler」就足以让
+        修复起点从已验证祖先漂回那一版坏代码 —— 而这正是这一组用例挡的漂移, 只不过
+        它换了一扇门进来。
+        """
+        tree = ast.parse(self.SRC.read_text(encoding="utf-8"))
+        retry = next((n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef)
+                      and n.name == "_answer_ask_and_retry"), None)
+        self.assertIsNotNone(retry, "`_answer_ask_and_retry` 不在了 —— 重读这条守卫")
+        call = self._fixer_call(retry)
+        self.assertIsNotNone(call, "询问重试那条路不再调用 Fixer ⇒ 这条守卫的前提已变")
+        kwargs = {k.arg for k in call.keywords}
+        positional = [a for a in call.args]
+        self.assertTrue(
+            "repair_base" in kwargs
+            or (positional and isinstance(positional[0], ast.Name)
+                and positional[0].id == "repair_base"),
+            f"询问重试那条路没把起点传下去 (第一个实参={positional[:1]}, 关键字={sorted(kwargs)})")
 
     def test_the_retreat_happens_before_the_fixer_is_called(self):
         fn, call = self._holder()

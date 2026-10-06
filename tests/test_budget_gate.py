@@ -98,14 +98,12 @@ class TestTheOracleBudgetStopsTheLoop(unittest.TestCase):
 
     maxDiff = 600
 
-    def _run(self, budget, max_rounds, min_speedup=5.0, llm=None,
-             require_double_confirm=False):
+    def _run(self, budget, max_rounds, min_speedup=5.0, llm=None):
         # 心跳周期调大: 这里量的是预算, 不让一次标定把标定那一格搅进来
         c = Conductor(backend=LaunchDominatedGPU(NET_MS_MATMUL_4096),
                       kernel_db=KernelDatabase(jsonl_path=None),
                       llm=llm or _TaggingLlm(), max_optimize_rounds=max_rounds,
-                      heartbeat_interval=1000, budget=budget,
-                      require_double_confirm=require_double_confirm)
+                      heartbeat_interval=1000, budget=budget)
         with contextlib.redirect_stdout(io.StringIO()) as buf:
             art = c.execute(_task(min_speedup), _inputs(), None, target_gflops=0.0)
         return art, buf.getvalue()
@@ -131,8 +129,7 @@ class TestTheOracleBudgetStopsTheLoop(unittest.TestCase):
 
     def test_the_reserve_is_spent_by_the_final_confirmation(self):
         """反向: 真有一条结论要进长期记忆时, 补测花的正是预留那一格"""
-        art, _ = self._run(BudgetPlan(oracle_total=5), max_rounds=6, min_speedup=0.001,
-                           require_double_confirm=True)
+        art, _ = self._run(BudgetPlan(oracle_total=5), max_rounds=6, min_speedup=0.001)
         st = art.metadata["budget"]
         self.assertTrue(art.all_passed, "前提: 这一跑要让结论有资格进长期记忆")
         self.assertEqual(1, st["spent"]["confirm"],

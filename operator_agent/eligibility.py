@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-# §4.3 第 5 条的常数: value > 实测峰值 × 1.05 判为「测量错了」而不是「很棒」。
+# §4.3 第 5 条的常数: value > 参考下界 × 1.05 判为「测量错了」而不是「很棒」。
 #
 # 语义是**余量比例** (0.05 = 5% 余量), 阈值 = `峰值 × (1 + PEAK_SLACK)`, 不是乘数。
 # 这一格踩过一次坑 (spine-review P2-9): 常数取名 `slack`、docstring 写 `×(1+slack)`,
@@ -78,7 +78,7 @@ ALL_TRUE = Eligibility(True, True, True, True, True)
 def exceeds_measured_peak(value: Optional[float],
                           measured_peak: Optional[float],
                           slack: float = PEAK_SLACK) -> bool:
-    """`value > 实测峰值 × (1+slack)`? 任一侧缺失则不触发 (缺证据不等于超上界)
+    """`value > 参考下界 × (1+slack)`? 任一侧缺失则不触发 (缺证据不等于超上界)
 
     阈值用**实测**峰值而不是 spec 表: roofline 在这里是校验边界 (§4.2 第 3 条),
     报出的 FLOPS 超过峰值说明测量错了, 不是说明很棒 —— 分母若来自规格表, 一次
@@ -109,6 +109,7 @@ def derive_eligibility(
     requires_real_device: bool = False,
     real_device: Optional[bool] = None,
     l3_pass_is_refused: bool = False,
+    correctness_verified: Optional[bool] = None,
     lib_fallback: bool = False,
     static_guards: Optional[bool] = None,
     peak_exceeded: bool = False,
@@ -123,8 +124,12 @@ def derive_eligibility(
     2  落在心跳失败的标定窗口内                   → 全 False (尺子自己坏了)
     3  契约要求 REAL_DEVICE 但 real_device=False   → 全 False (数没有指称对象)
        `l3_pass_is_refused=True` 同条: 评估器已经认定「通过」无对象
+       `correctness_verified=False` 同条 (设计 §14-10 / §20.4): 这个候选的正确性
+       没有凭据 («这个核算得对» 没被验证过) ⇒ 它的速率读数是**关于另一个对象**的。
+       只有 `verify_l3_only` 这条绕开 L2 的入口才可能带出 False —— 正常路径上
+       数值错的候选到不了 L3 (L2 失败即返回)。
     4  检测到 lib fallback                        → 全 False (它在测别的东西)
-    5  value > 实测峰值 × 1.05 / 档位已是 uninformative → 全 False
+    5  value > 参考下界 × 1.05 / 档位已是 uninformative → 全 False
     6  cv 超阈值 或 launch 下限占比超阈值          → DEGRADED (判决/调参/报数, 不持久化/不计进度)
     7  partition 漂移 / 档位已是 degraded          → DEGRADED (同 6 的位)
     8  静态守卫**不适用**于这份源码 (`static_guards=False`) → DEGRADED (CHECKLOG I65)
@@ -154,7 +159,10 @@ def derive_eligibility(
         return ALL_FALSE
 
     # 规则 3: 数不存在 ≠ 数不可信。整组拒绝 (§4.3 第二条设计意图)
-    if l3_pass_is_refused or (requires_real_device and real_device is False):
+    # `correctness_verified=False` 收在同一族: 没有正确性凭据的速率读数说的是另一个对象
+    # (§14-10 / §20.4)。三态 —— None (没带凭据) **不改判**, 与 real_device 同一边界。
+    if (l3_pass_is_refused or (requires_real_device and real_device is False)
+            or correctness_verified is False):
         return ALL_FALSE
 
     # 规则 4: 静默回退到库 = 候选根本没跑生成代码 (§4.2 第 1 条, 最常见的自欺)

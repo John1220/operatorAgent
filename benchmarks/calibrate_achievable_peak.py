@@ -12,7 +12,7 @@
 3680.0)`，注释说这些数是 2026-09-16 用 cuBLAS 8192³ / triad **实测**的，不是 datasheet。
 也就是说我们已经采纳了「measured peak」这条外部做法 —— 但把它当成了一个标量常数。
 
-吸纳 D4 之后这个常数开始有后果了: `measurement.roofline_converged()` 拿
+吸纳 D4 之后这个常数开始有后果了: `measurement.reference_ceiling_reached()` 拿
 「达成率 >= 90%」当**提前停止优化循环**的出口。而 doc 34/38 的真机读数里
 matmul 4096³ 跑到 **140.0 TFLOPS > 138.2** —— 达成率 101.5%。一个以「离上界还有
 多远」为判据的出口，上界本身却会被超过，说明那个数不是它声称的东西。

@@ -1,11 +1,22 @@
 """脊柱接入 Conductor 的离线标定 (设计 §10.5-4)
 
-入库门 = persist_decision  ∧  资格位 can_persist  ∧  (可选) 两次独立重测。
-`require_double_confirm` 打开后, 没有重测就**拒绝入库** —— 不是「没有就当过了」。
+入库门 = persist_decision  ∧  资格位 can_persist  ∧  **两次独立重测**。
+第三道门是设计 §3.5 的**不变量**, 不是开关: 没有重测就**拒绝入库** ——
+不是「没有就当过了」, 也不是「今天没要求就当过了」(CHECKLOG I79)。
+
+消融 (§14-9 的「关掉这道门会怎样」那一臂) **只能在 harness 侧 patch**:
+见 `TestTheDoubleConfirmationIsAnInvariant` 里那条把生产者换成空实现的用例 ——
+§3.5 规则 3: 一个能一键关安全门的环境变量就是那把尺子。
 """
+import contextlib
 import dataclasses
+import io
+import re as _RE
 import unittest
+from pathlib import Path
 from unittest import mock
+
+import numpy as np
 
 from operator_agent.confirm import ConfirmRecord
 from operator_agent.conductor import Conductor
@@ -15,6 +26,7 @@ from operator_agent.schemas import (ConstraintSpec, KernelArtifact, Precision,
                                     SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
                                     TaskType)
 from tests.backend_fakes import fake_backend
+from tests.test_measurement_validity import LaunchDominatedGPU, NET_MS_MATMUL_4096
 
 
 def _task():
@@ -51,10 +63,16 @@ class TestSaveToDbGates(unittest.TestCase):
     def setUp(self):
         self.cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
 
-    def test_good_run_still_persists_without_double_confirm_flag(self):
-        """默认不强制两次确认 —— 不打断现有链路"""
+    def test_a_good_run_without_a_remeasure_does_not_persist(self):
+        """**默认配置下这条路走不通** (§3.5 规则 2)
+
+        ⚠️ 这条用例以前断言的是反面 (`test_good_run_still_persists_without_double_confirm_flag`
+        ——「默认不强制两次确认, 不打断现有链路」)。它把「默认关的安全装置等于不存在」
+        这件事**钉成了正确行为**: 一个默认 `False` 的构造参数让单次读数就进了语料,
+        而设计 §3.5 把这道门列在「不允许配置」里。守卫钉住错的行为比没有守卫更贵 (I79)。
+        """
         ok = self.cond._save_to_db(_artifact(_good_metrics()), _task())
-        self.assertTrue(ok)
+        self.assertFalse(ok, "没有独立重测却入库了 —— 两次确认是空的")
 
     def test_degraded_eligibility_blocks_persist(self):
         m = _good_metrics(measurement_validity="degraded")
@@ -64,28 +82,24 @@ class TestSaveToDbGates(unittest.TestCase):
         ok = self.cond._save_to_db(_artifact(m), _task())
         self.assertFalse(ok, "can_persist=False 仍入库了")
 
-    def test_require_double_confirm_refuses_without_remeasure(self):
-        self.cond.require_double_confirm = True
+    def test_it_refuses_without_a_remeasure(self):
         ok = self.cond._save_to_db(_artifact(_good_metrics()), _task())
         self.assertFalse(ok, "没有重测却入库 —— 两次确认是空的")
 
-    def test_require_double_confirm_accepts_with_independent_remeasure(self):
-        self.cond.require_double_confirm = True
+    def test_it_accepts_with_an_independent_remeasure(self):
         art = _artifact(_good_metrics())
         art.remeasure = ConfirmRecord(ok=True, speedup=1.2, validity="valid",
                                       independent=True)
         ok = self.cond._save_to_db(art, _task())
         self.assertTrue(ok)
 
-    def test_remeasure_dropping_below_gate_refuses_even_with_flag(self):
-        self.cond.require_double_confirm = True
+    def test_remeasure_dropping_below_gate_refuses(self):
         art = _artifact(_good_metrics())
         art.remeasure = ConfirmRecord(ok=True, speedup=0.8, validity="valid")
         ok = self.cond._save_to_db(art, _task())
         self.assertFalse(ok)
 
     def test_direction_slower_is_stricter_than_faster(self):
-        self.cond.require_double_confirm = True
         fast = _artifact(_good_metrics())
         fast.remeasure = ConfirmRecord(ok=True, speedup=1.5, validity="valid")
         slow = _artifact(_good_metrics())
@@ -103,8 +117,8 @@ class TestTheGateHasExactlyOneImplementation(unittest.TestCase):
 
     所以这里不测判据的语义 (那在 `test_oracle.py`), 只钉**接线**:
       1. 生产路径必须调它, 且把 `keep` 当成自己的结论 (两个方向都验, 免得只测「调了」);
-      2. 传进去的 `requires_remeasure` 必须来自 `require_double_confirm` —— 那是机时承诺,
-         不许在接线处被写死。
+      2. 传进去的 `requires_remeasure` 必须**恒为 True** —— 它是设计 §3.5 的不变量
+         (不允许配置那一栏), 所以接线处**就该**写死; 能关掉它的东西一个都不许有。
     """
 
     def setUp(self):
@@ -134,16 +148,16 @@ class TestTheGateHasExactlyOneImplementation(unittest.TestCase):
         self.assertEqual(1, len(seen))
         self.assertTrue(ok, "判据说行, 生产路径却入不了库 —— 门在外面又加了一道")
 
-    def test_the_machine_time_policy_is_passed_not_hardcoded(self):
+    def test_the_double_confirmation_is_passed_as_an_invariant(self):
+        """接线处写死 `True` —— 判据的那道门在**每一次**入库尝试上都要求着"""
         seen = []
         with mock.patch("operator_agent.oracle.admit_to_corpus",
                         side_effect=self._spy((True, "哨兵"), seen)):
             self.cond._save_to_db(_artifact(_good_metrics()), _task())
-            self.cond.require_double_confirm = True
             self.cond._save_to_db(_artifact(_good_metrics()), _task())
-        self.assertEqual([False, True],
+        self.assertEqual([True, True],
                          [c["kw"].get("requires_remeasure") for c in seen],
-                         "requires_remeasure 没跟着 require_double_confirm 走")
+                         "requires_remeasure 不是恒开的 —— 有人给安全语义留了开关")
         self.assertEqual(float(_task().constraints.min_speedup or 1.0),
                          seen[0]["kw"].get("min_speedup"))
 
@@ -161,18 +175,17 @@ class TestRemeasureField(unittest.TestCase):
     """spine-review P2-10: `KernelArtifact.remeasure` 必须是声明字段
 
     WHY: `conductor._save_to_db` 读 `getattr(artifact, "remeasure", None)`,
-    但字段从未声明 → 生产路径无人写入 → `require_double_confirm=True` 时
-    入库率 100% 归零。此前测试靠 monkeypatch 属性赋值绕过, 测不出这个缺口。
+    但字段从未声明 → 生产路径无人写入 → 要求两次确认时入库率 100% 归零。
+    此前测试靠 monkeypatch 属性赋值绕过, 测不出这个缺口。
     """
 
     def test_remeasure_is_declared_on_kernel_artifact(self):
         names = {f.name for f in dataclasses.fields(KernelArtifact)}
         self.assertIn("remeasure", names,
-                      "KernelArtifact 缺 remeasure 字段 —— require_double_confirm 打开即全拒")
+                      "KernelArtifact 缺 remeasure 字段 —— 要求两次确认即全拒")
 
-    def test_constructor_with_remeasure_persists_under_double_confirm(self):
+    def test_constructor_with_remeasure_persists(self):
         cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
-        cond.require_double_confirm = True
         art = KernelArtifact(
             kernel_id="k-remeasure",
             code="def kernel(A, B):\n    return A @ B\n",
@@ -183,9 +196,8 @@ class TestRemeasureField(unittest.TestCase):
         )
         self.assertTrue(cond._save_to_db(art, _task()))
 
-    def test_constructor_without_remeasure_refuses_under_double_confirm(self):
+    def test_constructor_without_remeasure_refuses(self):
         cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
-        cond.require_double_confirm = True
         art = KernelArtifact(
             kernel_id="k-no-remeasure",
             code="def kernel(A, B):\n    return A @ B\n",
@@ -339,11 +351,12 @@ class TestHeartbeatIsInTheLoop(unittest.TestCase):
 
 
 class TestRemeasureProducer(unittest.TestCase):
-    """spine-review P2-10 的**生产端**: 打开 `require_double_confirm` 不再等于入库率归零
+    """spine-review P2-10 的**生产端**: 「一律要求两次确认」不再等于入库率归零
 
     消费者 (`_save_to_db` → `confirm_persist`) 早就在读 `artifact.remeasure`, 而全仓没有
-    写者 —— 于是那个开关只有「一律拒」一档。这里钉住写者: 谁在什么时候补这次重测、
-    记录里带什么、以及它真的能让入库门放行。
+    写者 —— 于是「要求两次确认」只有「一律拒」一档。这里钉住写者: 谁在什么时候补这次
+    重测、记录里带什么、以及它真的能让入库门放行。要求恒开 (I79) 之后这一条更吃重:
+    没有这个写者, 每一份产物都进不了语料。
     """
 
     def _cond(self, backend=None, **kw):
@@ -356,7 +369,7 @@ class TestRemeasureProducer(unittest.TestCase):
                 "B": rng.standard_normal((64, 64)).astype(_np.float32)}
 
     def _produced(self):
-        cond = self._cond(require_double_confirm=True)
+        cond = self._cond()
         art = _artifact(_good_metrics())
         cond._produce_remeasure(art, _task(), self._inputs(), 0.0)
         return cond, art
@@ -367,9 +380,19 @@ class TestRemeasureProducer(unittest.TestCase):
                                             validity="valid")
         return art
 
-    def test_double_confirm_defaults_off(self):
-        """默认关: 它是「每一份要记住的结论都量两遍」的机时承诺, 不该悄悄打开"""
-        self.assertFalse(self._cond().require_double_confirm)
+    def test_there_is_no_switch_to_turn_it_off(self):
+        """**没有开关** —— 不许是可配置面 (=「默认关的安全装置等于不存在」的反面)
+
+        两条一起判, 因为「删掉构造参数」与「删掉实现」是两件事:
+          * API 层: 传 `require_double_confirm=` 必须失败 (TypeError);
+          * 对象层: 实例上不存在一个能改的布尔属性 (改 `cond.require_double_confirm = False`
+            以前会静默生效, 因为 `_save_to_db` 读的就是它)。
+        """
+        with self.assertRaises(TypeError):
+            self._cond(require_double_confirm=False)
+        c = self._cond()
+        for name in ("require_double_confirm", "double_confirm", "require_remeasure"):
+            self.assertFalse(hasattr(c, name), f"{name} 还在 —— 它就是一个可关的开关")
 
     def test_the_producer_fills_in_a_usable_record(self):
         cond, art = self._produced()
@@ -388,8 +411,7 @@ class TestRemeasureProducer(unittest.TestCase):
         重测也是一条 L3 读数, 所以它同样过尺子检查; 而「决定永久记忆的那一次测量」尤其
         不能是唯一没被检查过的那一次。
         """
-        cond = self._cond(backend=_PinnedTimerGPU(), require_double_confirm=True,
-                          heartbeat_interval=1)
+        cond = self._cond(backend=_PinnedTimerGPU(), heartbeat_interval=1)
         art = _artifact(_good_metrics())
         cond._produce_remeasure(art, _task(), self._inputs(), 0.0)
         self.assertFalse(art.remeasure.ok, "坏窗口里的重测被当成了有效确认")
@@ -427,6 +449,209 @@ class TestRemeasureProducer(unittest.TestCase):
         self.assertFalse(keep, "判据在两次测量之间变了, 却仍然入库")
         self.assertIn("另一条契约", buf.getvalue(),
                       f"拒的理由不是判据同一性 —— 这条用例在空转: {buf.getvalue()}")
+
+
+class TestCorrectnessCredentialWiring(unittest.TestCase):
+    """`verify_l3_only` 是**唯一能绕开 L2** 产出 L3 观测的入口 (设计 §14-10 / §20.4)
+
+    它同时是**晋级层**那一次测量 (重测确认) 的入口 —— 所以"这个核算得对"必须由调用方
+    按它手里那份 L2 结果给出。漏传的失效方式是**静默的**: 三态里的 `None` = 没观测 =
+    不改判, 于是"忘了接"与"验过了"在产物里长得一样。结构守卫在这里比行为用例合适 ——
+    行为用例只能证明"传了会怎样", 证明不了"每个调用点都传了"。
+    """
+
+    def setUp(self):
+        root = Path(__file__).resolve().parents[1]
+        self.src = (root / "operator_agent" / "conductor.py").read_text(encoding="utf-8")
+
+    @staticmethod
+    def _call_body(src, open_paren):
+        """从 '(' 起取到**与它配对的那个** ')' —— 不用写死窗口宽度
+
+        写死窗口 (`src[i:i+800]`) 的失效方式是静默的: 调用点前面的注释一长,
+        守卫就在守卫一个已经不含目标的行区间 —— 那时它是绿的, 但它什么都没查。
+        """
+        depth = 0
+        for j in range(open_paren, len(src)):
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    return src[open_paren:j + 1]
+        return src[open_paren:]
+
+    def test_both_production_call_sites_pass_the_credential(self):
+        opens = [m.end() - 1 for m in _RE.finditer(r"verify_l3_only\(", self.src)]
+        self.assertEqual(len(opens), 2,
+                         f"生产调用点数量变了 ({len(opens)}) —— 本守卫需要跟着复核")
+        for i in opens:
+            self.assertIn("correctness_verified=", self._call_body(self.src, i),
+                          "有个 verify_l3_only 调用点没带正确性凭据")
+
+    def test_the_credential_is_derived_not_asserted(self):
+        """凭据必须从**那一份候选自己的** L2 结果里读, 不许写死成 True
+
+        写死的话它就不再是凭据, 而是"我们相信调用方总是对的"这句注释 ——
+        而 §14-10 要防的正是"以为验过了"。
+        """
+        self.assertIn("_correctness_credential(", self.src)
+        self.assertNotIn("correctness_verified=True", self.src)
+
+
+class _SketchLlm:
+    """只答 sketch 的最小替身 (设计器要求 LLM; 生成侧用 `use_coder_pipeline=False`)"""
+
+    def chat(self, messages, **kw):
+        return "import numpy as np\n\ndef kernel(A, B):\n    return A @ B\n"
+
+    def chat_json(self, messages, **kw):
+        return {"algorithm": "matmul",
+                "tiling": {"block_m": 64, "block_n": 64, "block_k": 32},
+                "memory_plan": {}, "pipeline": [], "optimization_hints": []}
+
+
+class TestTheDoubleConfirmationIsAnInvariant(unittest.TestCase):
+    """设计 §3.5: 「长期记忆的独立确认」**不允许配置** —— 今天它无条件生效
+
+    这一组用例的存在理由 (CHECKLOG I79): 它此前是一个默认 `False` 的构造参数, 于是
+    「默认配置下单次读数即可入库」。翻转之后要钉住三件事, 缺一条这个不变量就会退回去:
+
+      1. 默认配置下真的走这条路 (不是"文档说走");
+      2. 没有开关: API 上给不出关闭值, 对象上也没有一个能改的布尔;
+      3. 消融 (§14-9 的「关掉这道门会怎样」那一臂) **只能在 harness 侧 patch** ——
+         把生产者换成空实现, 结果是**一份都进不了语料**, 而不是静默入库。
+    """
+
+    def setUp(self):
+        root = Path(__file__).resolve().parents[1]
+        self.src = (root / "operator_agent" / "conductor.py").read_text(encoding="utf-8")
+
+    def _task(self, min_speedup=0.001):
+        return TaskSchema(
+            task_type=TaskType.OPERATOR_GENERATION,
+            source=SourceSpec(kernel_type="matmul"),
+            target=TargetSpec(hardware="mock_gpu", dsl="python"),
+            constraints=ConstraintSpec(precision=Precision.FP32,
+                                       min_speedup=min_speedup, max_error=1e-5),
+        )
+
+    def _run(self, cond):
+        rng = np.random.default_rng(0)
+        inputs = {"A": rng.standard_normal((64, 64)).astype(np.float32),
+                  "B": rng.standard_normal((64, 64)).astype(np.float32)}
+        with contextlib.redirect_stdout(io.StringIO()):
+            art = cond.execute(self._task(), inputs, None, target_gflops=0.0)
+        return art
+
+    def _cond(self, **kw):
+        return Conductor(backend=LaunchDominatedGPU(NET_MS_MATMUL_4096),
+                         kernel_db=KernelDatabase(jsonl_path=None),
+                         llm=_SketchLlm(), use_coder_pipeline=False,
+                         max_optimize_rounds=2, heartbeat_interval=1000, **kw)
+
+    def test_the_producer_runs_on_the_normal_path(self):
+        """① 默认配置下: 有结论要进语料时, 产物里**一定**带着那条独立重测记录
+
+        ⚠️ 这里断言的是「重测**做了**」而不是「入库**成了**」: 在控制机上没有 CUDA,
+        `MockGPU` 只会声明 `EMULATED`/`SIMULATED_PERF` ⇒ 读数按设计被判 uninformative,
+        入库在**更前面**那道门上就该被拒 (「不能把假信号固化成语料」)。在这台机器上
+        断言 `kept=True` 等于制造一条假证据 —— 想验「入库成功」得有一台真卡,
+        这条正向端到端对照今天全仓都缺 (记在 CHECKLOG I80)。
+        """
+        art = self._run(self._cond())
+        self.assertTrue(art.all_passed, "前提: 这一跑要让结论有资格进长期记忆")
+        self.assertIsNotNone(art.remeasure,
+                             "默认配置下没补重测 —— 不变量没生效 (I79 的洞回来了)")
+        self.assertTrue(art.remeasure.independent)
+        self.assertTrue(art.remeasure.validity, "重测记录没带档位")
+
+    @staticmethod
+    def _method_body(src: str, name: str) -> str:
+        """取 `def <name>(...)` 到下一个同级 `    def ` 之间的源码
+
+        用正则找**成对的** def 边界, 不写死窗口宽度: 写死窗口的失效方式是静默的
+        (注释一长, 守卫就在守一个已经不含目标的行区间 —— 那时它是绿的, 但什么都没查)。
+        """
+        m = _RE.search(rf"^    def {_RE.escape(name)}\(", src, _RE.M)
+        if m is None:
+            raise AssertionError(f"没找到 {name} —— 本守卫需要跟着复核")
+        nxt = _RE.search(r"^    def ", src[m.end():], _RE.M)
+        return src[m.start(): m.end() + (nxt.start() if nxt else len(src))]
+
+    @staticmethod
+    def _signature(src: str, name: str) -> str:
+        """只取形参表 (到与它配对的那个右括号) —— 参数名与参数名之间的注释都在里面"""
+        m = _RE.search(rf"^    def {_RE.escape(name)}\(", src, _RE.M)
+        if m is None:
+            raise AssertionError(f"没找到 {name} —— 本守卫需要跟着复核")
+        depth = 0
+        for j in range(m.end() - 1, len(src)):
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    return src[m.start():j + 1]
+        raise AssertionError(f"{name} 的形参表没有配对右括号")
+
+    @staticmethod
+    def _without_comments(text: str) -> str:
+        """去掉 `#` 到行尾 —— 守卫判的是**代码**, 注释里出现这些词是正当的
+
+        ⚠️ 这个剥离必须是保守的: 只去注释, 不去字符串 (藏在字符串里的
+        `"os.environ"` 仍然会被判成读环境变量 —— 宁可误报也不许漏报)。
+        """
+        return _RE.sub(r"#[^\n]*", "", text)
+
+    def test_no_environment_variable_or_cli_flag_can_turn_it_off(self):
+        """§3.5 的**形状**: 安全语义不许有环境变量 / 配置文件 / 命令行开关
+
+        源码级守卫 —— 它的反面在行为上不可观察: 今天没人会去设那个变量, 所以加上一行
+        `os.environ.get("OPERATOR_AGENT_DOUBLE_CONFIRM", "0")` 之后**所有行为用例都还是
+        绿的**, 而不变量已经变回开关。同一个理由也适用于构造参数: 名字像开关的布尔一律
+        不许再出现在 `Conductor.__init__` 上。
+        """
+        for method in ("_save_to_db", "_produce_remeasure"):
+            body = self._without_comments(self._method_body(self.src, method))
+            for needle in ("environ", "getenv", "argparse"):
+                self.assertNotIn(needle, body,
+                                 f"{method} 里能读环境变量/命令行 —— 那就是一个开关")
+        # 形参表单独判 (注释里提到那个**已删除**的参数名是正当的, 见 `__init__` 的说明)
+        sig = self._without_comments(self._signature(self.src, "__init__"))
+        self.assertNotRegex(sig, r"require_\w*confirm|double_confirm|skip_confirm",
+                            "构造参数里又出现了「可关掉两次确认」的开关")
+
+    def test_removing_the_producer_leaves_the_gate_without_a_second_reading(self):
+        """③ 消融臂 (§14-9 的「关掉两次确认会怎样」): 生产者 patch 成空实现
+
+        这是 §3.5 规则 3 要的形状 —— 消融**不是**产品开关, 而是 harness 侧的一处 patch。
+        两件事一起钉:
+          * 生产者没了 ⇒ 判据手里那次重测就是 `None` (少了第二份读数, 不是少了别的);
+          * 判据那一侧**还是**要求着 (`requires_remeasure=True`) —— 消融消的是生产者,
+            不是判据; 否则消融就变成了「把开关关掉」, 正是规则 3 不许的那种做法。
+        """
+        seen = []
+
+        def spy(metrics, remeasure, **kw):
+            seen.append({"remeasure": remeasure, "kw": kw})
+            return True, "哨兵: 判据放行"
+
+        normal = self._run(self._cond())
+        with mock.patch("operator_agent.oracle.admit_to_corpus", side_effect=spy):
+            normal = self._run(self._cond())
+        with mock.patch.object(Conductor, "_produce_remeasure", lambda *a, **k: None), \
+                mock.patch("operator_agent.oracle.admit_to_corpus", side_effect=spy):
+            ablated = self._run(self._cond())
+
+        self.assertIsNotNone(normal.remeasure, "前提: 正常臂里有那条重测记录")
+        self.assertIsNone(ablated.remeasure, "生产者被 patch 掉了, 记录却还在?")
+        self.assertTrue(seen[0]["remeasure"] is not None
+                        and seen[1]["remeasure"] is None,
+                        f"判据收到的重测记录不对: {[c['remeasure'] for c in seen]}")
+        self.assertEqual([True, True],
+                         [c["kw"].get("requires_remeasure") for c in seen],
+                         "消融臂把判据那道门也关了 —— §3.5 规则 3 不许这么做")
 
 
 if __name__ == "__main__":

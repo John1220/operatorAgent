@@ -1,6 +1,6 @@
-"""§13.5 的 `probe_peak`: 实测峰值标定 —— 判据、存放处、按精度读取
+"""§13.5 的 `probe_peak`: 参考下界标定 —— 判据、存放处、按精度读取
 
-设计说「`probe_peak` 必须实测 …探测失败 → roofline 收敛出口永久关闭」。这一族用例钉三件事:
+设计说「`probe_peak` 必须实测 …探测失败 → 天花板出口永久关闭」。这一族用例钉三件事:
 
 1. **判据**（`peak_probe.probe_peak`）: 七条拒绝理由各自单独可红, 任何一条也不过就不发布。
 2. **存放处**（`hardware_caps`）: 按 (设备, 精度) 分组、两个出口都合并、返回的是拷贝。
@@ -52,7 +52,7 @@ class TestTheJudgement(unittest.TestCase):
                          set(d.as_dict()))
 
     def test_a_simulation_reading_can_never_be_a_measured_peak(self):
-        """仿真读数可以驱动搜索, 但不能当实测峰值 —— 这一条挡的是「MockGPU 上也算实测」"""
+        """仿真读数可以驱动搜索, 但不能当参考下界 —— 这一条挡的是「MockGPU 上也算实测」"""
         d = probe_peak(_sample(real_device=False))
         self.assertFalse(d.measured)
         self.assertTrue(any("REAL_DEVICE" in r for r in d.refusals), d.refusals)
@@ -155,26 +155,26 @@ class TestTheStore(unittest.TestCase):
 
     def test_the_store_is_merged_into_caps_on_both_paths(self):
         """命中表 (H20) 与没命中表的卡都要合并 —— 只在末尾合并会让前者永远读不到"""
-        self.assertIsNone(hc.detect_hardware_caps(H20_INFO).measured_peak_tflops)
-        hc.remember_measured_peak(hc.device_key_of(H20_INFO), "tf32", 68.5, "L3 基线臂")
+        self.assertIsNone(hc.detect_hardware_caps(H20_INFO).reference_lower_bound_tflops)
+        hc.remember_reference_lower_bound(hc.device_key_of(H20_INFO), "tf32", 68.5, "L3 基线臂")
         self.assertEqual({"tf32": 68.5},
-                         hc.detect_hardware_caps(H20_INFO).measured_peak_tflops)
+                         hc.detect_hardware_caps(H20_INFO).reference_lower_bound_tflops)
         # 没命中表的卡: 实测值照样要读得到 (它最需要实测)
         new_card = {"name": "Some New GPU", "device": "cuda", "compute_capability": "12.0"}
-        hc.remember_measured_peak(hc.device_key_of(new_card), "fp16", 900.0, "L3 基线臂")
+        hc.remember_reference_lower_bound(hc.device_key_of(new_card), "fp16", 900.0, "L3 基线臂")
         self.assertEqual({"fp16": 900.0},
-                         hc.detect_hardware_caps(new_card).measured_peak_tflops)
+                         hc.detect_hardware_caps(new_card).reference_lower_bound_tflops)
 
     def test_the_store_is_keyed_by_device_and_precision(self):
-        hc.remember_measured_peak("nvidia h20", "tf32", 68.5, "m")
-        hc.remember_measured_peak("nvidia h20", "fp16", 140.0, "m")
-        hc.remember_measured_peak("other card", "tf32", 10.0, "m")
+        hc.remember_reference_lower_bound("nvidia h20", "tf32", 68.5, "m")
+        hc.remember_reference_lower_bound("nvidia h20", "fp16", 140.0, "m")
+        hc.remember_reference_lower_bound("other card", "tf32", 10.0, "m")
         self.assertEqual({"tf32": 68.5, "fp16": 140.0}, hc.measured_peaks_for("nvidia h20"))
         self.assertEqual({"tf32": 10.0}, hc.measured_peaks_for("other card"))
         self.assertEqual({}, hc.measured_peaks_for("never seen"))
 
     def test_a_record_comes_back_as_a_copy(self):
-        hc.remember_measured_peak("nvidia h20", "tf32", 68.5, "m", {"baseline_ms": 0.5})
+        hc.remember_reference_lower_bound("nvidia h20", "tf32", 68.5, "m", {"baseline_ms": 0.5})
         rec = hc.measured_peak_record("nvidia h20", "tf32")
         rec["evidence"]["baseline_ms"] = 999.0
         rec["tflops"] = 1.0
@@ -209,34 +209,34 @@ class TestTheReaderInTheVerifier(unittest.TestCase):
         v = self._verifier()
         r0 = self._roofline(v)
         self.assertEqual("tf32", r0["peak_key"], "H20 + cuda + matmul ⇒ tf32 分母")
-        self.assertIs(r0["peak_measured"], False, "没实测过 ⇒ 出口的位是关的")
+        self.assertIs(r0["reference_lower_bound"], False, "没实测过 ⇒ 出口的位是关的")
         self.assertAlmostEqual(74000.0, r0["hw_peak_gflops"], places=1)
 
-        hc.remember_measured_peak(hc.device_key_of(H20_INFO), "tf32", 60.0,
+        hc.remember_reference_lower_bound(hc.device_key_of(H20_INFO), "tf32", 60.0,
                                  "L3 基线臂", {"baseline_ms": 0.5})
         r1 = self._roofline(v)
-        self.assertIs(r1["peak_measured"], True)
+        self.assertIs(r1["reference_lower_bound"], True)
         self.assertAlmostEqual(60000.0, r1["hw_peak_gflops"], places=1,
                                msg="分母要换成实测值, 而不是继续用表")
-        self.assertIn("L3 基线臂", r1["peak_measured_source"],
+        self.assertIn("L3 基线臂", r1["reference_lower_bound_source"],
                       "分母的出处要跟着分母走")
-        self.assertEqual({"baseline_ms": 0.5}, r1["peak_measured_evidence"])
+        self.assertEqual({"baseline_ms": 0.5}, r1["reference_lower_bound_evidence"])
 
     def test_another_precisions_measurement_is_never_borrowed(self):
         """存了 fp16 的实测值, 而这一轮的分母是 tf32 ⇒ 仍然算未实测 (差近一倍)"""
-        hc.remember_measured_peak(hc.device_key_of(H20_INFO), "fp16", 300.0, "L3 基线臂")
+        hc.remember_reference_lower_bound(hc.device_key_of(H20_INFO), "fp16", 300.0, "L3 基线臂")
         r = self._roofline(self._verifier())
         self.assertEqual("tf32", r["peak_key"])
-        self.assertIs(r["peak_measured"], False)
+        self.assertIs(r["reference_lower_bound"], False)
         self.assertAlmostEqual(74000.0, r["hw_peak_gflops"], places=1)
-        self.assertEqual({}, r["peak_measured_evidence"])
+        self.assertEqual({}, r["reference_lower_bound_evidence"])
 
     def test_the_whole_dict_is_published_for_transparency(self):
         """读者要能看出「这张卡哪些精度实测过」, 而不是只有一个真/假位"""
-        hc.remember_measured_peak(hc.device_key_of(H20_INFO), "fp16", 300.0, "m")
+        hc.remember_reference_lower_bound(hc.device_key_of(H20_INFO), "fp16", 300.0, "m")
         peak = self._verifier()._detect_theoretical_peak()
-        self.assertEqual({"fp16": 300.0}, peak["measured_peak_tflops"])
-        self.assertIs(peak["peak_measured"], True,
+        self.assertEqual({"fp16": 300.0}, peak["reference_lower_bound_tflops"])
+        self.assertIs(peak["reference_lower_bound"], True,
                       "标量那个位回答的是「任何一个精度实测过没有」(透明用)")
 
 

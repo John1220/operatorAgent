@@ -24,6 +24,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+from . import tolerance
+
 
 # 五路动作 (§8 表的「策略」列)
 ROUTE_FIX = "fix"                 # 编译失败: 就地修
@@ -41,6 +43,10 @@ class Route:
     pollutes_learning: bool
     fix_not_rewrite: bool = False
     reason: str = ""
+    #: 数值失败的**误差形态** (设计 §8.2); `None` = 判不了 (三态)。
+    #: 它是**证据不是判据**: 候选的去留仍由 route/kind 决定, 形态只让 reason 说得出
+    #: "该往哪儿修" —— 判歪的代价是提示指歪, 不是误杀。
+    error_shape: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {
@@ -49,7 +55,38 @@ class Route:
             "pollutes_learning": self.pollutes_learning,
             "fix_not_rewrite": self.fix_not_rewrite,
             "reason": self.reason,
+            "error_shape": self.error_shape,
         }
+
+
+#: 形态 → "该往哪儿修"的一句话 (设计 §8.2)。**只影响提示文本, 不影响路由决策**:
+#: 这几句是给 Fixer 的处方方向, 判错了最坏是让它先看错地方, 而不会让错核通过 ——
+#: 那是 `fix_not_rewrite` 与 L2 判据的活。
+ERROR_SHAPE_HINTS = {
+    tolerance.ERROR_SHAPE_TAIL_BLOCK:
+        "检查尾块/边界守卫 (非对齐尾块、越界、mask 少盖了一块)",
+    tolerance.ERROR_SHAPE_WHOLE_ROW:
+        "检查行方向的索引/广播 (整行错: 少一维、轴选错、mask 写反)",
+    tolerance.ERROR_SHAPE_BROADCAST_AXIS:
+        "检查列方向的索引/广播 (整列错: 轴选错、mask 写反)",
+    tolerance.ERROR_SHAPE_WHOLE_TENSOR:
+        "整张量错: 先核对数值语义与输出缩放 (dtype / 累加精度 / 是否漏了一次 scale)",
+    tolerance.ERROR_SHAPE_NONFINITE:
+        "数值稳定性: 除零、溢出、未初始化 (NaN/Inf 会让其它位置统计失去意义)",
+}
+
+
+def _error_shape_of(results) -> Optional[str]:
+    """从失败结果里读形态 —— 读的是**产物里记的那一份**, 不重算
+
+    与 `static_guards` / `correctness_verified` 同一条纪律: 判定看的必须就是产物里记的,
+    否则「记录说 A、判定按 B」这种分叉永远查不出来。
+    """
+    for r in results:
+        shape = (getattr(r, "metrics", None) or {}).get("error_shape")
+        if shape:
+            return str(shape)
+    return None
 
 
 _INFRA_MARKERS = (
@@ -129,8 +166,16 @@ def classify(verify_results: Iterable,
     # 2) L2 失败 (且不是 L1 编译错) → 数值/边界, 调试式修
     only_l2 = all(("L2" in str(lv).upper() or "function" in str(lv).lower()) for lv in levels)
     if only_l2 and "L1" not in "".join(levels).upper():
-        return Route(ROUTE_DEBUG_FIX, "numeric", True, True, True,
-                     "正确性失败: 调试式修, **不重写** (§19.3 修>重写, 省 92.8% token)")
+        shape = _error_shape_of(failed)
+        reason = "正确性失败: 调试式修, **不重写** (§19.3 修>重写, 省 92.8% token)"
+        if shape:
+            hint = ERROR_SHAPE_HINTS.get(shape, "")
+            reason += f"; 误差形态={shape}" + (f" ⇒ {hint}" if hint else "")
+        else:
+            # 说不出来也要说 (与"空章节必须带依据"同一条纪律): 沉默会被读成"形态没问题"。
+            reason += "; 误差形态未确立 (坏点分布不落在已知几类上) —— 按首个坏点定位, 别猜"
+        return Route(ROUTE_DEBUG_FIX, "numeric", True, True, True, reason,
+                     error_shape=shape)
 
     # 1) 含 L1 → 编译/接口, 就地修
     return Route(ROUTE_FIX, "compile", True, True, False,

@@ -12,7 +12,7 @@
 memory-bound 需优化」, Conductor 拿这套数字去禁用配方并累计停滞轮次, 而这三个数
 描述的都是 kernel launch 开销, 不是核的质量。
 
-D4 之后每个 case 还顺带跑一遍四态判决与 roofline 收敛判定 (同一份真机 metrics),
+D4 之后每个 case 还顺带跑一遍四态判决与参考天花板判定 (同一份真机 metrics),
 看达成率的量级和带宽相对实际散布是宽还是窄 —— 那两条判据决定了循环会不会提前停。
 """
 import sys
@@ -27,8 +27,8 @@ from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, Targe
 from operator_agent.verifier import Verifier
 from operator_agent.measurement import (
     DISPERSION_DEGRADED, DISPERSION_UNINFORMATIVE, INTRUDER_MAX_OVER_MEDIAN,
-    NOISE_BAND, ROOFLINE_CONVERGED_PCT, Validity, binding_attainment,
-    roofline_converged, verdict,
+    NOISE_BAND, REFERENCE_CEILING_PCT, Validity, binding_attainment,
+    reference_ceiling_reached, verdict,
 )
 
 TRITON_LN = '''
@@ -121,7 +121,7 @@ print(f"  name={peak['name']!r} cc={peak['compute_capability']!r} "
 if peak["launch_floor_us"] is None:
     print("  ⚠️ 地板为 None: hardware_caps 未命中这台设备, 地板支配检查会被跳过")
 # 缺口 3: roofline 分母是哪一行、凭什么。未核口径的行会关掉「已到 roofline」出口
-# (measurement.roofline_converged), 所以下面每个 case 的 converged 都要连着这行读。
+# (measurement.reference_ceiling_reached), 所以下面每个 case 的 converged 都要连着这行读。
 print(f"  分母行 [{peak['peak_table_key']}] fp16={peak['fp16_tflops']} TFLOPS / "
       f"bw={peak['memory_bandwidth_gbs']} GB/s — {peak['peak_source']} "
       f"(trusted={peak['peak_trusted']})")
@@ -177,8 +177,8 @@ for label, code, kernel_type, inputs, traffic_mb, roof_us in CASES:
     # 「对不对」而是「量级合不合理」: 达成率是不是真在 0~100% 附近、判决带宽是不是
     # 比这一档的实际散布宽 (窄了会把噪声当改善, 宽了会永远判 SAME)。
     att = binding_attainment(m)
-    print(f"  绑定轴达成率 = {att}%   roofline_converged = {roofline_converged(m)} "
-          f"(阈值 {ROOFLINE_CONVERGED_PCT:.0f}%)")
+    print(f"  绑定轴达成率 = {att}%   reference_ceiling_reached = {reference_ceiling_reached(m)} "
+          f"(阈值 {REFERENCE_CEILING_PCT:.0f}%)")
     validity = Validity(m.get("measurement_validity", Validity.VALID.value))
     band = NOISE_BAND[validity]
     cur = float(m.get("gflops", 0) or 0)

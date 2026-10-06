@@ -580,8 +580,10 @@ class KernelArtifact:
     #: ok/speedup/validity/independent 属性即可)。
     #: WHY (spine-review P2-10): `conductor._save_to_db` 用
     #: `getattr(artifact, "remeasure", None)` 读它, 但字段从未声明 →
-    #: 生产路径无人写入 → `require_double_confirm=True` 时入库率 100% 归零。
+    #: 生产路径无人写入 → 要求两次确认时入库率 100% 归零。
     #: 声明字段让「没有重测」与「有重测但没过」成为可写、可查的数据。
+    #: ⚠️ 今天两次确认是**不变量**（设计 §3.5, 见 CHECKLOG I79）: `all_passed` 的产物
+    #: 一定会被写进这个字段, 所以「字段在、值恒 None」这一档不再可能。
     remeasure: Optional[Any] = None
     saved_dir: str = ""                # ArtifactStore.save 落盘目录 (由 Conductor 赋值, 便于引用)
     created_at: float = field(default_factory=time.time)

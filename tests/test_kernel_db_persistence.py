@@ -253,13 +253,23 @@ class TestGateWiring(unittest.TestCase):
             self.assertIsNotNone(c.kernel_db.get("kw"), "内存里可以留, 否则这次运行没有示范")
 
     def test_trusted_measurement_is_written_and_reloaded(self):
+        """可信读数 + 那条独立重测 ⇒ 落盘并可重载
+
+        ⚠️ 2026-10-03 起「可信」还包含「有过一次独立重测」: 两次确认是设计 §3.5 的
+        不变量 (CHECKLOG I79), 所以这条用例的产物必须像生产路径那样带上 `remeasure`
+        —— 生产路径由 `_produce_remeasure` 无条件补上 (`tests/test_spine_wiring.py`
+        有端到端用例钉住), 这里直接给记录是为了只验「门的结果决定落盘」这一根线。
+        """
+        from operator_agent.confirm import ConfirmRecord
         with tempfile.TemporaryDirectory() as d:
             p = str(Path(d) / "kernel_db.jsonl")
             c = self._conductor(p)
-            self.assertTrue(c._save_to_db(self._artifact({
+            art = self._artifact({
                 "gflops": 140.0, "speedup_vs_baseline": 1.35,
-                "measurement_can_gate": True, "measurement_validity": "valid"}),
-                self._task()))
+                "measurement_can_gate": True, "measurement_validity": "valid"})
+            art.remeasure = ConfirmRecord(ok=True, speedup=1.4, validity="valid",
+                                          independent=True)
+            self.assertTrue(c._save_to_db(art, self._task()))
             reloaded = KernelDatabase(jsonl_path=p).get("kw")
             self.assertIsNotNone(reloaded)
             self.assertAlmostEqual(1.35, reloaded.score, places=6)
