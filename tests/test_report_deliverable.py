@@ -354,6 +354,18 @@ class TestThroughARealRun(unittest.TestCase):
         self.assertIn("没有量具", txt)
         self.assertIn("capability", txt)
 
+    def test_the_implementation_verdict_reaches_the_written_report(self):
+        """§17.1 的实现裁决是交付物第 1 件 ⇒ 真跑一遍以后必须在报告里（带理由）
+
+        今天它只能是 `inconclusive`（两条证据没有生产者, 见 CHECKLOG I91）—— 这一条钉
+        「生产路径写进去了」+「报告读了它」, 而不是裁决的取值本身。
+        """
+        art, _ = self._run()
+        txt = (Path(art.saved_dir) / REPORT_NAME).read_text(encoding="utf-8")
+        self.assertIn("实现裁决 (§17.1)", txt)
+        self.assertIn("inconclusive", txt)
+        self.assertIn("门 3", txt, "理由要一起印出来, 否则读不出「为什么判不了」")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

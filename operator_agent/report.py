@@ -334,6 +334,24 @@ def _claim_level_lines(m: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _implementation_decision_lines(m: Dict[str, Any]) -> List[str]:
+    """§17.1 的实现裁决（交付物第 1 件里那一个显式结论 + 它为什么是这个结论）。
+
+    缺键 ⇒ **不印**（同 `_claim_level_lines`）：印一个默认裁决会让「没算」读成「算出来是它」，
+    而这个字段的后果是**部署决定**（§17.1 原句：「候选比 baseline 快」不足以支撑它）。
+    `metrics["implementation_decision"]` 由 `Conductor._save_to_db` 一处写入。
+    """
+    d = _get(m, "implementation_decision", None)
+    if not isinstance(d, dict) or not d.get("decision"):
+        return []
+    out = [f"- 实现裁决 (§17.1): `{d['decision']}` "
+           f"(声明等级 `{d.get('claim_level') or '未判'}`, "
+           f"上限 `{d.get('claim_ceiling') or '未判'}`)"]
+    for reason in (d.get("reasons") or []):
+        out.append(f"  - {reason}")
+    return out
+
+
 def _best_known_good(artifact: Any, m: Dict[str, Any]) -> List[str]:
     out = ["## 1. best-known-good", ""]
     code = str(getattr(artifact, "code", "") or "")
@@ -370,6 +388,7 @@ def _best_known_good(artifact: Any, m: Dict[str, Any]) -> List[str]:
     if isinstance(stop, dict):
         out.append(f"- 循环停因: `{stop.get('reason')}` "
                    f"(第 {stop.get('round')} 轮) {stop.get('detail') or ''}".rstrip())
+    out += _implementation_decision_lines(m)
     out.append("")
     return out
 

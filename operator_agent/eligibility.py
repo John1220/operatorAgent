@@ -363,3 +363,155 @@ def claim_level(*,
     return ClaimRecord(level=level, ceiling=ceiling, coverage_mode=mode,
                        reasons=tuple(reasons))
 
+
+# ─── §17.1 实现裁决 (ImplementationDecision)：交付物第 1 件里那一个显式结论 ─────
+#
+# 设计原文是一个 `StrEnum`；本仓跑 3.9（`StrEnum` 要 3.11），所以与
+# `measurement.Validity` / 上面的 `CLAIM_*` 同款：**字符串常数 + 元组**，产物里记字符串。
+#
+# 为什么这一格必须接进同一套资格位（设计 §17.1 的原话）：本文反复防范的失效模式是
+# 「噪声读数造成永久后果」——「因为一次噪声读数就建议你别上自定义核」与「因为一次噪声
+# 读数就永久拉黑一个配方」是同一失效模式的两个方向。裁决本身就是一个会被人**拿去部署**
+# 的结论，所以它读的证据与 §4.4/§22.3 是同一套，不许在下游另开一个没有闸门的新口子。
+
+DECISION_USE_CUSTOM = "use_custom"
+DECISION_USE_LIBRARY = "use_library"
+DECISION_INCONCLUSIVE = "inconclusive"
+
+#: 词表（顺序即从「敢用」到「判不了」），产物里记字符串。
+IMPLEMENTATION_DECISIONS: Tuple[str, ...] = (
+    DECISION_USE_CUSTOM, DECISION_USE_LIBRARY, DECISION_INCONCLUSIVE,
+)
+
+
+@dataclass(frozen=True)
+class DecisionRecord:
+    """一次运行的实现裁决 + 它为什么是这个结论（§17.1；产物里记这个）。
+
+    三个证据字段是**三态**（`True` / `False` / `None`）：`None` = **未确立**，
+    不是 False —— 「没量过回退」与「量过、没有回退」是两件事（与 §4.4/§22.3 同一条纪律）。
+    """
+
+    decision: str
+    claim_level: str
+    claim_ceiling: str
+    can_report: Optional[bool]
+    required_cases_ok: Optional[bool]
+    regression_over_limit: Optional[bool]
+    reasons: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.decision not in IMPLEMENTATION_DECISIONS:
+            raise ValueError(f"裁决不在词表里: {self.decision!r} "
+                             f"(表 {IMPLEMENTATION_DECISIONS})")
+
+    def as_dict(self) -> dict:
+        return {"decision": self.decision, "claim_level": self.claim_level,
+                "claim_ceiling": self.claim_ceiling, "can_report": self.can_report,
+                "required_cases_ok": self.required_cases_ok,
+                "regression_over_limit": self.regression_over_limit,
+                "reasons": list(self.reasons)}
+
+
+def _claim_record_of(claim_record) -> ClaimRecord:
+    """把产物里的 `claim_level` 摊平成 `ClaimRecord`（形状不对/缺键 ⇒ 等级读成空串）
+
+    空串的 `claim_rank` 是 -1 ⇒ 一档都够不上（fail-closed）。这里**不**补任何缺省等级：
+    「没经过 §4.4」与「等级很低」都上不了 `use_custom`，但前者要在理由里说出来。
+    """
+    if isinstance(claim_record, ClaimRecord):
+        return claim_record
+    if isinstance(claim_record, Mapping):
+        return ClaimRecord(level=str(claim_record.get("level") or ""),
+                           ceiling=str(claim_record.get("ceiling") or ""),
+                           coverage_mode=str(claim_record.get("coverage_mode") or ""),
+                           reasons=tuple(claim_record.get("reasons") or ()))
+    return ClaimRecord(level="", ceiling="", coverage_mode="")
+
+
+def implementation_decision(*, eligibility=None, claim_record=None,
+                            required_cases_ok: Optional[bool] = None,
+                            regression_over_limit: Optional[bool] = None,
+                            ) -> DecisionRecord:
+    """按 §17.1 推导实现裁决（纯函数；**裁决的唯一推导处**）。
+
+    设计原文的门槛（§17.1 末段原句）：
+
+        `USE_CUSTOM` 要求 `ClaimLevel ≥ VALIDATED` 且所有 `required_cases` 正确；
+        `USE_LIBRARY` 至少要求 `can_report`；其余一律 `INCONCLUSIVE`。
+
+    落成**四条门**，每一门都在产物里留下理由（理由是这个字段的一半：读报告的人要能分出
+    「判了：回退越限 ⇒ 用库」与「没判成 ⇒ 保守落 inconclusive」）：
+
+    0. `can_report is not True`（没有资格位 / 位是 False / 掩码不齐）⇒ `inconclusive`：
+       连「这个读数能对外报」都没确立，此时没有可裁决的对象。
+    1. 三条「自定义」的证据**全中** ⇒ `use_custom`：声明等级 ≥ `validated`（§4.4）、
+       `required_cases_ok is True`、`regression_over_limit is False`（§6.2 条款 3）。
+    2. `regression_over_limit is True` ⇒ `use_library`：这是设计点名的三条「用库」理由里
+       今天**有数据模型**的那一条（§6.2 条款 3 明写「`USE_CUSTOM` 也不成立」）。
+    3. 其余 ⇒ `inconclusive`（**含 `required_cases_ok is None`**）。
+
+    ⚠️ 三条读法与边界（与设计原句一起读，登记在 CHECKLOG I91）：
+
+      * 「`USE_LIBRARY` 至少要求 `can_report`」读成**必要条件**，不是「`can_report` ⇒ 用库」。
+        理由是本段自己的立论：`USE_LIBRARY` 是一个会被人拿去部署的**否定建议**，而
+        「契约里没有 `required_cases` 的生产者」不是候选不适用 —— 把它读成「建议你别上
+        自定义核」正是本段点名的失效模式。所以门 3 才是默认落点。
+      * `required_cases_ok is False`（有的必判 case 不正确）今天也落 `inconclusive`：
+        设计给 `USE_LIBRARY` 的三条理由（稳定慢 / 维护成本 / 回退越限）都**预设自定义
+        实现是正确的**，而正确性不成立的候选本来就进不了 best-known-good。
+      * 「在目标 workload 上稳定快」「维护成本不划算」**不在这里再判一遍**：前者是
+        `ClaimLevel` 的阶梯（`validated` 要正确性凭据、`promotable` 要独立确认 —— §4.4），
+        后者今天没有数据模型。单一真源，不重造。
+
+    三态纪律：`required_cases_ok` / `regression_over_limit` 的 `None`（未确立）既不算
+    「坏」也不算「好」—— 它挡住 `use_custom`，但也不给出 `use_library` 的依据。
+    """
+    elig = eligibility
+    if elig is not None and not isinstance(elig, Eligibility):
+        elig = Eligibility.from_mapping(elig)
+    rec = _claim_record_of(claim_record)
+    level = rec.level or None
+    can_report = getattr(elig, "can_report", None) if elig is not None else None
+    reasons: list = []
+
+    def _record(decision: str, more) -> DecisionRecord:
+        return DecisionRecord(decision=decision, claim_level=rec.level,
+                              claim_ceiling=rec.ceiling, can_report=can_report,
+                              required_cases_ok=required_cases_ok,
+                              regression_over_limit=regression_over_limit,
+                              reasons=tuple(reasons) + tuple(more))
+
+    if can_report is not True:
+        why = "没有资格位（没经过收口点）" if elig is None else f"can_report={elig.can_report}"
+        return _record(DECISION_INCONCLUSIVE,
+                       [f"资格位 {why} ⇒ 连「这个读数能对外报」都没有确立 "
+                        f"⇒ 判不了 (门 0)"])
+
+    blockers: list = []
+    if not at_least(level, CLAIM_VALIDATED):
+        blockers.append("声明等级 " + (f"{level} < {CLAIM_VALIDATED}" if level
+                                   else "缺失（没有 §4.4 的记录）") + " (门 1)")
+    if required_cases_ok is not True:
+        blockers.append("required_cases 不是全对：" +
+                        ("未确立（今天没有生产者）" if required_cases_ok is None
+                         else "有必判 case 不正确") + " (门 1)")
+    if regression_over_limit is not False:
+        blockers.append("回退越限不是「没有」：" +
+                        ("未确立（今天没有 max_regression 的生产者）"
+                         if regression_over_limit is None else "有回退越限") +
+                        " (§6.2 条款 3)")
+    if not blockers:
+        return _record(DECISION_USE_CUSTOM,
+                       ["声明等级 ≥ validated、required_cases 全对、没有回退越限 "
+                        "⇒ 三条证据全中 (门 1)"])
+    if regression_over_limit is True:
+        return _record(DECISION_USE_LIBRARY,
+                       blockers + ["有回退越限 ⇒ §6.2 条款 3「候选不得晋级」⇒ 自定义不成立 "
+                                   "⇒ 建议用库 (门 2)"])
+    reasons.extend(blockers)
+    return _record(DECISION_INCONCLUSIVE,
+                   ["「自定义」的三条证据没有一条被否定、也没有一条被确立 ⇒ "
+                    "既上不了 use_custom, 也没有「建议用库」的依据 (门 3)"])
+
+

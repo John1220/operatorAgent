@@ -3009,6 +3009,7 @@ class Conductor:
         「三级验证都点了通过」, 而缺口 1 的真机数据证明那个通过可以是被 launch 地板
         或邻居抢占造出来的 (doc 31/32/33)。一次侥幸读数不能变成永久真理。
         """
+        from .eligibility import implementation_decision
         from .kernel_db import KernelRecord
         from .oracle import admit_to_corpus
 
@@ -3059,6 +3060,14 @@ class Conductor:
         final = claim.as_dict()
         artifact.metadata["claim_level"] = final
         metrics["claim_level"] = final
+        # §17.1 的实现裁决：推导只有一处（`eligibility.implementation_decision`），这里只把
+        # 这次运行手上**有**的证据摊进去。两条证据今天**都没有生产者**（契约里既没有
+        # `required_cases` 也没有 `max_regression`；逐形状的正确性/回退证据要 §20.1 的
+        # CorrectnessSuite）⇒ 不传 ⇒ 记录里是 `None`（= 未确立）⇒ 裁决落不到 `use_custom`。
+        # 这是**诚实的结论**，不是缺省值：缺证据不是证据，而「建议用库」同样要有依据
+        # （见 CHECKLOG I91）。口径与产物同一条纪律：写进 `metrics` 的就是判据读的那一份。
+        metrics["implementation_decision"] = implementation_decision(
+            eligibility=metrics.get("eligibility"), claim_record=claim).as_dict()
         if not keep:
             print(f"[KernelDB] 未入库 (只留在本次进程): {reason}")
             self.kernel_db.add(record)

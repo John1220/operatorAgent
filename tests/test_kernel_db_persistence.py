@@ -258,6 +258,24 @@ class TestGateWiring(unittest.TestCase):
                                       independent=True)
         return art
 
+    def test_the_implementation_decision_is_published_next_to_the_claim(self):
+        """§17.1 的裁决是交付物第 1 件的一部分 ⇒ 必须由**生产路径**写进产物
+
+        今天两条证据（`required_cases_ok` / `regression_over_limit`）都**没有生产者**
+        （契约里没有那两个字段; 逐形状证据要 §20.1）⇒ 裁决只能是 `inconclusive` ——
+        这条同时钉住「不许塞 False 假装量过」（CHECKLOG I91）。
+        """
+        metrics = self._good_metrics()
+        with tempfile.TemporaryDirectory() as d:
+            c = self._conductor(str(Path(d) / "kernel_db.jsonl"))
+            c._save_to_db(self._confirmed(metrics), self._task())
+        dec = metrics["implementation_decision"]
+        self.assertEqual("inconclusive", dec["decision"], dec["reasons"])
+        self.assertIsNone(dec["required_cases_ok"])
+        self.assertIsNone(dec["regression_over_limit"])
+        self.assertEqual(metrics["claim_level"]["level"], dec["claim_level"],
+                         "裁决记的等级必须与产物里发布的那一次读数是同一个")
+
     def test_untrusted_measurement_is_not_written_to_disk(self):
         with tempfile.TemporaryDirectory() as d:
             p = str(Path(d) / "kernel_db.jsonl")
