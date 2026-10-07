@@ -330,7 +330,10 @@ class TestThroughARealRun(unittest.TestCase):
         inputs = _inputs()
         case = case_key(inputs)
         task = _task(required_cases=(case,) if declare else (),
-                     max_regression={case: 0.05} if declare else None)
+                     # 上限故意宽到不可能越界（同 `tests/test_case_ledger.py` 的 LOOSE_LIMIT）:
+                     # MockGPU 的读数是墙钟量级的，紧上限会让这条断言在机器忙时随机变红 ——
+                     # 这一组钉的是「两条证据被**确立**」，不是「这条 case 真的没退」。
+                     max_regression={case: 5.0} if declare else None)
         with contextlib.redirect_stdout(io.StringIO()):
             art = c.execute(task, inputs, None, target_gflops=0.0)
         return art, case
@@ -433,7 +436,9 @@ class TestOneProducerPerFact(unittest.TestCase):
         self.assertEqual(1, cu.count("def _l2_verdict("))
         self.assertEqual(2, cu.count("self._l2_verdict(artifact)"),
                          "两个读者: correctness_verified 与条款 2 的 case 正确性")
-        self.assertIn("evaluated = {case: self._l2_verdict(artifact)}", cu)
+        self.assertIn("l2_verdict = self._l2_verdict(artifact)", cu,
+                      "证据侧必须**通过这个助手**读 L2, 而不是自己再挑一次")
+        self.assertIn("evaluated = {c: l2_verdict for c in speedups}", cu)
     def test_the_harness_declares_the_case_it_evaluates(self):
         """真实通过率驱动: 声明与输入必须来自**同一次**构造（同一个 case_key）"""
         hp = self._src("benchmarks/harness_pass_rate.py")

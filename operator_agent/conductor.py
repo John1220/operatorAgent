@@ -16,7 +16,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Mapping, Optional, Union
 from .schemas import (
     TaskSchema, RouteType, VerificationLevel, VerificationResult,
     UnifiedSketch, KernelArtifact,
@@ -925,7 +925,7 @@ class Conductor:
         return result, True
 
     def _select_finalist(self, current_code: str, finalists: list,
-                         task, test_inputs, expected_output) -> tuple:
+                         task, input_sets, expected_output) -> tuple:
         """P1-1 (generation-side-review): 决赛候选逐个跑 L1+L2, 用真机正确性定胜负
 
         选择权在验证侧: compile-gate 只决定谁能进决赛 (≤ CoderPipeline.L2_FINALISTS)。
@@ -952,7 +952,7 @@ class Conductor:
         l2_runs = 0
         for i, cand in enumerate(finalists):
             sel = self.verifier.verify(
-                cand, task=task, test_inputs=test_inputs,
+                cand, task=task, test_inputs=input_sets,
                 expected_output=expected_output,
                 stop_after=VerificationLevel.L2_FUNCTION,
             )
@@ -977,7 +977,7 @@ class Conductor:
     def execute(
         self,
         task: TaskSchema,
-        test_inputs: dict,
+        test_inputs: Union[dict, list],
         expected_output=None,
         target_gflops: float = 10.0,
         resume_from: Optional[str] = None,
@@ -1045,12 +1045,20 @@ class Conductor:
     def _execute_inner(
         self,
         task: TaskSchema,
-        test_inputs: dict,
+        test_inputs: Union[dict, list],
         expected_output=None,
         target_gflops: float = 10.0,
         resume_from: Optional[str] = None,
     ) -> KernelArtifact:
         """实际执行逻辑 (被 execute 的日志上下文包裹)"""
+        # §6.2 条款 2「候选须在**全部**形状上通过」: 调用方可以传**多组**输入
+        # （`list[dict]`，每组 = 一条 case）。主 case = 第一组 —— **轮级的所有既有逻辑
+        # 一个字节都不动**（轮轴 / 提示词 / 动作上下文 / 停因都按主 case 走）;
+        # 而**验证链**拿的是整份列表: L2 逐组判正确性（条款 2 的正确性那半）、L3 逐 case
+        # 量加速比（`Verifier._publish_case_ledger` 的账本）。
+        # 代价是**声明的**: 传几组就量几组（线性增长）; 只传一组 = 与 I92 之前一字不差。
+        input_sets = list(test_inputs) if isinstance(test_inputs, list) else [test_inputs]
+        test_inputs = input_sets[0]
         backend_name = self.backend.label
         llm_info = f" (LLM: {self.llm})" if self.llm else ""
 
@@ -1534,7 +1542,7 @@ class Conductor:
                 if len(finalists) > 1:
                     (current_code, selected_l1_l2, l1_l2_is_final,
                      round_l2_runs) = self._select_finalist(
-                        current_code, finalists, task, test_inputs, expected_output,
+                        current_code, finalists, task, input_sets, expected_output,
                     )
 
             # ---- 候选新颖度观测 (doc 47) ----
@@ -1651,7 +1659,7 @@ class Conductor:
                     print(f"\n[Verifier] 执行 L3 验证 (L1+L2 已在候选选择中通过)...")
                     verify_results = selected_l1_l2 + self.verifier.verify_l3_only(
                         kernel_code=current_code,
-                        test_inputs=test_inputs,
+                        test_inputs=input_sets,
                         target_gflops=target_gflops,
                         task=task,
                         environment_drift=verify_drift,
@@ -1672,7 +1680,7 @@ class Conductor:
                     verify_results = self.verifier.verify(
                         kernel_code=current_code,
                         task=task,
-                        test_inputs=test_inputs,
+                        test_inputs=input_sets,
                         expected_output=expected_output,
                         target_gflops=target_gflops,
                         environment_drift=verify_drift,
@@ -2569,7 +2577,7 @@ class Conductor:
             # 后面, 于是默认配置下单次读数就能入库 (I79: 「默认关的安全装置等于不存在」)。
             # 生产者与消费者 (下面 `_save_to_db` 里那道门) 成对存在, 所以无条件要求不是
             # 「一律拒」: 先补一次独立重测, 再由判据读它。
-            self._produce_remeasure(artifact, task, test_inputs, target_gflops)
+            self._produce_remeasure(artifact, task, input_sets, target_gflops)
             self._save_to_db(artifact, task)
 
         # ── 报告产物 (设计 §17 第 3 条) ──
@@ -2904,7 +2912,7 @@ class Conductor:
             vr_list,
         )
 
-    def _produce_remeasure(self, artifact, task, test_inputs, target_gflops: float) -> None:
+    def _produce_remeasure(self, artifact, task, input_sets, target_gflops: float) -> None:
         """给「即将进长期记忆」的结论补一次**独立重测** (设计 §10.2 末 10% 预算 / §10.5-4)。
 
         为什么在这里、而不是每轮都测: 只有 `all_passed` 的产物会进语料, 而确认的对象
@@ -2924,7 +2932,7 @@ class Conductor:
         heartbeat, heartbeat_expected = self._heartbeat_for_next_measurement()
         try:
             results = self.verifier.verify_l3_only(
-                kernel_code=artifact.code, test_inputs=test_inputs,
+                kernel_code=artifact.code, test_inputs=input_sets,
                 target_gflops=target_gflops, task=task,
                 heartbeat=heartbeat, heartbeat_expected=heartbeat_expected,
                 # 重测也是一次资格判定: 适用性从**产物里记的那几级结果**里读
@@ -2989,6 +2997,34 @@ class Conductor:
                              getattr(r, "level", ""))).lower() == "l2"]
         return (all(bool(r.passed) for r in l2) if l2 else None)
 
+    @staticmethod
+    def _case_speedups_from_metrics(metrics: dict) -> dict:
+        """从产物里读出「case → 本次加速比」的账（逐 case 账本优先, 退回单 case 那格）
+
+        两个来源是**同一件事的两种形状**（多组输入 / 单组输入）: 多组时账本由
+        `Verifier._publish_case_ledger` 发布在 `metrics["cases"]`; 单组时只有 I92 那一格
+        `metrics["case_key"]`。收口只在这一处 —— 判据面的两条 (`required_cases_ok` /
+        `regression_over_limit`) 与目标函数都读它。
+
+        三态: 账本里某一项读不出 `speedup_vs_baseline` ⇒ 记 `None` = **量过但没得出**
+        数值（判据面读作「未量到」, 不是 0）。
+        """
+        ledger = metrics.get("cases")
+        if isinstance(ledger, Mapping) and ledger:
+            out = {}
+            for case, entry in ledger.items():
+                if not str(case):
+                    continue
+                value = (entry.get("speedup_vs_baseline")
+                         if isinstance(entry, Mapping) else entry)
+                out[str(case)] = None if value is None else value
+            if out:
+                return out
+        case = str(metrics.get("case_key") or "")
+        if case:
+            return {case: metrics.get("speedup_vs_baseline")}
+        return {}
+
     def _claim_level_for(self, artifact: KernelArtifact, task: TaskSchema,
                          metrics: dict, persisted: bool = False):
         """§4.4 的声明等级：把这次读数手上的证据摊给 `eligibility.claim_level`。
@@ -3027,8 +3063,8 @@ class Conductor:
         或邻居抢占造出来的 (doc 31/32/33)。一次侥幸读数不能变成永久真理。
         """
         from .contract import freeze_from_task
-        from .eligibility import (implementation_decision, regression_over_limit,
-                                  required_cases_ok)
+        from .eligibility import (aggregate_speedup, implementation_decision,
+                                  regression_over_limit, required_cases_ok)
         from .kernel_db import KernelRecord
         from .oracle import admit_to_corpus
 
@@ -3094,13 +3130,31 @@ class Conductor:
                      f"{(contract.hash or contract.compute_hash())[:12]}… 不一致 "
                      f"⇒ 不拿新判据去判旧读数 ⇒ 两条证据都未确立",)
         else:
-            # 「本次评过哪条 case」与「这条 case 正确吗」是同一份 L2 结果的两种读法
-            # （`_l2_verdict`）；没有 case 键 ⇒ 空账 ⇒ 两条证据都落未确立。
-            evaluated = {case: self._l2_verdict(artifact)} if case else {}
-            speedups = {case: metrics.get("speedup_vs_baseline")} if case else {}
+            # 「本次评过**哪些** case、各自多少」= 逐 case 账本（多组输入时由
+            # `Verifier._publish_case_ledger` 发布 `metrics["cases"]`），单组输入退回 I92
+            # 那一格 —— 两种形状在 `_case_speedups_from_metrics` 里收口成同一份账。
+            speedups = self._case_speedups_from_metrics(metrics)
+            # 正确性**按组**、身份**按签名**（见 verifier 那段注释）: 账本里的每一条都过了
+            # L2（任一组不过就回不到这里），所以逐 case 的正确性读的是**同一份 L2 结果**
+            # （`_l2_verdict`）—— 与 §4.4 的 `correctness_verified` 同一处, 看一遍不看两遍。
+            l2_verdict = self._l2_verdict(artifact)
+            evaluated = {c: l2_verdict for c in speedups}
             rco, rco_why = required_cases_ok(contract.required_cases, evaluated)
             rol, rol_why = regression_over_limit(contract.max_regression, speedups,
                                                  target_metric=contract.target_metric)
+            agg, agg_why = aggregate_speedup(contract.case_weights, speedups,
+                                             contract.aggregate,
+                                             target_metric=contract.target_metric)
+            # §6.2 的**目标函数**在这里发布成数据（不是门槛 —— §16 那条「用单形状的
+            # 加速比作为成功标准」还没收口, 见 CHECKLOG I93）。发布它的理由: 「这一次跑
+            # 的到底是什么目标」必须可查, 否则权重/口径进了 hash 也没人能核对。
+            metrics["objective"] = {
+                "aggregate": contract.aggregate or None,
+                "weighted_cases": len(contract.case_weights),
+                "evaluated_cases": len(speedups),
+                "speedup": None if agg is None else round(float(agg), 4),
+                "reason": tuple(agg_why),
+            }
             notes = tuple(rco_why) + tuple(rol_why)
         # §17.1 的实现裁决：推导只有一处（`eligibility.implementation_decision`），这里只把
         # 这次运行手上**有**的证据摊进去（见 CHECKLOG I91 / I92）。

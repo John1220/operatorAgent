@@ -10,6 +10,9 @@ import math
 import uuid
 import time
 
+# 聚合口径的词表与契约**共用一份常量**（只有一个来源, 免得任务侧与契约侧漂成两个
+# 词表）。`contract` 不 import 本模块 ⇒ 无环（见那边的模块 docstring）。
+from .contract import CASE_AGGREGATES
 from .backend_caps import Cap
 
 
@@ -268,6 +271,11 @@ class ConstraintSpec:
     #: §6.2 条款 3：`{case: 允许的回退比例}`（JSON 原生 dict；冻结进契约时转成
     #: tuple-of-pairs 以进 hash）。negative 值 = 要求**比基线更快**（值必须 > -1）。
     max_regression: dict = field(default_factory=dict)
+    #: §6.2 的**目标函数**: `{case: 权重}`（JSON 原生 dict；冻结进契约时转 tuple-of-pairs
+    #: 以进 hash）。权重之和必须 > 0；负权与坏值一律拒绝（失败关闭）。
+    case_weights: dict = field(default_factory=dict)
+    #: §6.2 的聚合口径（`contract.CASE_AGGREGATES` 之一）。空串 = 没声明。
+    aggregate: str = ""
 
     def validate(self) -> list[str]:
         errors = []
@@ -299,6 +307,28 @@ class ConstraintSpec:
                 elif not math.isfinite(float(limit)) or float(limit) <= -1.0:
                     errors.append(f"constraints.max_regression[{case!r}] 必须 > -1 且有限, "
                                   f"实际 {limit!r}")
+        if self.case_weights and not isinstance(self.case_weights, Mapping):
+            errors.append("constraints.case_weights 必须是 {case: 权重} 映射, "
+                          f"实际 {type(self.case_weights).__name__}")
+        else:
+            _w_sum = 0.0
+            for case, weight in (self.case_weights or {}).items():
+                if not isinstance(case, str) or not case.strip():
+                    errors.append(f"constraints.case_weights 的 case 不是非空字符串, 实际 {case!r}")
+                if not isinstance(weight, (int, float)) or isinstance(weight, bool):
+                    errors.append(f"constraints.case_weights[{case!r}] 必须是数值, "
+                                  f"实际 {type(weight).__name__}")
+                elif not math.isfinite(float(weight)) or float(weight) < 0.0:
+                    errors.append(f"constraints.case_weights[{case!r}] 必须 >= 0 且有限, "
+                                  f"实际 {weight!r}")
+                else:
+                    _w_sum += float(weight)
+            if self.case_weights and _w_sum <= 0:
+                errors.append("constraints.case_weights 的权重之和必须 > 0")
+        # 聚合口径走契约的词表（同一份常量, 免得任务侧与契约侧漂成两个词表）
+        if self.aggregate and self.aggregate not in CASE_AGGREGATES:
+            errors.append(f"constraints.aggregate 不在词表里 {CASE_AGGREGATES}, "
+                          f"实际 {self.aggregate!r}")
         return errors
 
 
@@ -337,6 +367,12 @@ class TaskSchema:
             constraints_dict["required_cases"] = list(self.constraints.required_cases)
         if self.constraints.max_regression:
             constraints_dict["max_regression"] = dict(self.constraints.max_regression)
+        # 同 `required_cases` 的纪律: **非空才写** —— 空 = 没声明（老任务载荷里本来也
+        # 没有这两个键），于是「有↔无」在 to_dict 这一层也是可区分的。
+        if self.constraints.case_weights:
+            constraints_dict["case_weights"] = dict(self.constraints.case_weights)
+        if self.constraints.aggregate:
+            constraints_dict["aggregate"] = str(self.constraints.aggregate)
         return {
             "task_id": self.task_id,
             "task_type": self.task_type.value,

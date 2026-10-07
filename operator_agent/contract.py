@@ -120,6 +120,20 @@ def case_key(inputs: Any) -> str:
     return "|".join(parts)
 
 
+#: §6.2 的**聚合口径**（目标函数）。设计原文给的是
+#: `Literal["geomean", "weighted_geomean", "max_regret"]` —— py3.9 没有 `StrEnum`
+#: （同 `CLAIM_LEVELS` / `IMPLEMENTATION_DECISIONS` 的做法）⇒ 常数 + 有序元组。
+#: `mean` = 加权算术平均（权重当相对份额）; `worst_case` = 最差的那一条 case ——
+#: 设计里 `max_regret` 要挡的正是「总体好看不能掩盖最差的一条」那个方向。
+#: 设计里的 `geomean`（等权）**不再单列**：它就是所有权重都为 1 的
+#: `weighted_geomean`（多一个成员只会多一条会漂的同义路）。
+CASE_AGGREGATE_WEIGHTED_GEOMEAN = "weighted_geomean"
+CASE_AGGREGATE_MEAN = "mean"
+CASE_AGGREGATE_WORST_CASE = "worst_case"
+CASE_AGGREGATES = (CASE_AGGREGATE_WEIGHTED_GEOMEAN, CASE_AGGREGATE_MEAN,
+                    CASE_AGGREGATE_WORST_CASE)
+
+
 @dataclass(frozen=True)
 class FrozenContract:
     """冻结后的契约。**只读**; `hash` 由内容决定, 改一个字段就变。"""
@@ -137,6 +151,11 @@ class FrozenContract:
     #: §6.2 条款 3：`((case_key, 允许的回退比例), ...)` —— 逐 case 硬回退上限。
     #: 用 tuple-of-pairs 而不是 dict：与 `ShapeDist.entries` 同款（冻结对象不可变、可哈希）。
     max_regression: tuple = ()
+    #: §6.2 / §3.4：`((case_key, 权重), ...)` —— 目标函数的权重。空 tuple = **契约没
+    #: 声明**（判据面按「未确立」走, 不是「权重都是 1」）。权重之和必须 > 0（校验）。
+    case_weights: tuple = ()
+    #: §6.2 的**聚合口径**（`CASE_AGGREGATES` 之一）。空串 = 没声明（同上一格的三态）。
+    aggregate: str = ""
     notes: str = ""
     #: 规范化 JSON 的 sha256 —— 不存进 as_dict 的计算路径, 单独算
     hash: str = field(default="", compare=False)
@@ -161,6 +180,12 @@ class FrozenContract:
             d["required_cases"] = list(self.required_cases)
         if self.max_regression:
             d["max_regression"] = [[str(k), float(v)] for k, v in self.max_regression]
+        # 同一条纪律（条款 4 + 空声明不进）: **权重进 hash**（设计 §6.2 明写「权重进
+        # 契约 hash」）—— 权重能改就等于目标函数能改; 空串/空表 = 没声明 ⇒ 不进。
+        if self.case_weights:
+            d["case_weights"] = [[str(k), float(v)] for k, v in self.case_weights]
+        if self.aggregate:
+            d["aggregate"] = str(self.aggregate)
         return d
 
     def regression_limit(self, case: str) -> Optional[float]:
@@ -169,6 +194,17 @@ class FrozenContract:
         「没声明上限」与「声明了 0（一点也不许退）」是两件事，判据面必须分得开。
         """
         for key, value in self.max_regression:
+            if str(key) == str(case):
+                return float(value)
+        return None
+
+    def case_weight(self, case: str) -> Optional[float]:
+        """这条 case 在目标函数里的权重；没为它声明 ⇒ `None`（**不是** 0）
+
+        「没声明权重」与「声明了 0 权重（这条不进聚合）」是两件事：前者是没判据，
+        后者是一条明确的排除。判据面必须分得开（同 `regression_limit`）。
+        """
+        for key, value in self.case_weights:
             if str(key) == str(case):
                 return float(value)
         return None
@@ -196,7 +232,16 @@ def _regression_pairs(raw) -> tuple:
     return tuple((str(k), v) for k, v in items)
 
 
-def _lint_case_declarations(required_cases, max_regression) -> list:
+def _weight_pairs(raw) -> tuple:
+    """同 `_regression_pairs`：dict 或 `(case, 值)` 序列都收，值**不在这里**转 float。"""
+    if not raw:
+        return ()
+    items = raw.items() if isinstance(raw, Mapping) else raw
+    return tuple((str(k), v) for k, v in items)
+
+
+def _lint_case_declarations(required_cases, max_regression,
+                            case_weights=(), aggregate="") -> list:
     """§6.2 条款 2/3 的两项声明进契约前的 CONTRACT_LINT。
 
     失败关闭：声明了但读不出来（空串、非数值、值 ≤ -1）就拒绝冻结 —— 一个读不出来的
@@ -219,6 +264,27 @@ def _lint_case_declarations(required_cases, max_regression) -> list:
             errs.append(f"max_regression[{key!r}] 必须是数值: {value!r}")
         elif not math.isfinite(float(value)) or float(value) <= -1.0:
             errs.append(f"max_regression[{key!r}] 必须 > -1 且有限: {value!r}")
+    # 权重：非负、有限，且**和 > 0** —— 全零的权重表等于「谁都不算」，聚合出来的是
+    # 一个没有分母的数（不是「没声明」，那会被读成一条判据）。
+    weight_sum = 0.0
+    for item in case_weights or ():
+        try:
+            key, value = item
+        except (TypeError, ValueError):
+            errs.append(f"case_weights 的项必须是 (case, 数值) 二元组: {item!r}")
+            continue
+        if not isinstance(key, str) or not key.strip():
+            errs.append(f"case_weights 的 case 不是非空字符串: {key!r}")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            errs.append(f"case_weights[{key!r}] 必须是数值: {value!r}")
+        elif not math.isfinite(float(value)) or float(value) < 0.0:
+            errs.append(f"case_weights[{key!r}] 必须 >= 0 且有限: {value!r}")
+        else:
+            weight_sum += float(value)
+    if case_weights and weight_sum <= 0:
+        errs.append("case_weights 的权重之和必须 > 0")
+    if aggregate and aggregate not in CASE_AGGREGATES:
+        errs.append(f"aggregate 不在词表里 {CASE_AGGREGATES}: {aggregate!r}")
     return errs
 
 
@@ -232,7 +298,9 @@ def freeze(kernel_type: str,
            required_caps=(),
            notes: str = "",
            required_cases=(),
-           max_regression=()) -> FrozenContract:
+           max_regression=(),
+           case_weights=(),
+           aggregate: str = "") -> FrozenContract:
     """CONTRACT_LINT + 冻结。任何 validate 失败都抛 ContractError —— **失败关闭**。
 
     「不可判定就交还给人」(设计 §10.1 REJECT): 这里不猜默认值。缺数值语义的契约
@@ -249,7 +317,8 @@ def freeze(kernel_type: str,
     errs += [f"dtype_semantics: {e}" for e in dtype_semantics.validate()]
     errs += [f"baseline: {e}" for e in baseline.validate()]
     errs += [f"shapes: {e}" for e in shapes.validate()]
-    errs += _lint_case_declarations(required_cases, max_regression)
+    errs += _lint_case_declarations(required_cases, max_regression,
+                                    case_weights, aggregate)
     if errs:
         raise ContractError("契约不可判定: " + "; ".join(errs))
 
@@ -267,6 +336,8 @@ def freeze(kernel_type: str,
         # 必须同哈希是契约哈希的第一条要求, 见模块 docstring）。
         required_cases=tuple(sorted(set(required_cases or ()))),
         max_regression=tuple(sorted((str(k), float(v)) for k, v in (max_regression or ()))),
+        case_weights=tuple(sorted((str(k), float(v)) for k, v in (case_weights or ()))),
+        aggregate=str(aggregate or ""),
     )
     # 冻结后立刻写入 hash: 之后 as_dict() 用的就是这份
     return FrozenContract(
@@ -280,6 +351,8 @@ def freeze(kernel_type: str,
         required_caps=c.required_caps,
         required_cases=c.required_cases,
         max_regression=c.max_regression,
+        case_weights=c.case_weights,
+        aggregate=c.aggregate,
         notes=c.notes,
         hash=c.compute_hash(),
     )
@@ -319,6 +392,8 @@ def load_dict(payload: Mapping[str, Any]) -> FrozenContract:
             # 「未确立」走。**不**在这里补默认值：补了就等于替人写了判据（见 §4.4 三态）。
             required_cases=tuple(payload.get("required_cases") or ()),
             max_regression=_regression_pairs(payload.get("max_regression")),
+            case_weights=_weight_pairs(payload.get("case_weights")),
+            aggregate=str(payload.get("aggregate") or ""),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ContractError(f"无法从载荷重建契约: {exc}") from exc
@@ -368,4 +443,6 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
         required_cases=tuple(getattr(cons, "required_cases", ()) or ()),
         # 任务侧写的是 dict（JSON 原生），冻结契约收的是 tuple-of-pairs（可哈希）
         max_regression=_regression_pairs(getattr(cons, "max_regression", None)),
+        case_weights=_weight_pairs(getattr(cons, "case_weights", None)),
+        aggregate=str(getattr(cons, "aggregate", "") or ""),
     )

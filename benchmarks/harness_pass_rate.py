@@ -88,6 +88,13 @@ MAX_ERROR = 1e-2
 #: （「自己实现 vs 直接用库」那一条建议），**不**参与入库门（§4.4 的阶梯与品种门都不读它）。
 MAX_REGRESSION = 0.05
 
+#: §6.2 **聚合口径**：声明出「这次跑的目标函数是什么」。单 case 的权重就是 1（今天这个
+#: 驱动一条 case 一条 case 地跑），所以 `weighted_geomean(1 条 case)` = 那一条的加速比
+#: —— 这个数的用途是让目标在产物里**可查**，不是门槛（准入仍看主 case 的加速比，见
+#: CHECKLOG I93 的仍欠）。多 case 的权重是**声明的**，不是机器学出来的。
+SINGLE_CASE_WEIGHT = 1.0
+CASE_AGGREGATE = "weighted_geomean"
+
 
 def llm_from_config() -> LLMClient:
     """从 config.yaml 读自建端点。值只进环境变量, **不打印**。"""
@@ -108,7 +115,7 @@ def llm_from_config() -> LLMClient:
 
 
 def _task(kernel_type: str, precision: Precision, *, required_cases=(),
-          max_regression=None) -> TaskSchema:
+          max_regression=None, case_weights=None) -> TaskSchema:
     return TaskSchema(
         task_type=TaskType.OPERATOR_GENERATION,
         source=SourceSpec(kernel_type=kernel_type, complexity=TaskComplexity.MEDIUM),
@@ -122,7 +129,9 @@ def _task(kernel_type: str, precision: Precision, *, required_cases=(),
         constraints=ConstraintSpec(precision=precision, min_speedup=MIN_SPEEDUP,
                                    max_error=MAX_ERROR,
                                    required_cases=tuple(required_cases or ()),
-                                   max_regression=dict(max_regression or {})),
+                                   max_regression=dict(max_regression or {}),
+                                   case_weights=dict(case_weights or {}),
+                                   aggregate=CASE_AGGREGATE),
     )
 
 
@@ -1232,7 +1241,10 @@ def run_one(label, kernel_type, precision, shape, backend, rounds, run_root=""):
         _case = case_key(inputs)
         art = conductor.execute(
             _task(kernel_type, precision, required_cases=(_case,),
-                  max_regression={_case: MAX_REGRESSION}),
+                  max_regression={_case: MAX_REGRESSION},
+                  # 权重与必判清单是**同一条 case**（同一个 `_case` 变量）: 声明与输入
+                  # 来自同一次构造，不许各写一个字符串。
+                  case_weights={_case: SINGLE_CASE_WEIGHT}),
             inputs, target_gflops=0.0)
     except Exception as exc:  # noqa: BLE001
         # 一次 ssh 抖动不该毁掉整场测量: 记成崩溃样本, 继续下一个

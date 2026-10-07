@@ -33,8 +33,11 @@ l3_pass_is_refused / backend_real_device) 与心跳、契约哈希、峰值、li
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Dict, Mapping, Optional, Tuple
 
+from .contract import (CASE_AGGREGATE_MEAN, CASE_AGGREGATE_WORST_CASE,
+                       CASE_AGGREGATES)
 from .source_lang import COVERAGE_AST, COVERAGE_NONE, COVERAGE_REGEX
 
 # §4.3 第 5 条的常数: value > 参考下界 × 1.05 判为「测量错了」而不是「很棒」。
@@ -532,6 +535,87 @@ def regression_over_limit(max_regression, speedups,
         return True, (f"{detail} ⇒ §6.2 条款 3「候选不得晋级」",)
     return False, ("每条声明了回退上限的 case 都在限内",)
 
+
+def aggregate_speedup(case_weights, speedups, aggregate,
+                      target_metric: str = "speedup_vs_baseline",
+                      ) -> Tuple[Optional[float], Tuple[str, ...]]:
+    """§6.2 的**目标函数**: 把逐 case 的加速比聚合成一个数（三态 + 逐 run 理由）
+
+    * `case_weights`: 契约声明的 `((case, 权重), ...)`（也接受 dict）
+    * `speedups`: 本次量到的 case → 加速比（`None` = 量过但没得出数值）
+    * `aggregate`: `CASE_AGGREGATES` 之一; 空串 = 没声明
+
+    四条读法（登记在 CHECKLOG I93）:
+
+      * 没声明权重**或**没声明口径 ⇒ `None` —— **不替人补默认**（补一个「等权」/
+        「加权几何平均」就等于替人写了目标函数, 而同一条纪律 §3.2 写过: 缺数值语义
+        即拒绝）;
+      * 声明了、但有一条带权重的 case **没量到** ⇒ `None`（点名缺哪几条）: 分母不全
+        ⇒ 这个数没有指称对象。宁可未确立, 也不给一个「少算了最差那条」的数;
+      * 几何平均要求每条加速比 **> 0**（`ln` 的定义域）⇒ 有一条 ≤ 0 就 `None`;
+        `mean` / `worst_case` 不受此限 —— `worst_case` 取最差的那一条, 正是设计里
+        `max_regret` 要挡的方向（总体好看不能掩盖最差的一条）;
+      * 目标指标不是 `speedup_vs_baseline` ⇒ `None`（同 `regression_over_limit`:
+        吞吐/延迟的聚合要另一套换算, 今天不存在）。
+
+    ⚠️ **今天这个数是「数据」不是「门槛」**: 候选准入仍由主 case 的
+    `speedup_vs_baseline >= min_speedup` 判（§16 反模式「用单形状的加速比作为成功
+    标准」还没收口 —— 见 CHECKLOG I93 的仍欠那一条）。把它直接接进门槛会让
+    「没声明权重的调用方」整片失守, 那是另一种自锁。
+    """
+    if not case_weights:
+        return None, ("契约没有声明 case_weights ⇒ 目标函数没有权重 ⇒ 未确立",)
+    if not aggregate:
+        return None, ("契约没有声明 aggregate（聚合口径）⇒ 未确立",)
+    if aggregate not in CASE_AGGREGATES:
+        return None, (f"aggregate 不在词表里 {CASE_AGGREGATES}: {aggregate!r} ⇒ 未确立",)
+    if not isinstance(case_weights, (Mapping, list, tuple)):
+        return None, (f"case_weights 的形状读不出来 "
+                      f"({type(case_weights).__name__}) ⇒ 未确立",)
+    if target_metric != "speedup_vs_baseline":
+        return None, (f"目标指标是 {target_metric} ⇒ 今天只有 speedup_vs_baseline "
+                      f"口径的聚合 ⇒ 未确立",)
+    pairs = (case_weights.items() if isinstance(case_weights, Mapping)
+             else case_weights)
+    weights: dict = {}
+    for item in pairs:
+        try:
+            key, value = item
+        except (TypeError, ValueError):
+            return None, (f"case_weights 里有一项读不出来: {item!r} ⇒ 未确立",)
+        try:
+            weights[str(key)] = float(value)
+        except (TypeError, ValueError):
+            return None, (f"case_weights[{key!r}] 不是数值: {value!r} ⇒ 未确立",)
+    if not isinstance(speedups, Mapping):
+        speedups = {}
+    measured: dict = {}
+    for case in weights:
+        try:
+            value = speedups.get(case)
+            measured[case] = None if value is None else float(value)
+        except (TypeError, ValueError):
+            measured[case] = None
+    unmeasured = sorted(c for c in weights if measured.get(c) is None)
+    if unmeasured:
+        still = sorted(c for c in weights if c not in unmeasured)
+        tail = f"（本次量到加速比的：{still}）" if still else ""
+        return None, (f"契约给了 case {unmeasured} 的权重, 但本次没有它们的加速比"
+                      f" ⇒ 未确立{tail}",)
+    total = sum(weights.values())
+    if total <= 0:
+        return None, (f"case_weights 的权重之和是 {total:g} ⇒ 聚合没有分母 ⇒ 未确立",)
+    if aggregate == CASE_AGGREGATE_WORST_CASE:
+        worst = min(measured[c] for c in weights)
+        return worst, (f"最差的一条 case 是 {worst:g}x（{len(weights)} 条带权重的 case）",)
+    if aggregate == CASE_AGGREGATE_MEAN:
+        value = sum(weights[c] * measured[c] for c in weights) / total
+        return value, (f"加权算术平均 = {value:g}x（{len(weights)} 条 case）",)
+    bad = sorted(c for c in weights if measured[c] <= 0)
+    if bad:
+        return None, (f"几何平均要求每条加速比 > 0, 但 {bad} 不是 ⇒ 未确立",)
+    value = math.exp(sum(weights[c] * math.log(measured[c]) for c in weights) / total)
+    return value, (f"加权几何平均 = {value:g}x（{len(weights)} 条 case）",)
 
 def implementation_decision(*, eligibility=None, claim_record=None,
                             required_cases_ok: Optional[bool] = None,

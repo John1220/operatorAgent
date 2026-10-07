@@ -11,11 +11,12 @@ L3: 性能验证 (性能达到预期加速比) + Roofline 分析
 import time
 import dataclasses
 import numpy as np
-from typing import Optional
+from typing import Mapping, Optional
 from .schemas import (
     VerificationResult, VerificationLevel, TaskSchema, Precision,
 )
 from .anticheat import static_audit
+from .contract import case_key
 from .source_lang import classify
 
 
@@ -1064,6 +1065,102 @@ class Verifier:
             return note + lead + f"误差是参考幅值的 {scale:.3g} 倍"
         return note + "，而这把尺没给出可比的数"
 
+    def _bench_case(self, kernel_code: str, inputs: dict, task: TaskSchema):
+        """量**一组**输入的「候选 + 基线」—— 主 case 与逐 case 账本共用这一处
+
+        返回 `(bench, remote_bench)`：远端优先（`benchmark_with_baselines`，同机基准
+        协议），否则本机 `benchmark`。协议参数（`repeat=5` / `baseline_priority`）只
+        在这里写一次 —— 主 case 与账本里其余 case 的读数会被放在同一张表里比，两处
+        协议一漂就会比出两种数（这是「一个事实一处生产」在本函数上的样子）。
+        """
+        remote_bench = None
+        if Cap.SAME_DEVICE_BASELINE in self._caps:
+            remote_bench = self.backend.benchmark_with_baselines(
+                kernel_code, inputs, task.source.kernel_type,
+                precision=task.constraints.precision.value,
+                baseline_priority=baseline_plan(task.source.kernel_type,
+                                                task.constraints.precision.value),
+                reference_source=task.source.reference_source or "",
+            )
+        bench = (self.backend.benchmark(kernel_code, inputs, warmup=2, repeat=5)
+                 if remote_bench is None else remote_bench)
+        return bench, remote_bench
+
+    def _measure_case_speedup(self, kernel_code: str, inputs: dict, task: TaskSchema) -> dict:
+        """单个**非主** case 的加速比（与主 case 同一对调用、同一个口径）
+
+        口径与 `_verify_performance` 里那两处逐字对齐: 远端 `baseline_selected` 那条
+        基线 / 本机 `_measure_baseline`（按输入签名缓存）; 分子都是**候选的中位（或
+        最小）耗时**。逐 case 失败**不抛**: 记 `None` + 原因 —— 账本是证据面，不是
+        判决面，它不许把一次 L3 打成异常（三态: 判据面读作「未量到」）。
+        """
+        try:
+            bench, remote = self._bench_case(kernel_code, inputs, task)
+        except Exception as exc:  # noqa: BLE001 —— 账本不许把 L3 打成异常
+            return {"speedup_vs_baseline": None, "reason": f"逐 case 测量抛异常: {exc}"}
+        if remote is not None:
+            if not remote.get("success", False):
+                return {"speedup_vs_baseline": None,
+                        "reason": f"远端性能测试失败: {remote.get('error', '')}"}
+            cargo = remote.get("candidate", {}) or {}
+            kernel_min_ms = (cargo.get("median_time_ms") or cargo.get("min_time_ms")
+                             or remote.get("avg_time_ms") or 0)
+            name = remote.get("baseline_selected")
+            base = (remote.get("baselines", {}) or {}).get(name) if name else None
+            if not base:
+                return {"speedup_vs_baseline": None,
+                        "reason": "远端没报 baseline_selected ⇒ 没有基线可比"}
+            base_ms = base.get("median_time_ms", base.get("min_time_ms", 0))
+            speedup = base_ms / kernel_min_ms if kernel_min_ms > 0 else None
+            return {"speedup_vs_baseline": (round(speedup, 4) if speedup else None),
+                    "baseline_type": name, "kernel_min_ms": round(kernel_min_ms, 6)}
+        kernel_min_ms = (bench.get("median_time_ms") or bench.get("min_time_ms")
+                         or bench.get("avg_time_ms") or 0)
+        base = self._measure_baseline(task, inputs)
+        if base is None:
+            return {"speedup_vs_baseline": None,
+                    "reason": "这一组没有参考实现 ⇒ 没有基线可比"}
+        speedup = base["baseline_time_ms"] / kernel_min_ms if kernel_min_ms > 0 else None
+        return {"speedup_vs_baseline": (round(speedup, 4) if speedup else None),
+                "baseline_type": base["baseline_type"],
+                "baseline_time_ms": round(base["baseline_time_ms"], 4),
+                "baseline_reused": bool(base.get("baseline_reused")),
+                "kernel_min_ms": round(kernel_min_ms, 6)}
+
+    def _publish_case_ledger(self, metrics: dict, kernel_code: str, test_inputs,
+                             task: TaskSchema) -> None:
+        """把**逐 case** 的加速比账本写进这次 L3 的 metrics（`metrics["cases"]`）
+
+        §6.2 条款 2/3 的证据面要求「本次评了哪几条 case、各自多少」。在此之前 L3 明
+        说「多组输入套件时，性能基准使用第一组输入」（§3.4 的欠账）—— 于是「全部形状」
+        只剩 L2 的正确性，加速比只有第一条，而 §16 反模式点的正是「用单形状的加速比
+        作为成功标准」。现在: 主 case 用**已经算出来的那个数**（同一件事不量两遍），
+        其余每组各量一次。
+
+        ⚠️ 只在**有主 case 读数**的两条出口调用（远端 / 本机有参考实现）: 没有参考
+        实现时这条路判的是绝对 GFLOPS，逐 case 的加速比在那里没有指称对象 —— 硬造
+        一份全是 `None` 的账本只会让「没量到」看起来像「量过了」。
+
+        ⚠️ case 身份 = **输入形状签名**（`contract.case_key`）⇒ 两组**同形状**的输入
+        是**同一条 case**：账本按 case 去重（后一组不重复测）；而 L2 的逐组正确性照旧
+        逐组做（正确性按组、身份按签名，两件事本来就不是一个粒度）。
+        """
+        input_sets = test_inputs if isinstance(test_inputs, list) else [test_inputs]
+        if len(input_sets) < 2:
+            return
+        ledger = {}
+        first = case_key(input_sets[0])
+        if first:
+            ledger[first] = {"speedup_vs_baseline": metrics.get("speedup_vs_baseline"),
+                             "basis": "主 case: 本次 L3 那个读数（未重复测）"}
+        for inputs in input_sets[1:]:
+            key = case_key(inputs)
+            if not key or key in ledger:
+                continue
+            ledger[key] = self._measure_case_speedup(kernel_code, inputs, task)
+        if len(ledger) > 1:
+            metrics["cases"] = ledger
+
     def _verify_performance(self, kernel_code: str, test_inputs, target_gflops: float,
                             task: TaskSchema,
                             environment_drift: Optional[list] = None,
@@ -1075,16 +1172,10 @@ class Verifier:
         print(f"  [Verifier] L3: 性能验证 (要求加速比 >= {min_required:.2f}x vs baseline)...")
         # 多组输入套件时，性能基准使用第一组输入
         bench_inputs = test_inputs[0] if isinstance(test_inputs, list) else test_inputs
-        remote_bench = None
-        if Cap.SAME_DEVICE_BASELINE in self._caps:
-            remote_bench = self.backend.benchmark_with_baselines(
-                kernel_code, bench_inputs, task.source.kernel_type,
-                precision=task.constraints.precision.value,
-                baseline_priority=baseline_plan(task.source.kernel_type,
-                                                task.constraints.precision.value),
-                reference_source=task.source.reference_source or "",
-            )
-        bench = self.backend.benchmark(kernel_code, bench_inputs, warmup=2, repeat=5) if remote_bench is None else remote_bench
+        # 一次 case 的「候选 + 基线」测量只有这一处（`_bench_case`）—— 逐 case 账本
+        # （`_publish_case_ledger` / `_measure_case_speedup`）也走同一条路: 两处协议
+        # 一漂（repeat / 远端优先 / 基线选择）就会在同一张表里比出两种数。
+        bench, remote_bench = self._bench_case(kernel_code, bench_inputs, task)
 
         if remote_bench is not None and not remote_bench.get("success", False):
             return VerificationResult(
@@ -1356,6 +1447,7 @@ class Verifier:
                     msg += f" (注: 卡与 {others} 个其他进程共享, 瞬时 util={util}%)"
 
                 print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
+                self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
                 return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                           passed=passed, message=msg, metrics=metrics)
 
@@ -1407,6 +1499,7 @@ class Verifier:
                 heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
             passed = self._refuse_l3_pass(passed, assessment)
             print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
+            self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
             return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                       passed=passed, message=msg, metrics=metrics)
 

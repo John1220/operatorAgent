@@ -367,6 +367,27 @@ def _implementation_decision_lines(m: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _objective_lines(m: Dict[str, Any]) -> List[str]:
+    """§6.2 的**目标函数**（权重 + 聚合口径 + 那个数）—— **声明了才印**
+
+    缺键 ⇒ 不印（同 `_claim_level_lines` / `_implementation_decision_lines`）：印一个默认
+    聚合会让「没声明」读成「等权几何平均」。这个数是**数据**不是门槛（准入今天仍看主
+    case 的加速比），所以那条边界必须和数一起印 —— 读的人默认会把它当门槛。
+    """
+    obj = _get(m, "objective", None)
+    if not isinstance(obj, dict):
+        return []
+    value = obj.get("speedup")
+    out = [f"- 目标函数 (§6.2): `{obj.get('aggregate') or '未声明'}` = "
+           f"{'未确立' if value is None else value} "
+           f"({obj.get('evaluated_cases', 0)}/{obj.get('weighted_cases', 0)} 条 case 有权重)"]
+    for reason in (obj.get("reason") or []):
+        out.append(f"  - {reason}")
+    if value is not None:
+        out.append("  - ⚠️ 这个数今天**不进门槛**: 准入仍看主 case 的加速比 "
+                   "(§16 反模式「用单形状的加速比作为成功标准」未收口, 见 CHECKLOG I93)")
+    return out
+
 def _best_known_good(artifact: Any, m: Dict[str, Any]) -> List[str]:
     out = ["## 1. best-known-good", ""]
     code = str(getattr(artifact, "code", "") or "")
@@ -403,6 +424,7 @@ def _best_known_good(artifact: Any, m: Dict[str, Any]) -> List[str]:
     if isinstance(stop, dict):
         out.append(f"- 循环停因: `{stop.get('reason')}` "
                    f"(第 {stop.get('round')} 轮) {stop.get('detail') or ''}".rstrip())
+    out += _objective_lines(m)
     out += _implementation_decision_lines(m)
     out.append("")
     return out
