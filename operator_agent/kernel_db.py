@@ -14,6 +14,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
+from .kernel_templates import SOFTMAX_TRITON
 from .schemas import UnifiedSketch
 
 
@@ -129,29 +130,10 @@ def kernel(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
     return C
 """
 
-_TRITON_SOFTMAX_CODE = """import triton
-import triton.language as tl
-import torch
-
-@triton.jit
-def softmax_kernel(x_ptr, y_ptr, n_cols, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(0)
-    offs = tl.arange(0, BLOCK_SIZE)
-    mask = offs < n_cols
-    x = tl.load(x_ptr + pid * n_cols + offs, mask=mask, other=-float('inf'))
-    x_max = tl.max(x, axis=0)
-    x_exp = tl.exp(x - x_max)
-    x_sum = tl.sum(x_exp, axis=0)
-    y = x_exp / x_sum
-    tl.store(y_ptr + pid * n_cols + offs, y, mask=mask)
-
-def kernel(X):
-    n_rows, n_cols = X.shape
-    Y = torch.empty_like(X)
-    BLOCK_SIZE = triton.next_power_of_2(n_cols)
-    softmax_kernel[(n_rows,)](X, Y, n_cols, BLOCK_SIZE=BLOCK_SIZE)
-    return Y
-"""
+# 单一真源: kernel_templates.py。此处曾与 rule_templates._SOFTMAX_TRITON 逐字重复
+# （675 字符），两份都在跑而没有任何断言让它们同源。
+# 见 tests/test_template_single_source.py。
+_TRITON_SOFTMAX_CODE = SOFTMAX_TRITON
 
 _TRITON_ATTENTION_CODE = """import triton
 import triton.language as tl

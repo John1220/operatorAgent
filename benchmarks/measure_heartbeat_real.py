@@ -31,28 +31,20 @@ from operator_agent.calibration import (KNOWN_GOOD_SOURCE,  # noqa: E402
                                        KNOWN_SLOW_SOURCE, backend_bench_fn,
                                        default_inputs, heartbeat)
 from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
+from operator_agent.kernel_templates import (  # noqa: E402
+    MATMUL_TRITON, jit_kernel_source,
+)
 
-# ── triton 那一对 (取自 operator_agent/rule_templates.py 的 matmul 模板) ─────
+# ── triton 那一对 (由 kernel_templates.MATMUL_TRITON **派生**, 不再手抄) ────
 # 好核: 模板原样。慢核: 同一个 launcher 连跑 8 遍, 只返回最后一遍 —— 与 numpy 那对
 # 的构造完全同构 (数值正确, 只是多算), 这样两对的分离度才可比。
-TRITON_BODY = """
-@triton.jit
-def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
-                  stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
-                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k_start in range(0, K, BLOCK_K):
-        a = tl.load(a_ptr + offs_m[:, None] * stride_am + (offs_k + k_start)[None, :] * stride_ak)
-        b = tl.load(b_ptr + (offs_k + k_start)[:, None] * stride_bk + offs_n[None, :] * stride_bn)
-        acc += tl.dot(a, b)
-    c = acc.to(tl.float32)
-    tl.store(c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn, c)
-"""
+#
+# 这里曾经是一份**手抄**的核: 与模板语义相同、签名被重新折行 ⇒ 逐字比较抓不到,
+# 而注释写着"取自 rule_templates.py"。模板一改, 这个量具就会静静地量另一个核,
+# 注释继续撒谎。现在改为由单一真源派生, 派生关系由
+# tests/test_template_single_source.py 盯着。
+
+TRITON_BODY = jit_kernel_source(MATMUL_TRITON)
 
 TRITON_HEAD = "import triton\nimport triton.language as tl\nimport torch\n"
 
