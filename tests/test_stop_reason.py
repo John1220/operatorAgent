@@ -3,7 +3,8 @@
 doc 53 §7.1 从 DSH 借的是**形状**而不是 hook 系统：`agent/turn-stopping` 是
 「自然停止边界上一个被 await 的串行通知」(`agent-lifecycle.md:59-60`、
 `architecture.md:84`、`interception-extension-points.md:21`)，要继续得显式 `agent.steer()`。
-本仓今天的对应物是 `conductor.py` 优化循环里的 6 处 `break` + 1 处走满轮次，
+本仓今天的对应物是 `conductor.py` 优化循环里的 13 处终止出口 (`return _ROUND_STOP`,
+散在 _run_round 与它拆出来的 _round_enter_or_stop / _round_close_out 里) + 1 处走满轮次，
 其中 5 处的「为什么」只活在 stdout 的一行 print 上 —— 产物里
 「没练够」「练到顶了」「修坏了」「压根没验过」全部同形 (`all_passed=False` + 一个轮次数)。
 rounds-to-pass 那类统计 (#48) 要的正是这个区分，所以这一步先记成数据、不加任何新阈值。
@@ -159,6 +160,10 @@ class TestStopReasonIsRecorded(unittest.TestCase):
             Conductor._record_stop(Conductor(backend=MockGPU(), kernel_db=KernelDatabase(),
                                             llm=None), art, 1, "budget", "还没这一档")
 
+    #: 轮次的组成部分 —— 出口可能住在其中任何一个里。Stage3 从 _run_round 里搬出了
+    #: 轮首两道门与收尾两段, 出口跟着走。少列一个方法, 它里面的出口就会漏计。
+    _ROUND_PARTS = ("_run_round", "_round_enter_or_stop", "_round_close_out")
+
     def test_every_exit_from_a_round_has_a_reason_attached(self):
         """防腐: 轮次里每个「终止优化循环」的出口, 紧邻上方必须是 `_record_stop(...)`。
 
@@ -166,48 +171,78 @@ class TestStopReasonIsRecorded(unittest.TestCase):
         缺这一档 —— 与 doc 49 §7.7 那条「差分守卫要配绝对锚点」同族, 这里用**计数**钉住。
 
         Stage2 把循环体搬进 _run_round 之后, 出口的写法从 `break` 变成了
-        `return _ROUND_STOP`。判据要盯的东西一个字没变 (每个终止出口都得带 reason),
-        所以这里跟到新写法上 —— 是换位置, 不是放宽。
+        `return _ROUND_STOP`; Stage3 又把轮首门与收尾搬成方法, 出口跟着散到三个
+        方法里。判据要盯的东西一个字没变 (每个终止出口都得带 reason), 所以这里跟着走 ——
+        是换位置, 不是放宽。
+
+        多出来的一类出口是**委派**式的:
+
+            if self._round_enter_or_stop(state, round_num) is _ROUND_STOP:
+                return _ROUND_STOP
+
+        它的 reason 记在被委派的那个方法里, 所以判据把这种出口单独数, 并要求它委派到的
+        方法里**确实**有一个带 reason 的实质出口 —— 否则委派就成了藏出口的通道。
         """
         tree = ast.parse(io.open(ROOT / "operator_agent" / "conductor.py",
                                  encoding="utf-8").read())
-        run_round = next(n for n in ast.walk(tree)
-                         if isinstance(n, ast.FunctionDef) and n.name == "_run_round")
-        exits, reasoned = [], 0
-        for node in ast.walk(run_round):
-            if (isinstance(node, ast.Return) and isinstance(node.value, ast.Name)
-                    and node.value.id == "_ROUND_STOP"):
-                exits.append(node.lineno)
+        conductor = next(n for n in ast.walk(tree)
+                         if isinstance(n, ast.ClassDef) and n.name == "Conductor")
+        parts = [next(n for n in conductor.body
+                      if isinstance(n, ast.FunctionDef) and n.name == name)
+                 for name in self._ROUND_PARTS]
+        calls = {n.lineno for fn in parts for n in ast.walk(fn)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "_record_stop"}
+        exits, delegated = [], []
+        for fn in parts:
+            parents = {ch: n for n in ast.walk(fn) for ch in ast.iter_child_nodes(n)}
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Return) and isinstance(node.value, ast.Name)
+                        and node.value.id == "_ROUND_STOP"):
+                    continue
+                parent = parents.get(node)
+                targets = ([x.func.attr for x in ast.walk(parent.test)
+                            if isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute)
+                            and x.func.attr in self._ROUND_PARTS]
+                           if isinstance(parent, ast.If) else [])
+                if targets:
+                    delegated.append((node.lineno, targets[0], fn.name))
+                else:
+                    exits.append((node.lineno, fn.name))
         exits.sort()          # ast.walk 是 BFS 不是行序, 下面是按行序钉的
-        body_lines = {n.lineno for n in ast.walk(run_round)
-                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                      and n.func.attr == "_record_stop"}
-        for bl in exits:
-            if any(bl > call_line and bl - call_line <= 3 for call_line in body_lines):
-                reasoned += 1
-        self.assertEqual(len(exits), reasoned,
-                         f"轮次里 {len(exits)} 个出口, 只有 {reasoned} 个带着 reason")
+        reasoned = [e for e in exits if any(0 < e[0] - line <= 3 for line in calls)]
+        self.assertEqual(len(exits), len(reasoned),
+                         f"轮次里 {len(exits)} 个实质出口, 只有 {len(reasoned)} 个带着 reason")
+        for lineno, target, holder in delegated:
+            self.assertTrue([e for e in exits if e[1] == target],
+                            f"{holder}:L{lineno} 的委派出口把 reason 推给了 {target}, "
+                            f"而 {target} 里没有带 reason 的实质出口 —— 委派成了藏出口的通道")
         # 绝对锚点 (doc 49 §7.7): 「每个出口都带 reason」是差分判据, 它拦不住「把一个出口
         # 改成 continue」—— 少一个出口, 两边一起少, 等式照样成立。实测: 把第一个出口
         # (wall_clock_exhausted) 改成 return _ROUND_CONTINUE, 全量 2570 条全绿。
         # 所以个数与对应关系都写死。
         self.assertEqual(13, len(exits),
                          "终止出口的个数变了 —— 少一个就是某个出口被改成了「继续」")
-        calls = {n.lineno: n for n in ast.walk(run_round)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                 and n.func.attr == "_record_stop"}
+        self.assertEqual(1, len(delegated),
+                         "委派式出口的个数变了 —— 进出口清单的话, 这里也要改")
+        calls_by_line = {}
+        for fn in parts:
+            for n in ast.walk(fn):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and n.func.attr == "_record_stop"):
+                    calls_by_line[n.lineno] = n
         reasons = []
-        for bl in exits:
-            near = sorted((c for line, c in calls.items() if 0 < bl - line <= 3),
+        for lineno, _holder in exits:
+            near = sorted((c for line, c in calls_by_line.items() if 0 < lineno - line <= 3),
                           key=lambda c: c.lineno)
             reasons.append(ast.unparse(near[-1].args[2]) if near else None)
         self.assertEqual(
             ["'wall_clock_exhausted'", "'budget_exhausted'", "'budget_exhausted'",
-             "'template_no_candidate'", "'passed'", "'stagnant'", "'converged'",
-             "'infra_retry'", "'fix_error'", "'ask_turns_exhausted'",
-             "'l1_l2_failed'", "'budget_exhausted'", "'search_error'"],
+             "'search_error'", "'budget_exhausted'", "'template_no_candidate'",
+             "'passed'", "'stagnant'", "'converged'", "'infra_retry'", "'fix_error'",
+             "'ask_turns_exhausted'", "'l1_l2_failed'"],
             reasons,
-            "出口与 reason 的对应关系漂了 —— 这份清单按行序钉, 换顺序也要在这里改")
+            "出口与 reason 的对应关系漂了 —— 这份清单按全轮的三个方法、按行序钉")
 
 
 class TestStopReasonReachesResultJson(unittest.TestCase):

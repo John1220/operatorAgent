@@ -89,15 +89,66 @@ def _restored_names(src):
     return [ast.unparse(e) for e in ret.value.elts]
 
 
+#: 轮次的组成部分 —— state.<名字> 的读者要在这些方法里找。Stage3 从 _run_round 里又
+#: 搬出了三段 (轮首门 / _snap / 收尾), 所以这份清单跟着长: 少一个方法, 它读的字段就会被
+#: 误报成「新增字段没有读者」。
+_ROUND_PARTS = ("_run_round", "_round_enter_or_stop", "_snap", "_round_close_out",
+                "_finalize_run")
+
+
 def _state_reads(src):
-    """轮次循环 (含搬出去的 _run_round) 与收尾里以 state.<名字> 出现的字段集合。"""
+    """轮次的各个部分 (循环 + 搬出去的阶段方法 + 收尾) 里 state.<名字> 的字段集合。"""
     tree = _tree(src)
     out = set()
-    for node in (_round_loop(tree), _func(tree, "_run_round"), _func(tree, "_finalize_run")):
+    for node in [_round_loop(tree)] + [_func(tree, name) for name in _ROUND_PARTS]:
         for x in ast.walk(node):
             if (isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name)
                     and x.value.id == "state"):
                 out.add(x.attr)
+    return out
+
+
+#: Stage3 拆出来的三个阶段方法, 以及它们对外的接口 (依赖清单)。接口就是契约: 多一个形参
+#: 不是「顺手」, 是这个阶段又多赖了一层外面的状态。
+_PHASE_PARTS = (("_round_enter_or_stop", ["self", "state", "round_num"]),
+                ("_snap", ["self", "state", "round_num"]),
+                ("_round_close_out", ["self", "state", "round_num", "_esc_decision",
+                                      "_measure_s", "_space", "bandit_arm", "l3_result"]))
+
+
+def _phase_problems(src):
+    """Stage3 的三个阶段还在不在、接口有没有变、_run_round 里有没有长出嵌套函数。
+
+    这些漂移**都是行为等价的** (把门内联回去还是那两道门; 闭包读的 3 个名字恰好都在
+    外层), 所以只有形状判据能拦 —— 全量 2572 条与行为摘要都不会说话。
+    """
+    tree = _tree(src)
+    out = []
+    rr = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+               and n.name == "_run_round"), None)
+    if rr is None:
+        return ["_run_round 不见了"]
+    gate = [s for s in rr.body if isinstance(s, ast.If)
+            and "_round_enter_or_stop" in ast.unparse(s.test)
+            and "_ROUND_STOP" in ast.unparse(s.test)]
+    if len(gate) != 1:
+        out.append("轮首门没有以「委派」的形式出现在 _run_round 里 (被内联回来或写法变了)")
+    if not (isinstance(rr.body[-1], ast.Return)
+            and "_round_close_out" in ast.unparse(rr.body[-1])):
+        out.append("_run_round 的最后一步不是收尾阶段 _round_close_out")
+    nested = [n.name for n in ast.walk(rr) if isinstance(n, ast.FunctionDef) and n is not rr]
+    if nested:
+        out.append("_run_round 里长出了嵌套函数 (闭包会让依赖清单消失): %s" % nested)
+    for name, params in _PHASE_PARTS:
+        fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                   and n.name == name), None)
+        if fn is None:
+            out.append("阶段方法 %s 不见了" % name)
+            continue
+        got = [a.arg for a in fn.args.posonlyargs + fn.args.args]
+        got += [a.arg for a in fn.args.kwonlyargs]
+        if got != params:
+            out.append("%s 的接口变了: %s != %s" % (name, got, params))
     return out
 
 
@@ -342,6 +393,19 @@ class TestTheRoundIsOneNamedMethod(unittest.TestCase):
         self.assertIn("is _ROUND_STOP", cond)
         self.assertNotIn("is not", cond)
 
+    def test_the_round_is_three_named_phases(self):
+        """Stage3 之后一轮读起来是三步: 轮首门 -> 主流水线 -> 收尾。
+
+        这条钉的是**结构本身** (绝对锚点, doc 49 §7.7)。把这三段再内联回 _run_round 是
+        「拆分白做」, 而纯搬运的回退不会有任何行为判据变红 —— 实测: 搬运前后 2571 条
+        全绿、行为摘要也相同。所以形状只能写死在这里。
+
+        另外钉住「_run_round 里没有嵌套函数」: _snap 原来是闭包, 闭包的读会被判据漏掉
+        (它读的 3 个名字恰好都在外层), 现在它是方法, 参数就是它的依赖清单。
+        """
+        bad = _phase_problems(self.src)
+        self.assertEqual([], bad, "阶段结构被破坏: " + " | ".join(bad))
+
 
 class TestTheGuardIsNotANoOp(unittest.TestCase):
     """反向标定: 在内存里造出每一种漂移, 判据必须变红 —— 没红就说明这条判据是摆设。"""
@@ -360,6 +424,33 @@ class TestTheGuardIsNotANoOp(unittest.TestCase):
             "    round_signatures: list" + NL + "    zzz_nobody_reads_me: int" + NL)
         self.assertTrue(any("zzz_nobody_reads_me" in b for b in _problems(drifted)))
 
+    def test_catches_the_round_phases_being_inlined_back(self):
+        """把轮首门的委派换掉 -> 「一轮是三步」这条判据必须变红
+
+        这是纯搬运式回退: 行为一个字不变 (内联回去还是那两道门), 所以只有形状判据能拦。
+        """
+        drifted = self._drift(
+            "        if self._round_enter_or_stop(state, round_num) is _ROUND_STOP:" + NL
+            + "            return _ROUND_STOP" + NL,
+            '        if self._budget.oracle_may("explore", 1):' + NL + '            pass' + NL)
+        self.assertTrue(any("轮首门" in b for b in _phase_problems(drifted)))
+
+    def test_catches_a_phase_growing_an_interface(self):
+        """收尾阶段多吃一个形参 -> 依赖清单变了"""
+        drifted = self._drift(
+            "                         _esc_decision, _measure_s, _space, bandit_arm, l3_result) -> bool:" + NL,
+            "                         _esc_decision, _measure_s, _space, bandit_arm, l3_result, zzz) -> bool:" + NL)
+        self.assertTrue(any("_round_close_out 的接口变了" in b for b in _phase_problems(drifted)))
+
+    def test_catches_a_nested_function_growing_in_run_round(self):
+        """_run_round 里又长出嵌套函数 -> 闭包的依赖会被判据漏掉"""
+        head = ("    def _run_round(self, state, round_num, *, expected_output, hw_info, _mem_caps,"
+                + NL + "                   max_stagnant_rounds, verify_drift) -> bool:" + NL)
+        drifted = self.src.replace(
+            head, head + "        def _zzz() -> None:" + NL + "            return None" + NL, 1)
+        self.assertNotEqual(drifted, self.src, "标定没接上: 锚点没匹配")
+        self.assertTrue(any("嵌套函数" in b for b in _phase_problems(drifted)))
+
     def test_catches_a_constructor_that_forgot_a_field(self):
         drifted = self._drift("            artifact=artifact," + NL, "")
         self.assertTrue(any("构造点与字段清单不一致" in b for b in _problems(drifted)))
@@ -374,9 +465,16 @@ class TestTheGuardIsNotANoOp(unittest.TestCase):
         self.assertTrue(any("接口变了" in b for b in _problems(drifted)))
 
     def test_catches_a_break_left_in_run_round(self):
-        """把一处 return _ROUND_STOP 改回 break -> 出口机制又变成藏在循环体里的跳转"""
-        drifted = self.src.replace("            return _ROUND_STOP" + NL,
-                                   "            break" + NL, 1)
+        """把 _run_round 里那处委派出口改回 break -> 出口机制又变成藏在循环体里的跳转
+
+        锚点必须落在 _run_round **里面**: 现在全仓有 14 处 `return _ROUND_STOP`,
+        第一处住在 _round_enter_or_stop 里 —— 用「第一个 12 空格缩进的」去接会接到别人
+        身上, 标定就会「没红」。那是量具坏了, 不是判据松了。
+        """
+        anchor = ("        if self._round_enter_or_stop(state, round_num) is _ROUND_STOP:" + NL
+                  + "            return _ROUND_STOP" + NL)
+        self.assertIn(anchor, self.src, "标定没接上: 锚点不在")
+        drifted = self.src.replace(anchor, anchor.replace("return _ROUND_STOP", "break"), 1)
         self.assertNotEqual(drifted, self.src, "标定没接上: 锚点没匹配")
         self.assertTrue(_round_level_control(drifted))
 

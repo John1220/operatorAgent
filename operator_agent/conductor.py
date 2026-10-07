@@ -1462,39 +1462,48 @@ class Conductor:
         return self._finalize_run(state=state)
 
 
-    def _run_round(self, state, round_num, *, expected_output, hw_info, _mem_caps,
-                   max_stagnant_rounds, verify_drift) -> bool:
-        """跑完一轮; 返回 _ROUND_STOP 表示这一轮命中了退出出口。
+    def _snap(self, state, round_num) -> str:
+        """把当前循环状态写进 execution_snapshot.json
 
-        这是从 _execute_inner 的轮次循环体**整体**搬出来的一步。搬运方式是逐字的:
-        除下面这 14 处控制流改写之外, 方法体与原来的循环体逐 AST 节点相同 (写盘前按
-        AST 逐节点比对过; 搬完之后那 6 个跨轮记忆名字的判据在
-        tests/test_run_state_single_source.py):
-          13 处 break    -> return _ROUND_STOP
-           1 处 continue -> return _ROUND_CONTINUE
-        改过之后, 这个方法内部再没有能跳出调用者的语句 —— 「这一轮要不要终止整个
-        优化循环」只由返回值表达, 不再靠 break 从 1128 行深处跳出去。
+        循环内的落盘点都走这里 (通过 / 停滞 / 已到 roofline / L1L2 耗尽轮次 /
+        走到轮次末尾)。少数例外是参数不同的那几处 —— 例如 Fixer 抛异常时
+        `pending_fix` 要写成 None, 它们仍直接调 `_flush_snapshot`。
 
-        接口为什么是 state + round_num + 5 个关键字:
-          * state 装的是**跨轮活下来**的那些值 —— 既包括收尾也要读的, 也包括循环
-            自己攒的记忆 (见 RunState 类文档)。字段清单由三条既有契约钉住
-            (tests/test_run_state_single_source.py)。
-          * 另外 5 个是**只有这一轮才需要、而且从不被写**的只读上下文 (期望输出 /
-            硬件信息 / 显存上限 / 停滞阈值 / 漂移判定)。它们刻意不进 state: 那样
-            字段清单就退化成「凡是这一轮读到的都算」, 也就不再是契约了。
+        ⚠️ 变异测试的一个空跑: 终止出口处这次落盘写在 return _ROUND_STOP 之前、save 之前,
+        而 `execute()` 末尾一定会再补写一次进权威的 `saved_dir`。所以删掉出口
+        那次不会有任何断言变红 —— 它只在「进程在 save 之前就没」时才有读者。
+        保留是为了与其余出口动作一致。
         """
+        return self._flush_snapshot(
+            task=state.task,
+            artifact_dir=state.snapshot_target_dir,
+            round_done=round_num,
+            current_sketch=state.current_sketch,
+            current_code=state.current_code,
+            pending_fix=state.pending_fix,
+            iteration_history=state.artifact.iteration_history,
+            best_gflops=state.best_gflops,
+            rounds_without_improvement=state.rounds_without_improvement,
+            optimization_history=state.optimization_history,
+            applied_recipes=state.applied_recipes,
+            disabled_recipes=state.disabled_recipes,
+            all_verification_results=state.all_verification_results,
+        )
 
-        print(f"\n{'─'*40}")
-        print(f"轮次 {round_num}/{self.max_optimize_rounds}")
-        print(f"{'─'*40}")
 
-        # ── §10.2 的两道预算门, 放在轮次**最前面** ──
-        # 位置是判据的一部分: 放在 Coder/Planner 之后等于「先花完 LLM 与写代码的钱,
-        # 再说这次测量买不起」。两道门都是 fail-closed: 买不起就停, 不停在半路上。
-        #
-        # 为什么 oracle 这一格用 `"explore"` 而不是按 explore/refine 分: 本仓今天
-        # **没有**「参数搜索平台化」这条判据 (§10.3 的升级门, CHECKLOG I53), 分不出来
-        # 就如实只花一格; 预留 (`confirm`) 那一格一律不许碰 —— 那才是这条预算的意义。
+    def _round_enter_or_stop(self, state, round_num) -> bool:
+        """轮次**最前面**那两道预算门; 返回 _ROUND_STOP 表示这一轮不该开 (§10.2)。
+
+        位置是判据的一部分: 放在 Coder/Planner 之后等于「先花完 LLM 与写代码的钱,
+        再说这次测量买不起」。两道门都是 fail-closed: 买不起就停, 不停在半路上。
+
+        为什么 oracle 这一格用 "explore" 而不是按 explore/refine 分: 本仓今天
+        **没有**「参数搜索平台化」这条判据 (§10.3 的升级门, CHECKLOG I53), 分不出来
+        就如实只花一格; 预留 (`confirm`) 那一格一律不许碰 —— 那才是这条预算的意义。
+
+        搬出来是纯搬运: 函数体逐字未改; 依赖只有 self/state/round_num —— 定值分析实测
+        _why/_plan/_elapsed 都是现写现读的临时变量, 不出这一段。
+        """
         if not self._budget.within_wall_clock(time.monotonic() - self._run_started):
             _elapsed = time.monotonic() - self._run_started
             _why = (f"墙钟预算用尽 ({_elapsed:.1f}s >= "
@@ -1511,6 +1520,260 @@ class Conductor:
             print(f"\n[Budget] {_why}")
             self._budget.oracle_refuse("explore")
             self._record_stop(state.artifact, round_num, "budget_exhausted", _why)
+            return _ROUND_STOP
+
+
+    def _round_close_out(self, state, round_num, *,
+                         _esc_decision, _measure_s, _space, bandit_arm, l3_result) -> bool:
+        """这一轮的收尾: 参考天花板 / 无改善停滞 / 调参资格门 / 出口判定 (§10.4)。
+
+        入参这 5 个不是设计出来的接口, 是**实测**出来的依赖 —— 用「段内可能未先
+        赋值就读」的定值分析算的 (粗糙的「前面写过、后面读过」会多报: _why/_plan
+        这类每处都是现写现读的临时变量, 实际不出段)。
+
+        搬出来是纯搬运: 形参名与原来的局部名逐字相同, 所以函数体一个字符都不用改。
+        """
+        if l3_result and not l3_result.passed and round_num < self.max_optimize_rounds:
+            # ── 资格门: `can_tune` 管的是 **belief**, 不是「停循环」 ──
+            # 设计 §10.4 的伪码就是这条:
+            #     obs = oracle.evaluate(c, contract)
+            #     if obs.eligibility.can_tune: belief.update(c, obs)
+            #     if obs.eligibility.can_count_progress: stagnation.update(belief)
+            # 也就是说没资格的那个数**不进信念**, 于是 `propose()` 只能从**上一次
+            # 有资格的读数**构成的信念出发 —— 循环照常跑满预算 (那条策略另有真机
+            # 用例守着: `uninformative` 轮次必须跑满、不许提前终止)。
+            #
+            # 此前这里**没有任何门** (CHECKLOG I52): 一个档位 `uninformative`、五位
+            # 全 False 的读数照样被拼成 `perf_data` (gflops/speedup/`roofline_bound`
+            # 全在里面), 喂给邻居排序 (`agents.py:680` 读 roofline_bound 决定往大
+            # BLOCK_K 还是小 BLOCK_M/N 排) 与 LLM 先验 (`agents.py:708` 读 speedup)。
+            # §10.2 第三行: LLM token 独立管, 超了退化成纯数值搜索。口径是
+            # **本次运行**的用量 (`summary_since(水位线)`), 不是这个进程到现在的累计。
+            # 口径只有一处 (`_llm_tokens_used`): §21.1 的预算校验也读它。两处各算
+            # 一遍同一件事, 迟早会出现两个「还剩多少」。
+            _tokens_used = self._llm_tokens_used()
+            _llm_broke = self._budget.note_llm_usage(_tokens_used)
+            if _llm_broke:
+                print(f"\n[Budget] LLM token 预算用尽 ({_tokens_used}/"
+                      f"{self._budget.plan.llm_tokens}) ⇒ 本轮退化成纯数值搜索 "
+                      f"(不问 LLM 要结构改动)")
+            _elig = l3_result.metrics.get("eligibility") or {}
+            _can_tune = _elig.get("can_tune") is True
+            if not _can_tune:
+                print(f"\n[Search] 本轮读数无调参资格 "
+                      f"(can_tune=False; 档位="
+                      f"{l3_result.metrics.get('measurement_validity')!r})"
+                      f" ⇒ 不进信念")
+            print(f"\n[Search] L3 性能未达标，启动优化...")
+            # ── bandit 记账 (§5 / §10.5-3) ──
+            # 回报口径 = 相对**本轮之前**最好 gflops 的改进 —— 与 `best_gflops` /
+            # 停滞判定同一个量, 不另立一个口径。资格位决定这次回报算不算数:
+            # `can_count_progress=False` 的那一轮只记「试过」, 回报不进均值
+            # (「试过但没数」既不是「没试过」, 也不是「试过且不好」)。
+            _cur = l3_result.metrics.get("gflops")
+            _reward = None
+            if (isinstance(_cur, (int, float)) and not isinstance(_cur, bool)
+                    and isinstance(state.best_gflops, (int, float)) and state.best_gflops > 0):
+                _reward = (float(_cur) - float(state.best_gflops)) / float(state.best_gflops)
+            state.bandit.update(bandit_arm, _reward,
+                          eligible=_elig.get("can_count_progress") is True,
+                          # §10.3 的分母原料: 这一轮把秒换成数字花了多少。只有真跑出
+                          # L3 读数才算 (L1/L2 就挂掉的轮次没有测量秒可言 ⇒ None)。
+                          cost_s=_measure_s if l3_result is not None else None)
+            perf_data = {
+                "gflops": l3_result.metrics.get("gflops", 0),
+                "speedup": l3_result.metrics.get("speedup_vs_baseline", 0),
+                "target_speedup": state.task.constraints.min_speedup,
+                "bound_type": l3_result.metrics.get("bound_type", "unknown"),
+                "avg_time_ms": l3_result.metrics.get("avg_time_ms", 0),
+                "memory_bandwidth_gbs": l3_result.metrics.get("memory_bandwidth_gbs", 0),
+                # ---- Roofline 数据 (Verifier 注入) ----
+                "hw_peak_gflops": l3_result.metrics.get("hw_peak_gflops", 0),
+                "hw_peak_bandwidth_gbs": l3_result.metrics.get("hw_peak_bandwidth_gbs", 0),
+                "gflops_utilization_pct": l3_result.metrics.get("gflops_utilization_pct", 0),
+                "bandwidth_utilization_pct": l3_result.metrics.get("bandwidth_utilization_pct", 0),
+                "arithmetic_intensity": l3_result.metrics.get("arithmetic_intensity", 0),
+                "ridge_point": l3_result.metrics.get("ridge_point", 0),
+                "roofline_bound": l3_result.metrics.get("roofline_bound", "unknown"),
+                "name_bound": l3_result.metrics.get("name_bound", "unknown"),
+                "hw_name": l3_result.metrics.get("hw_name", "unknown"),
+                "hw_compute_capability": l3_result.metrics.get("hw_compute_capability", "unknown"),
+                # ---- §12 便宜代理剪枝的输入 (不花 GPU 秒) ----
+                # 上界由 Verifier 从 caps 发布 (0 = 不知道); elem_bytes 取**任务声明
+                # 精度**的字节数 —— 与 smem 估算、AI 分母同一个口径 (核根本见不到
+                # 控制端手里那份 float32 数组, 见 verifier._compute_arithmetic_intensity)。
+                "shared_mem_per_sm_kb": l3_result.metrics.get("shared_mem_per_sm_kb", 0),
+                "elem_bytes": state.task.constraints.precision.itemsize,
+                # ---- 优化历史 ----
+                "optimization_history": state.optimization_history,
+            }
+            if _llm_broke:
+                # 与 `tuning_refused` 走同一条通道 (perf_data), 不新增签名 ——
+                # SearchAgent 见到它就跳过 `_llm_optimize` 走规则路径。
+                perf_data["llm_budget_exhausted"] = True
+            # §10.3: 把本轮裁决**发布**给 SearchAgent (判据在判决点之后已经算过,
+            # 这里只发布 —— 一个判定一处实现)。不通过 ⇒ 这一轮只做参数搜索。
+            perf_data["structural_escalation_denied"] = list(_esc_decision.refusals)
+            if _can_tune:
+                # 有资格 ⇒ 这份读数进信念, 供后面的轮次沿用
+                state.last_tunable_perf = perf_data
+            elif state.last_tunable_perf is not None:
+                # 没资格 ⇒ 沿用**上一次有资格读数**构成的信念 (伪码里的 `belief`)
+                perf_data = state.last_tunable_perf
+            else:
+                # 本次运行还没有任何一次有资格的读数: 给一个**不含任何数字**的
+                # 结构先验。`tuning_refused` 是给 SearchAgent 的信号 —— 它必须
+                # 把「没有读数」如实写进 prompt, 不许用 `.get(k, 0)` 编一个 0 出来
+                # (`_llm_optimize` 原来正是那样: 缺键 ⇒ 0.00 印进 prompt)。
+                perf_data = {
+                    "target_speedup": state.task.constraints.min_speedup,
+                    "tuning_refused": "can_tune=False",
+                    "optimization_history": [],
+                }
+            if _space is not None:
+                # §12: 模板型后端的候选来自参数空间 (下一轮轮首再取一次, 那时
+                # bandit 已经吃过本轮的回报 ⇒ 顺位会跟着证据走)。这条 LLM/邻域搜索
+                # 路径**整条不适用**: 让 SearchAgent 改 tiling 会把「模板点」与
+                # 「LLM 结构」混进同一个候选队列 —— 而它们连身份口径都不同。
+                print(f"\n[Search] 模板型后端: 候选来自参数空间, 本轮不走 LLM 搜索")
+                # 模板轮**没有**新 sketch 也没有 LLM 建议: 那两行原样打出来会
+                # 读成「这一轮改了 sketch」—— 那是代码型那边的语义。
+                #
+                # `optimization_history` 在这里**一个字都不写**: 它唯一的读者是
+                # SearchAgent 的 prompt (`agents._llm_optimize`), 而模板轮根本不叫
+                # SearchAgent —— 写一条进去就是「只有调试者会读到」的键 (与
+                # CHECKLOG I36 那类「算了没人读」同族)。这一轮的候选身份已经在
+                # `iteration_history.template_selection` 里, 那是有读者的那一格。
+            else:
+                if state.search_alternatives:
+                    # P1-4: 上一轮排好的邻域候选按序轮换 —— 系统搜索代替「每轮
+                    # 重新问一次 LLM 直觉」。轮换候选已带结构 (hints/memory_plan),
+                    # 只换了 tiling, 不需要再过 Search。
+                    #
+                    # 选**哪一个**交给 §10.3 的选择器 (`choose`): ε 那一支去未探索的
+                    # 区域, 1-ε 那一支去分数最高的; 计划格子 (分相预算) 约束模式。
+                    _nsel = choose(state.search_alternatives, state.bandit, self._arm_of,
+                                   epsilon=self.selection_epsilon,
+                                   draw=explore_draw(state._selection_seed, round_num),
+                                   phases=self._plan_phases())
+                    if _nsel is None:
+                        _room = self._budget.as_dict()["phase_room"]
+                        _why = (f"探索/精修两格的计划额度都用完了 (剩余 {_room}) 且"
+                                "邻域队列里没有符合模式的候选 ⇒ 不再开新的一轮")
+                        self._budget.oracle_refuse("explore")
+                        self._record_stop(state.artifact, round_num, "budget_exhausted", _why)
+                        return _ROUND_STOP
+                    state.current_sketch = _nsel.chosen
+                    state.search_alternatives = [x for x in _nsel.ranking
+                                           if x is not _nsel.chosen]
+                    _round_selection = dict(_nsel.as_dict(), applies_to="next_round",
+                                            chosen_label=self._arm_of(_nsel.chosen))
+                    print(f"\n[Selection] {_nsel.note}")
+                    t = state.current_sketch.tiling
+                    suggestion = "P1-4 邻域候选轮换"
+                    print(f"\n[Search] 轮换邻域候选: tiling={t.block_m}x{t.block_n}x{t.block_k} "
+                          f"(队列剩 {len(state.search_alternatives)} 个)")
+                else:
+                    # ── §12 的开关: 后端声明了参数空间 ⇒ 模板型 ──
+                    # 控制器「自动切换成 LLM/模板产出候选、bandit 只做局部精修」这件事,
+                    # 今天只有代码型那一半有实现 (bandit 精修 = P1-4 邻域)。模板型那一半
+                    # (由参数空间枚举候选并实例化) 还没落地 ⇒ 在这里 fail-closed, 而不是
+                    # 把它降级成代码型继续跑: §12 点名的风险正是「把候选悄悄当成源码字符串」。
+                    # 放在真值测量**之前** (这一处是每轮搜索的入口), 因为拒绝要发生在花钱之前。
+                    try:
+                        state.current_sketch, suggestion = self.search.run(state.current_sketch, perf_data)
+                    except Exception as e:
+                        # 规则优化也失败时, 终止优化但不崩整个任务
+                        print(f"\n[Conductor] Search 优化异常 ({e}), 终止优化循环")
+                        state.snapshot_target_dir = self._flush_snapshot(
+                            task=state.task,
+                            artifact_dir=state.snapshot_target_dir,
+                            round_done=round_num,
+                            current_sketch=state.current_sketch,
+                            current_code=state.current_code,
+                            pending_fix=state.pending_fix,
+                            iteration_history=state.artifact.iteration_history,
+                            best_gflops=state.best_gflops,
+                            rounds_without_improvement=state.rounds_without_improvement,
+                            optimization_history=state.optimization_history,
+                            applied_recipes=state.applied_recipes,
+                            disabled_recipes=state.disabled_recipes,
+                            all_verification_results=state.all_verification_results,
+                        )
+                        self._record_stop(state.artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
+
+                        return _ROUND_STOP
+                    # P1-4: 排队下一轮的轮换候选 (SearchAgent 只在 triton 路径产出)
+                    # §5: 顺序交给 bandit (本轮累积的证据优先, 无观测的保持先验顺序),
+                    # 而不是纯 FIFO —— 后者对脏数据免疫但也无知: 哪个候选上次变快了,
+                    # 队列不知道。资格门在这层之外 (没资格的数根本没进来)。
+                    # 队列在这里**只入队不排序** (保持先验顺序): 排序与「取哪一个」
+                    # 是同一个判断, 它发生在**消费那一轮** (`choose`) —— 那时证据最新,
+                    # 而且一次判断只有一个地方做。这里再排一遍会让同一个选择器对同一批
+                    # 候选跑两次 (真实 bandit 是幂等的, 但那是巧合, 不是设计)。
+                    state.search_alternatives = list(
+                        getattr(self.search, "last_alternatives", []))
+                    if state.bandit.total_scored or state.bandit.unscored_updates:
+                        print(f"  [Bandit] 队列按证据重排: 已采纳 {state.bandit.total_scored} 个回报, "
+                              f"没采纳 {state.bandit.unscored_updates} 个")
+                print(f"  优化建议: {suggestion}")
+                print(f"  新 Sketch 版本: v{state.current_sketch.version}")
+
+                # ---- 记录本轮优化历史 (供后续轮次参考) ----
+                # 只在有资格时累加: 这份 history 会印进下一轮的 prompt, 也就是**信念**的
+                # 一部分。把没有调参资格的那一轮数字写进去, 等于换个通道让它指挥搜索。
+                if _can_tune:
+                    state.optimization_history.append({
+                        "tiling": f"{state.current_sketch.tiling.block_m}x{state.current_sketch.tiling.block_n}x{state.current_sketch.tiling.block_k}",
+                        "gflops": l3_result.metrics.get("gflops", 0),
+                        "stage": "algorithm",  # 由 SearchAgent 返回实际 stage
+                        "outcome": f"GFLOPS={l3_result.metrics.get('gflops', 0):.2f}, "
+                                   f"加速比={l3_result.metrics.get('speedup_vs_baseline', 0):.2f}x",
+                    })
+
+        # ── 可复现性 Harness: 循环走到末尾 (没走 break/continue) 时统一 flush 一次快照 ──
+        state.snapshot_target_dir = self._snap(state, round_num)
+        if not (l3_result and not l3_result.passed and round_num < self.max_optimize_rounds):
+            print(f"\n[Conductor] 已达最大优化轮次，停止迭代")
+
+
+    def _run_round(self, state, round_num, *, expected_output, hw_info, _mem_caps,
+                   max_stagnant_rounds, verify_drift) -> bool:
+        """跑完一轮; 返回 _ROUND_STOP 表示这一轮命中了退出出口。
+
+        这是从 _execute_inner 的轮次循环体**整体**搬出来的一步。搬运方式是逐字的:
+        除下面这 14 处控制流改写之外, 方法体与原来的循环体逐 AST 节点相同 (写盘前按
+        AST 逐节点比对过; 搬完之后那 6 个跨轮记忆名字的判据在
+        tests/test_run_state_single_source.py):
+          13 处 break    -> return _ROUND_STOP
+           1 处 continue -> return _ROUND_CONTINUE
+        改过之后, 这个方法内部再没有能跳出调用者的语句 —— 「这一轮要不要终止整个
+        优化循环」只由返回值表达, 不再靠 break 从 1128 行深处跳出去。
+
+        Stage3 又把轮次的两头拆成具名阶段 (同样是纯搬运, 写盘前逐 AST 节点比对过):
+          * _round_enter_or_stop —— 轮首两道预算门 (§10.2), 零依赖;
+          * _round_close_out     —— 收尾的参考天花板/停滞/资格门/出口判定 (§10.4),
+                                    吃 5 个**实测**出来的依赖;
+          * _snap                —— 快照落盘, 原来在这里是个闭包 (只读 self/state/round_num)。
+        中段没有再拆: 每个内部切分点的真实入向是 12-25 个值 (用「可能未先赋值就读」的
+        定值分析算的), 没有概念上的接口可言 —— 硬拆就得造一个 12-25 字段的中转记录,
+        那是把「依赖清单」这张契约换成一堆凑数的字段。形状由 _phase_problems 钉住。
+
+        接口为什么是 state + round_num + 5 个关键字:
+          * state 装的是**跨轮活下来**的那些值 —— 既包括收尾也要读的, 也包括循环
+            自己攒的记忆 (见 RunState 类文档)。字段清单由三条既有契约钉住
+            (tests/test_run_state_single_source.py)。
+          * 另外 5 个是**只有这一轮才需要、而且从不被写**的只读上下文 (期望输出 /
+            硬件信息 / 显存上限 / 停滞阈值 / 漂移判定)。它们刻意不进 state: 那样
+            字段清单就退化成「凡是这一轮读到的都算」, 也就不再是契约了。
+        """
+
+        print(f"\n{'─'*40}")
+        print(f"轮次 {round_num}/{self.max_optimize_rounds}")
+        print(f"{'─'*40}")
+
+        # ── §10.2 的两道预算门在最前面 (位置是判据的一部分), 见 _round_enter_or_stop ──
+        if self._round_enter_or_stop(state, round_num) is _ROUND_STOP:
             return _ROUND_STOP
 
         # ── §12 模板型后端: 本轮的候选来自**参数空间**, 不走 LLM/Coder ──
@@ -2008,34 +2271,6 @@ class Conductor:
         if _perf_agg["ruler_same"] is False:
             print(f"\n[Ruler] {ruler_note(_perf_agg, RULER_LABEL_PERFORMANCE, _PERF_ADVICE)}")
 
-        def _snap() -> str:
-            """把当前循环状态写进 execution_snapshot.json
-
-            循环内的落盘点都走这里 (通过 / 停滞 / 已到 roofline / L1L2 耗尽轮次 /
-            走到轮次末尾)。少数例外是参数不同的那几处 —— 例如 Fixer 抛异常时
-            `pending_fix` 要写成 None, 它们仍直接调 `_flush_snapshot`。
-
-            ⚠️ 变异测试的一个空跑: 终止出口处这次落盘写在 break 之前、save 之前,
-            而 `execute()` 末尾一定会再补写一次进权威的 `saved_dir`。所以删掉出口
-            那次不会有任何断言变红 —— 它只在「进程在 save 之前就没」时才有读者。
-            保留是为了与其余出口动作一致。
-            """
-            return self._flush_snapshot(
-                task=state.task,
-                artifact_dir=state.snapshot_target_dir,
-                round_done=round_num,
-                current_sketch=state.current_sketch,
-                current_code=state.current_code,
-                pending_fix=state.pending_fix,
-                iteration_history=state.artifact.iteration_history,
-                best_gflops=state.best_gflops,
-                rounds_without_improvement=state.rounds_without_improvement,
-                optimization_history=state.optimization_history,
-                applied_recipes=state.applied_recipes,
-                disabled_recipes=state.disabled_recipes,
-                all_verification_results=state.all_verification_results,
-            )
-
         if all_passed:
             # 标记本轮配方为成功应用
             if state.plan and state.plan.selected_recipes:
@@ -2043,7 +2278,7 @@ class Conductor:
                     state.applied_recipes.add(r.id)
             print(f"\n[Conductor] 所有验证通过!")
             # ── 可复现性 Harness: 通过前写快照, 方便后续 resume 时直接复用最终轮 ──
-            state.snapshot_target_dir = _snap()
+            state.snapshot_target_dir = self._snap(state, round_num)
             self._record_stop(state.artifact, round_num, "passed", "所有验证通过 (L1/L2/L3)")
 
             return _ROUND_STOP
@@ -2197,7 +2432,7 @@ class Conductor:
             if _threshold and _coverage.exhausted:
                 print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善，"
                       f"{_coverage.note()} ⇒ 提前终止优化")
-                state.snapshot_target_dir = _snap()
+                state.snapshot_target_dir = self._snap(state, round_num)
                 # 停机理由要**点名两半**都成立 (只有前一半的话, 那正是设计点名的
                 # 错读法): 「连续无改善」+「候选区域已穷尽 (哪个集合, 几个点)」。
                 _why = (f"连续无改善达上限且候选区域已穷尽 "
@@ -2227,7 +2462,7 @@ class Conductor:
                   f"peak={_rl.get('hw_peak_gflops', 0) / 1000:.1f} TFLOPS / "
                   f"bw={_rl.get('hw_peak_bandwidth_gbs', 0):.0f} GB/s "
                   f"({_rl.get('compute_used', '?')}) — {_rl.get('peak_source', '出处未知')}")
-            state.snapshot_target_dir = _snap()
+            state.snapshot_target_dir = self._snap(state, round_num)
             self._record_stop(state.artifact, round_num, "converged", "绑定轴已达 参考天花板")
 
             return _ROUND_STOP
@@ -2404,214 +2639,16 @@ class Conductor:
                 )
                 return _ROUND_CONTINUE
             print(f"\n[Conductor] L1/L2 验证失败且已达最大轮次，停止迭代")
-            state.snapshot_target_dir = _snap()
+            state.snapshot_target_dir = self._snap(state, round_num)
             self._record_stop(state.artifact, round_num, "l1_l2_failed", "L1/L2 失败且已达最大轮次")
 
             return _ROUND_STOP
 
-        if l3_result and not l3_result.passed and round_num < self.max_optimize_rounds:
-            # ── 资格门: `can_tune` 管的是 **belief**, 不是「停循环」 ──
-            # 设计 §10.4 的伪码就是这条:
-            #     obs = oracle.evaluate(c, contract)
-            #     if obs.eligibility.can_tune: belief.update(c, obs)
-            #     if obs.eligibility.can_count_progress: stagnation.update(belief)
-            # 也就是说没资格的那个数**不进信念**, 于是 `propose()` 只能从**上一次
-            # 有资格的读数**构成的信念出发 —— 循环照常跑满预算 (那条策略另有真机
-            # 用例守着: `uninformative` 轮次必须跑满、不许提前终止)。
-            #
-            # 此前这里**没有任何门** (CHECKLOG I52): 一个档位 `uninformative`、五位
-            # 全 False 的读数照样被拼成 `perf_data` (gflops/speedup/`roofline_bound`
-            # 全在里面), 喂给邻居排序 (`agents.py:680` 读 roofline_bound 决定往大
-            # BLOCK_K 还是小 BLOCK_M/N 排) 与 LLM 先验 (`agents.py:708` 读 speedup)。
-            # §10.2 第三行: LLM token 独立管, 超了退化成纯数值搜索。口径是
-            # **本次运行**的用量 (`summary_since(水位线)`), 不是这个进程到现在的累计。
-            # 口径只有一处 (`_llm_tokens_used`): §21.1 的预算校验也读它。两处各算
-            # 一遍同一件事, 迟早会出现两个「还剩多少」。
-            _tokens_used = self._llm_tokens_used()
-            _llm_broke = self._budget.note_llm_usage(_tokens_used)
-            if _llm_broke:
-                print(f"\n[Budget] LLM token 预算用尽 ({_tokens_used}/"
-                      f"{self._budget.plan.llm_tokens}) ⇒ 本轮退化成纯数值搜索 "
-                      f"(不问 LLM 要结构改动)")
-            _elig = l3_result.metrics.get("eligibility") or {}
-            _can_tune = _elig.get("can_tune") is True
-            if not _can_tune:
-                print(f"\n[Search] 本轮读数无调参资格 "
-                      f"(can_tune=False; 档位="
-                      f"{l3_result.metrics.get('measurement_validity')!r})"
-                      f" ⇒ 不进信念")
-            print(f"\n[Search] L3 性能未达标，启动优化...")
-            # ── bandit 记账 (§5 / §10.5-3) ──
-            # 回报口径 = 相对**本轮之前**最好 gflops 的改进 —— 与 `best_gflops` /
-            # 停滞判定同一个量, 不另立一个口径。资格位决定这次回报算不算数:
-            # `can_count_progress=False` 的那一轮只记「试过」, 回报不进均值
-            # (「试过但没数」既不是「没试过」, 也不是「试过且不好」)。
-            _cur = l3_result.metrics.get("gflops")
-            _reward = None
-            if (isinstance(_cur, (int, float)) and not isinstance(_cur, bool)
-                    and isinstance(state.best_gflops, (int, float)) and state.best_gflops > 0):
-                _reward = (float(_cur) - float(state.best_gflops)) / float(state.best_gflops)
-            state.bandit.update(bandit_arm, _reward,
-                          eligible=_elig.get("can_count_progress") is True,
-                          # §10.3 的分母原料: 这一轮把秒换成数字花了多少。只有真跑出
-                          # L3 读数才算 (L1/L2 就挂掉的轮次没有测量秒可言 ⇒ None)。
-                          cost_s=_measure_s if l3_result is not None else None)
-            perf_data = {
-                "gflops": l3_result.metrics.get("gflops", 0),
-                "speedup": l3_result.metrics.get("speedup_vs_baseline", 0),
-                "target_speedup": state.task.constraints.min_speedup,
-                "bound_type": l3_result.metrics.get("bound_type", "unknown"),
-                "avg_time_ms": l3_result.metrics.get("avg_time_ms", 0),
-                "memory_bandwidth_gbs": l3_result.metrics.get("memory_bandwidth_gbs", 0),
-                # ---- Roofline 数据 (Verifier 注入) ----
-                "hw_peak_gflops": l3_result.metrics.get("hw_peak_gflops", 0),
-                "hw_peak_bandwidth_gbs": l3_result.metrics.get("hw_peak_bandwidth_gbs", 0),
-                "gflops_utilization_pct": l3_result.metrics.get("gflops_utilization_pct", 0),
-                "bandwidth_utilization_pct": l3_result.metrics.get("bandwidth_utilization_pct", 0),
-                "arithmetic_intensity": l3_result.metrics.get("arithmetic_intensity", 0),
-                "ridge_point": l3_result.metrics.get("ridge_point", 0),
-                "roofline_bound": l3_result.metrics.get("roofline_bound", "unknown"),
-                "name_bound": l3_result.metrics.get("name_bound", "unknown"),
-                "hw_name": l3_result.metrics.get("hw_name", "unknown"),
-                "hw_compute_capability": l3_result.metrics.get("hw_compute_capability", "unknown"),
-                # ---- §12 便宜代理剪枝的输入 (不花 GPU 秒) ----
-                # 上界由 Verifier 从 caps 发布 (0 = 不知道); elem_bytes 取**任务声明
-                # 精度**的字节数 —— 与 smem 估算、AI 分母同一个口径 (核根本见不到
-                # 控制端手里那份 float32 数组, 见 verifier._compute_arithmetic_intensity)。
-                "shared_mem_per_sm_kb": l3_result.metrics.get("shared_mem_per_sm_kb", 0),
-                "elem_bytes": state.task.constraints.precision.itemsize,
-                # ---- 优化历史 ----
-                "optimization_history": state.optimization_history,
-            }
-            if _llm_broke:
-                # 与 `tuning_refused` 走同一条通道 (perf_data), 不新增签名 ——
-                # SearchAgent 见到它就跳过 `_llm_optimize` 走规则路径。
-                perf_data["llm_budget_exhausted"] = True
-            # §10.3: 把本轮裁决**发布**给 SearchAgent (判据在判决点之后已经算过,
-            # 这里只发布 —— 一个判定一处实现)。不通过 ⇒ 这一轮只做参数搜索。
-            perf_data["structural_escalation_denied"] = list(_esc_decision.refusals)
-            if _can_tune:
-                # 有资格 ⇒ 这份读数进信念, 供后面的轮次沿用
-                state.last_tunable_perf = perf_data
-            elif state.last_tunable_perf is not None:
-                # 没资格 ⇒ 沿用**上一次有资格读数**构成的信念 (伪码里的 `belief`)
-                perf_data = state.last_tunable_perf
-            else:
-                # 本次运行还没有任何一次有资格的读数: 给一个**不含任何数字**的
-                # 结构先验。`tuning_refused` 是给 SearchAgent 的信号 —— 它必须
-                # 把「没有读数」如实写进 prompt, 不许用 `.get(k, 0)` 编一个 0 出来
-                # (`_llm_optimize` 原来正是那样: 缺键 ⇒ 0.00 印进 prompt)。
-                perf_data = {
-                    "target_speedup": state.task.constraints.min_speedup,
-                    "tuning_refused": "can_tune=False",
-                    "optimization_history": [],
-                }
-            if _space is not None:
-                # §12: 模板型后端的候选来自参数空间 (下一轮轮首再取一次, 那时
-                # bandit 已经吃过本轮的回报 ⇒ 顺位会跟着证据走)。这条 LLM/邻域搜索
-                # 路径**整条不适用**: 让 SearchAgent 改 tiling 会把「模板点」与
-                # 「LLM 结构」混进同一个候选队列 —— 而它们连身份口径都不同。
-                print(f"\n[Search] 模板型后端: 候选来自参数空间, 本轮不走 LLM 搜索")
-                # 模板轮**没有**新 sketch 也没有 LLM 建议: 那两行原样打出来会
-                # 读成「这一轮改了 sketch」—— 那是代码型那边的语义。
-                #
-                # `optimization_history` 在这里**一个字都不写**: 它唯一的读者是
-                # SearchAgent 的 prompt (`agents._llm_optimize`), 而模板轮根本不叫
-                # SearchAgent —— 写一条进去就是「只有调试者会读到」的键 (与
-                # CHECKLOG I36 那类「算了没人读」同族)。这一轮的候选身份已经在
-                # `iteration_history.template_selection` 里, 那是有读者的那一格。
-            else:
-                if state.search_alternatives:
-                    # P1-4: 上一轮排好的邻域候选按序轮换 —— 系统搜索代替「每轮
-                    # 重新问一次 LLM 直觉」。轮换候选已带结构 (hints/memory_plan),
-                    # 只换了 tiling, 不需要再过 Search。
-                    #
-                    # 选**哪一个**交给 §10.3 的选择器 (`choose`): ε 那一支去未探索的
-                    # 区域, 1-ε 那一支去分数最高的; 计划格子 (分相预算) 约束模式。
-                    _nsel = choose(state.search_alternatives, state.bandit, self._arm_of,
-                                   epsilon=self.selection_epsilon,
-                                   draw=explore_draw(state._selection_seed, round_num),
-                                   phases=self._plan_phases())
-                    if _nsel is None:
-                        _room = self._budget.as_dict()["phase_room"]
-                        _why = (f"探索/精修两格的计划额度都用完了 (剩余 {_room}) 且"
-                                "邻域队列里没有符合模式的候选 ⇒ 不再开新的一轮")
-                        self._budget.oracle_refuse("explore")
-                        self._record_stop(state.artifact, round_num, "budget_exhausted", _why)
-                        return _ROUND_STOP
-                    state.current_sketch = _nsel.chosen
-                    state.search_alternatives = [x for x in _nsel.ranking
-                                           if x is not _nsel.chosen]
-                    _round_selection = dict(_nsel.as_dict(), applies_to="next_round",
-                                            chosen_label=self._arm_of(_nsel.chosen))
-                    print(f"\n[Selection] {_nsel.note}")
-                    t = state.current_sketch.tiling
-                    suggestion = "P1-4 邻域候选轮换"
-                    print(f"\n[Search] 轮换邻域候选: tiling={t.block_m}x{t.block_n}x{t.block_k} "
-                          f"(队列剩 {len(state.search_alternatives)} 个)")
-                else:
-                    # ── §12 的开关: 后端声明了参数空间 ⇒ 模板型 ──
-                    # 控制器「自动切换成 LLM/模板产出候选、bandit 只做局部精修」这件事,
-                    # 今天只有代码型那一半有实现 (bandit 精修 = P1-4 邻域)。模板型那一半
-                    # (由参数空间枚举候选并实例化) 还没落地 ⇒ 在这里 fail-closed, 而不是
-                    # 把它降级成代码型继续跑: §12 点名的风险正是「把候选悄悄当成源码字符串」。
-                    # 放在真值测量**之前** (这一处是每轮搜索的入口), 因为拒绝要发生在花钱之前。
-                    try:
-                        state.current_sketch, suggestion = self.search.run(state.current_sketch, perf_data)
-                    except Exception as e:
-                        # 规则优化也失败时, 终止优化但不崩整个任务
-                        print(f"\n[Conductor] Search 优化异常 ({e}), 终止优化循环")
-                        state.snapshot_target_dir = self._flush_snapshot(
-                            task=state.task,
-                            artifact_dir=state.snapshot_target_dir,
-                            round_done=round_num,
-                            current_sketch=state.current_sketch,
-                            current_code=state.current_code,
-                            pending_fix=state.pending_fix,
-                            iteration_history=state.artifact.iteration_history,
-                            best_gflops=state.best_gflops,
-                            rounds_without_improvement=state.rounds_without_improvement,
-                            optimization_history=state.optimization_history,
-                            applied_recipes=state.applied_recipes,
-                            disabled_recipes=state.disabled_recipes,
-                            all_verification_results=state.all_verification_results,
-                        )
-                        self._record_stop(state.artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
-
-                        return _ROUND_STOP
-                    # P1-4: 排队下一轮的轮换候选 (SearchAgent 只在 triton 路径产出)
-                    # §5: 顺序交给 bandit (本轮累积的证据优先, 无观测的保持先验顺序),
-                    # 而不是纯 FIFO —— 后者对脏数据免疫但也无知: 哪个候选上次变快了,
-                    # 队列不知道。资格门在这层之外 (没资格的数根本没进来)。
-                    # 队列在这里**只入队不排序** (保持先验顺序): 排序与「取哪一个」
-                    # 是同一个判断, 它发生在**消费那一轮** (`choose`) —— 那时证据最新,
-                    # 而且一次判断只有一个地方做。这里再排一遍会让同一个选择器对同一批
-                    # 候选跑两次 (真实 bandit 是幂等的, 但那是巧合, 不是设计)。
-                    state.search_alternatives = list(
-                        getattr(self.search, "last_alternatives", []))
-                    if state.bandit.total_scored or state.bandit.unscored_updates:
-                        print(f"  [Bandit] 队列按证据重排: 已采纳 {state.bandit.total_scored} 个回报, "
-                              f"没采纳 {state.bandit.unscored_updates} 个")
-                print(f"  优化建议: {suggestion}")
-                print(f"  新 Sketch 版本: v{state.current_sketch.version}")
-
-                # ---- 记录本轮优化历史 (供后续轮次参考) ----
-                # 只在有资格时累加: 这份 history 会印进下一轮的 prompt, 也就是**信念**的
-                # 一部分。把没有调参资格的那一轮数字写进去, 等于换个通道让它指挥搜索。
-                if _can_tune:
-                    state.optimization_history.append({
-                        "tiling": f"{state.current_sketch.tiling.block_m}x{state.current_sketch.tiling.block_n}x{state.current_sketch.tiling.block_k}",
-                        "gflops": l3_result.metrics.get("gflops", 0),
-                        "stage": "algorithm",  # 由 SearchAgent 返回实际 stage
-                        "outcome": f"GFLOPS={l3_result.metrics.get('gflops', 0):.2f}, "
-                                   f"加速比={l3_result.metrics.get('speedup_vs_baseline', 0):.2f}x",
-                    })
-
-        # ── 可复现性 Harness: 循环走到末尾 (没走 break/continue) 时统一 flush 一次快照 ──
-        state.snapshot_target_dir = _snap()
-        if not (l3_result and not l3_result.passed and round_num < self.max_optimize_rounds):
-            print(f"\n[Conductor] 已达最大优化轮次，停止迭代")
-
+        # ── 收尾: 参考天花板 / 停滞 / 资格门 / 出口判定 (§10.4), 见 _round_close_out ──
+        return self._round_close_out(
+            state, round_num,
+            _esc_decision=_esc_decision, _measure_s=_measure_s, _space=_space,
+            bandit_arm=bandit_arm, l3_result=l3_result)
 
     def _finalize_run(self, *, state):
         """收尾: 把跑完的循环状态落成最终产物、写报告、给出返回值。
