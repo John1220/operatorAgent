@@ -422,8 +422,11 @@ class TestOneProducerPerFact(unittest.TestCase):
         self.assertEqual(1, el.count("def regression_over_limit("))
 
     def test_the_conductor_publishes_the_case_once_and_derives_both(self):
+        # Stage1: 收尾阶段改从运行状态对象读 (RunState), 参数因此变成 state.test_inputs。
+        # 断言跟着改成新形状 —— 而不是抹掉前缀: 这条守卫要的就是「读的是本次运行的输入」
+        # 这个结构事实, 结构变了它就该红一次, 由人确认。
         cu = self._src("operator_agent/conductor.py")
-        self.assertEqual(1, cu.count("case_key(test_inputs)"))
+        self.assertEqual(1, cu.count("case_key(state.test_inputs)"))
         self.assertEqual(1, cu.count("required_cases_ok(contract.required_cases"))
         self.assertEqual(1, cu.count("regression_over_limit(contract.max_regression"))
         self.assertIn("artifact.benchmark_data[\"case_key\"]", cu)

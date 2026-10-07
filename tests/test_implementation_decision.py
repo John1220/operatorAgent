@@ -315,8 +315,10 @@ class TestTheOnlyProducer(unittest.TestCase):
     def test_the_case_key_is_published_where_both_the_reading_and_the_inputs_exist(self):
         """「本次评了哪条 case」与 L3 读数写在**同一处**（判据侧没有输入可查）"""
         src = self._src("conductor.py")
-        key_at = src.index('artifact.benchmark_data["case_key"] = case_key(test_inputs)')
-        l3_at = src.index("artifact.benchmark_data = l3.metrics")
+        # Stage1: 收尾阶段改从运行状态对象读 (RunState) —— 两处都带上了 state. 前缀。
+        # 相邻性这条断言本身没变, 只是跟着结构改形状 (结构变了就该红一次, 由人确认)。
+        key_at = src.index('state.artifact.benchmark_data["case_key"] = case_key(state.test_inputs)')
+        l3_at = src.index("state.artifact.benchmark_data = l3.metrics")
         self.assertLess(l3_at, key_at, "case_key 必须与 L3 读数同处发布")
         self.assertEqual(1, src.count('["case_key"] = case_key('))
     

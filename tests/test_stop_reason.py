@@ -159,28 +159,55 @@ class TestStopReasonIsRecorded(unittest.TestCase):
             Conductor._record_stop(Conductor(backend=MockGPU(), kernel_db=KernelDatabase(),
                                             llm=None), art, 1, "budget", "还没这一档")
 
-    def test_every_break_in_the_loop_has_a_reason_attached(self):
-        """防腐: 循环里每个 `break` 的紧邻上一行必须是 `_record_stop(...)`。
+    def test_every_exit_from_a_round_has_a_reason_attached(self):
+        """防腐: 轮次里每个「终止优化循环」的出口, 紧邻上方必须是 `_record_stop(...)`。
 
-        新增出口而忘了记 reason 是最自然的走法 (break 已经在那儿了)，而那时产物会静默地
+        新增出口而忘了记 reason 是最自然的走法 (出口已经在那儿了)，而那时产物会静默地
         缺这一档 —— 与 doc 49 §7.7 那条「差分守卫要配绝对锚点」同族, 这里用**计数**钉住。
+
+        Stage2 把循环体搬进 _run_round 之后, 出口的写法从 `break` 变成了
+        `return _ROUND_STOP`。判据要盯的东西一个字没变 (每个终止出口都得带 reason),
+        所以这里跟到新写法上 —— 是换位置, 不是放宽。
         """
         tree = ast.parse(io.open(ROOT / "operator_agent" / "conductor.py",
                                  encoding="utf-8").read())
-        loop = next(n for n in ast.walk(tree)
-                    if isinstance(n, ast.For) and "round_num" in ast.dump(n.target))
-        breaks, reasoned = [], 0
-        for node in ast.walk(loop):
-            if isinstance(node, ast.Break):
-                breaks.append(node.lineno)
-        body_lines = {n.lineno for n in ast.walk(loop)
+        run_round = next(n for n in ast.walk(tree)
+                         if isinstance(n, ast.FunctionDef) and n.name == "_run_round")
+        exits, reasoned = [], 0
+        for node in ast.walk(run_round):
+            if (isinstance(node, ast.Return) and isinstance(node.value, ast.Name)
+                    and node.value.id == "_ROUND_STOP"):
+                exits.append(node.lineno)
+        exits.sort()          # ast.walk 是 BFS 不是行序, 下面是按行序钉的
+        body_lines = {n.lineno for n in ast.walk(run_round)
                       if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                       and n.func.attr == "_record_stop"}
-        for bl in breaks:
+        for bl in exits:
             if any(bl > call_line and bl - call_line <= 3 for call_line in body_lines):
                 reasoned += 1
-        self.assertEqual(len(breaks), reasoned,
-                         f"循环里 {len(breaks)} 个 break, 只有 {reasoned} 个带着 reason")
+        self.assertEqual(len(exits), reasoned,
+                         f"轮次里 {len(exits)} 个出口, 只有 {reasoned} 个带着 reason")
+        # 绝对锚点 (doc 49 §7.7): 「每个出口都带 reason」是差分判据, 它拦不住「把一个出口
+        # 改成 continue」—— 少一个出口, 两边一起少, 等式照样成立。实测: 把第一个出口
+        # (wall_clock_exhausted) 改成 return _ROUND_CONTINUE, 全量 2570 条全绿。
+        # 所以个数与对应关系都写死。
+        self.assertEqual(13, len(exits),
+                         "终止出口的个数变了 —— 少一个就是某个出口被改成了「继续」")
+        calls = {n.lineno: n for n in ast.walk(run_round)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "_record_stop"}
+        reasons = []
+        for bl in exits:
+            near = sorted((c for line, c in calls.items() if 0 < bl - line <= 3),
+                          key=lambda c: c.lineno)
+            reasons.append(ast.unparse(near[-1].args[2]) if near else None)
+        self.assertEqual(
+            ["'wall_clock_exhausted'", "'budget_exhausted'", "'budget_exhausted'",
+             "'template_no_candidate'", "'passed'", "'stagnant'", "'converged'",
+             "'infra_retry'", "'fix_error'", "'ask_turns_exhausted'",
+             "'l1_l2_failed'", "'budget_exhausted'", "'search_error'"],
+            reasons,
+            "出口与 reason 的对应关系漂了 —— 这份清单按行序钉, 换顺序也要在这里改")
 
 
 class TestStopReasonReachesResultJson(unittest.TestCase):

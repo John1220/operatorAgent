@@ -77,10 +77,12 @@ ROWS = [
         '            if r.level != "L3":\n                merged.append(r)',
         "同上, 但两条检索通道一起堵 ⇒ 证明「两条通道各自都算数」"),
     # ── 结构类: 今天行为不可区分, 只有结构守卫杀得掉 ──
+    # Stage2 把轮次循环体整段搬进 _run_round (少一层缩进), 这条锚点跟着少 4 格 ——
+    # 判据没变, 变的是它盯的那行代码现在住在哪儿。
     Row("M11 把 Fixer 入口那道门放宽到 L3", "cond",
-        '                not r.passed and r.level in (VerificationLevel.L1_COMPILE, VerificationLevel.L2_FUNCTION)',
-        '                not r.passed and r.level in (VerificationLevel.L1_COMPILE,\n'
-        '                    VerificationLevel.L2_FUNCTION, VerificationLevel.L3_PERFORMANCE)',
+        '            not r.passed and r.level in (VerificationLevel.L1_COMPILE, VerificationLevel.L2_FUNCTION)',
+        '            not r.passed and r.level in (VerificationLevel.L1_COMPILE,\n'
+        '                VerificationLevel.L2_FUNCTION, VerificationLevel.L3_PERFORMANCE)',
         "隔离理由: `verify()` fail-fast ⇒ 现役输入里构造不出「L3 单独失败还进了 Fixer」的活路径; "
         "杀它的是对 `l1_l2_failed` 那道门的 AST 断言 (它钉的是可达性, 不是当次输出)",
         False),

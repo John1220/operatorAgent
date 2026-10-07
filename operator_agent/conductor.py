@@ -16,7 +16,8 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Mapping, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional, Union
 from .schemas import (
     TaskSchema, RouteType, VerificationLevel, VerificationResult,
     UnifiedSketch, KernelArtifact,
@@ -292,6 +293,83 @@ _PERF_ADVICE = ("门槛或判据换了去查部署; 只有绑定轴换了通常�
 #: 那一轮**, 正是唯一一次问 LLM 要不要做结构性跳跃的机会 —— 而升级买到的是 K 轮
 #: (停滞计数清零, 因为那段平坦区是对**旧结构**的陈述)。
 MAX_STAGNANT_ROUNDS = 2
+
+
+@dataclass
+class RunState:
+    """一次运行的状态 —— 轮次循环与收尾阶段共同读写的那一份东西。
+
+    **为什么需要它**: `_execute_inner` 的 1128 行轮次循环与它后面的收尾, 靠二十多个
+    同名局部变量互相通信。这些名字在收进来之前只是「函数里碰巧还在作用域内的东西」:
+    谁能改它、改完谁看得见, 只能靠通读 1600 行来回答。收成一个对象之后, 这个问题才有
+    有限答案 —— 「哪些值跨轮活下来」是一份**字段清单**, 而不是作用域的副产品。
+
+    **字段清单不是随手定的**, 它由三条**已经存在**的契约交叉确定:
+      * `_restore_state_from_snapshot` 恢复的那 10 项 = 快照里跨轮活下来的状态;
+      * `_finalize_run` 收尾要读的全部东西;
+      * 轮次循环自己攒的跨轮记忆 (`verified_parent` / `verified_parent_round` /
+        `snapshot_target_dir` / `search_alternatives` / `plan` / `last_tunable_perf`)。这一组是 Stage2 把循环体搬成
+        `_run_round` 时才现形的: 它们在**同一轮里先读后写**, 所以必须有值从上一轮传进来 ——
+        在原作用域里这是隐形的, 搬成方法后第一轮就是 UnboundLocalError。后两位的形状更隐蔽:
+        赋值在 if 这一支、读在 elif 的另一支 —— 光比行号顺序看不出来, 要按「可能未绑定就读取」
+        的数据流分析才现形 (所以判据也照数据流写, 见 tests/test_run_state_single_source.py)。它们**不在快照里**:
+        进程重启后回到 setup 初值 (既有行为, 此处只让它可见)。
+    `tests/test_run_state_single_source.py` 把这三条都钉成了断言 —— 少一个字段,
+    或加一个没人读的字段, 都会变红。
+
+    只读上下文那一组: 绑定在整次运行里不变, 但值本身可能是可变的累积器
+    (`bandit` / `coverage_ledger` 内部一直在攒东西) —— 变的是它们内部, 不是这个字段。
+    """
+
+    # ---- 只读上下文: 整次运行不变的绑定 ----
+    task: TaskSchema
+    target_gflops: float
+    test_inputs: Mapping
+    input_sets: list
+    declared_cases: set
+    case_source: str
+    #: 选型种子 (字符串, 由 task_id + 后端标签拼成 —— 不是随机数)
+    _selection_seed: str
+    bandit: Bandit
+    coverage_ledger: CoverageLedger
+
+    # ---- 产物 ----
+    artifact: KernelArtifact
+
+    # ---- 跨轮活下来的状态 (与 _restore_state_from_snapshot 的恢复清单逐一对应) ----
+    start_round: int
+    current_sketch: Optional[UnifiedSketch]
+    current_code: Optional[str]
+    pending_fix: Any
+    best_gflops: float
+    rounds_without_improvement: int
+    optimization_history: list
+    applied_recipes: set
+    disabled_recipes: set
+    all_verification_results: list
+
+    # ---- 也只跨轮活下来, 但**不在快照契约里** (见类文档) ----
+    verified_parent: Optional[str]
+    verified_parent_round: int
+    snapshot_target_dir: Any
+    search_alternatives: list
+    plan: Any
+    last_tunable_perf: Any
+
+    # ---- 只在收尾读的累积量 ----
+    fix_attempts: list
+    reflexion_pending: list
+    duplicate_rounds: int
+    refused_rounds: int
+    invalid_measurement_rounds: int
+    round_signatures: list
+
+
+#: _run_round 的返回值: 轮次循环接下来该继续还是该停。
+#: 用具名常量而不是裸 True/False —— 那 14 处 return 是从 break/continue 换过来的,
+#: 读的人需要一个能自查的名字 (而不是回头数这个布尔是什么极性)。
+_ROUND_CONTINUE = True
+_ROUND_STOP = False
 
 
 class Conductor:
@@ -1334,1150 +1412,1237 @@ class Conductor:
         #: `can_tune=False` 的轮次不许覆盖它, 只许沿用它。
         last_tunable_perf: Optional[dict] = None
 
-        for round_num in range(start_round, self.max_optimize_rounds + 1):
-            print(f"\n{'─'*40}")
-            print(f"轮次 {round_num}/{self.max_optimize_rounds}")
-            print(f"{'─'*40}")
+        # 初始化运行状态: 从这里往下, 轮次循环与收尾读写的是同一个对象。
+        # 上面那段「准备」仍然用局部名 —— 它们只在这一次构造里被读一次, 收进来没有意义。
+        state = RunState(
+            artifact=artifact,
+            task=task,
+            target_gflops=target_gflops,
+            test_inputs=test_inputs,
+            input_sets=input_sets,
+            declared_cases=declared_cases,
+            case_source=case_source,
+            _selection_seed=_selection_seed,
+            bandit=bandit,
+            coverage_ledger=coverage_ledger,
+            current_sketch=current_sketch,
+            current_code=current_code,
+            pending_fix=pending_fix,
+            best_gflops=best_gflops,
+            rounds_without_improvement=rounds_without_improvement,
+            optimization_history=optimization_history,
+            applied_recipes=applied_recipes,
+            disabled_recipes=disabled_recipes,
+            all_verification_results=all_verification_results,
+            start_round=start_round,
+            verified_parent=verified_parent,
+            verified_parent_round=verified_parent_round,
+            snapshot_target_dir=snapshot_target_dir,
+            search_alternatives=search_alternatives,
+            plan=plan,
+            last_tunable_perf=last_tunable_perf,
+            fix_attempts=fix_attempts,
+            reflexion_pending=reflexion_pending,
+            duplicate_rounds=duplicate_rounds,
+            refused_rounds=refused_rounds,
+            invalid_measurement_rounds=invalid_measurement_rounds,
+            round_signatures=round_signatures,
+        )
 
-            # ── §10.2 的两道预算门, 放在轮次**最前面** ──
-            # 位置是判据的一部分: 放在 Coder/Planner 之后等于「先花完 LLM 与写代码的钱,
-            # 再说这次测量买不起」。两道门都是 fail-closed: 买不起就停, 不停在半路上。
-            #
-            # 为什么 oracle 这一格用 `"explore"` 而不是按 explore/refine 分: 本仓今天
-            # **没有**「参数搜索平台化」这条判据 (§10.3 的升级门, CHECKLOG I53), 分不出来
-            # 就如实只花一格; 预留 (`confirm`) 那一格一律不许碰 —— 那才是这条预算的意义。
-            if not self._budget.within_wall_clock(time.monotonic() - self._run_started):
-                _elapsed = time.monotonic() - self._run_started
-                _why = (f"墙钟预算用尽 ({_elapsed:.1f}s >= "
-                        f"{self._budget.plan.wall_clock_s}s) ⇒ 不再开新的一轮")
-                print(f"\n[Budget] {_why}")
-                self._budget.oracle_refuse("explore")
-                self._record_stop(artifact, round_num, "wall_clock_exhausted", _why)
+        for round_num in range(state.start_round, self.max_optimize_rounds + 1):
+            # 一轮的全部流程在 _run_round 里 (循环体那 1128 行搬过去了)。返回
+            # _ROUND_STOP = 这一轮命中了某个退出出口, 即原来的 13 处 break。
+            if self._run_round(state, round_num, expected_output=expected_output,
+                               hw_info=hw_info, _mem_caps=_mem_caps,
+                               max_stagnant_rounds=max_stagnant_rounds,
+                               verify_drift=verify_drift) is _ROUND_STOP:
                 break
-            if not self._budget.oracle_may("explore", 1):
-                _plan = self._budget.plan
-                _why = (f"真值测量预算用尽 (已花 {self._budget.spent_all}/"
-                        f"{_plan.oracle_total}, 其中 {self._budget.caps['confirm']} 次"
-                        f"留给最终确认不许挪用) ⇒ 不再开新的一轮")
-                print(f"\n[Budget] {_why}")
+
+        # 收尾: 产物成型 / 报告 / 返回值。循环到此结束, 状态整体交出去。
+        return self._finalize_run(state=state)
+
+
+    def _run_round(self, state, round_num, *, expected_output, hw_info, _mem_caps,
+                   max_stagnant_rounds, verify_drift) -> bool:
+        """跑完一轮; 返回 _ROUND_STOP 表示这一轮命中了退出出口。
+
+        这是从 _execute_inner 的轮次循环体**整体**搬出来的一步。搬运方式是逐字的:
+        除下面这 14 处控制流改写之外, 方法体与原来的循环体逐 AST 节点相同 (写盘前按
+        AST 逐节点比对过; 搬完之后那 6 个跨轮记忆名字的判据在
+        tests/test_run_state_single_source.py):
+          13 处 break    -> return _ROUND_STOP
+           1 处 continue -> return _ROUND_CONTINUE
+        改过之后, 这个方法内部再没有能跳出调用者的语句 —— 「这一轮要不要终止整个
+        优化循环」只由返回值表达, 不再靠 break 从 1128 行深处跳出去。
+
+        接口为什么是 state + round_num + 5 个关键字:
+          * state 装的是**跨轮活下来**的那些值 —— 既包括收尾也要读的, 也包括循环
+            自己攒的记忆 (见 RunState 类文档)。字段清单由三条既有契约钉住
+            (tests/test_run_state_single_source.py)。
+          * 另外 5 个是**只有这一轮才需要、而且从不被写**的只读上下文 (期望输出 /
+            硬件信息 / 显存上限 / 停滞阈值 / 漂移判定)。它们刻意不进 state: 那样
+            字段清单就退化成「凡是这一轮读到的都算」, 也就不再是契约了。
+        """
+
+        print(f"\n{'─'*40}")
+        print(f"轮次 {round_num}/{self.max_optimize_rounds}")
+        print(f"{'─'*40}")
+
+        # ── §10.2 的两道预算门, 放在轮次**最前面** ──
+        # 位置是判据的一部分: 放在 Coder/Planner 之后等于「先花完 LLM 与写代码的钱,
+        # 再说这次测量买不起」。两道门都是 fail-closed: 买不起就停, 不停在半路上。
+        #
+        # 为什么 oracle 这一格用 `"explore"` 而不是按 explore/refine 分: 本仓今天
+        # **没有**「参数搜索平台化」这条判据 (§10.3 的升级门, CHECKLOG I53), 分不出来
+        # 就如实只花一格; 预留 (`confirm`) 那一格一律不许碰 —— 那才是这条预算的意义。
+        if not self._budget.within_wall_clock(time.monotonic() - self._run_started):
+            _elapsed = time.monotonic() - self._run_started
+            _why = (f"墙钟预算用尽 ({_elapsed:.1f}s >= "
+                    f"{self._budget.plan.wall_clock_s}s) ⇒ 不再开新的一轮")
+            print(f"\n[Budget] {_why}")
+            self._budget.oracle_refuse("explore")
+            self._record_stop(state.artifact, round_num, "wall_clock_exhausted", _why)
+            return _ROUND_STOP
+        if not self._budget.oracle_may("explore", 1):
+            _plan = self._budget.plan
+            _why = (f"真值测量预算用尽 (已花 {self._budget.spent_all}/"
+                    f"{_plan.oracle_total}, 其中 {self._budget.caps['confirm']} 次"
+                    f"留给最终确认不许挪用) ⇒ 不再开新的一轮")
+            print(f"\n[Budget] {_why}")
+            self._budget.oracle_refuse("explore")
+            self._record_stop(state.artifact, round_num, "budget_exhausted", _why)
+            return _ROUND_STOP
+
+        # ── §12 模板型后端: 本轮的候选来自**参数空间**, 不走 LLM/Coder ──
+        # 位置与预算门同级 (轮次最前面): 候选的**来源**决定这一轮怎么花钱, 所以
+        # 要在花钱之前定下来。开关只有一处判据 (`require_supported_space`): 后端没
+        # 实现实例化器 ⇒ 那里就炸; 这里只管「建不建得出来、先试哪个点」。
+        _space = require_supported_space(
+            param_space_of(self.backend, state.task), self.backend)
+        template_choice = None
+        _template_sel = None
+        # §21.3 这一段进没进**本轮修复提示**的留痕 (读者: A/B 对照与复盘)。
+        # 初值必须在轮首: 上一轮修过的话, 这一轮的血缘会带着上一轮的记录 ——
+        # 「这一轮的提示里有没有结构化证据」这个问题就答错了 (`selection` 那一格
+        # 初值放晚了是同一种错误, 被用例抓过一次)。
+        # ⚠️ 必须是**会被后填的字典** (与 `_coverage_record` 同一处置): 血缘条目在
+        # 修复之前就 append 了, 直接填一个 None/字符串的话后填的值进不了产物 ——
+        # 第一版就是这么写的, 产物里每一轮都是 `null`, 用例当场抓到。
+        _fix_evidence_record: dict = {"injected": False}
+        # §21.1 生产者侧的动作留痕 (与上面同一种写法: 血缘在轮首就 append, 后填的值
+        # 靠引用进产物)。它记的是「动作是谁写的」以及询问类信封被怎么响应 ——
+        # 没有这一格，「模型写的理由」与「harness 拼的理由」在产物里长得一样。
+        _fix_action_record: dict = {"asked": False}
+        # 本轮**可枚举**的候选全集 (§10.4 的覆盖判据要它): 模板型 = 剪枝后的点,
+        # 代码型 = None (候选由 LLM/规则按需产生 ⇒ 覆盖无法确立)。初值必须在轮首 ——
+        # 否则代码型轮会读到**上一轮**留下的一批点 (那会让覆盖判定拿旧全集说新话)。
+        _universe = None
+        # 这一轮的覆盖判定 (§10.4 的另一半)。血缘条目在**轮首**就 append 了, 而覆盖
+        # 判定要等本轮的观测进账 (这一轮的候选试过没有) —— 所以这里放一个**会被后填的
+        # 字典**, 与 `permanent_effects` 同一处置 (血缘里存的是同一个对象的引用)。
+        # 第一版直接 `_coverage = None` 再在下面赋值 ⇒ 每一轮血缘里都是 `null`。
+        _coverage_record: dict = {}
+        # §10.3 这一轮的选择 (模式/抽签/分数/顺序)。模板型 = 本轮用的候选就是它选的;
+        # 代码型 = 它在轮末选的是**下一轮**的候选 (`applies_to` 说明是哪一种)。
+        # ⚠️ 初值必须在**选择之前**: 第一版把它放在模板选择之后, 于是刚选出来的那份
+        # 记录被擦成 None (产物里每一轮都是 `selection: null`, 用例红了才发现)。
+        _round_selection = None
+        _draw = explore_draw(state._selection_seed, round_num)
+        if _space is not None:
+            # §10.3 的选择: 候选 = 参数空间的点。`allowed` 是「还有计划格子的相位」
+            # (分相预算) —— 它**约束**这一轮是探索还是精修, 于是 55%/30% 那个计划
+            # 真的体现在花的钱上, 而不只是一行注释。
+            # 候选 = **剪枝后**的点 (与队列同一批): 否则选择器会把剪掉的点排进顺位,
+            # 队列再过滤掉 ⇒ 「想选谁」与「用了谁」分叉, 连花哪一格预算都跟着错。
+            _universe = template_points(
+                _space, _mem_caps, state.task.constraints.precision.itemsize)
+            _sel = choose(_universe.kept, state.bandit, template_arm,
+                          epsilon=self.selection_epsilon, draw=_draw,
+                          phases=self._plan_phases())
+            if _sel is None:
+                _room = self._budget.as_dict()["phase_room"]
+                _why = (f"探索与精修两格的计划额度都用完了 (剩余 {_room}) ⇒ 不再开"
+                        "新的一轮")
+                print(f"\n[Template] {_why}")
                 self._budget.oracle_refuse("explore")
-                self._record_stop(artifact, round_num, "budget_exhausted", _why)
-                break
+                self._record_stop(state.artifact, round_num, "budget_exhausted", _why)
+                return _ROUND_STOP
+            # `chosen_label` 是「想选谁」的人读名字 (臂是去重键,留给 bandit 的统计);
+            # 它与队列最终用的那个点可能不同 (顺位回退), 所以两者都要在产物里。
+            _round_selection = dict(_sel.as_dict(), applies_to="this_round",
+                                    chosen_label=point_label(_sel.chosen))
+            print(f"\n[Selection] {_sel.note}")
+            _template_sel = select_template_candidate(
+                _space, self.backend, caps=_mem_caps,
+                elem_bytes=state.task.constraints.precision.itemsize,
+                order=_sel.ranking)
+            template_choice = _template_sel.chosen
+            print(f"\n[Template] {_template_sel.note()}")
+            if template_choice is None:
+                # 空间非空 (ParamSpace 校验过), 所以这个 None 只剩一个含义: **所有点
+                # 都建不出来**。停在这里并说明, 不退回代码型 —— §12 点名的风险正是
+                # 「把声明的参数空间悄悄丢掉后继续跑」。
+                _why = (f"参数空间 {_space.template_id!r} 的 {len(_template_sel.ranked)} "
+                        f"个点一个都没建成 (实例化器拒绝 {len(_template_sel.refusals)} 条)"
+                        " ⇒ 停止, 不退回代码型生成路径")
+                print(f"\n[Template] {_why}")
+                self._record_stop(state.artifact, round_num, "template_no_candidate", _why)
+                return _ROUND_STOP
 
-            # ── §12 模板型后端: 本轮的候选来自**参数空间**, 不走 LLM/Coder ──
-            # 位置与预算门同级 (轮次最前面): 候选的**来源**决定这一轮怎么花钱, 所以
-            # 要在花钱之前定下来。开关只有一处判据 (`require_supported_space`): 后端没
-            # 实现实例化器 ⇒ 那里就炸; 这里只管「建不建得出来、先试哪个点」。
-            _space = require_supported_space(
-                param_space_of(self.backend, task), self.backend)
-            template_choice = None
-            _template_sel = None
-            # §21.3 这一段进没进**本轮修复提示**的留痕 (读者: A/B 对照与复盘)。
-            # 初值必须在轮首: 上一轮修过的话, 这一轮的血缘会带着上一轮的记录 ——
-            # 「这一轮的提示里有没有结构化证据」这个问题就答错了 (`selection` 那一格
-            # 初值放晚了是同一种错误, 被用例抓过一次)。
-            # ⚠️ 必须是**会被后填的字典** (与 `_coverage_record` 同一处置): 血缘条目在
-            # 修复之前就 append 了, 直接填一个 None/字符串的话后填的值进不了产物 ——
-            # 第一版就是这么写的, 产物里每一轮都是 `null`, 用例当场抓到。
-            _fix_evidence_record: dict = {"injected": False}
-            # §21.1 生产者侧的动作留痕 (与上面同一种写法: 血缘在轮首就 append, 后填的值
-            # 靠引用进产物)。它记的是「动作是谁写的」以及询问类信封被怎么响应 ——
-            # 没有这一格，「模型写的理由」与「harness 拼的理由」在产物里长得一样。
-            _fix_action_record: dict = {"asked": False}
-            # 本轮**可枚举**的候选全集 (§10.4 的覆盖判据要它): 模板型 = 剪枝后的点,
-            # 代码型 = None (候选由 LLM/规则按需产生 ⇒ 覆盖无法确立)。初值必须在轮首 ——
-            # 否则代码型轮会读到**上一轮**留下的一批点 (那会让覆盖判定拿旧全集说新话)。
-            _universe = None
-            # 这一轮的覆盖判定 (§10.4 的另一半)。血缘条目在**轮首**就 append 了, 而覆盖
-            # 判定要等本轮的观测进账 (这一轮的候选试过没有) —— 所以这里放一个**会被后填的
-            # 字典**, 与 `permanent_effects` 同一处置 (血缘里存的是同一个对象的引用)。
-            # 第一版直接 `_coverage = None` 再在下面赋值 ⇒ 每一轮血缘里都是 `null`。
-            _coverage_record: dict = {}
-            # §10.3 这一轮的选择 (模式/抽签/分数/顺序)。模板型 = 本轮用的候选就是它选的;
-            # 代码型 = 它在轮末选的是**下一轮**的候选 (`applies_to` 说明是哪一种)。
-            # ⚠️ 初值必须在**选择之前**: 第一版把它放在模板选择之后, 于是刚选出来的那份
-            # 记录被擦成 None (产物里每一轮都是 `selection: null`, 用例红了才发现)。
-            _round_selection = None
-            _draw = explore_draw(_selection_seed, round_num)
-            if _space is not None:
-                # §10.3 的选择: 候选 = 参数空间的点。`allowed` 是「还有计划格子的相位」
-                # (分相预算) —— 它**约束**这一轮是探索还是精修, 于是 55%/30% 那个计划
-                # 真的体现在花的钱上, 而不只是一行注释。
-                # 候选 = **剪枝后**的点 (与队列同一批): 否则选择器会把剪掉的点排进顺位,
-                # 队列再过滤掉 ⇒ 「想选谁」与「用了谁」分叉, 连花哪一格预算都跟着错。
-                _universe = template_points(
-                    _space, _mem_caps, task.constraints.precision.itemsize)
-                _sel = choose(_universe.kept, bandit, template_arm,
-                              epsilon=self.selection_epsilon, draw=_draw,
-                              phases=self._plan_phases())
-                if _sel is None:
-                    _room = self._budget.as_dict()["phase_room"]
-                    _why = (f"探索与精修两格的计划额度都用完了 (剩余 {_room}) ⇒ 不再开"
-                            "新的一轮")
-                    print(f"\n[Template] {_why}")
-                    self._budget.oracle_refuse("explore")
-                    self._record_stop(artifact, round_num, "budget_exhausted", _why)
-                    break
-                # `chosen_label` 是「想选谁」的人读名字 (臂是去重键,留给 bandit 的统计);
-                # 它与队列最终用的那个点可能不同 (顺位回退), 所以两者都要在产物里。
-                _round_selection = dict(_sel.as_dict(), applies_to="this_round",
-                                        chosen_label=point_label(_sel.chosen))
-                print(f"\n[Selection] {_sel.note}")
-                _template_sel = select_template_candidate(
-                    _space, self.backend, caps=_mem_caps,
-                    elem_bytes=task.constraints.precision.itemsize,
-                    order=_sel.ranking)
-                template_choice = _template_sel.chosen
-                print(f"\n[Template] {_template_sel.note()}")
-                if template_choice is None:
-                    # 空间非空 (ParamSpace 校验过), 所以这个 None 只剩一个含义: **所有点
-                    # 都建不出来**。停在这里并说明, 不退回代码型 —— §12 点名的风险正是
-                    # 「把声明的参数空间悄悄丢掉后继续跑」。
-                    _why = (f"参数空间 {_space.template_id!r} 的 {len(_template_sel.ranked)} "
-                            f"个点一个都没建成 (实例化器拒绝 {len(_template_sel.refusals)} 条)"
-                            " ⇒ 停止, 不退回代码型生成路径")
-                    print(f"\n[Template] {_why}")
-                    self._record_stop(artifact, round_num, "template_no_candidate", _why)
-                    break
+        # 本轮的 bandit 臂 = **本轮候选的身份** (§5 的排序器吃的就是它): 模板轮 =
+        # 那个点的去重键, 代码型轮 = tiling 三元组。刻意与候选身份同源 —— 一个候选
+        # 只有一个臂, 否则「这个点上次变快了没有」会随调用方各自解释。
+        #
+        # 位置: 必须在血缘 append **之前** (那是一轮里更早的位置), 也必须在本轮
+        # 搜索**之前** —— 搜索那一步改的是下一轮的 sketch 与队列, 都在它之后, 所以
+        # 这里算出来的与搜索块用掉的是同一个值。
+        bandit_arm = (template_arm(template_choice.candidate)
+                      if template_choice is not None
+                      else self._arm_of(state.current_sketch))
+        # 这一轮的候选值哪一相预算 (§10.3 的分相): 没观测过 ⇒ 探索, 观测过 ⇒ 精修。
+        # 它与 `Selection.mode` 是同一件事的两半 (探索那一支只取未观测的候选), 所以
+        # 「记的相位 = 当时选的模式」是一条可被测试钉住的不变量。
+        round_phase = phase_of(state.bandit, bandit_arm)
 
-            # 本轮的 bandit 臂 = **本轮候选的身份** (§5 的排序器吃的就是它): 模板轮 =
-            # 那个点的去重键, 代码型轮 = tiling 三元组。刻意与候选身份同源 —— 一个候选
-            # 只有一个臂, 否则「这个点上次变快了没有」会随调用方各自解释。
-            #
-            # 位置: 必须在血缘 append **之前** (那是一轮里更早的位置), 也必须在本轮
-            # 搜索**之前** —— 搜索那一步改的是下一轮的 sketch 与队列, 都在它之后, 所以
-            # 这里算出来的与搜索块用掉的是同一个值。
-            bandit_arm = (template_arm(template_choice.candidate)
-                          if template_choice is not None
-                          else self._arm_of(current_sketch))
-            # 这一轮的候选值哪一相预算 (§10.3 的分相): 没观测过 ⇒ 探索, 观测过 ⇒ 精修。
-            # 它与 `Selection.mode` 是同一件事的两半 (探索那一支只取未观测的候选), 所以
-            # 「记的相位 = 当时选的模式」是一条可被测试钉住的不变量。
-            round_phase = phase_of(bandit, bandit_arm)
+        # P1-1 (generation-side-review): 本轮若走了候选选择, 已跑完的 L1+L2
+        # 结果缓存在这里 —— Step 4 复用它, 不重复真机执行。
+        # None = 本轮没有多候选 (单体路径 / 修复轮 / 名单里没有默认候选)。
+        # l1_l2_is_final = 这份结果已是最终态 (决赛全败: L2 已失败, 不该再跑 L3)。
+        selected_l1_l2 = None
+        l1_l2_is_final = False
+        # P1-1 成本记账: 本轮 compile-gate 放行了几个决赛候选, 以及真机 L2 跑了几次。
+        # 翻转默认路径后每轮生成从 1 个候选变成最多 2 个决赛候选 + 最多 2 次 L2,
+        # 而「这次翻转让机时涨了多少」在产物里此前没有任何原料。
+        round_candidates = 0
+        round_l2_runs = None      # None = 由 verify_results 现算 (非选择路径)
+        # (臂在下面「模板选择」之后立刻算 —— 血缘条目在那一轮更早的位置 append,
+        #  所以臂必须在 append 之前就有值; 见那一处的说明。)
 
-            # P1-1 (generation-side-review): 本轮若走了候选选择, 已跑完的 L1+L2
-            # 结果缓存在这里 —— Step 4 复用它, 不重复真机执行。
-            # None = 本轮没有多候选 (单体路径 / 修复轮 / 名单里没有默认候选)。
-            # l1_l2_is_final = 这份结果已是最终态 (决赛全败: L2 已失败, 不该再跑 L3)。
-            selected_l1_l2 = None
-            l1_l2_is_final = False
-            # P1-1 成本记账: 本轮 compile-gate 放行了几个决赛候选, 以及真机 L2 跑了几次。
-            # 翻转默认路径后每轮生成从 1 个候选变成最多 2 个决赛候选 + 最多 2 次 L2,
-            # 而「这次翻转让机时涨了多少」在产物里此前没有任何原料。
-            round_candidates = 0
-            round_l2_runs = None      # None = 由 verify_results 现算 (非选择路径)
-            # (臂在下面「模板选择」之后立刻算 —— 血缘条目在那一轮更早的位置 append,
-            #  所以臂必须在 append 之前就有值; 见那一处的说明。)
+        # Step 3: 获取代码
+        # - 首轮 / Search 优化后: Coder 根据 Sketch + OptimizationPlanner 配方重新生成
+        # - Fixer 修复后: 直接使用修复版代码重新验证
+        # §21 的回滚点与 diff 基线: 本轮开始**之前**手里的那份代码 (= 上一轮的成品,
+        # 也就是本轮 Fixer 被要求去修的那一份)。必须在下面三支改写 `current_code`
+        # 之前取 —— 取晚了就成了「自己与自己比」。
+        _code_before_this_round = state.current_code
+        # 本轮候选的**来路**（§21.1 生产者侧）。轮首置空 —— 只有「本轮用的是 Fixer
+        # 交上来的那份」这一支会武装它, 于是生成轮/模板轮恒为 `absent`。
+        _model_envelope: Optional[ActionEnvelope] = None
+        if state.pending_fix is not None:
+            state.current_code = state.pending_fix
+            state.pending_fix = None
+            # 信封与 `pending_fix` **同生同灭**（唯一的消费点就在这两行）: 拿出来的
+            # 是「这份候选是谁怎么提出来的」。它进不了别的轮次 —— 上面那一行已经把它
+            # 清空, 而下一轮的候选要么由 Coder 生成（没有信封）, 要么由新的修复轮武装。
+            _model_envelope = self._pending_action_envelope
+            self._pending_action_envelope = None
+            action = "fix"
+            print(f"\n[Conductor] 使用 Fixer 修复后的代码重新验证...")
+        elif template_choice is not None:
+            # §12: 模板候选的源码**来自实例化器**, 不经 LLM/Coder (§12 的
+            # 「控制器自动切换成『LLM / 模板产出候选』」那一半)。action 单列一个值,
+            # 于是「这一轮是模板产出的」在血缘里可分辨, 不必从源码去猜。
+            state.current_code = template_choice.source
+            action = "template"
+            print(f"\n[Conductor] 模板候选 (跳过 Coder): "
+                  f"{point_label(template_choice.candidate)}")
+        else:
+            action = "generate" if round_num == 1 else "optimize"
 
-            # Step 3: 获取代码
-            # - 首轮 / Search 优化后: Coder 根据 Sketch + OptimizationPlanner 配方重新生成
-            # - Fixer 修复后: 直接使用修复版代码重新验证
-            # §21 的回滚点与 diff 基线: 本轮开始**之前**手里的那份代码 (= 上一轮的成品,
-            # 也就是本轮 Fixer 被要求去修的那一份)。必须在下面三支改写 `current_code`
-            # 之前取 —— 取晚了就成了「自己与自己比」。
-            _code_before_this_round = current_code
-            # 本轮候选的**来路**（§21.1 生产者侧）。轮首置空 —— 只有「本轮用的是 Fixer
-            # 交上来的那份」这一支会武装它, 于是生成轮/模板轮恒为 `absent`。
-            _model_envelope: Optional[ActionEnvelope] = None
-            if pending_fix is not None:
-                current_code = pending_fix
-                pending_fix = None
-                # 信封与 `pending_fix` **同生同灭**（唯一的消费点就在这两行）: 拿出来的
-                # 是「这份候选是谁怎么提出来的」。它进不了别的轮次 —— 上面那一行已经把它
-                # 清空, 而下一轮的候选要么由 Coder 生成（没有信封）, 要么由新的修复轮武装。
-                _model_envelope = self._pending_action_envelope
-                self._pending_action_envelope = None
-                action = "fix"
-                print(f"\n[Conductor] 使用 Fixer 修复后的代码重新验证...")
-            elif template_choice is not None:
-                # §12: 模板候选的源码**来自实例化器**, 不经 LLM/Coder (§12 的
-                # 「控制器自动切换成『LLM / 模板产出候选』」那一半)。action 单列一个值,
-                # 于是「这一轮是模板产出的」在血缘里可分辨, 不必从源码去猜。
-                current_code = template_choice.source
-                action = "template"
-                print(f"\n[Conductor] 模板候选 (跳过 Coder): "
-                      f"{point_label(template_choice.candidate)}")
-            else:
-                action = "generate" if round_num == 1 else "optimize"
+            # ---- OptimizationPlanner: 根据 Roofline 选择本轮要应用的配方 ----
+            prev_l3_metrics = {}
+            if state.all_verification_results:
+                prev_l3 = next((r for r in state.all_verification_results
+                                if r.level == VerificationLevel.L3_PERFORMANCE), None)
+                if prev_l3:
+                    prev_l3_metrics = prev_l3.metrics
 
-                # ---- OptimizationPlanner: 根据 Roofline 选择本轮要应用的配方 ----
-                prev_l3_metrics = {}
-                if all_verification_results:
-                    prev_l3 = next((r for r in all_verification_results
-                                    if r.level == VerificationLevel.L3_PERFORMANCE), None)
-                    if prev_l3:
-                        prev_l3_metrics = prev_l3.metrics
-
-                plan = self.planner.plan(
-                    kernel_type=task.source.kernel_type,
-                    dsl=current_sketch.target_dsl if current_sketch else task.target.dsl,
-                    roofline=prev_l3_metrics if round_num > 1 else None,
-                    hardware=hw_info,
-                    precision=task.constraints.precision.value,
-                    round_num=round_num,
-                    disabled_recipes=disabled_recipes,
-                    active_recipes=applied_recipes,
+            state.plan = self.planner.plan(
+                kernel_type=state.task.source.kernel_type,
+                dsl=state.current_sketch.target_dsl if state.current_sketch else state.task.target.dsl,
+                roofline=prev_l3_metrics if round_num > 1 else None,
+                hardware=hw_info,
+                precision=state.task.constraints.precision.value,
+                round_num=round_num,
+                disabled_recipes=state.disabled_recipes,
+                active_recipes=state.applied_recipes,
+            )
+            current_recipes_text = state.plan.to_prompt()
+            if state.plan.selected_recipes:
+                recipe_names = ", ".join(
+                    f"{r.id}({r.name})" for r in state.plan.selected_recipes
                 )
-                current_recipes_text = plan.to_prompt()
-                if plan.selected_recipes:
-                    recipe_names = ", ".join(
-                        f"{r.id}({r.name})" for r in plan.selected_recipes
-                    )
-                    print(f"\n[Planner] 选中 {len(plan.selected_recipes)} 个优化配方: {recipe_names}")
-                    print(f"  {plan.summary()}")
-                else:
-                    print(f"\n[Planner] 本轮无新增优化配方")
+                print(f"\n[Planner] 选中 {len(state.plan.selected_recipes)} 个优化配方: {recipe_names}")
+                print(f"  {state.plan.summary()}")
+            else:
+                print(f"\n[Planner] 本轮无新增优化配方")
 
-                print(f"\n[Coder] 根据 Sketch + 优化配方生成代码 (v{current_sketch.version})...")
-                current_code = self.coder.run(
-                    current_sketch, task,
-                    optimization_recipes=current_recipes_text,
-                    test_inputs=test_inputs,
+            print(f"\n[Coder] 根据 Sketch + 优化配方生成代码 (v{state.current_sketch.version})...")
+            state.current_code = self.coder.run(
+                state.current_sketch, state.task,
+                optimization_recipes=current_recipes_text,
+                test_inputs=state.test_inputs,
+            )
+
+            # ---- P1-1 候选选择: compile-gate 只定了决赛名单, 真机 L1+L2 定胜负 ----
+            # 必须紧跟本轮流水的 coder.run 读名单: `last_finalists` 跨轮残留,
+            # 修复轮 (pending_fix) 不该拿上一轮的名单重新选。
+            # getattr: 测试常用自定义 coder 替身 (无此属性 = 单候选, 跳过选择)。
+            finalists = getattr(self.coder, "last_finalists", [])
+            round_candidates = len(finalists)
+            if len(finalists) > 1:
+                (state.current_code, selected_l1_l2, l1_l2_is_final,
+                 round_l2_runs) = self._select_finalist(
+                    state.current_code, finalists, state.task, state.input_sets, expected_output,
                 )
 
-                # ---- P1-1 候选选择: compile-gate 只定了决赛名单, 真机 L1+L2 定胜负 ----
-                # 必须紧跟本轮流水的 coder.run 读名单: `last_finalists` 跨轮残留,
-                # 修复轮 (pending_fix) 不该拿上一轮的名单重新选。
-                # getattr: 测试常用自定义 coder 替身 (无此属性 = 单候选, 跳过选择)。
-                finalists = getattr(self.coder, "last_finalists", [])
-                round_candidates = len(finalists)
-                if len(finalists) > 1:
-                    (current_code, selected_l1_l2, l1_l2_is_final,
-                     round_l2_runs) = self._select_finalist(
-                        current_code, finalists, task, input_sets, expected_output,
-                    )
+        # ---- 候选新颖度观测 (doc 47) ----
+        # 只做两件事: 把结构签名写进 iteration_history (它会被序列化进 result.json,
+        # 于是「模型重新生成时有多少轮是结构重复」第一次有一个能复盘的数), 以及在
+        # 当场打印出来。**不跳过验证** —— 假阳的代价是丢掉一个真的更好的核, 在没有
+        # 基率之前拿它省 GPU 时间就是拿判决换一个还没量的东西。
+        sig = signature_of(state.current_code)
+        dup_of = next((r for (r, s) in state.round_signatures if s and s == sig), None)
+        if sig:
+            state.round_signatures.append((round_num, sig))
+        if dup_of is not None and action == "optimize":
+            state.duplicate_rounds += 1
+            print(f"\n[Novelty] 第 {round_num} 轮与第 {dup_of} 轮结构相同 (签名 {sig}) "
+                  f"—— 照常验证, 本轮只在量基率")
 
-            # ---- 候选新颖度观测 (doc 47) ----
-            # 只做两件事: 把结构签名写进 iteration_history (它会被序列化进 result.json,
-            # 于是「模型重新生成时有多少轮是结构重复」第一次有一个能复盘的数), 以及在
-            # 当场打印出来。**不跳过验证** —— 假阳的代价是丢掉一个真的更好的核, 在没有
-            # 基率之前拿它省 GPU 时间就是拿判决换一个还没量的东西。
-            sig = signature_of(current_code)
-            dup_of = next((r for (r, s) in round_signatures if s and s == sig), None)
-            if sig:
-                round_signatures.append((round_num, sig))
-            if dup_of is not None and action == "optimize":
-                duplicate_rounds += 1
-                print(f"\n[Novelty] 第 {round_num} 轮与第 {dup_of} 轮结构相同 (签名 {sig}) "
-                      f"—— 照常验证, 本轮只在量基率")
+        # ── §21 Agent Runtime: 候选进编译之前的独立检查 (§21.4) ──────────────
+        # 位置是判据的一部分: 它在**所有**候选来源（Coder / 模板实例化器 / Fixer
+        # 修复版 / 决赛选择）汇合之后、在**任何** GPU 与 SSH 之前。放到 producer
+        # 那一侧就漏掉三条路（模板、修复、决赛选择），放到 Verifier 里面则会把
+        # 「动作协议」塞进评测器。
+        #
+        # 被拒的后果是**定义好的**：本轮不进 L1/L2/L3，合成一条 L1 失败结果
+        # （`agent_action_refused`），于是 §8 的路由与 Fixer 的处方照旧工作 ——
+        # 拒绝不是「静默丢掉这个候选」。
+        _prev_route = (classify_failure(state.all_verification_results)
+                       if action == "fix" and state.all_verification_results else None)
+        # §21.1 生产者侧: 这一轮的候选如果是 Fixer 交上来的, 它可能同时交了**动作信封**
+        # （种类 / 理由 / 预期瓶颈 / 想用的工具）。信封只在这一轮有效 —— 消费点就在上面
+        # `current_code = pending_fix` 那一处（与 `pending_fix` 同生同灭），于是它不可能
+        # 泄漏到别的轮次。没有信封（生成轮 / 模板轮 / 快照续跑）⇒ `absent`，
+        # 动作由 harness 按轮次与路由拼（接线前的行为）。
+        _action_envelope_record: dict = {
+            "status": ENVELOPE_ABSENT,
+            "reason": ("这一轮不是修复轮 —— 只有 Fixer 会交信封"
+                       if action != "fix" else "这一次修复没有交出信封 (或快照续跑丢了它)"),
+            "used_for_action": False,
+            "source": ACTION_SOURCE_HARNESS,
+        }
+        if _model_envelope is not None:
+            _action_envelope_record = dict(_model_envelope.as_dict())
+            _action_envelope_record["used_for_action"] = bool(_model_envelope.usable)
+            _action_envelope_record["source"] = (
+                ACTION_SOURCE_LLM if _model_envelope.usable else ACTION_SOURCE_HARNESS)
+        _used_envelope = _model_envelope
+        _model_envelope = None       # 一轮只用一次: 下一轮重新由修复轮武装
+        _agent_action = self._round_agent_action(
+            round_num=round_num, round_action=action, route=_prev_route,
+            current_code=state.current_code,
+            # 回滚点/ diff 基线: 修复轮是「本轮开始前的那一份」(Fixer 修的就是它,
+            # 而它不一定是**已验证**父代 —— 一份从未通过正确性的候选同样可以被修);
+            # 其余轮次用已验证父代 (它就是这份新候选要替换掉的那一份)。
+            # 两者都没有 ⇒ 空, 于是 `Patch.rollback_source()` 返回 None 而不是空源码。
+            parent_code=((_code_before_this_round or state.verified_parent or "")
+                         if action == "fix" else (state.verified_parent or "")),
+            task=state.task,
+            error_shape=(getattr(_prev_route, "error_shape", None)
+                         if _prev_route is not None else None),
+            envelope=_used_envelope,
+        )
+        _action_ctx = self._round_action_context(
+            route=_prev_route, current_code=state.current_code, test_inputs=state.test_inputs,
+            task=state.task, verified_parent=state.verified_parent,
+            previous_results=state.all_verification_results or (),
+            dep_baseline=self._admitted_baseline,
+            # 候选在这个位置**已经生成** ⇒ 钱花过了。预算问题照记, 但不据此拒绝
+            # (见 `ActionContext.spend_committed`)。
+            spend_committed=True,
+        )
+        _action_verdict = self.agent_runtime.admit(_agent_action, _action_ctx)
+        if _action_verdict.accepted:
+            # 过了门才配当下一轮的「新增依赖」基线 (I78): 被拒的那份从没进过流程,
+            # 它声明的 import 也就没进过环境 —— 拿它当基线等于把同一份违规候选的
+            # 第二次提交放行 (真机实测: 第 3 轮那份夹带 torch 的候选过了门, 真的上了
+            # 远端编译, 只有 L2 的反作弊静态审计把它拦住)。
+            self._admitted_baseline = state.current_code
+            # §22.1 的落盘点：过门的候选**走唯一写入口**写进 `candidate/` 那一格
+            # （没有 `run_root` 时是空操作）。它让「§21 判据指着的那个路径」与
+            # 「盘上真实存在的产物」是同一个文件 —— 否则权限位保护的是零个产物。
+            _materialized = self._materialize_candidate(state.current_code, state.task)
+            if _materialized:
+                print(f"  [§22.1] 候选已落盘: {_materialized}")
+        if not _action_verdict.accepted:
+            print(f"\n[§21 Runtime] 动作被拒 (零 GPU 秒): "
+                  f"{_action_verdict.refusal_note()}")
+            if _action_verdict.fallback_available:
+                print("  [§21 Runtime] 回退父代是一条可选出路 (§21.2) —— "
+                      "本轮的修复提示会把这一点带上")
+            verify_results = [self._refusal_result(_action_verdict)]
 
-            # ── §21 Agent Runtime: 候选进编译之前的独立检查 (§21.4) ──────────────
-            # 位置是判据的一部分: 它在**所有**候选来源（Coder / 模板实例化器 / Fixer
-            # 修复版 / 决赛选择）汇合之后、在**任何** GPU 与 SSH 之前。放到 producer
-            # 那一侧就漏掉三条路（模板、修复、决赛选择），放到 Verifier 里面则会把
-            # 「动作协议」塞进评测器。
-            #
-            # 被拒的后果是**定义好的**：本轮不进 L1/L2/L3，合成一条 L1 失败结果
-            # （`agent_action_refused`），于是 §8 的路由与 Fixer 的处方照旧工作 ——
-            # 拒绝不是「静默丢掉这个候选」。
-            _prev_route = (classify_failure(all_verification_results)
-                           if action == "fix" and all_verification_results else None)
-            # §21.1 生产者侧: 这一轮的候选如果是 Fixer 交上来的, 它可能同时交了**动作信封**
-            # （种类 / 理由 / 预期瓶颈 / 想用的工具）。信封只在这一轮有效 —— 消费点就在上面
-            # `current_code = pending_fix` 那一处（与 `pending_fix` 同生同灭），于是它不可能
-            # 泄漏到别的轮次。没有信封（生成轮 / 模板轮 / 快照续跑）⇒ `absent`，
-            # 动作由 harness 按轮次与路由拼（接线前的行为）。
-            _action_envelope_record: dict = {
-                "status": ENVELOPE_ABSENT,
-                "reason": ("这一轮不是修复轮 —— 只有 Fixer 会交信封"
-                           if action != "fix" else "这一次修复没有交出信封 (或快照续跑丢了它)"),
-                "used_for_action": False,
-                "source": ACTION_SOURCE_HARNESS,
-            }
-            if _model_envelope is not None:
-                _action_envelope_record = dict(_model_envelope.as_dict())
-                _action_envelope_record["used_for_action"] = bool(_model_envelope.usable)
-                _action_envelope_record["source"] = (
-                    ACTION_SOURCE_LLM if _model_envelope.usable else ACTION_SOURCE_HARNESS)
-            _used_envelope = _model_envelope
-            _model_envelope = None       # 一轮只用一次: 下一轮重新由修复轮武装
-            _agent_action = self._round_agent_action(
-                round_num=round_num, round_action=action, route=_prev_route,
-                current_code=current_code,
-                # 回滚点/ diff 基线: 修复轮是「本轮开始前的那一份」(Fixer 修的就是它,
-                # 而它不一定是**已验证**父代 —— 一份从未通过正确性的候选同样可以被修);
-                # 其余轮次用已验证父代 (它就是这份新候选要替换掉的那一份)。
-                # 两者都没有 ⇒ 空, 于是 `Patch.rollback_source()` 返回 None 而不是空源码。
-                parent_code=((_code_before_this_round or verified_parent or "")
-                             if action == "fix" else (verified_parent or "")),
-                task=task,
-                error_shape=(getattr(_prev_route, "error_shape", None)
-                             if _prev_route is not None else None),
-                envelope=_used_envelope,
-            )
-            _action_ctx = self._round_action_context(
-                route=_prev_route, current_code=current_code, test_inputs=test_inputs,
-                task=task, verified_parent=verified_parent,
-                previous_results=all_verification_results or (),
-                dep_baseline=self._admitted_baseline,
-                # 候选在这个位置**已经生成** ⇒ 钱花过了。预算问题照记, 但不据此拒绝
-                # (见 `ActionContext.spend_committed`)。
-                spend_committed=True,
-            )
-            _action_verdict = self.agent_runtime.admit(_agent_action, _action_ctx)
-            if _action_verdict.accepted:
-                # 过了门才配当下一轮的「新增依赖」基线 (I78): 被拒的那份从没进过流程,
-                # 它声明的 import 也就没进过环境 —— 拿它当基线等于把同一份违规候选的
-                # 第二次提交放行 (真机实测: 第 3 轮那份夹带 torch 的候选过了门, 真的上了
-                # 远端编译, 只有 L2 的反作弊静态审计把它拦住)。
-                self._admitted_baseline = current_code
-                # §22.1 的落盘点：过门的候选**走唯一写入口**写进 `candidate/` 那一格
-                # （没有 `run_root` 时是空操作）。它让「§21 判据指着的那个路径」与
-                # 「盘上真实存在的产物」是同一个文件 —— 否则权限位保护的是零个产物。
-                _materialized = self._materialize_candidate(current_code, task)
-                if _materialized:
-                    print(f"  [§22.1] 候选已落盘: {_materialized}")
-            if not _action_verdict.accepted:
-                print(f"\n[§21 Runtime] 动作被拒 (零 GPU 秒): "
-                      f"{_action_verdict.refusal_note()}")
-                if _action_verdict.fallback_available:
-                    print("  [§21 Runtime] 回退父代是一条可选出路 (§21.2) —— "
-                          "本轮的修复提示会把这一点带上")
-                verify_results = [self._refusal_result(_action_verdict)]
-
-            # Step 4: Verifier 验证
-            # P1-1 拼接: 候选选择里已经跑过 L1+L2, 这里只补缺的那一段 ——
-            # 胜者补 L3; **全败**时那份 L1+L2 本身就是最终结果 (L2 已失败, 不跑 L3),
-            # 同时也是喂 Fixer 的失败证据, 不必重算 (上一版丢掉它、重跑一遍真机 L2;
-            # 旧注释写的「胜者的 L1 复检走 SHA256 编译缓存」其实不存在 —— 拼接路径
-            # 根本不进 L1)。
-            # 标定心跳 (设计 §10.5-1): 到期就在**本窗口内**塞一对已知参照核。读数与心跳
-            # 同窗, 于是尺子坏了这条读数当场作废, 而不是等下一轮才发现。
-            # 放在「已知不跑 L3」的那一支**之后**: 那一支没有真值测量, 塞心跳纯属烧机时。
-            # §10.3 分数(c) 的分母: 「预期 GPU 秒」的口径 = **控制端观测到的测量墙钟**。
-            # 与 §10.2 的墙钟预算同一个货币 (同一个进程、同一个 `time.monotonic()`),
-            # 于是「这一轮把秒换成数字花了多少」与预算拦人的口径是同一个。它不是卡上时间。
-            _meas_started = time.monotonic()
-            if not _action_verdict.accepted:
-                # 上一段已经把 `verify_results` 设成那条拒绝结果 —— 这里**不许**再碰
-                # 后端 (心跳也不跑: 这一轮没有任何「把时间换成数字」的动作)。
-                pass
-            elif selected_l1_l2 is not None and l1_l2_is_final:
-                print(f"\n[Verifier] 复用候选选择中的 L1+L2 失败结果 (不重跑真机)...")
-                verify_results = selected_l1_l2
+        # Step 4: Verifier 验证
+        # P1-1 拼接: 候选选择里已经跑过 L1+L2, 这里只补缺的那一段 ——
+        # 胜者补 L3; **全败**时那份 L1+L2 本身就是最终结果 (L2 已失败, 不跑 L3),
+        # 同时也是喂 Fixer 的失败证据, 不必重算 (上一版丢掉它、重跑一遍真机 L2;
+        # 旧注释写的「胜者的 L1 复检走 SHA256 编译缓存」其实不存在 —— 拼接路径
+        # 根本不进 L1)。
+        # 标定心跳 (设计 §10.5-1): 到期就在**本窗口内**塞一对已知参照核。读数与心跳
+        # 同窗, 于是尺子坏了这条读数当场作废, 而不是等下一轮才发现。
+        # 放在「已知不跑 L3」的那一支**之后**: 那一支没有真值测量, 塞心跳纯属烧机时。
+        # §10.3 分数(c) 的分母: 「预期 GPU 秒」的口径 = **控制端观测到的测量墙钟**。
+        # 与 §10.2 的墙钟预算同一个货币 (同一个进程、同一个 `time.monotonic()`),
+        # 于是「这一轮把秒换成数字花了多少」与预算拦人的口径是同一个。它不是卡上时间。
+        _meas_started = time.monotonic()
+        if not _action_verdict.accepted:
+            # 上一段已经把 `verify_results` 设成那条拒绝结果 —— 这里**不许**再碰
+            # 后端 (心跳也不跑: 这一轮没有任何「把时间换成数字」的动作)。
+            pass
+        elif selected_l1_l2 is not None and l1_l2_is_final:
+            print(f"\n[Verifier] 复用候选选择中的 L1+L2 失败结果 (不重跑真机)...")
+            verify_results = selected_l1_l2
+        else:
+            heartbeat, heartbeat_expected = self._heartbeat_for_next_measurement()
+            if selected_l1_l2 is not None:
+                print(f"\n[Verifier] 执行 L3 验证 (L1+L2 已在候选选择中通过)...")
+                verify_results = selected_l1_l2 + self.verifier.verify_l3_only(
+                    kernel_code=state.current_code,
+                    test_inputs=state.input_sets,
+                    target_gflops=state.target_gflops,
+                    task=state.task,
+                    environment_drift=verify_drift,
+                    heartbeat=heartbeat,
+                    heartbeat_expected=heartbeat_expected,
+                    # 静态守卫的适用性来自**这次胜者**的 L1/L2 结果, 不是 Verifier
+                    # 的实例状态 (一个实例连验多个候选, 存字段就是「记录说 A、
+                    # 判定按 B」)—— CHECKLOG I65。
+                    static_guards=flag_from_metrics(
+                        *(r.metrics for r in selected_l1_l2 or [])),
+                    # 正确性凭据 (§14-10 / §20.4): 从**这次胜者**的 L2 结果里读 ——
+                    # L3 只跑胜者, 所以"胜者是靠正确性选出来的"这件事必须作为数据
+                    # 随读数走, 而不是靠"我们没走到这里就说明它对了"的隐含推理。
+                    correctness_verified=_correctness_credential(selected_l1_l2),
+                )
             else:
-                heartbeat, heartbeat_expected = self._heartbeat_for_next_measurement()
-                if selected_l1_l2 is not None:
-                    print(f"\n[Verifier] 执行 L3 验证 (L1+L2 已在候选选择中通过)...")
-                    verify_results = selected_l1_l2 + self.verifier.verify_l3_only(
-                        kernel_code=current_code,
-                        test_inputs=input_sets,
-                        target_gflops=target_gflops,
-                        task=task,
-                        environment_drift=verify_drift,
-                        heartbeat=heartbeat,
-                        heartbeat_expected=heartbeat_expected,
-                        # 静态守卫的适用性来自**这次胜者**的 L1/L2 结果, 不是 Verifier
-                        # 的实例状态 (一个实例连验多个候选, 存字段就是「记录说 A、
-                        # 判定按 B」)—— CHECKLOG I65。
-                        static_guards=flag_from_metrics(
-                            *(r.metrics for r in selected_l1_l2 or [])),
-                        # 正确性凭据 (§14-10 / §20.4): 从**这次胜者**的 L2 结果里读 ——
-                        # L3 只跑胜者, 所以"胜者是靠正确性选出来的"这件事必须作为数据
-                        # 随读数走, 而不是靠"我们没走到这里就说明它对了"的隐含推理。
-                        correctness_verified=_correctness_credential(selected_l1_l2),
-                    )
-                else:
-                    print(f"\n[Verifier] 执行三级验证...")
-                    verify_results = self.verifier.verify(
-                        kernel_code=current_code,
-                        task=task,
-                        test_inputs=input_sets,
-                        expected_output=expected_output,
-                        target_gflops=target_gflops,
-                        environment_drift=verify_drift,
-                        heartbeat=heartbeat,
-                        heartbeat_expected=heartbeat_expected,
-                    )
-            all_verification_results = verify_results
+                print(f"\n[Verifier] 执行三级验证...")
+                verify_results = self.verifier.verify(
+                    kernel_code=state.current_code,
+                    task=state.task,
+                    test_inputs=state.input_sets,
+                    expected_output=expected_output,
+                    target_gflops=state.target_gflops,
+                    environment_drift=verify_drift,
+                    heartbeat=heartbeat,
+                    heartbeat_expected=heartbeat_expected,
+                )
+        state.all_verification_results = verify_results
 
-            # P1-1 成本记账 (续): 非选择路径的 L2 次数直接从这一轮的验证结果里数 ——
-            # L2 挂了就早退没有 L3, 所以「结果里有没有 L2」就是「L2 跑没跑」。
-            if round_l2_runs is None:
-                round_l2_runs = sum(
-                    1 for r in verify_results
-                    if r.level is VerificationLevel.L2_FUNCTION)
+        # P1-1 成本记账 (续): 非选择路径的 L2 次数直接从这一轮的验证结果里数 ——
+        # L2 挂了就早退没有 L3, 所以「结果里有没有 L2」就是「L2 跑没跑」。
+        if round_l2_runs is None:
+            round_l2_runs = sum(
+                1 for r in verify_results
+                if r.level is VerificationLevel.L2_FUNCTION)
 
-            all_passed = all(r.passed for r in verify_results)
-            # 「这一版被验证过」必须在这一刻、由这一刻的读数记下 —— 等下一轮再回头找就没了:
-            # `current_code` 会被 `pending_fix` 覆盖掉 (见上面 `if pending_fix:` 那一支)。
-            # 注意这里**不看** L3: 正确性已验证但不够快的核正是要留在手里的那个起点。
-            if correctness_verified(verify_results):
-                verified_parent = current_code
-                verified_parent_round = round_num
-            _measure_s = time.monotonic() - _meas_started
-            l3_result = next(
-                (r for r in verify_results if r.level == VerificationLevel.L3_PERFORMANCE), None,
-            )
-            # 「真值测量」= 这一轮真的产生了一条 L3 读数。只数它, 不数 L1/L2 —— 心跳
-            # 要盯的是「把时间换成数字」的那条通道; 而 L1/L2 失败的轮次不推进计数,
-            # 于是同一扇窗的参照对不会被反复重跑 (见 `_heartbeat_ran_for`)。
-            if l3_result is not None:
-                self._true_measurements += 1
-                # §10.2 的记账与这个计数**同点**发生 (一个地方决定「什么算一次真值测量」)。
-                # 放在这里而不是放在门那边: 门是「该不该花」, 这是「花了」—— 两者分开才
-                # 使得同一次测量不可能出现「记了两次」或「花了没记」。
-                # 花的是**这一相**那一格 (§10.3 的分相): 相位由这一轮的候选决定 ——
-                # 未观测的候选花「探索」, 已观测的花「精修」。`oracle_spend` 只记账不拦,
-                # 计划格子被突破时账本里 `over_plan` 会涨 (与标定超支同一处置)。
-                self._budget.oracle_spend(round_phase)
+        all_passed = all(r.passed for r in verify_results)
+        # 「这一版被验证过」必须在这一刻、由这一刻的读数记下 —— 等下一轮再回头找就没了:
+        # `current_code` 会被 `pending_fix` 覆盖掉 (见上面 `if pending_fix:` 那一支)。
+        # 注意这里**不看** L3: 正确性已验证但不够快的核正是要留在手里的那个起点。
+        if correctness_verified(verify_results):
+            state.verified_parent = state.current_code
+            state.verified_parent_round = round_num
+        _measure_s = time.monotonic() - _meas_started
+        l3_result = next(
+            (r for r in verify_results if r.level == VerificationLevel.L3_PERFORMANCE), None,
+        )
+        # 「真值测量」= 这一轮真的产生了一条 L3 读数。只数它, 不数 L1/L2 —— 心跳
+        # 要盯的是「把时间换成数字」的那条通道; 而 L1/L2 失败的轮次不推进计数,
+        # 于是同一扇窗的参照对不会被反复重跑 (见 `_heartbeat_ran_for`)。
+        if l3_result is not None:
+            self._true_measurements += 1
+            # §10.2 的记账与这个计数**同点**发生 (一个地方决定「什么算一次真值测量」)。
+            # 放在这里而不是放在门那边: 门是「该不该花」, 这是「花了」—— 两者分开才
+            # 使得同一次测量不可能出现「记了两次」或「花了没记」。
+            # 花的是**这一相**那一格 (§10.3 的分相): 相位由这一轮的候选决定 ——
+            # 未观测的候选花「探索」, 已观测的花「精修」。`oracle_spend` 只记账不拦,
+            # 计划格子被突破时账本里 `over_plan` 会涨 (与标定超支同一处置)。
+            self._budget.oracle_spend(round_phase)
 
-            # 这一轮造成的**永久后果** —— 供设计 §14-9 的资格审计对照实验离线统计。
-            #
-            # 为什么必须单独记: `measurement_validity` 进血缘的理由是「有多少轮的读数有资格
-            # 驱动闭环可以离线统计」, 而**后果**从来没被记过。于是设计 §4.3 那句「资格决定
-            # 这个数被允许造成什么后果」在产物侧无法验证 —— 判据算了、后果发生了, 但
-            # 「一个不可信的读数有没有真的永久改掉配置 / 覆盖 best」, 出了循环只剩一个最终
-            # 的 `disabled_recipes` 集合, 归因不到轮。
-            #
-            # 值先建 (全 False), 判决分支里改的就是血缘里这一份 —— 没走到判决的轮次因此读作
-            # 「没有永久后果」, 而不是缺键 (缺键会被读成「没记」)。
-            _perm = {"best_updated": False, "recipes_disabled": [], "stagnation_counted": False}
-            # 血缘记录: 每轮动作与结果
-            artifact.iteration_history.append({
-                "round": round_num,
-                "action": action,
-                "all_passed": all_passed,
-                # 分级结果必须进血缘: `all_verification_results` 每轮被覆盖
-                # (见上面 `all_verification_results = verify_results`), 所以出了循环
-                # 就只剩最后一轮的分级 —— 「第 2 轮卡在 L1」与「第 2 轮卡在 L3」在产物里
-                # 无法区分, 而 rounds-to-pass 这类统计要的正是它。与 doc 33 抓到的
-                # `runs`/`max_time_ms` 从未进过 metrics 是同一类搬运缺陷。
-                "levels_passed": {r.level.value: r.passed for r in verify_results},
-                "gflops": l3_result.metrics.get("gflops") if l3_result else None,
-                # 加速比同理: `benchmark_data` 只有最后一轮的, 而「逐轮到底有没有在变快」
-                # 这个问句需要每一轮的读数
-                "speedup": (l3_result.metrics.get("speedup_vs_baseline")
+        # 这一轮造成的**永久后果** —— 供设计 §14-9 的资格审计对照实验离线统计。
+        #
+        # 为什么必须单独记: `measurement_validity` 进血缘的理由是「有多少轮的读数有资格
+        # 驱动闭环可以离线统计」, 而**后果**从来没被记过。于是设计 §4.3 那句「资格决定
+        # 这个数被允许造成什么后果」在产物侧无法验证 —— 判据算了、后果发生了, 但
+        # 「一个不可信的读数有没有真的永久改掉配置 / 覆盖 best」, 出了循环只剩一个最终
+        # 的 `disabled_recipes` 集合, 归因不到轮。
+        #
+        # 值先建 (全 False), 判决分支里改的就是血缘里这一份 —— 没走到判决的轮次因此读作
+        # 「没有永久后果」, 而不是缺键 (缺键会被读成「没记」)。
+        _perm = {"best_updated": False, "recipes_disabled": [], "stagnation_counted": False}
+        # 血缘记录: 每轮动作与结果
+        state.artifact.iteration_history.append({
+            "round": round_num,
+            "action": action,
+            "all_passed": all_passed,
+            # 分级结果必须进血缘: `all_verification_results` 每轮被覆盖
+            # (见上面 `all_verification_results = verify_results`), 所以出了循环
+            # 就只剩最后一轮的分级 —— 「第 2 轮卡在 L1」与「第 2 轮卡在 L3」在产物里
+            # 无法区分, 而 rounds-to-pass 这类统计要的正是它。与 doc 33 抓到的
+            # `runs`/`max_time_ms` 从未进过 metrics 是同一类搬运缺陷。
+            "levels_passed": {r.level.value: r.passed for r in verify_results},
+            "gflops": l3_result.metrics.get("gflops") if l3_result else None,
+            # 加速比同理: `benchmark_data` 只有最后一轮的, 而「逐轮到底有没有在变快」
+            # 这个问句需要每一轮的读数
+            "speedup": (l3_result.metrics.get("speedup_vs_baseline")
+                        if l3_result else None),
+            # 档位进血缘是为了让「有多少轮的读数有资格驱动闭环」可以离线统计,
+            # 而不必重跑一遍才知道那次循环是不是全程都在盲跑
+            "measurement_validity": (l3_result.metrics.get("measurement_validity")
+                                     if l3_result else None),
+            # 资格位 (五位) 也进血缘 —— 上面那段为 `measurement_validity` 写的理由逐字
+            # 适用于它, 而且更精确: 档位说「这个数可不可信」, 资格位说「它被允许造成
+            # 什么后果」。缺了它, 「有多少轮真的推进了信念 / 有资格写进记忆」这个问句
+            # 只能靠重跑估。读者: 设计 §14-9 的资格审计对照实验 (ablation_eligibility)。
+            "eligibility": (l3_result.metrics.get("eligibility")
                             if l3_result else None),
-                # 档位进血缘是为了让「有多少轮的读数有资格驱动闭环」可以离线统计,
-                # 而不必重跑一遍才知道那次循环是不是全程都在盲跑
-                "measurement_validity": (l3_result.metrics.get("measurement_validity")
-                                         if l3_result else None),
-                # 资格位 (五位) 也进血缘 —— 上面那段为 `measurement_validity` 写的理由逐字
-                # 适用于它, 而且更精确: 档位说「这个数可不可信」, 资格位说「它被允许造成
-                # 什么后果」。缺了它, 「有多少轮真的推进了信念 / 有资格写进记忆」这个问句
-                # 只能靠重跑估。读者: 设计 §14-9 的资格审计对照实验 (ablation_eligibility)。
-                "eligibility": (l3_result.metrics.get("eligibility")
-                                if l3_result else None),
-                "recipes_applied": list(applied_recipes),
-                # 永久后果的记账 (上面刚建好那个 dict 的引用; §14-9 的读者)
-                "permanent_effects": _perm,
-                # P1-1 成本记账: CoderPipeline 翻为默认后, 一个「生成轮」的机时开销变成
-                # 「最多 2 个决赛候选各跑一次 L1+L2, 胜者再跑一次 L3」。这两个数不进血缘,
-                # 「这次翻转让机时涨了多少」就只能靠重跑一遍估 —— 与上面 `levels_passed`
-                # 记的是同一类搬运缺陷 (原料在循环里有效, 出了循环只剩最后一轮)。
-                # `generation_candidates` 三态: 0 = 本轮没走 pipeline 生成 (修复轮);
-                # 1 = 单候选生成 (没触发选择); 2 = 多候选上了真机 L1+L2 选择。
-                "generation_candidates": round_candidates,
-                "real_l2_runs": round_l2_runs,
-                # 本轮数值门用的哪把尺 (#87 第 2 片)。三态: 报了 / 自己就说不一致 / 没报。
-                # 「跨轮的尺是不是同一把」这个问句的原料只能在这里落下 —— 循环之外只剩
-                # 最后一轮的 metrics。
-                LINEAGE_RULER_KEY: _round_ruler(verify_results),
-                # 性能那一半的兄弟格 (#87 第 3 片)。外部那句 𝒮 说的是 "correctness **and**
-                # performance criteria fixed across attempts", 只落 L2 那一格等于只问了一半。
-                LINEAGE_PERF_RULER_KEY: _round_perf_ruler(verify_results),
-                # 执行侧那一格 (#102 第 1 片, **只观测不改判决**): 这一轮的 L2 失败到底是
-                # 「远端答了失败」还是「没听到回答」。后者在血缘里第一次有了名字, 于是
-                # 「这次远端可能已经跑过一遍」这个问题离线可查, 而不是只活在终端那一行。
-                TRANSPORT_KEY: _round_transport(verify_results),
-                # 重复率的原料: 签名进 result.json 之后, 「模型重新生成时有多少轮是同一份
-                # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
-                "candidate_signature": sig,
-                "duplicate_of": dup_of,
-                # §21 的动作与裁决 (**审计与可回滚**的落点): 动作者、理由、patch 的
-                # 双向哈希、改了几行, 以及七条独立检查逐条的结论 + 覆盖率。
-                # 不进血缘的话, 「Agent 产生的每个 patch 都可审计、可回滚」(Wave 3 的
-                # 退出标准) 只能靠重跑一次才知道 —— 而拒绝过的那一轮连代码都不存在。
-                "agent_action": _action_verdict.as_dict(),
-                # §21.1 **生产者侧**: 这一轮的动作是哪来的（模型交的信封 / harness 拼的）、
-                # 信封读没读出来（`parsed` / `absent` / `malformed` + 原因）、模型声明的
-                # token 预算（**不进判据** —— 判据读的是 harness 那一份）、以及询问类信封
-                # 被怎么响应。缺了它，「动作是谁写的」与「模型自己声明了多少预算」这两件
-                # 事在产物里都无法区分 (本仓 I77 那一族)。
-                "action_envelope": _action_envelope_record,
-                "fix_action": _fix_action_record,
-                # §21.3 的**注入留痕**: 这一轮的修复提示里有没有那一段结构化证据、
-                # 它有多长、哪几段被截断了、profiler 那一格喂的是哪些键。没有这一格,
-                # 「筛过的证据 vs 全量错误日志」这个对照的产物侧无法区分两臂
-                # (`injected` 只由构造参数与这一轮有没有走修复共同决定)。
-                "fix_evidence": _fix_evidence_record,
-                # §12: 这一轮的候选如果是**模板点**产出的, 它的身份 (template_id /
-                # instantiator_ver / 参数) 与「怎么选的」(顺位/剪枝/被拒的点) 一起进血缘。
-                # 没有这一格, 「这个 tiling 更好」与「这个模板点更好」在产物里长得一样。
-                "template_selection": (_template_sel.as_dict()
-                                       if _template_sel is not None else None),
-                # §10.3 这一轮的选择: 模式 / 抽签值 / 每个候选的分数 / 顺序 / 被计划格子
-                # 逼成什么样。模板型轮 `applies_to="this_round"`, 代码型轮是给下一轮选的。
-                "selection": _round_selection,
-                # §10.4 的另一半: 这一轮的候选空间覆盖到哪了 (无法确立也照记)。引用同一个
-                # 会被后填的字典 —— 与上面 `permanent_effects` 同一种写法: 血缘在轮首就
-                # append 了, 而这个判定要等本轮的观测进账才算得出来。
-                "coverage": _coverage_record,
-                # 这一轮的候选花的是哪一格预算 (§10.3 的分相)。与 `selection.mode` 是同一个
-                # 事实的两处写法 —— 测试钉住它们相等, 于是「记的相位」不会漂。
-                "phase": round_phase,
-                # §10.3 分数(c) 分母的原料: 控制端观测到的这一轮测量墙钟 (秒)。
-                # `None` = 这一轮没有真值测量 (L1/L2 就挂了), 不是 0。
-                "measurement_wall_s": (round(_measure_s, 3) if l3_result is not None else None),
-                # 本轮候选属于哪个臂 (§5 的排序器吃的就是它)。注意这一格说的是
-                # 「候选是谁」, 不是「这一轮有没有更新统计」—— 后者的读法是
-                # `metadata["bandit"].arms[arm]`: `pulls` 涨了才算这一轮的回报进过账,
-                # 而 L3 直接通过的那些轮不会进搜索 (所以那种轮里这一格一样有值)。
-                "bandit_arm": bandit_arm,
-                # 分母的原料 (缺口 3 的「先补分母」那半, doc 49 §八 第 14 条): Verifier 每轮**已经算出** roofline 的全部轴
-                # (算术强度、脊点、两侧达成率、峰值出处与可信位), 但它们只活到本次判决结束,
-                # 从没进过血缘 —— 于是「可达上界是按 shape/AI 索引的曲线」这件已经量出来的
-                # 事实, 任何离线复盘都用不上。整块搬, **不挑键**: doc 48 那次给落盘键做
-                # 白名单, 代价是那一批真机数据的血缘永久没了。缺的那块不填默认值。
-                **_round_axes(l3_result, test_inputs),
-            })
-            # 这一轮那条记录的引用: 带宽要等**判决发生的那一刻**才知道用没用、用了多少
-            # (见下面 `verdict(...)` 那一支), 而这一轮的 dict 已经落在这里 —— 回头按 `-1`
-            # 取会依赖「中间没有第二次 append」, 那个前提将来被人破坏时不会响, 只会把
-            # 带宽记到别人的轮上。
-            _round_rec = artifact.iteration_history[-1]
+            "recipes_applied": list(state.applied_recipes),
+            # 永久后果的记账 (上面刚建好那个 dict 的引用; §14-9 的读者)
+            "permanent_effects": _perm,
+            # P1-1 成本记账: CoderPipeline 翻为默认后, 一个「生成轮」的机时开销变成
+            # 「最多 2 个决赛候选各跑一次 L1+L2, 胜者再跑一次 L3」。这两个数不进血缘,
+            # 「这次翻转让机时涨了多少」就只能靠重跑一遍估 —— 与上面 `levels_passed`
+            # 记的是同一类搬运缺陷 (原料在循环里有效, 出了循环只剩最后一轮)。
+            # `generation_candidates` 三态: 0 = 本轮没走 pipeline 生成 (修复轮);
+            # 1 = 单候选生成 (没触发选择); 2 = 多候选上了真机 L1+L2 选择。
+            "generation_candidates": round_candidates,
+            "real_l2_runs": round_l2_runs,
+            # 本轮数值门用的哪把尺 (#87 第 2 片)。三态: 报了 / 自己就说不一致 / 没报。
+            # 「跨轮的尺是不是同一把」这个问句的原料只能在这里落下 —— 循环之外只剩
+            # 最后一轮的 metrics。
+            LINEAGE_RULER_KEY: _round_ruler(verify_results),
+            # 性能那一半的兄弟格 (#87 第 3 片)。外部那句 𝒮 说的是 "correctness **and**
+            # performance criteria fixed across attempts", 只落 L2 那一格等于只问了一半。
+            LINEAGE_PERF_RULER_KEY: _round_perf_ruler(verify_results),
+            # 执行侧那一格 (#102 第 1 片, **只观测不改判决**): 这一轮的 L2 失败到底是
+            # 「远端答了失败」还是「没听到回答」。后者在血缘里第一次有了名字, 于是
+            # 「这次远端可能已经跑过一遍」这个问题离线可查, 而不是只活在终端那一行。
+            TRANSPORT_KEY: _round_transport(verify_results),
+            # 重复率的原料: 签名进 result.json 之后, 「模型重新生成时有多少轮是同一份
+            # 结构」这个问题第一次可以被离线复盘, 而不是只能靠当场打印的那一行
+            "candidate_signature": sig,
+            "duplicate_of": dup_of,
+            # §21 的动作与裁决 (**审计与可回滚**的落点): 动作者、理由、patch 的
+            # 双向哈希、改了几行, 以及七条独立检查逐条的结论 + 覆盖率。
+            # 不进血缘的话, 「Agent 产生的每个 patch 都可审计、可回滚」(Wave 3 的
+            # 退出标准) 只能靠重跑一次才知道 —— 而拒绝过的那一轮连代码都不存在。
+            "agent_action": _action_verdict.as_dict(),
+            # §21.1 **生产者侧**: 这一轮的动作是哪来的（模型交的信封 / harness 拼的）、
+            # 信封读没读出来（`parsed` / `absent` / `malformed` + 原因）、模型声明的
+            # token 预算（**不进判据** —— 判据读的是 harness 那一份）、以及询问类信封
+            # 被怎么响应。缺了它，「动作是谁写的」与「模型自己声明了多少预算」这两件
+            # 事在产物里都无法区分 (本仓 I77 那一族)。
+            "action_envelope": _action_envelope_record,
+            "fix_action": _fix_action_record,
+            # §21.3 的**注入留痕**: 这一轮的修复提示里有没有那一段结构化证据、
+            # 它有多长、哪几段被截断了、profiler 那一格喂的是哪些键。没有这一格,
+            # 「筛过的证据 vs 全量错误日志」这个对照的产物侧无法区分两臂
+            # (`injected` 只由构造参数与这一轮有没有走修复共同决定)。
+            "fix_evidence": _fix_evidence_record,
+            # §12: 这一轮的候选如果是**模板点**产出的, 它的身份 (template_id /
+            # instantiator_ver / 参数) 与「怎么选的」(顺位/剪枝/被拒的点) 一起进血缘。
+            # 没有这一格, 「这个 tiling 更好」与「这个模板点更好」在产物里长得一样。
+            "template_selection": (_template_sel.as_dict()
+                                   if _template_sel is not None else None),
+            # §10.3 这一轮的选择: 模式 / 抽签值 / 每个候选的分数 / 顺序 / 被计划格子
+            # 逼成什么样。模板型轮 `applies_to="this_round"`, 代码型轮是给下一轮选的。
+            "selection": _round_selection,
+            # §10.4 的另一半: 这一轮的候选空间覆盖到哪了 (无法确立也照记)。引用同一个
+            # 会被后填的字典 —— 与上面 `permanent_effects` 同一种写法: 血缘在轮首就
+            # append 了, 而这个判定要等本轮的观测进账才算得出来。
+            "coverage": _coverage_record,
+            # 这一轮的候选花的是哪一格预算 (§10.3 的分相)。与 `selection.mode` 是同一个
+            # 事实的两处写法 —— 测试钉住它们相等, 于是「记的相位」不会漂。
+            "phase": round_phase,
+            # §10.3 分数(c) 分母的原料: 控制端观测到的这一轮测量墙钟 (秒)。
+            # `None` = 这一轮没有真值测量 (L1/L2 就挂了), 不是 0。
+            "measurement_wall_s": (round(_measure_s, 3) if l3_result is not None else None),
+            # 本轮候选属于哪个臂 (§5 的排序器吃的就是它)。注意这一格说的是
+            # 「候选是谁」, 不是「这一轮有没有更新统计」—— 后者的读法是
+            # `metadata["bandit"].arms[arm]`: `pulls` 涨了才算这一轮的回报进过账,
+            # 而 L3 直接通过的那些轮不会进搜索 (所以那种轮里这一格一样有值)。
+            "bandit_arm": bandit_arm,
+            # 分母的原料 (缺口 3 的「先补分母」那半, doc 49 §八 第 14 条): Verifier 每轮**已经算出** roofline 的全部轴
+            # (算术强度、脊点、两侧达成率、峰值出处与可信位), 但它们只活到本次判决结束,
+            # 从没进过血缘 —— 于是「可达上界是按 shape/AI 索引的曲线」这件已经量出来的
+            # 事实, 任何离线复盘都用不上。整块搬, **不挑键**: doc 48 那次给落盘键做
+            # 白名单, 代价是那一批真机数据的血缘永久没了。缺的那块不填默认值。
+            **_round_axes(l3_result, state.test_inputs),
+        })
+        # 这一轮那条记录的引用: 带宽要等**判决发生的那一刻**才知道用没用、用了多少
+        # (见下面 `verdict(...)` 那一支), 而这一轮的 dict 已经落在这里 —— 回头按 `-1`
+        # 取会依赖「中间没有第二次 append」, 那个前提将来被人破坏时不会响, 只会把
+        # 带宽记到别人的轮上。
+        _round_rec = state.artifact.iteration_history[-1]
 
-            # 每轮都算一遍「这一场里各轮的尺是不是同一把」, 但**只在它有话说的时候**打印
-            # (与上面 [Novelty] 同一个姿势)。一致时不占日志: 「各轮同尺」是这片要守的
-            # 默认前提, 不是成果; 要露出来的只有「变了」与「某一轮自己说不清用了哪把」。
-            # 这一句不改任何判决 —— 跨轮换尺今天没有阈可判, 处置与环境漂移同一条
-            # (观测先于判定, 见 `measurement.ruler_note`)。
-            #
-            # 两半各一行, 而且**两句的修法不同** ⇒ 建议也各一条: 数值尺换了几乎一定是部署
-            # 中途换过版本, 而 `bound_type` 换了通常只是候选自己换了形状 (那是事实, 不是
-            # 待查的漂移)。标签必须带上 —— 不带的话日志里会有两行「各轮的尺一致」而读者
-            # 分不清说的是哪一把 (本仓「同一句话有多个副本」那一族的反面: 这里是两个副本
-            # 各说不同的事, 却长得一模一样)。
-            _ruler_agg = cross_round_ruler(artifact.iteration_history)
-            if (_ruler_agg["ruler_same"] is False
-                    or _ruler_agg["ruler_rounds_self_conflict"]):
-                print(f"\n[Ruler] {ruler_note(_ruler_agg, RULER_LABEL_CORRECTNESS)}")
-            _perf_agg = cross_round_ruler(artifact.iteration_history,
-                                          keys=PERF_GATE_PARAM_KEYS,
-                                          lineage_key=LINEAGE_PERF_RULER_KEY)
-            if _perf_agg["ruler_same"] is False:
-                print(f"\n[Ruler] {ruler_note(_perf_agg, RULER_LABEL_PERFORMANCE, _PERF_ADVICE)}")
+        # 每轮都算一遍「这一场里各轮的尺是不是同一把」, 但**只在它有话说的时候**打印
+        # (与上面 [Novelty] 同一个姿势)。一致时不占日志: 「各轮同尺」是这片要守的
+        # 默认前提, 不是成果; 要露出来的只有「变了」与「某一轮自己说不清用了哪把」。
+        # 这一句不改任何判决 —— 跨轮换尺今天没有阈可判, 处置与环境漂移同一条
+        # (观测先于判定, 见 `measurement.ruler_note`)。
+        #
+        # 两半各一行, 而且**两句的修法不同** ⇒ 建议也各一条: 数值尺换了几乎一定是部署
+        # 中途换过版本, 而 `bound_type` 换了通常只是候选自己换了形状 (那是事实, 不是
+        # 待查的漂移)。标签必须带上 —— 不带的话日志里会有两行「各轮的尺一致」而读者
+        # 分不清说的是哪一把 (本仓「同一句话有多个副本」那一族的反面: 这里是两个副本
+        # 各说不同的事, 却长得一模一样)。
+        _ruler_agg = cross_round_ruler(state.artifact.iteration_history)
+        if (_ruler_agg["ruler_same"] is False
+                or _ruler_agg["ruler_rounds_self_conflict"]):
+            print(f"\n[Ruler] {ruler_note(_ruler_agg, RULER_LABEL_CORRECTNESS)}")
+        _perf_agg = cross_round_ruler(state.artifact.iteration_history,
+                                      keys=PERF_GATE_PARAM_KEYS,
+                                      lineage_key=LINEAGE_PERF_RULER_KEY)
+        if _perf_agg["ruler_same"] is False:
+            print(f"\n[Ruler] {ruler_note(_perf_agg, RULER_LABEL_PERFORMANCE, _PERF_ADVICE)}")
 
-            def _snap() -> str:
-                """把当前循环状态写进 execution_snapshot.json
+        def _snap() -> str:
+            """把当前循环状态写进 execution_snapshot.json
 
-                循环内的落盘点都走这里 (通过 / 停滞 / 已到 roofline / L1L2 耗尽轮次 /
-                走到轮次末尾)。少数例外是参数不同的那几处 —— 例如 Fixer 抛异常时
-                `pending_fix` 要写成 None, 它们仍直接调 `_flush_snapshot`。
+            循环内的落盘点都走这里 (通过 / 停滞 / 已到 roofline / L1L2 耗尽轮次 /
+            走到轮次末尾)。少数例外是参数不同的那几处 —— 例如 Fixer 抛异常时
+            `pending_fix` 要写成 None, 它们仍直接调 `_flush_snapshot`。
 
-                ⚠️ 变异测试的一个空跑: 终止出口处这次落盘写在 break 之前、save 之前,
-                而 `execute()` 末尾一定会再补写一次进权威的 `saved_dir`。所以删掉出口
-                那次不会有任何断言变红 —— 它只在「进程在 save 之前就没」时才有读者。
-                保留是为了与其余出口动作一致。
-                """
-                return self._flush_snapshot(
-                    task=task,
-                    artifact_dir=snapshot_target_dir,
-                    round_done=round_num,
-                    current_sketch=current_sketch,
-                    current_code=current_code,
-                    pending_fix=pending_fix,
-                    iteration_history=artifact.iteration_history,
-                    best_gflops=best_gflops,
-                    rounds_without_improvement=rounds_without_improvement,
-                    optimization_history=optimization_history,
-                    applied_recipes=applied_recipes,
-                    disabled_recipes=disabled_recipes,
-                    all_verification_results=all_verification_results,
-                )
-
-            if all_passed:
-                # 标记本轮配方为成功应用
-                if plan and plan.selected_recipes:
-                    for r in plan.selected_recipes:
-                        applied_recipes.add(r.id)
-                print(f"\n[Conductor] 所有验证通过!")
-                # ── 可复现性 Harness: 通过前写快照, 方便后续 resume 时直接复用最终轮 ──
-                snapshot_target_dir = _snap()
-                self._record_stop(artifact, round_num, "passed", "所有验证通过 (L1/L2/L3)")
-
-                break
-
-            # 缺口 1: 「数字不好看」不等于「性能未改善」—— 测量本身可能不可信。
-            # 污染与 launch 地板支配压低的是数字, 不是核的质量; 拿它禁用配方会
-            # **永久**拉黑实际有效的配方, 拿它累计停滞会在 max_stagnant_rounds=2 下
-            # 把一次正在起效的优化提前终止。L3 通过时同样要看: 那一路会把本轮配方
-            # 记进 applied_recipes, 依据不可信的测量给配方记功是同一个错误的镜像。
-            # §10.3 升级门: 本轮的裁决。缺省是**拒绝**(三条件一条都不成立) —— 于是
-            # 「这一轮没走到重算」(例如测量不可信、进了别的分支) 与「判过、没通过」
-            # 对下游是同一个答案, 而不会因为漏算一次就放行。真正的重算在判决之后。
-            _esc_decision = self._denied_escalation()
-            # 每一轮门都被问过, **答了什么都要留痕** —— 包括「没走到重算、按缺省拒绝」
-            # 的那一轮。不留这一条的话, 读数不可信的轮次在产物里与「门没接上」长得一样
-            # (实测: 那几轮原本一条裁决都没有, 于是缺省裁决成了没人读的值)。
-            self._escalation_log.append(dict(_esc_decision.as_dict(), round=round_num))
-            measurement_ok = True
-            if l3_result is not None:
-                measurement_ok = self._measurement_drives_loop(l3_result, round_num)
-                if not measurement_ok:
-                    invalid_measurement_rounds += 1
-                # 读的是 metrics 里那个布尔而不是重算一遍判据: 键没了就说明提供方
-                # 没做过出处检查, 此时如实计 0, 不假装数过了。
-                if (l3_result.metrics or {}).get("measurement_l3_pass_refused"):
-                    refused_rounds += 1
-
-            # L3 性能改善追踪: 连续无改善时提前终止，避免浪费 LLM token
-            if l3_result and l3_result.passed is False and measurement_ok:
-                current_gflops = l3_result.metrics.get("gflops", 0)
-                # 当 gflops 为 0 (指标计算不可用) 时，用速度比判断
-                if current_gflops > 0 and best_gflops <= 0:
-                    # 首个有效观测只能用来建立基线: 没有"之前"可比, 因此既不算改善
-                    # 也不算停滞, 更不能据此禁用本轮配方 (首轮 plan 是在 roofline=None
-                    # 下按算子类型选的, 无从判断其好坏)。
-                    # 缺少这一支时 best_gflops 的初值 0.0 会让首轮掉进下面的"指标不
-                    # 完整"分支: 把可用的 gflops 报成缺失, 无条件禁用配方, 并在
-                    # max_stagnant_rounds=2 下把一次正在起效的优化提前终止。
-                    best_gflops = current_gflops
-                    _perm["best_updated"] = True
-                    print(f"\n[Conductor] 建立性能基线: {current_gflops:.2f} GFLOPS "
-                          f"(speedup={l3_result.metrics.get('speedup_vs_baseline', 0):.4f})")
-                elif current_gflops > 0 and best_gflops > 0:
-                    # D4 四态判决。原来这里是无带宽的 `current > best`: 于是「完全
-                    # 打平」和「差 0.0001%」都会去禁用配方 —— 而禁用是**永久**决策,
-                    # 需要的证据比「这次没测出更好」强。现在只有 SLOW 才禁用。
-                    _validity = _validity_of(l3_result.metrics or {})
-                    v, why, used_band = verdict(current_gflops, best_gflops, _validity)
-                    # §10.3 条件 1 的输入就在**这一个点**产出: 这个分支只在
-                    # `measurement_ok` 成立时进入 (它要求 can_count_stagnation = VALID),
-                    # 所以尾巴里天然只有 valid 轮 —— 「K 轮 valid」不需要第二次筛
-                    # (再筛一次 = 同一个判定两处实现)。
-                    self._verdict_tail.append(v.name)
-                    # 这一轮的判决**真正用过**的那条带宽进血缘 (#87 第 4 片, **只观测**)。
-                    # 取的是 `verdict` 自己返回的那个值, 不是这里再查一次表: 分两次查同一张
-                    # 表, 中间表被换过就会记下一个「判决没用过的数」, 而这一格要回答的题正是
-                    # 「判决用过什么」。AMBIGUOUS 那两支没 consult 表 ⇒ 返回 `None`, 键**缺席**
-                    # 才是「这一轮没到判决」, 两者在 `cross_round_band` 里分开数。
-                    # 为什么这条要落盘: 带宽换了同时是两件事的读数 (档位降级按表换宽 vs
-                    # 表本身被改过), 折成一句「尺变了」就把前者报成后者 —— 归因在
-                    # `measurement.cross_round_band` 里分开做。
-                    _round_rec[LINEAGE_BAND_KEY] = used_band
-                    _band_agg = cross_round_band(artifact.iteration_history)
-                    if _band_agg["band_state"] in (BAND_SPEC_DRIFT, BAND_UNEXPLAINED):
-                        print(f"\n[Band] {band_note(_band_agg)}")
-                    if v is Verdict.FAST:
-                        best_gflops = current_gflops
-                        _perm["best_updated"] = True
-                        rounds_without_improvement = 0
-                        if plan and plan.selected_recipes:
-                            for r in plan.selected_recipes:
-                                applied_recipes.add(r.id)
-                        print(f"\n[Conductor] 性能改善 ({current_gflops:.2f} GFLOPS, {why})")
-                    else:
-                        if v is Verdict.SLOW:
-                            # 只有 SLOW 才禁用配方 —— SAME 与 AMBIGUOUS 都是「没有证据」,
-                            # 而禁用是永久决策。进到这里时 measurement_ok 已经成立
-                            # (它要求 can_count_stagnation, 也就是 VALID), 所以不必再
-                            # 检查 can_disable_recipe: 那会是永不生效的条件。
-                            new_recipes = [r for r in plan.selected_recipes
-                                           if r.id not in applied_recipes] if plan else []
-                            for r in new_recipes:
-                                disabled_recipes.add(r.id)
-                                _perm["recipes_disabled"].append(r.id)
-                            if new_recipes:
-                                disabled_names = ", ".join(r.id for r in new_recipes)
-                                print(f"  [Planner] 性能退步，禁用配方: {disabled_names}")
-                            print(f"\n[Conductor] 性能退步 ({current_gflops:.2f} < {best_gflops:.2f} "
-                                  f"GFLOPS, {why}), 连续 {rounds_without_improvement + 1}/{max_stagnant_rounds} 轮")
-                        else:
-                            print(f"\n[Conductor] 性能未改善 ({current_gflops:.2f} vs {best_gflops:.2f} "
-                                  f"GFLOPS, {why}), 连续 {rounds_without_improvement + 1}/{max_stagnant_rounds} 轮")
-                        rounds_without_improvement += 1
-                        _perm["stagnation_counted"] = True
-                else:
-                    # gflops 不可用: 用速度比或时间判断
-                    speedup = l3_result.metrics.get("speedup_vs_baseline", 0)
-                    # 首轮同样无基线可比, 不禁用配方 (与上面 gflops 分支同理)
-                    if round_num < 2 or (speedup > 0 and speedup < 1.0):
-                        # 无 gflops 参考时禁用配方等于拿噪声做永久决策，跳过避免死锁
-                        pass
-                    elif plan and plan.selected_recipes:
-                        new_recipes = [r for r in plan.selected_recipes if r.id not in applied_recipes]
-                        for r in new_recipes:
-                            disabled_recipes.add(r.id)
-                            _perm["recipes_disabled"].append(r.id)
-                    rounds_without_improvement += 1
-                    _perm["stagnation_counted"] = True
-                    print(f"\n[Conductor] 性能指标不完整 (gflops={current_gflops:.2f}, speedup={speedup:.4f}), "
-                          f"连续 {rounds_without_improvement}/{max_stagnant_rounds} 轮")
-                # ── §10.3 的三条件升级门 (判据的输入刚刚齐: 本轮判决已进尾巴) ──
-                # 位置是判据的一部分: 必须在**停滞出口之前**。第一版把它放在优化分支里,
-                # 于是「记满 K 轮平坦」的那一轮先被停滞出口 break 掉, 门永远开不了
-                # (实测: K=2 时门能看到的尾巴最多只有 1 条)。
-                _esc_decision = self._escalation_decision(
-                    plan, applied_recipes, disabled_recipes,
-                    (l3_result.metrics or {}) if l3_result else {}, current_code, task)
-                # **替换**而不是追加: 这一轮的缺省裁决已经记过一条, 同一轮记两条会让
-                # 「判过几次」变成「轮数 × 分支数」, 而读者要的是每轮一个答案。
-                self._escalation_log[-1] = dict(_esc_decision.as_dict(), round=round_num)
-                if not _esc_decision.allowed:
-                    print(f"\n[Escalation] 结构升级门未通过 ⇒ 本轮只做参数搜索: "
-                          f"{_esc_decision.refusal_note()}")
-                elif rounds_without_improvement >= max_stagnant_rounds:
-                    # 升级**买到的是 K 轮**: 平台化是对**旧结构**的陈述, 换成新结构之后
-                    # 那段平坦区不再是关于它的证据 ⇒ 停滞计数清零。有界性靠
-                    # `max_optimize_rounds`(总轮次) 与「清零后要重新攒够 K 轮 valid」
-                    # 两条一起保证, 不会因为门反复放行而无限跑。
-                    print("\n[Escalation] 结构升级门通过 ⇒ 停滞计数清零, "
-                          "本轮把结构改动交给 LLM")
-                    rounds_without_improvement = 0
-                # ── §10.4 可靠停滞 = 两个条件**同时**成立 ──
-                # 前半句 (K 轮 valid 无改善) 上面刚记完; 后半句是「有希望的区域已穷尽」。
-                # 位置: 停滞出口之前 —— 判据的输入是本轮候选全集与 bandit 的观测, 两者都
-                # 已经定下来了。
-                _coverage = (assess_coverage(_universe.kept, bandit, template_arm,
-                                             label=point_label, universe=FROM_TEMPLATE_SPACE)
-                             if _universe is not None
-                             else undeclared(
-                                 FROM_LLM_ON_DEMAND,
-                                 "代码型路径的候选由 LLM/规则按需产生, 没有可列举的全集"))
-                _threshold = rounds_without_improvement >= max_stagnant_rounds
-                _coverage_record.update(_coverage.as_dict(),
-                                        threshold_reached=_threshold)
-                coverage_ledger.record(_coverage, threshold_reached=_threshold)
-                if _threshold and not _coverage.exhausted:
-                    # 「只因轮数」不许停 (设计 §10.4 的原话)。停不成的原因要留痕: 没有这一格,
-                    # 「因为没穷尽所以继续跑」与「停滞判据根本没人读」在产物里长得一样。
-                    print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善, 但"
-                          f"{_coverage.note()}")
-                if _threshold and _coverage.exhausted:
-                    print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善，"
-                          f"{_coverage.note()} ⇒ 提前终止优化")
-                    snapshot_target_dir = _snap()
-                    # 停机理由要**点名两半**都成立 (只有前一半的话, 那正是设计点名的
-                    # 错读法): 「连续无改善」+「候选区域已穷尽 (哪个集合, 几个点)」。
-                    _why = (f"连续无改善达上限且候选区域已穷尽 "
-                            f"({_coverage.universe} {_coverage.tried}/{_coverage.total})")
-                    self._record_stop(artifact, round_num, "stagnant", _why)
-
-                    break
-
-            # 缺口 4 的正解: 改善判据该看「离 参考天花板还有多远」, 而不是继续拿
-            # 一个标量比大小。绑定轴已经贴着上界的核, 换任何配方都不可能有可测收益 ——
-            # 再跑一轮只是白烧 GPU 与 LLM token。
-            #
-            # 只判「本轮有没有 L3 结果」: 再往前 `all_passed` 已经 break, 而
-            # `Verifier.verify()` 在 L1/L2 失败时直接 return (verifier.py:158-175),
-            # 所以拿得到 L3 就意味着 L1/L2 过了、且 L3 没过。在这里再写
-            # `not l3_result.passed` 或 `not l1_l2_failed` 都是永不生效的条件
-            # (同一文件里刚为 `can_disable_recipe` 删掉过一个)。
-            if l3_result is not None and reference_ceiling_reached(l3_result.metrics or {}):
-                _att = binding_attainment(l3_result.metrics or {})
-                _rl = (l3_result.metrics or {}).get("roofline_analysis") or {}
-                print(f"\n[Conductor] 绑定轴已达 roofline {_att:.1f}% "
-                      f"(>= {REFERENCE_CEILING_PCT:.0f}%), 判定已收敛, 停止后续优化轮")
-                # 这条 break 是整个循环里最贵的一次判定 (它决定不再花轮次), 所以把它
-                # 依赖的分母连同出处一起落进日志: 以后复查时不需要回头猜 90% 是相对
-                # 哪个数算出来的、那个数凭什么。
-                print(f"[Conductor]   分母: [{_rl.get('peak_table_key', '?')}] "
-                      f"peak={_rl.get('hw_peak_gflops', 0) / 1000:.1f} TFLOPS / "
-                      f"bw={_rl.get('hw_peak_bandwidth_gbs', 0):.0f} GB/s "
-                      f"({_rl.get('compute_used', '?')}) — {_rl.get('peak_source', '出处未知')}")
-                snapshot_target_dir = _snap()
-                self._record_stop(artifact, round_num, "converged", "绑定轴已达 参考天花板")
-
-                break
-
-            l1_l2_failed = any(
-                not r.passed and r.level in (VerificationLevel.L1_COMPILE, VerificationLevel.L2_FUNCTION)
-                for r in verify_results
+            ⚠️ 变异测试的一个空跑: 终止出口处这次落盘写在 break 之前、save 之前,
+            而 `execute()` 末尾一定会再补写一次进权威的 `saved_dir`。所以删掉出口
+            那次不会有任何断言变红 —— 它只在「进程在 save 之前就没」时才有读者。
+            保留是为了与其余出口动作一致。
+            """
+            return self._flush_snapshot(
+                task=state.task,
+                artifact_dir=state.snapshot_target_dir,
+                round_done=round_num,
+                current_sketch=state.current_sketch,
+                current_code=state.current_code,
+                pending_fix=state.pending_fix,
+                iteration_history=state.artifact.iteration_history,
+                best_gflops=state.best_gflops,
+                rounds_without_improvement=state.rounds_without_improvement,
+                optimization_history=state.optimization_history,
+                applied_recipes=state.applied_recipes,
+                disabled_recipes=state.disabled_recipes,
+                all_verification_results=state.all_verification_results,
             )
-            if l1_l2_failed:
-                # §8 路由: 先分类再动作。性能不达标≠bug (走搜索), 基础设施≠进度,
-                # 编译过、仅数值错 → **修不重写** (§19.3, 外部实测省 92.8% token)。
-                from .failure_route import ROUTE_DEBUG_FIX, ROUTE_HOLD, ROUTE_RETRY, classify
-                route = classify(verify_results)
-                print(f"  [Route] §8 分类: kind={route.kind} route={route.route}"
-                      f"{' · fix_not_rewrite' if route.fix_not_rewrite else ''}"
-                      f" — {route.reason}")
-                if route.route == ROUTE_RETRY:
-                    # 基础设施失败: 退避重试, 不计进度、不进负样本库 (§8 表)
-                    self._record_stop(artifact, round_num, "infra_retry",
-                                      route.reason)
-                    break
-                # ROUTE_HOLD 仍走 Fixer (既有控制流: 「那一轮仍然走 Fixer」),
-                # 只是下面的写入侧按 reference_hold 跳过沉淀 —— 不在这里 continue。
-                if round_num < self.max_optimize_rounds:
-                    # L1 编译失败可能是缺依赖: 分析代码 import 并按需补装
-                    l1_result = next((r for r in verify_results
-                                      if r.level == VerificationLevel.L1_COMPILE and not r.passed), None)
-                    # §21 拦下的候选**根本没被送进编译**, 为它跑一次远端依赖分析
-                    # (SSH 往返) 毫无意义 —— 那正是「不进编译」想省的机时。
-                    if l1_result and not (l1_result.metrics or {}).get("agent_action_refused") \
-                            and Cap.DEP_ANALYSIS in self.backend.capabilities:
-                        deps = self.backend.analyze_dependencies(current_code)
-                        if deps:
-                            print(f"\n[Conductor] 代码依赖: {deps}, 尝试按需补装...")
-                            if Cap.ENV_PROVISION in self.backend.capabilities:
-                                self.backend.ensure_environment(required_pips=deps)
 
-                    failed_results = [r for r in verify_results if not r.passed]
-                    # 「本级判不出」的那一轮对这张核没有作出任何判定 (参考自己产 NaN/Inf)。
-                    # 它仍然走 Fixer —— 控制流这一片不动, 省一轮 LLM 是另一次要带 A/B 的改动
-                    # (doc 58 §4.2 剩下的那半)。这里先接的是**写入侧**: 那一轮的 Reflexion
-                    # 会写出一份指向错误对象的教训, 而那份教训在同任务的后续轮次里被检索到。
-                    reference_hold = failure_class(failed_results) == FAILURE_CLASS_REFERENCE
-                    if reference_hold:
-                        print("\n[Conductor] 本轮失败归为「本级判不出」(参考侧没有可比对象): "
-                              "不沉淀教训、不进负样本库")
-                    print(f"\n[Fixer] L1/L2 验证失败，启动错误修复...")
-                    # 修订起点 (arXiv:2609.35140v1 行 214)。有已验证的祖先就不从这一版出发:
-                    # 它没通过正确性验证, 在它上面继续叠就是「在坏的后代上盖一层」—— 那正是
-                    # 这句规则要挡的漂移。但**错误信息仍然取这一版的**: 那是「上一次改动坏在哪」
-                    # 的唯一证据, 换成祖先的错误信息就什么都修不了。
-                    # `!= current_code` 那半句管的是同一份文本这次没过 (验证非确定: 共享卡、
-                    # 容差边界) 的场合 —— 那时起点没变, 少了它就印一句「退回」的谎话。
-                    # 它的证人是 `tests/test_verified_parent_retreat.py` 里用假 Verifier 造的
-                    # 那个现场; 没有那一条时这个条件构造不出反例, 就会被当成死文字删掉 (M4)。
-                    repair_base = current_code
-                    if verified_parent is not None and verified_parent != current_code:
-                        repair_base = verified_parent
-                        print(f"  [Conductor] 修订起点退回第 {verified_parent_round} 轮那份 "
-                              f"L1/L2 已验证的实现 (本轮这一版没有通过正确性验证)")
-                    try:
-                        # §21.3: 结构化证据那一段 (**唯一拼装点** = `_fix_evidence`),
-                        # 默认开。关掉时传空串 ⇒ 只少那一段（其余段两臂同值，见构造参数注释）。
-                        _evidence = ""
-                        if self.structured_evidence:
-                            _evidence, _rec = self._fix_evidence(
-                                task=task, route=route, verify_results=failed_results,
-                                current_code=current_code,
-                                parent_code=_code_before_this_round,
-                                gate_ctx=_action_ctx,
-                            )
-                            _fix_evidence_record.update(_rec)
-                        # §21.1 生产者侧: 修复这一步现在**同时**取回模型交上来的动作信封。
-                        # `run` 保留给不关心信封的调用方, 而这里用的是带信封的那一个 ——
-                        # 于是「动作是谁写的」在内侧就分得开。
-                        _outcome = self.fixer.run_with_action(
-                            repair_base, task, failed_results,
-                            fix_not_rewrite=route.fix_not_rewrite,
-                            structured_evidence=_evidence,
-                            error_shape=(getattr(route, "error_shape", "") or ""),
-                        )
-                        if _outcome.asked:
-                            # 模型交的是**不改候选**的意图 (解释 / 请求观测): 这一轮没有候选。
-                            # 响应它一次 (答或拒), 再要一次补丁 —— 有界: 第二次还是提问就停。
-                            # 「一直问」不设上限就是一条白烧 token 的环 (§21.1 的预算账)。
-                            _outcome = self._answer_ask_and_retry(
-                                _outcome, repair_base=repair_base, task=task,
-                                failed_results=failed_results, route=route,
-                                evidence=_evidence,
-                                record=_fix_action_record,
-                            )
-                        fixed_code, fix_note = _outcome.code, _outcome.summary
-                        # 信封交给**下一轮**的判据点 (它就是这份候选的来路)。只有改候选的
-                        # 那几类值得传（提问类在上面已经被响应掉了）。
-                        self._pending_action_envelope = (
-                            _outcome.envelope if _outcome.envelope.usable else None)
-                        _fix_action_record.update(_outcome.as_dict())
-                    except Exception as e:
-                        print(f"\n[Conductor] Fixer 修复失败 ({e})，停止迭代")
-                        snapshot_target_dir = self._flush_snapshot(
-                            task=task,
-                            artifact_dir=snapshot_target_dir,
-                            round_done=round_num,
-                            current_sketch=current_sketch,
-                            current_code=current_code,
-                            pending_fix=None,
-                            iteration_history=artifact.iteration_history,
-                            best_gflops=best_gflops,
-                            rounds_without_improvement=rounds_without_improvement,
-                            optimization_history=optimization_history,
-                            applied_recipes=applied_recipes,
-                            disabled_recipes=disabled_recipes,
-                            all_verification_results=all_verification_results,
-                        )
-                        self._record_stop(artifact, round_num, "fix_error", "Fixer 修复抛异常, 停止迭代")
+        if all_passed:
+            # 标记本轮配方为成功应用
+            if state.plan and state.plan.selected_recipes:
+                for r in state.plan.selected_recipes:
+                    state.applied_recipes.add(r.id)
+            print(f"\n[Conductor] 所有验证通过!")
+            # ── 可复现性 Harness: 通过前写快照, 方便后续 resume 时直接复用最终轮 ──
+            state.snapshot_target_dir = _snap()
+            self._record_stop(state.artifact, round_num, "passed", "所有验证通过 (L1/L2/L3)")
 
-                        break
-                    if not _outcome.code:
-                        # 响应过、又要过一次补丁，第二次**还是**提问 ⇒ 这一轮没有候选。
-                        # 停（不是「拿上一次的代码继续跑」）：模型已经明说它不改候选，
-                        # 再拿旧候选上去验证就是 harness 替它改了它的声明。
-                        print(f"\n[Conductor] 连续两次收到「不改候选」的动作信封 "
-                              f"({_outcome.envelope.kind})，本轮没有候选 —— 停止迭代")
-                        self._pending_action_envelope = None
-                        # 「紧邻 break 的三行内必须有 _record_stop」是 `test_stop_reason`
-                        # 的计数守卫 —— 详情写多行会把它顶出窗口, 于是那条守卫就漏了这一处。
-                        self._record_stop(artifact, round_num, "ask_turns_exhausted",
-                                          f"连续两次收到不改候选的意图 "
-                                          f"({_outcome.envelope.kind})，响应后仍无补丁")
-                        break
-                    print(f"  修复说明: {fix_note}")
-                    pending_fix = fixed_code
+            return _ROUND_STOP
 
-                    # ---- Reflexion: 修复后让 Fixer 产出结构化教训并沉淀 ----
-                    reflexion = None
-                    try:
-                        # 判不出那一轮不产 Reflexion: 那一步是让模型回答「这次失败的根因
-                        # 是什么、下次怎么避免」, 而这一轮根本没有失败可归因 —— 让它回答就是
-                        # 让它编一个候选侧的根因, 再把那份编出来的教训 `add()` 进语料。
-                        if not reference_hold:
-                            reflexion = self.fixer.produce_reflexion()
-                        if reflexion is not None:
-                            self.failure_db.add(reflexion)
-                            reflexion_pending.append(reflexion)
-                            lessons_cnt = len(reflexion.lessons)
-                            cause = reflexion.root_cause or "N/A"
-                            print(f"  [Reflexion] 已入库: 根因={cause[:60]}, lessons={lessons_cnt}条")
-                    except Exception as _rx_err:
-                        # Reflexion 失败不影响主流程, 只记录不中断
-                        reflexion = None
-                        print(f"  [Reflexion] 跳过沉淀: {_rx_err}")
+        # 缺口 1: 「数字不好看」不等于「性能未改善」—— 测量本身可能不可信。
+        # 污染与 launch 地板支配压低的是数字, 不是核的质量; 拿它禁用配方会
+        # **永久**拉黑实际有效的配方, 拿它累计停滞会在 max_stagnant_rounds=2 下
+        # 把一次正在起效的优化提前终止。L3 通过时同样要看: 那一路会把本轮配方
+        # 记进 applied_recipes, 依据不可信的测量给配方记功是同一个错误的镜像。
+        # §10.3 升级门: 本轮的裁决。缺省是**拒绝**(三条件一条都不成立) —— 于是
+        # 「这一轮没走到重算」(例如测量不可信、进了别的分支) 与「判过、没通过」
+        # 对下游是同一个答案, 而不会因为漏算一次就放行。真正的重算在判决之后。
+        _esc_decision = self._denied_escalation()
+        # 每一轮门都被问过, **答了什么都要留痕** —— 包括「没走到重算、按缺省拒绝」
+        # 的那一轮。不留这一条的话, 读数不可信的轮次在产物里与「门没接上」长得一样
+        # (实测: 那几轮原本一条裁决都没有, 于是缺省裁决成了没人读的值)。
+        self._escalation_log.append(dict(_esc_decision.as_dict(), round=round_num))
+        measurement_ok = True
+        if l3_result is not None:
+            measurement_ok = self._measurement_drives_loop(l3_result, round_num)
+            if not measurement_ok:
+                state.invalid_measurement_rounds += 1
+            # 读的是 metrics 里那个布尔而不是重算一遍判据: 键没了就说明提供方
+            # 没做过出处检查, 此时如实计 0, 不假装数过了。
+            if (l3_result.metrics or {}).get("measurement_l3_pass_refused"):
+                state.refused_rounds += 1
 
-                    # 第三个位置带的是**那条记录本身或 None**, 不是「已经沉淀过了」这个
-                    # 声称。原先写死 True, 而唯一的循环内沉淀是 produce_reflexion() ——
-                    # 它只在修好时返回记录, 于是「修不好的那类失败」被 815-821 的兜底
-                    # 当成「已经记过了」跳过, 永远进不了负样本库 (doc 49 §7.14 / #56)。
-                    fix_attempts.append((failed_results, fix_note, reflexion))
-
-                    # ── 可复现性 Harness: Fixer 修复后走 continue 前也要落快照 (否则 crash 就丢了修复代码) ──
-                    snapshot_target_dir = self._flush_snapshot(
-                        task=task,
-                        artifact_dir=snapshot_target_dir,
-                        round_done=round_num,
-                        current_sketch=current_sketch,
-                        current_code=current_code,
-                        pending_fix=pending_fix,
-                        iteration_history=artifact.iteration_history,
-                        best_gflops=best_gflops,
-                        rounds_without_improvement=rounds_without_improvement,
-                        optimization_history=optimization_history,
-                        applied_recipes=applied_recipes,
-                        disabled_recipes=disabled_recipes,
-                        all_verification_results=all_verification_results,
-                    )
-                    continue
-                print(f"\n[Conductor] L1/L2 验证失败且已达最大轮次，停止迭代")
-                snapshot_target_dir = _snap()
-                self._record_stop(artifact, round_num, "l1_l2_failed", "L1/L2 失败且已达最大轮次")
-
-                break
-
-            if l3_result and not l3_result.passed and round_num < self.max_optimize_rounds:
-                # ── 资格门: `can_tune` 管的是 **belief**, 不是「停循环」 ──
-                # 设计 §10.4 的伪码就是这条:
-                #     obs = oracle.evaluate(c, contract)
-                #     if obs.eligibility.can_tune: belief.update(c, obs)
-                #     if obs.eligibility.can_count_progress: stagnation.update(belief)
-                # 也就是说没资格的那个数**不进信念**, 于是 `propose()` 只能从**上一次
-                # 有资格的读数**构成的信念出发 —— 循环照常跑满预算 (那条策略另有真机
-                # 用例守着: `uninformative` 轮次必须跑满、不许提前终止)。
-                #
-                # 此前这里**没有任何门** (CHECKLOG I52): 一个档位 `uninformative`、五位
-                # 全 False 的读数照样被拼成 `perf_data` (gflops/speedup/`roofline_bound`
-                # 全在里面), 喂给邻居排序 (`agents.py:680` 读 roofline_bound 决定往大
-                # BLOCK_K 还是小 BLOCK_M/N 排) 与 LLM 先验 (`agents.py:708` 读 speedup)。
-                # §10.2 第三行: LLM token 独立管, 超了退化成纯数值搜索。口径是
-                # **本次运行**的用量 (`summary_since(水位线)`), 不是这个进程到现在的累计。
-                # 口径只有一处 (`_llm_tokens_used`): §21.1 的预算校验也读它。两处各算
-                # 一遍同一件事, 迟早会出现两个「还剩多少」。
-                _tokens_used = self._llm_tokens_used()
-                _llm_broke = self._budget.note_llm_usage(_tokens_used)
-                if _llm_broke:
-                    print(f"\n[Budget] LLM token 预算用尽 ({_tokens_used}/"
-                          f"{self._budget.plan.llm_tokens}) ⇒ 本轮退化成纯数值搜索 "
-                          f"(不问 LLM 要结构改动)")
-                _elig = l3_result.metrics.get("eligibility") or {}
-                _can_tune = _elig.get("can_tune") is True
-                if not _can_tune:
-                    print(f"\n[Search] 本轮读数无调参资格 "
-                          f"(can_tune=False; 档位="
-                          f"{l3_result.metrics.get('measurement_validity')!r})"
-                          f" ⇒ 不进信念")
-                print(f"\n[Search] L3 性能未达标，启动优化...")
-                # ── bandit 记账 (§5 / §10.5-3) ──
-                # 回报口径 = 相对**本轮之前**最好 gflops 的改进 —— 与 `best_gflops` /
-                # 停滞判定同一个量, 不另立一个口径。资格位决定这次回报算不算数:
-                # `can_count_progress=False` 的那一轮只记「试过」, 回报不进均值
-                # (「试过但没数」既不是「没试过」, 也不是「试过且不好」)。
-                _cur = l3_result.metrics.get("gflops")
-                _reward = None
-                if (isinstance(_cur, (int, float)) and not isinstance(_cur, bool)
-                        and isinstance(best_gflops, (int, float)) and best_gflops > 0):
-                    _reward = (float(_cur) - float(best_gflops)) / float(best_gflops)
-                bandit.update(bandit_arm, _reward,
-                              eligible=_elig.get("can_count_progress") is True,
-                              # §10.3 的分母原料: 这一轮把秒换成数字花了多少。只有真跑出
-                              # L3 读数才算 (L1/L2 就挂掉的轮次没有测量秒可言 ⇒ None)。
-                              cost_s=_measure_s if l3_result is not None else None)
-                perf_data = {
-                    "gflops": l3_result.metrics.get("gflops", 0),
-                    "speedup": l3_result.metrics.get("speedup_vs_baseline", 0),
-                    "target_speedup": task.constraints.min_speedup,
-                    "bound_type": l3_result.metrics.get("bound_type", "unknown"),
-                    "avg_time_ms": l3_result.metrics.get("avg_time_ms", 0),
-                    "memory_bandwidth_gbs": l3_result.metrics.get("memory_bandwidth_gbs", 0),
-                    # ---- Roofline 数据 (Verifier 注入) ----
-                    "hw_peak_gflops": l3_result.metrics.get("hw_peak_gflops", 0),
-                    "hw_peak_bandwidth_gbs": l3_result.metrics.get("hw_peak_bandwidth_gbs", 0),
-                    "gflops_utilization_pct": l3_result.metrics.get("gflops_utilization_pct", 0),
-                    "bandwidth_utilization_pct": l3_result.metrics.get("bandwidth_utilization_pct", 0),
-                    "arithmetic_intensity": l3_result.metrics.get("arithmetic_intensity", 0),
-                    "ridge_point": l3_result.metrics.get("ridge_point", 0),
-                    "roofline_bound": l3_result.metrics.get("roofline_bound", "unknown"),
-                    "name_bound": l3_result.metrics.get("name_bound", "unknown"),
-                    "hw_name": l3_result.metrics.get("hw_name", "unknown"),
-                    "hw_compute_capability": l3_result.metrics.get("hw_compute_capability", "unknown"),
-                    # ---- §12 便宜代理剪枝的输入 (不花 GPU 秒) ----
-                    # 上界由 Verifier 从 caps 发布 (0 = 不知道); elem_bytes 取**任务声明
-                    # 精度**的字节数 —— 与 smem 估算、AI 分母同一个口径 (核根本见不到
-                    # 控制端手里那份 float32 数组, 见 verifier._compute_arithmetic_intensity)。
-                    "shared_mem_per_sm_kb": l3_result.metrics.get("shared_mem_per_sm_kb", 0),
-                    "elem_bytes": task.constraints.precision.itemsize,
-                    # ---- 优化历史 ----
-                    "optimization_history": optimization_history,
-                }
-                if _llm_broke:
-                    # 与 `tuning_refused` 走同一条通道 (perf_data), 不新增签名 ——
-                    # SearchAgent 见到它就跳过 `_llm_optimize` 走规则路径。
-                    perf_data["llm_budget_exhausted"] = True
-                # §10.3: 把本轮裁决**发布**给 SearchAgent (判据在判决点之后已经算过,
-                # 这里只发布 —— 一个判定一处实现)。不通过 ⇒ 这一轮只做参数搜索。
-                perf_data["structural_escalation_denied"] = list(_esc_decision.refusals)
-                if _can_tune:
-                    # 有资格 ⇒ 这份读数进信念, 供后面的轮次沿用
-                    last_tunable_perf = perf_data
-                elif last_tunable_perf is not None:
-                    # 没资格 ⇒ 沿用**上一次有资格读数**构成的信念 (伪码里的 `belief`)
-                    perf_data = last_tunable_perf
+        # L3 性能改善追踪: 连续无改善时提前终止，避免浪费 LLM token
+        if l3_result and l3_result.passed is False and measurement_ok:
+            current_gflops = l3_result.metrics.get("gflops", 0)
+            # 当 gflops 为 0 (指标计算不可用) 时，用速度比判断
+            if current_gflops > 0 and state.best_gflops <= 0:
+                # 首个有效观测只能用来建立基线: 没有"之前"可比, 因此既不算改善
+                # 也不算停滞, 更不能据此禁用本轮配方 (首轮 plan 是在 roofline=None
+                # 下按算子类型选的, 无从判断其好坏)。
+                # 缺少这一支时 best_gflops 的初值 0.0 会让首轮掉进下面的"指标不
+                # 完整"分支: 把可用的 gflops 报成缺失, 无条件禁用配方, 并在
+                # max_stagnant_rounds=2 下把一次正在起效的优化提前终止。
+                state.best_gflops = current_gflops
+                _perm["best_updated"] = True
+                print(f"\n[Conductor] 建立性能基线: {current_gflops:.2f} GFLOPS "
+                      f"(speedup={l3_result.metrics.get('speedup_vs_baseline', 0):.4f})")
+            elif current_gflops > 0 and state.best_gflops > 0:
+                # D4 四态判决。原来这里是无带宽的 `current > best`: 于是「完全
+                # 打平」和「差 0.0001%」都会去禁用配方 —— 而禁用是**永久**决策,
+                # 需要的证据比「这次没测出更好」强。现在只有 SLOW 才禁用。
+                _validity = _validity_of(l3_result.metrics or {})
+                v, why, used_band = verdict(current_gflops, state.best_gflops, _validity)
+                # §10.3 条件 1 的输入就在**这一个点**产出: 这个分支只在
+                # `measurement_ok` 成立时进入 (它要求 can_count_stagnation = VALID),
+                # 所以尾巴里天然只有 valid 轮 —— 「K 轮 valid」不需要第二次筛
+                # (再筛一次 = 同一个判定两处实现)。
+                self._verdict_tail.append(v.name)
+                # 这一轮的判决**真正用过**的那条带宽进血缘 (#87 第 4 片, **只观测**)。
+                # 取的是 `verdict` 自己返回的那个值, 不是这里再查一次表: 分两次查同一张
+                # 表, 中间表被换过就会记下一个「判决没用过的数」, 而这一格要回答的题正是
+                # 「判决用过什么」。AMBIGUOUS 那两支没 consult 表 ⇒ 返回 `None`, 键**缺席**
+                # 才是「这一轮没到判决」, 两者在 `cross_round_band` 里分开数。
+                # 为什么这条要落盘: 带宽换了同时是两件事的读数 (档位降级按表换宽 vs
+                # 表本身被改过), 折成一句「尺变了」就把前者报成后者 —— 归因在
+                # `measurement.cross_round_band` 里分开做。
+                _round_rec[LINEAGE_BAND_KEY] = used_band
+                _band_agg = cross_round_band(state.artifact.iteration_history)
+                if _band_agg["band_state"] in (BAND_SPEC_DRIFT, BAND_UNEXPLAINED):
+                    print(f"\n[Band] {band_note(_band_agg)}")
+                if v is Verdict.FAST:
+                    state.best_gflops = current_gflops
+                    _perm["best_updated"] = True
+                    state.rounds_without_improvement = 0
+                    if state.plan and state.plan.selected_recipes:
+                        for r in state.plan.selected_recipes:
+                            state.applied_recipes.add(r.id)
+                    print(f"\n[Conductor] 性能改善 ({current_gflops:.2f} GFLOPS, {why})")
                 else:
-                    # 本次运行还没有任何一次有资格的读数: 给一个**不含任何数字**的
-                    # 结构先验。`tuning_refused` 是给 SearchAgent 的信号 —— 它必须
-                    # 把「没有读数」如实写进 prompt, 不许用 `.get(k, 0)` 编一个 0 出来
-                    # (`_llm_optimize` 原来正是那样: 缺键 ⇒ 0.00 印进 prompt)。
-                    perf_data = {
-                        "target_speedup": task.constraints.min_speedup,
-                        "tuning_refused": "can_tune=False",
-                        "optimization_history": [],
-                    }
-                if _space is not None:
-                    # §12: 模板型后端的候选来自参数空间 (下一轮轮首再取一次, 那时
-                    # bandit 已经吃过本轮的回报 ⇒ 顺位会跟着证据走)。这条 LLM/邻域搜索
-                    # 路径**整条不适用**: 让 SearchAgent 改 tiling 会把「模板点」与
-                    # 「LLM 结构」混进同一个候选队列 —— 而它们连身份口径都不同。
-                    print(f"\n[Search] 模板型后端: 候选来自参数空间, 本轮不走 LLM 搜索")
-                    # 模板轮**没有**新 sketch 也没有 LLM 建议: 那两行原样打出来会
-                    # 读成「这一轮改了 sketch」—— 那是代码型那边的语义。
-                    #
-                    # `optimization_history` 在这里**一个字都不写**: 它唯一的读者是
-                    # SearchAgent 的 prompt (`agents._llm_optimize`), 而模板轮根本不叫
-                    # SearchAgent —— 写一条进去就是「只有调试者会读到」的键 (与
-                    # CHECKLOG I36 那类「算了没人读」同族)。这一轮的候选身份已经在
-                    # `iteration_history.template_selection` 里, 那是有读者的那一格。
-                else:
-                    if search_alternatives:
-                        # P1-4: 上一轮排好的邻域候选按序轮换 —— 系统搜索代替「每轮
-                        # 重新问一次 LLM 直觉」。轮换候选已带结构 (hints/memory_plan),
-                        # 只换了 tiling, 不需要再过 Search。
-                        #
-                        # 选**哪一个**交给 §10.3 的选择器 (`choose`): ε 那一支去未探索的
-                        # 区域, 1-ε 那一支去分数最高的; 计划格子 (分相预算) 约束模式。
-                        _nsel = choose(search_alternatives, bandit, self._arm_of,
-                                       epsilon=self.selection_epsilon,
-                                       draw=explore_draw(_selection_seed, round_num),
-                                       phases=self._plan_phases())
-                        if _nsel is None:
-                            _room = self._budget.as_dict()["phase_room"]
-                            _why = (f"探索/精修两格的计划额度都用完了 (剩余 {_room}) 且"
-                                    "邻域队列里没有符合模式的候选 ⇒ 不再开新的一轮")
-                            self._budget.oracle_refuse("explore")
-                            self._record_stop(artifact, round_num, "budget_exhausted", _why)
-                            break
-                        current_sketch = _nsel.chosen
-                        search_alternatives = [x for x in _nsel.ranking
-                                               if x is not _nsel.chosen]
-                        _round_selection = dict(_nsel.as_dict(), applies_to="next_round",
-                                                chosen_label=self._arm_of(_nsel.chosen))
-                        print(f"\n[Selection] {_nsel.note}")
-                        t = current_sketch.tiling
-                        suggestion = "P1-4 邻域候选轮换"
-                        print(f"\n[Search] 轮换邻域候选: tiling={t.block_m}x{t.block_n}x{t.block_k} "
-                              f"(队列剩 {len(search_alternatives)} 个)")
+                    if v is Verdict.SLOW:
+                        # 只有 SLOW 才禁用配方 —— SAME 与 AMBIGUOUS 都是「没有证据」,
+                        # 而禁用是永久决策。进到这里时 measurement_ok 已经成立
+                        # (它要求 can_count_stagnation, 也就是 VALID), 所以不必再
+                        # 检查 can_disable_recipe: 那会是永不生效的条件。
+                        new_recipes = [r for r in state.plan.selected_recipes
+                                       if r.id not in state.applied_recipes] if state.plan else []
+                        for r in new_recipes:
+                            state.disabled_recipes.add(r.id)
+                            _perm["recipes_disabled"].append(r.id)
+                        if new_recipes:
+                            disabled_names = ", ".join(r.id for r in new_recipes)
+                            print(f"  [Planner] 性能退步，禁用配方: {disabled_names}")
+                        print(f"\n[Conductor] 性能退步 ({current_gflops:.2f} < {state.best_gflops:.2f} "
+                              f"GFLOPS, {why}), 连续 {state.rounds_without_improvement + 1}/{max_stagnant_rounds} 轮")
                     else:
-                        # ── §12 的开关: 后端声明了参数空间 ⇒ 模板型 ──
-                        # 控制器「自动切换成 LLM/模板产出候选、bandit 只做局部精修」这件事,
-                        # 今天只有代码型那一半有实现 (bandit 精修 = P1-4 邻域)。模板型那一半
-                        # (由参数空间枚举候选并实例化) 还没落地 ⇒ 在这里 fail-closed, 而不是
-                        # 把它降级成代码型继续跑: §12 点名的风险正是「把候选悄悄当成源码字符串」。
-                        # 放在真值测量**之前** (这一处是每轮搜索的入口), 因为拒绝要发生在花钱之前。
-                        try:
-                            current_sketch, suggestion = self.search.run(current_sketch, perf_data)
-                        except Exception as e:
-                            # 规则优化也失败时, 终止优化但不崩整个任务
-                            print(f"\n[Conductor] Search 优化异常 ({e}), 终止优化循环")
-                            snapshot_target_dir = self._flush_snapshot(
-                                task=task,
-                                artifact_dir=snapshot_target_dir,
-                                round_done=round_num,
-                                current_sketch=current_sketch,
-                                current_code=current_code,
-                                pending_fix=pending_fix,
-                                iteration_history=artifact.iteration_history,
-                                best_gflops=best_gflops,
-                                rounds_without_improvement=rounds_without_improvement,
-                                optimization_history=optimization_history,
-                                applied_recipes=applied_recipes,
-                                disabled_recipes=disabled_recipes,
-                                all_verification_results=all_verification_results,
-                            )
-                            self._record_stop(artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
+                        print(f"\n[Conductor] 性能未改善 ({current_gflops:.2f} vs {state.best_gflops:.2f} "
+                              f"GFLOPS, {why}), 连续 {state.rounds_without_improvement + 1}/{max_stagnant_rounds} 轮")
+                    state.rounds_without_improvement += 1
+                    _perm["stagnation_counted"] = True
+            else:
+                # gflops 不可用: 用速度比或时间判断
+                speedup = l3_result.metrics.get("speedup_vs_baseline", 0)
+                # 首轮同样无基线可比, 不禁用配方 (与上面 gflops 分支同理)
+                if round_num < 2 or (speedup > 0 and speedup < 1.0):
+                    # 无 gflops 参考时禁用配方等于拿噪声做永久决策，跳过避免死锁
+                    pass
+                elif state.plan and state.plan.selected_recipes:
+                    new_recipes = [r for r in state.plan.selected_recipes if r.id not in state.applied_recipes]
+                    for r in new_recipes:
+                        state.disabled_recipes.add(r.id)
+                        _perm["recipes_disabled"].append(r.id)
+                state.rounds_without_improvement += 1
+                _perm["stagnation_counted"] = True
+                print(f"\n[Conductor] 性能指标不完整 (gflops={current_gflops:.2f}, speedup={speedup:.4f}), "
+                      f"连续 {state.rounds_without_improvement}/{max_stagnant_rounds} 轮")
+            # ── §10.3 的三条件升级门 (判据的输入刚刚齐: 本轮判决已进尾巴) ──
+            # 位置是判据的一部分: 必须在**停滞出口之前**。第一版把它放在优化分支里,
+            # 于是「记满 K 轮平坦」的那一轮先被停滞出口 break 掉, 门永远开不了
+            # (实测: K=2 时门能看到的尾巴最多只有 1 条)。
+            _esc_decision = self._escalation_decision(
+                state.plan, state.applied_recipes, state.disabled_recipes,
+                (l3_result.metrics or {}) if l3_result else {}, state.current_code, state.task)
+            # **替换**而不是追加: 这一轮的缺省裁决已经记过一条, 同一轮记两条会让
+            # 「判过几次」变成「轮数 × 分支数」, 而读者要的是每轮一个答案。
+            self._escalation_log[-1] = dict(_esc_decision.as_dict(), round=round_num)
+            if not _esc_decision.allowed:
+                print(f"\n[Escalation] 结构升级门未通过 ⇒ 本轮只做参数搜索: "
+                      f"{_esc_decision.refusal_note()}")
+            elif state.rounds_without_improvement >= max_stagnant_rounds:
+                # 升级**买到的是 K 轮**: 平台化是对**旧结构**的陈述, 换成新结构之后
+                # 那段平坦区不再是关于它的证据 ⇒ 停滞计数清零。有界性靠
+                # `max_optimize_rounds`(总轮次) 与「清零后要重新攒够 K 轮 valid」
+                # 两条一起保证, 不会因为门反复放行而无限跑。
+                print("\n[Escalation] 结构升级门通过 ⇒ 停滞计数清零, "
+                      "本轮把结构改动交给 LLM")
+                state.rounds_without_improvement = 0
+            # ── §10.4 可靠停滞 = 两个条件**同时**成立 ──
+            # 前半句 (K 轮 valid 无改善) 上面刚记完; 后半句是「有希望的区域已穷尽」。
+            # 位置: 停滞出口之前 —— 判据的输入是本轮候选全集与 bandit 的观测, 两者都
+            # 已经定下来了。
+            _coverage = (assess_coverage(_universe.kept, state.bandit, template_arm,
+                                         label=point_label, universe=FROM_TEMPLATE_SPACE)
+                         if _universe is not None
+                         else undeclared(
+                             FROM_LLM_ON_DEMAND,
+                             "代码型路径的候选由 LLM/规则按需产生, 没有可列举的全集"))
+            _threshold = state.rounds_without_improvement >= max_stagnant_rounds
+            _coverage_record.update(_coverage.as_dict(),
+                                    threshold_reached=_threshold)
+            state.coverage_ledger.record(_coverage, threshold_reached=_threshold)
+            if _threshold and not _coverage.exhausted:
+                # 「只因轮数」不许停 (设计 §10.4 的原话)。停不成的原因要留痕: 没有这一格,
+                # 「因为没穷尽所以继续跑」与「停滞判据根本没人读」在产物里长得一样。
+                print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善, 但"
+                      f"{_coverage.note()}")
+            if _threshold and _coverage.exhausted:
+                print(f"\n[Conductor] 连续 {max_stagnant_rounds} 轮无性能改善，"
+                      f"{_coverage.note()} ⇒ 提前终止优化")
+                state.snapshot_target_dir = _snap()
+                # 停机理由要**点名两半**都成立 (只有前一半的话, 那正是设计点名的
+                # 错读法): 「连续无改善」+「候选区域已穷尽 (哪个集合, 几个点)」。
+                _why = (f"连续无改善达上限且候选区域已穷尽 "
+                        f"({_coverage.universe} {_coverage.tried}/{_coverage.total})")
+                self._record_stop(state.artifact, round_num, "stagnant", _why)
 
-                            break
-                        # P1-4: 排队下一轮的轮换候选 (SearchAgent 只在 triton 路径产出)
-                        # §5: 顺序交给 bandit (本轮累积的证据优先, 无观测的保持先验顺序),
-                        # 而不是纯 FIFO —— 后者对脏数据免疫但也无知: 哪个候选上次变快了,
-                        # 队列不知道。资格门在这层之外 (没资格的数根本没进来)。
-                        # 队列在这里**只入队不排序** (保持先验顺序): 排序与「取哪一个」
-                        # 是同一个判断, 它发生在**消费那一轮** (`choose`) —— 那时证据最新,
-                        # 而且一次判断只有一个地方做。这里再排一遍会让同一个选择器对同一批
-                        # 候选跑两次 (真实 bandit 是幂等的, 但那是巧合, 不是设计)。
-                        search_alternatives = list(
-                            getattr(self.search, "last_alternatives", []))
-                        if bandit.total_scored or bandit.unscored_updates:
-                            print(f"  [Bandit] 队列按证据重排: 已采纳 {bandit.total_scored} 个回报, "
-                                  f"没采纳 {bandit.unscored_updates} 个")
-                    print(f"  优化建议: {suggestion}")
-                    print(f"  新 Sketch 版本: v{current_sketch.version}")
+                return _ROUND_STOP
 
-                    # ---- 记录本轮优化历史 (供后续轮次参考) ----
-                    # 只在有资格时累加: 这份 history 会印进下一轮的 prompt, 也就是**信念**的
-                    # 一部分。把没有调参资格的那一轮数字写进去, 等于换个通道让它指挥搜索。
-                    if _can_tune:
-                        optimization_history.append({
-                            "tiling": f"{current_sketch.tiling.block_m}x{current_sketch.tiling.block_n}x{current_sketch.tiling.block_k}",
-                            "gflops": l3_result.metrics.get("gflops", 0),
-                            "stage": "algorithm",  # 由 SearchAgent 返回实际 stage
-                            "outcome": f"GFLOPS={l3_result.metrics.get('gflops', 0):.2f}, "
-                                       f"加速比={l3_result.metrics.get('speedup_vs_baseline', 0):.2f}x",
-                        })
+        # 缺口 4 的正解: 改善判据该看「离 参考天花板还有多远」, 而不是继续拿
+        # 一个标量比大小。绑定轴已经贴着上界的核, 换任何配方都不可能有可测收益 ——
+        # 再跑一轮只是白烧 GPU 与 LLM token。
+        #
+        # 只判「本轮有没有 L3 结果」: 再往前 `all_passed` 已经 break, 而
+        # `Verifier.verify()` 在 L1/L2 失败时直接 return (verifier.py:158-175),
+        # 所以拿得到 L3 就意味着 L1/L2 过了、且 L3 没过。在这里再写
+        # `not l3_result.passed` 或 `not l1_l2_failed` 都是永不生效的条件
+        # (同一文件里刚为 `can_disable_recipe` 删掉过一个)。
+        if l3_result is not None and reference_ceiling_reached(l3_result.metrics or {}):
+            _att = binding_attainment(l3_result.metrics or {})
+            _rl = (l3_result.metrics or {}).get("roofline_analysis") or {}
+            print(f"\n[Conductor] 绑定轴已达 roofline {_att:.1f}% "
+                  f"(>= {REFERENCE_CEILING_PCT:.0f}%), 判定已收敛, 停止后续优化轮")
+            # 这条 break 是整个循环里最贵的一次判定 (它决定不再花轮次), 所以把它
+            # 依赖的分母连同出处一起落进日志: 以后复查时不需要回头猜 90% 是相对
+            # 哪个数算出来的、那个数凭什么。
+            print(f"[Conductor]   分母: [{_rl.get('peak_table_key', '?')}] "
+                  f"peak={_rl.get('hw_peak_gflops', 0) / 1000:.1f} TFLOPS / "
+                  f"bw={_rl.get('hw_peak_bandwidth_gbs', 0):.0f} GB/s "
+                  f"({_rl.get('compute_used', '?')}) — {_rl.get('peak_source', '出处未知')}")
+            state.snapshot_target_dir = _snap()
+            self._record_stop(state.artifact, round_num, "converged", "绑定轴已达 参考天花板")
 
-            # ── 可复现性 Harness: 循环走到末尾 (没走 break/continue) 时统一 flush 一次快照 ──
-            snapshot_target_dir = _snap()
-            if not (l3_result and not l3_result.passed and round_num < self.max_optimize_rounds):
-                print(f"\n[Conductor] 已达最大优化轮次，停止迭代")
+            return _ROUND_STOP
+
+        l1_l2_failed = any(
+            not r.passed and r.level in (VerificationLevel.L1_COMPILE, VerificationLevel.L2_FUNCTION)
+            for r in verify_results
+        )
+        if l1_l2_failed:
+            # §8 路由: 先分类再动作。性能不达标≠bug (走搜索), 基础设施≠进度,
+            # 编译过、仅数值错 → **修不重写** (§19.3, 外部实测省 92.8% token)。
+            from .failure_route import ROUTE_DEBUG_FIX, ROUTE_HOLD, ROUTE_RETRY, classify
+            route = classify(verify_results)
+            print(f"  [Route] §8 分类: kind={route.kind} route={route.route}"
+                  f"{' · fix_not_rewrite' if route.fix_not_rewrite else ''}"
+                  f" — {route.reason}")
+            if route.route == ROUTE_RETRY:
+                # 基础设施失败: 退避重试, 不计进度、不进负样本库 (§8 表)
+                self._record_stop(state.artifact, round_num, "infra_retry",
+                                  route.reason)
+                return _ROUND_STOP
+            # ROUTE_HOLD 仍走 Fixer (既有控制流: 「那一轮仍然走 Fixer」),
+            # 只是下面的写入侧按 reference_hold 跳过沉淀 —— 不在这里 continue。
+            if round_num < self.max_optimize_rounds:
+                # L1 编译失败可能是缺依赖: 分析代码 import 并按需补装
+                l1_result = next((r for r in verify_results
+                                  if r.level == VerificationLevel.L1_COMPILE and not r.passed), None)
+                # §21 拦下的候选**根本没被送进编译**, 为它跑一次远端依赖分析
+                # (SSH 往返) 毫无意义 —— 那正是「不进编译」想省的机时。
+                if l1_result and not (l1_result.metrics or {}).get("agent_action_refused") \
+                        and Cap.DEP_ANALYSIS in self.backend.capabilities:
+                    deps = self.backend.analyze_dependencies(state.current_code)
+                    if deps:
+                        print(f"\n[Conductor] 代码依赖: {deps}, 尝试按需补装...")
+                        if Cap.ENV_PROVISION in self.backend.capabilities:
+                            self.backend.ensure_environment(required_pips=deps)
+
+                failed_results = [r for r in verify_results if not r.passed]
+                # 「本级判不出」的那一轮对这张核没有作出任何判定 (参考自己产 NaN/Inf)。
+                # 它仍然走 Fixer —— 控制流这一片不动, 省一轮 LLM 是另一次要带 A/B 的改动
+                # (doc 58 §4.2 剩下的那半)。这里先接的是**写入侧**: 那一轮的 Reflexion
+                # 会写出一份指向错误对象的教训, 而那份教训在同任务的后续轮次里被检索到。
+                reference_hold = failure_class(failed_results) == FAILURE_CLASS_REFERENCE
+                if reference_hold:
+                    print("\n[Conductor] 本轮失败归为「本级判不出」(参考侧没有可比对象): "
+                          "不沉淀教训、不进负样本库")
+                print(f"\n[Fixer] L1/L2 验证失败，启动错误修复...")
+                # 修订起点 (arXiv:2609.35140v1 行 214)。有已验证的祖先就不从这一版出发:
+                # 它没通过正确性验证, 在它上面继续叠就是「在坏的后代上盖一层」—— 那正是
+                # 这句规则要挡的漂移。但**错误信息仍然取这一版的**: 那是「上一次改动坏在哪」
+                # 的唯一证据, 换成祖先的错误信息就什么都修不了。
+                # `!= current_code` 那半句管的是同一份文本这次没过 (验证非确定: 共享卡、
+                # 容差边界) 的场合 —— 那时起点没变, 少了它就印一句「退回」的谎话。
+                # 它的证人是 `tests/test_verified_parent_retreat.py` 里用假 Verifier 造的
+                # 那个现场; 没有那一条时这个条件构造不出反例, 就会被当成死文字删掉 (M4)。
+                repair_base = state.current_code
+                if state.verified_parent is not None and state.verified_parent != state.current_code:
+                    repair_base = state.verified_parent
+                    print(f"  [Conductor] 修订起点退回第 {state.verified_parent_round} 轮那份 "
+                          f"L1/L2 已验证的实现 (本轮这一版没有通过正确性验证)")
+                try:
+                    # §21.3: 结构化证据那一段 (**唯一拼装点** = `_fix_evidence`),
+                    # 默认开。关掉时传空串 ⇒ 只少那一段（其余段两臂同值，见构造参数注释）。
+                    _evidence = ""
+                    if self.structured_evidence:
+                        _evidence, _rec = self._fix_evidence(
+                            task=state.task, route=route, verify_results=failed_results,
+                            current_code=state.current_code,
+                            parent_code=_code_before_this_round,
+                            gate_ctx=_action_ctx,
+                        )
+                        _fix_evidence_record.update(_rec)
+                    # §21.1 生产者侧: 修复这一步现在**同时**取回模型交上来的动作信封。
+                    # `run` 保留给不关心信封的调用方, 而这里用的是带信封的那一个 ——
+                    # 于是「动作是谁写的」在内侧就分得开。
+                    _outcome = self.fixer.run_with_action(
+                        repair_base, state.task, failed_results,
+                        fix_not_rewrite=route.fix_not_rewrite,
+                        structured_evidence=_evidence,
+                        error_shape=(getattr(route, "error_shape", "") or ""),
+                    )
+                    if _outcome.asked:
+                        # 模型交的是**不改候选**的意图 (解释 / 请求观测): 这一轮没有候选。
+                        # 响应它一次 (答或拒), 再要一次补丁 —— 有界: 第二次还是提问就停。
+                        # 「一直问」不设上限就是一条白烧 token 的环 (§21.1 的预算账)。
+                        _outcome = self._answer_ask_and_retry(
+                            _outcome, repair_base=repair_base, task=state.task,
+                            failed_results=failed_results, route=route,
+                            evidence=_evidence,
+                            record=_fix_action_record,
+                        )
+                    fixed_code, fix_note = _outcome.code, _outcome.summary
+                    # 信封交给**下一轮**的判据点 (它就是这份候选的来路)。只有改候选的
+                    # 那几类值得传（提问类在上面已经被响应掉了）。
+                    self._pending_action_envelope = (
+                        _outcome.envelope if _outcome.envelope.usable else None)
+                    _fix_action_record.update(_outcome.as_dict())
+                except Exception as e:
+                    print(f"\n[Conductor] Fixer 修复失败 ({e})，停止迭代")
+                    state.snapshot_target_dir = self._flush_snapshot(
+                        task=state.task,
+                        artifact_dir=state.snapshot_target_dir,
+                        round_done=round_num,
+                        current_sketch=state.current_sketch,
+                        current_code=state.current_code,
+                        pending_fix=None,
+                        iteration_history=state.artifact.iteration_history,
+                        best_gflops=state.best_gflops,
+                        rounds_without_improvement=state.rounds_without_improvement,
+                        optimization_history=state.optimization_history,
+                        applied_recipes=state.applied_recipes,
+                        disabled_recipes=state.disabled_recipes,
+                        all_verification_results=state.all_verification_results,
+                    )
+                    self._record_stop(state.artifact, round_num, "fix_error", "Fixer 修复抛异常, 停止迭代")
+
+                    return _ROUND_STOP
+                if not _outcome.code:
+                    # 响应过、又要过一次补丁，第二次**还是**提问 ⇒ 这一轮没有候选。
+                    # 停（不是「拿上一次的代码继续跑」）：模型已经明说它不改候选，
+                    # 再拿旧候选上去验证就是 harness 替它改了它的声明。
+                    print(f"\n[Conductor] 连续两次收到「不改候选」的动作信封 "
+                          f"({_outcome.envelope.kind})，本轮没有候选 —— 停止迭代")
+                    self._pending_action_envelope = None
+                    # 「紧邻 break 的三行内必须有 _record_stop」是 `test_stop_reason`
+                    # 的计数守卫 —— 详情写多行会把它顶出窗口, 于是那条守卫就漏了这一处。
+                    self._record_stop(state.artifact, round_num, "ask_turns_exhausted",
+                                      f"连续两次收到不改候选的意图 "
+                                      f"({_outcome.envelope.kind})，响应后仍无补丁")
+                    return _ROUND_STOP
+                print(f"  修复说明: {fix_note}")
+                state.pending_fix = fixed_code
+
+                # ---- Reflexion: 修复后让 Fixer 产出结构化教训并沉淀 ----
+                reflexion = None
+                try:
+                    # 判不出那一轮不产 Reflexion: 那一步是让模型回答「这次失败的根因
+                    # 是什么、下次怎么避免」, 而这一轮根本没有失败可归因 —— 让它回答就是
+                    # 让它编一个候选侧的根因, 再把那份编出来的教训 `add()` 进语料。
+                    if not reference_hold:
+                        reflexion = self.fixer.produce_reflexion()
+                    if reflexion is not None:
+                        self.failure_db.add(reflexion)
+                        state.reflexion_pending.append(reflexion)
+                        lessons_cnt = len(reflexion.lessons)
+                        cause = reflexion.root_cause or "N/A"
+                        print(f"  [Reflexion] 已入库: 根因={cause[:60]}, lessons={lessons_cnt}条")
+                except Exception as _rx_err:
+                    # Reflexion 失败不影响主流程, 只记录不中断
+                    reflexion = None
+                    print(f"  [Reflexion] 跳过沉淀: {_rx_err}")
+
+                # 第三个位置带的是**那条记录本身或 None**, 不是「已经沉淀过了」这个
+                # 声称。原先写死 True, 而唯一的循环内沉淀是 produce_reflexion() ——
+                # 它只在修好时返回记录, 于是「修不好的那类失败」被 815-821 的兜底
+                # 当成「已经记过了」跳过, 永远进不了负样本库 (doc 49 §7.14 / #56)。
+                state.fix_attempts.append((failed_results, fix_note, reflexion))
+
+                # ── 可复现性 Harness: Fixer 修复后走 continue 前也要落快照 (否则 crash 就丢了修复代码) ──
+                state.snapshot_target_dir = self._flush_snapshot(
+                    task=state.task,
+                    artifact_dir=state.snapshot_target_dir,
+                    round_done=round_num,
+                    current_sketch=state.current_sketch,
+                    current_code=state.current_code,
+                    pending_fix=state.pending_fix,
+                    iteration_history=state.artifact.iteration_history,
+                    best_gflops=state.best_gflops,
+                    rounds_without_improvement=state.rounds_without_improvement,
+                    optimization_history=state.optimization_history,
+                    applied_recipes=state.applied_recipes,
+                    disabled_recipes=state.disabled_recipes,
+                    all_verification_results=state.all_verification_results,
+                )
+                return _ROUND_CONTINUE
+            print(f"\n[Conductor] L1/L2 验证失败且已达最大轮次，停止迭代")
+            state.snapshot_target_dir = _snap()
+            self._record_stop(state.artifact, round_num, "l1_l2_failed", "L1/L2 失败且已达最大轮次")
+
+            return _ROUND_STOP
+
+        if l3_result and not l3_result.passed and round_num < self.max_optimize_rounds:
+            # ── 资格门: `can_tune` 管的是 **belief**, 不是「停循环」 ──
+            # 设计 §10.4 的伪码就是这条:
+            #     obs = oracle.evaluate(c, contract)
+            #     if obs.eligibility.can_tune: belief.update(c, obs)
+            #     if obs.eligibility.can_count_progress: stagnation.update(belief)
+            # 也就是说没资格的那个数**不进信念**, 于是 `propose()` 只能从**上一次
+            # 有资格的读数**构成的信念出发 —— 循环照常跑满预算 (那条策略另有真机
+            # 用例守着: `uninformative` 轮次必须跑满、不许提前终止)。
+            #
+            # 此前这里**没有任何门** (CHECKLOG I52): 一个档位 `uninformative`、五位
+            # 全 False 的读数照样被拼成 `perf_data` (gflops/speedup/`roofline_bound`
+            # 全在里面), 喂给邻居排序 (`agents.py:680` 读 roofline_bound 决定往大
+            # BLOCK_K 还是小 BLOCK_M/N 排) 与 LLM 先验 (`agents.py:708` 读 speedup)。
+            # §10.2 第三行: LLM token 独立管, 超了退化成纯数值搜索。口径是
+            # **本次运行**的用量 (`summary_since(水位线)`), 不是这个进程到现在的累计。
+            # 口径只有一处 (`_llm_tokens_used`): §21.1 的预算校验也读它。两处各算
+            # 一遍同一件事, 迟早会出现两个「还剩多少」。
+            _tokens_used = self._llm_tokens_used()
+            _llm_broke = self._budget.note_llm_usage(_tokens_used)
+            if _llm_broke:
+                print(f"\n[Budget] LLM token 预算用尽 ({_tokens_used}/"
+                      f"{self._budget.plan.llm_tokens}) ⇒ 本轮退化成纯数值搜索 "
+                      f"(不问 LLM 要结构改动)")
+            _elig = l3_result.metrics.get("eligibility") or {}
+            _can_tune = _elig.get("can_tune") is True
+            if not _can_tune:
+                print(f"\n[Search] 本轮读数无调参资格 "
+                      f"(can_tune=False; 档位="
+                      f"{l3_result.metrics.get('measurement_validity')!r})"
+                      f" ⇒ 不进信念")
+            print(f"\n[Search] L3 性能未达标，启动优化...")
+            # ── bandit 记账 (§5 / §10.5-3) ──
+            # 回报口径 = 相对**本轮之前**最好 gflops 的改进 —— 与 `best_gflops` /
+            # 停滞判定同一个量, 不另立一个口径。资格位决定这次回报算不算数:
+            # `can_count_progress=False` 的那一轮只记「试过」, 回报不进均值
+            # (「试过但没数」既不是「没试过」, 也不是「试过且不好」)。
+            _cur = l3_result.metrics.get("gflops")
+            _reward = None
+            if (isinstance(_cur, (int, float)) and not isinstance(_cur, bool)
+                    and isinstance(state.best_gflops, (int, float)) and state.best_gflops > 0):
+                _reward = (float(_cur) - float(state.best_gflops)) / float(state.best_gflops)
+            state.bandit.update(bandit_arm, _reward,
+                          eligible=_elig.get("can_count_progress") is True,
+                          # §10.3 的分母原料: 这一轮把秒换成数字花了多少。只有真跑出
+                          # L3 读数才算 (L1/L2 就挂掉的轮次没有测量秒可言 ⇒ None)。
+                          cost_s=_measure_s if l3_result is not None else None)
+            perf_data = {
+                "gflops": l3_result.metrics.get("gflops", 0),
+                "speedup": l3_result.metrics.get("speedup_vs_baseline", 0),
+                "target_speedup": state.task.constraints.min_speedup,
+                "bound_type": l3_result.metrics.get("bound_type", "unknown"),
+                "avg_time_ms": l3_result.metrics.get("avg_time_ms", 0),
+                "memory_bandwidth_gbs": l3_result.metrics.get("memory_bandwidth_gbs", 0),
+                # ---- Roofline 数据 (Verifier 注入) ----
+                "hw_peak_gflops": l3_result.metrics.get("hw_peak_gflops", 0),
+                "hw_peak_bandwidth_gbs": l3_result.metrics.get("hw_peak_bandwidth_gbs", 0),
+                "gflops_utilization_pct": l3_result.metrics.get("gflops_utilization_pct", 0),
+                "bandwidth_utilization_pct": l3_result.metrics.get("bandwidth_utilization_pct", 0),
+                "arithmetic_intensity": l3_result.metrics.get("arithmetic_intensity", 0),
+                "ridge_point": l3_result.metrics.get("ridge_point", 0),
+                "roofline_bound": l3_result.metrics.get("roofline_bound", "unknown"),
+                "name_bound": l3_result.metrics.get("name_bound", "unknown"),
+                "hw_name": l3_result.metrics.get("hw_name", "unknown"),
+                "hw_compute_capability": l3_result.metrics.get("hw_compute_capability", "unknown"),
+                # ---- §12 便宜代理剪枝的输入 (不花 GPU 秒) ----
+                # 上界由 Verifier 从 caps 发布 (0 = 不知道); elem_bytes 取**任务声明
+                # 精度**的字节数 —— 与 smem 估算、AI 分母同一个口径 (核根本见不到
+                # 控制端手里那份 float32 数组, 见 verifier._compute_arithmetic_intensity)。
+                "shared_mem_per_sm_kb": l3_result.metrics.get("shared_mem_per_sm_kb", 0),
+                "elem_bytes": state.task.constraints.precision.itemsize,
+                # ---- 优化历史 ----
+                "optimization_history": state.optimization_history,
+            }
+            if _llm_broke:
+                # 与 `tuning_refused` 走同一条通道 (perf_data), 不新增签名 ——
+                # SearchAgent 见到它就跳过 `_llm_optimize` 走规则路径。
+                perf_data["llm_budget_exhausted"] = True
+            # §10.3: 把本轮裁决**发布**给 SearchAgent (判据在判决点之后已经算过,
+            # 这里只发布 —— 一个判定一处实现)。不通过 ⇒ 这一轮只做参数搜索。
+            perf_data["structural_escalation_denied"] = list(_esc_decision.refusals)
+            if _can_tune:
+                # 有资格 ⇒ 这份读数进信念, 供后面的轮次沿用
+                state.last_tunable_perf = perf_data
+            elif state.last_tunable_perf is not None:
+                # 没资格 ⇒ 沿用**上一次有资格读数**构成的信念 (伪码里的 `belief`)
+                perf_data = state.last_tunable_perf
+            else:
+                # 本次运行还没有任何一次有资格的读数: 给一个**不含任何数字**的
+                # 结构先验。`tuning_refused` 是给 SearchAgent 的信号 —— 它必须
+                # 把「没有读数」如实写进 prompt, 不许用 `.get(k, 0)` 编一个 0 出来
+                # (`_llm_optimize` 原来正是那样: 缺键 ⇒ 0.00 印进 prompt)。
+                perf_data = {
+                    "target_speedup": state.task.constraints.min_speedup,
+                    "tuning_refused": "can_tune=False",
+                    "optimization_history": [],
+                }
+            if _space is not None:
+                # §12: 模板型后端的候选来自参数空间 (下一轮轮首再取一次, 那时
+                # bandit 已经吃过本轮的回报 ⇒ 顺位会跟着证据走)。这条 LLM/邻域搜索
+                # 路径**整条不适用**: 让 SearchAgent 改 tiling 会把「模板点」与
+                # 「LLM 结构」混进同一个候选队列 —— 而它们连身份口径都不同。
+                print(f"\n[Search] 模板型后端: 候选来自参数空间, 本轮不走 LLM 搜索")
+                # 模板轮**没有**新 sketch 也没有 LLM 建议: 那两行原样打出来会
+                # 读成「这一轮改了 sketch」—— 那是代码型那边的语义。
+                #
+                # `optimization_history` 在这里**一个字都不写**: 它唯一的读者是
+                # SearchAgent 的 prompt (`agents._llm_optimize`), 而模板轮根本不叫
+                # SearchAgent —— 写一条进去就是「只有调试者会读到」的键 (与
+                # CHECKLOG I36 那类「算了没人读」同族)。这一轮的候选身份已经在
+                # `iteration_history.template_selection` 里, 那是有读者的那一格。
+            else:
+                if state.search_alternatives:
+                    # P1-4: 上一轮排好的邻域候选按序轮换 —— 系统搜索代替「每轮
+                    # 重新问一次 LLM 直觉」。轮换候选已带结构 (hints/memory_plan),
+                    # 只换了 tiling, 不需要再过 Search。
+                    #
+                    # 选**哪一个**交给 §10.3 的选择器 (`choose`): ε 那一支去未探索的
+                    # 区域, 1-ε 那一支去分数最高的; 计划格子 (分相预算) 约束模式。
+                    _nsel = choose(state.search_alternatives, state.bandit, self._arm_of,
+                                   epsilon=self.selection_epsilon,
+                                   draw=explore_draw(state._selection_seed, round_num),
+                                   phases=self._plan_phases())
+                    if _nsel is None:
+                        _room = self._budget.as_dict()["phase_room"]
+                        _why = (f"探索/精修两格的计划额度都用完了 (剩余 {_room}) 且"
+                                "邻域队列里没有符合模式的候选 ⇒ 不再开新的一轮")
+                        self._budget.oracle_refuse("explore")
+                        self._record_stop(state.artifact, round_num, "budget_exhausted", _why)
+                        return _ROUND_STOP
+                    state.current_sketch = _nsel.chosen
+                    state.search_alternatives = [x for x in _nsel.ranking
+                                           if x is not _nsel.chosen]
+                    _round_selection = dict(_nsel.as_dict(), applies_to="next_round",
+                                            chosen_label=self._arm_of(_nsel.chosen))
+                    print(f"\n[Selection] {_nsel.note}")
+                    t = state.current_sketch.tiling
+                    suggestion = "P1-4 邻域候选轮换"
+                    print(f"\n[Search] 轮换邻域候选: tiling={t.block_m}x{t.block_n}x{t.block_k} "
+                          f"(队列剩 {len(state.search_alternatives)} 个)")
+                else:
+                    # ── §12 的开关: 后端声明了参数空间 ⇒ 模板型 ──
+                    # 控制器「自动切换成 LLM/模板产出候选、bandit 只做局部精修」这件事,
+                    # 今天只有代码型那一半有实现 (bandit 精修 = P1-4 邻域)。模板型那一半
+                    # (由参数空间枚举候选并实例化) 还没落地 ⇒ 在这里 fail-closed, 而不是
+                    # 把它降级成代码型继续跑: §12 点名的风险正是「把候选悄悄当成源码字符串」。
+                    # 放在真值测量**之前** (这一处是每轮搜索的入口), 因为拒绝要发生在花钱之前。
+                    try:
+                        state.current_sketch, suggestion = self.search.run(state.current_sketch, perf_data)
+                    except Exception as e:
+                        # 规则优化也失败时, 终止优化但不崩整个任务
+                        print(f"\n[Conductor] Search 优化异常 ({e}), 终止优化循环")
+                        state.snapshot_target_dir = self._flush_snapshot(
+                            task=state.task,
+                            artifact_dir=state.snapshot_target_dir,
+                            round_done=round_num,
+                            current_sketch=state.current_sketch,
+                            current_code=state.current_code,
+                            pending_fix=state.pending_fix,
+                            iteration_history=state.artifact.iteration_history,
+                            best_gflops=state.best_gflops,
+                            rounds_without_improvement=state.rounds_without_improvement,
+                            optimization_history=state.optimization_history,
+                            applied_recipes=state.applied_recipes,
+                            disabled_recipes=state.disabled_recipes,
+                            all_verification_results=state.all_verification_results,
+                        )
+                        self._record_stop(state.artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
+
+                        return _ROUND_STOP
+                    # P1-4: 排队下一轮的轮换候选 (SearchAgent 只在 triton 路径产出)
+                    # §5: 顺序交给 bandit (本轮累积的证据优先, 无观测的保持先验顺序),
+                    # 而不是纯 FIFO —— 后者对脏数据免疫但也无知: 哪个候选上次变快了,
+                    # 队列不知道。资格门在这层之外 (没资格的数根本没进来)。
+                    # 队列在这里**只入队不排序** (保持先验顺序): 排序与「取哪一个」
+                    # 是同一个判断, 它发生在**消费那一轮** (`choose`) —— 那时证据最新,
+                    # 而且一次判断只有一个地方做。这里再排一遍会让同一个选择器对同一批
+                    # 候选跑两次 (真实 bandit 是幂等的, 但那是巧合, 不是设计)。
+                    state.search_alternatives = list(
+                        getattr(self.search, "last_alternatives", []))
+                    if state.bandit.total_scored or state.bandit.unscored_updates:
+                        print(f"  [Bandit] 队列按证据重排: 已采纳 {state.bandit.total_scored} 个回报, "
+                              f"没采纳 {state.bandit.unscored_updates} 个")
+                print(f"  优化建议: {suggestion}")
+                print(f"  新 Sketch 版本: v{state.current_sketch.version}")
+
+                # ---- 记录本轮优化历史 (供后续轮次参考) ----
+                # 只在有资格时累加: 这份 history 会印进下一轮的 prompt, 也就是**信念**的
+                # 一部分。把没有调参资格的那一轮数字写进去, 等于换个通道让它指挥搜索。
+                if _can_tune:
+                    state.optimization_history.append({
+                        "tiling": f"{state.current_sketch.tiling.block_m}x{state.current_sketch.tiling.block_n}x{state.current_sketch.tiling.block_k}",
+                        "gflops": l3_result.metrics.get("gflops", 0),
+                        "stage": "algorithm",  # 由 SearchAgent 返回实际 stage
+                        "outcome": f"GFLOPS={l3_result.metrics.get('gflops', 0):.2f}, "
+                                   f"加速比={l3_result.metrics.get('speedup_vs_baseline', 0):.2f}x",
+                    })
+
+        # ── 可复现性 Harness: 循环走到末尾 (没走 break/continue) 时统一 flush 一次快照 ──
+        state.snapshot_target_dir = _snap()
+        if not (l3_result and not l3_result.passed and round_num < self.max_optimize_rounds):
+            print(f"\n[Conductor] 已达最大优化轮次，停止迭代")
+
+
+    def _finalize_run(self, *, state):
+        """收尾: 把跑完的循环状态落成最终产物、写报告、给出返回值。
+
+        从 `_execute_inner` 拆出来的第一段 (1620 -> 1448 行)。**为什么先拆这一段**:
+        它有一个单出口 (`return artifact`)、不写任何 `self.` 属性、也不依赖外层循环的
+        控制流 (区内的 `continue` 绑的是区内自己的循环) —— 所以能用「逐字搬 + 显式
+        接线」完成, 循环内部一行没动, 风险被限制在尾部。
+
+        ⚠️ 接口宽 (24 个关键字) 是这里**真实的**耦合, 不是随手摊开的参数表: 收尾确实要
+        读这次运行攒下的全部东西, `_restore_state_from_snapshot` 那 11 个「快照状态」
+        只是它的一个子集。正确的收敛方向是把它收成一个运行状态对象, 但那要求 1128 行的
+        轮次循环也改成从那个对象读 —— 那是下一步, 不在这一版里。这一版刻意**不**动循环,
+        为的是让「行为是否变了」只由 `tests/test_execute_inner_behavior.py` 一个判据回答。
+        """
 
         # 循环正常走到末尾 (没被任何 break 收走) —— 这一档以前只在 stdout 上有一行 print,
         # 产物里与「修坏了」「到顶了」完全同形。补记成数据。
-        if not (artifact.metadata or {}).get("stop"):
-            self._record_stop(artifact, self.max_optimize_rounds, "rounds_exhausted",
+        if not (state.artifact.metadata or {}).get("stop"):
+            self._record_stop(state.artifact, self.max_optimize_rounds, "rounds_exhausted",
                               "轮次用完仍未通过, 也没有触发任何提前出口")
 
         # 构建最终产物
-        artifact.code = current_code
-        artifact.sketch = current_sketch
-        artifact.verification_results = all_verification_results
+        state.artifact.code = state.current_code
+        state.artifact.sketch = state.current_sketch
+        state.artifact.verification_results = state.all_verification_results
 
-        if all_verification_results:
-            l3 = next((r for r in all_verification_results if r.level == VerificationLevel.L3_PERFORMANCE), None)
+        if state.all_verification_results:
+            l3 = next((r for r in state.all_verification_results if r.level == VerificationLevel.L3_PERFORMANCE), None)
             if l3:
-                artifact.benchmark_data = l3.metrics
+                state.artifact.benchmark_data = l3.metrics
                 from .contract import case_key
 
                 # §6.2 条款 2/4 的第一件证据：**本次评的是哪一条 case**（输入形状签名，
@@ -2485,55 +2650,55 @@ class Conductor:
                 # 与「本轮的输入」同时在手的地方 —— 判据侧（`_save_to_db` 的两条证据）
                 # 读的就是这一格。没有输入 ⇒ 空串 = **没有 case**（判据按未确立走），
                 # 不拿别的键冒充（见 I92）。
-                artifact.benchmark_data["case_key"] = case_key(test_inputs)
+                state.artifact.benchmark_data["case_key"] = case_key(state.test_inputs)
                 # §3.4（I94）: **输入从哪来** + 「契约声明的 case」与「本次评的那几组」对不对
                 # 得上。三态: `case_source` 空串 = 契约没声明具体输入（老契约，输入只能由
                 # 调用方给）; `case_match` 只在契约声明了 case 时才有这一格（没声明 ⇒ 不写，
                 # 免得「没得对账」被读成「对上了」）。`case_declared` = 契约手里有几组具体输入。
-                artifact.benchmark_data["case_source"] = case_source
-                if declared_cases:
-                    evaluated = {case_key(item) for item in input_sets}
-                    artifact.benchmark_data["case_declared"] = len(declared_cases)
-                    artifact.benchmark_data["case_match"] = bool(
-                        evaluated and evaluated <= set(declared_cases))
+                state.artifact.benchmark_data["case_source"] = state.case_source
+                if state.declared_cases:
+                    evaluated = {case_key(item) for item in state.input_sets}
+                    state.artifact.benchmark_data["case_declared"] = len(state.declared_cases)
+                    state.artifact.benchmark_data["case_match"] = bool(
+                        evaluated and evaluated <= set(state.declared_cases))
 
             # 提取编译元信息 (Triton: num_warps, num_stages 等)
-            l1 = next((r for r in all_verification_results if r.level == VerificationLevel.L1_COMPILE), None)
+            l1 = next((r for r in state.all_verification_results if r.level == VerificationLevel.L1_COMPILE), None)
             if l1 and l1.metrics:
-                artifact.compile_info = {
+                state.artifact.compile_info = {
                     k: v for k, v in l1.metrics.items()
                     if k not in ("compile_status", "backend")
                 }
             # 从 task 配置补充 Triton 编译参数
-            if task.target.triton_config:
-                artifact.compile_info.update(task.target.triton_config.to_dict())
+            if state.task.target.triton_config:
+                state.artifact.compile_info.update(state.task.target.triton_config.to_dict())
 
         # 失败案例入库: 修复记录与最终失败均沉淀为负样本 (供后续 Fixer 检索)
         # 循环内只沉淀 Reflexion 那一条 (带 lessons 结构化教训), 且当时 `fixed` 只能是
         # 「还没验证过」; 这里补齐两件事: 没有 Reflexion 记录的修复走兜底入库,
         # 有 Reflexion 记录的在结果已知后补写一次。
-        if fix_attempts:
-            for failed_results, fix_note, reflexion in fix_attempts:
+        if state.fix_attempts:
+            for failed_results, fix_note, reflexion in state.fix_attempts:
                 if reflexion is not None:
                     continue      # 这条失败已经有它自己的记录 (下面那次补写会更新它)
-                self._record_failure(task, failed_results, fix_note, fixed=artifact.all_passed)
-        elif all_verification_results and not artifact.all_passed:
-            failed = [r for r in all_verification_results if not r.passed]
+                self._record_failure(state.task, failed_results, fix_note, fixed=state.artifact.all_passed)
+        elif state.all_verification_results and not state.artifact.all_passed:
+            failed = [r for r in state.all_verification_results if not r.passed]
             if any(r.level in (VerificationLevel.L1_COMPILE, VerificationLevel.L2_FUNCTION)
                    for r in failed):
-                self._record_failure(task, failed, "", fixed=False)
+                self._record_failure(state.task, failed, "", fixed=False)
 
-        if artifact.all_passed:
+        if state.artifact.all_passed:
             # `fixed` 的字段注释是「该失败**最终**是否被修复」, 而 produce_reflexion() 被调用的
             # 那一刻下一轮验证还没跑 —— 原先它无条件写 True, 于是每条反思都在结果未知时替结果
             # 写了答案, 且修的到底是哪一次也没人核对过。现在创建时留默认 False, 到这里才补写。
             # 追加式日志里同一条 id 的 fixed=False → fixed=True 演进是**设计支持的**
             # (kernel_db.py:806-812: 重放按后写覆盖先写), 所以这不是新增机制, 是用它本来的用法。
-            for reflexion in reflexion_pending:
+            for reflexion in state.reflexion_pending:
                 reflexion.fixed = True
                 self.failure_db.add(reflexion)
-            if reflexion_pending:
-                print(f"\n[Conductor] Reflexion 记录补写 fixed=True ({len(reflexion_pending)} 条)")
+            if state.reflexion_pending:
+                print(f"\n[Conductor] Reflexion 记录补写 fixed=True ({len(state.reflexion_pending)} 条)")
 
         # ── 成本监控 Harness: 汇总 LLM 账单, 写入 artifact.metadata ──
         if self.llm and hasattr(self.llm, 'cost_tracker'):
@@ -2546,36 +2711,36 @@ class Conductor:
             if cost_summary:
                 cost_summary["scope"] = "this_run"
                 cost_summary["process_total_calls"] = tracker.total_calls
-                if artifact.metadata is None:
-                    artifact.metadata = {}
-                artifact.metadata["llm_cost"] = cost_summary
+                if state.artifact.metadata is None:
+                    state.artifact.metadata = {}
+                state.artifact.metadata["llm_cost"] = cost_summary
 
         # 保存产物到文件系统
-        saved_dir = self.store.save(artifact, task)
+        saved_dir = self.store.save(state.artifact, state.task)
         # Artifact 上记录一下落盘目录, 方便下游 (golden harness / 日志) 直接引用
         try:
-            artifact.saved_dir = str(saved_dir)
+            state.artifact.saved_dir = str(saved_dir)
         except Exception:
             pass
         # 保存后用权威 artifact 目录刷新 snapshot_target_dir, 并补写一次最终快照
         # (这样 resume_from=saved_dir 就能读到 execution_snapshot.json)
         snapshot_target_dir = saved_dir
         self._flush_snapshot(
-            task=task,
+            task=state.task,
             artifact_dir=snapshot_target_dir,
             round_done=max(
-                (h.get("round") or 0) for h in artifact.iteration_history
-            ) if artifact.iteration_history else 0,
-            current_sketch=current_sketch,
-            current_code=current_code,
+                (h.get("round") or 0) for h in state.artifact.iteration_history
+            ) if state.artifact.iteration_history else 0,
+            current_sketch=state.current_sketch,
+            current_code=state.current_code,
             pending_fix=None,  # 循环结束就没有 pending 了
-            iteration_history=artifact.iteration_history,
-            best_gflops=best_gflops,
-            rounds_without_improvement=rounds_without_improvement,
-            optimization_history=optimization_history,
-            applied_recipes=applied_recipes,
-            disabled_recipes=disabled_recipes,
-            all_verification_results=all_verification_results,
+            iteration_history=state.artifact.iteration_history,
+            best_gflops=state.best_gflops,
+            rounds_without_improvement=state.rounds_without_improvement,
+            optimization_history=state.optimization_history,
+            applied_recipes=state.applied_recipes,
+            disabled_recipes=state.disabled_recipes,
+            all_verification_results=state.all_verification_results,
         )
         print(f"\n[Conductor] 产物已保存到: {saved_dir}")
 
@@ -2583,14 +2748,14 @@ class Conductor:
         if self.llm and hasattr(self.llm, 'cost_tracker') and self.llm.cost_tracker.total_calls > 0:
             print(f"\n[Conductor] {self.llm.cost_tracker.pretty()}")
 
-        if artifact.all_passed:
+        if state.artifact.all_passed:
             # 永久结论量两遍 (设计 §10.5-4 / §3.5 的**不变量**, 不是开关): 只有真会进语料
             # 的这一支做重测, 而这一支**一定**做 —— 曾经它挂在一个默认 `False` 的构造参数
             # 后面, 于是默认配置下单次读数就能入库 (I79: 「默认关的安全装置等于不存在」)。
             # 生产者与消费者 (下面 `_save_to_db` 里那道门) 成对存在, 所以无条件要求不是
             # 「一律拒」: 先补一次独立重测, 再由判据读它。
-            self._produce_remeasure(artifact, task, input_sets, target_gflops)
-            self._save_to_db(artifact, task)
+            self._produce_remeasure(state.artifact, state.task, state.input_sets, state.target_gflops)
+            self._save_to_db(state.artifact, state.task)
 
         # ── 报告产物 (设计 §17 第 3 条) ──
         # 位置是刻意的: **必须在 `store.save()` 与 `_save_to_db()` 之后**。前者给出产物
@@ -2599,31 +2764,31 @@ class Conductor:
         # 那个文件), 所以这里不需要再兜一层。
         # bandit 状态落盘: 「有几轮的数进了统计」这件事必须能在产物里读到, 否则
         # 排序就成了一个没有出处的黑箱 (与 `selection_rejections`/`stop` 同一处置)。
-        if artifact.metadata is None:
-            artifact.metadata = {}
-        artifact.metadata["bandit"] = bandit.as_dict()
+        if state.artifact.metadata is None:
+            state.artifact.metadata = {}
+        state.artifact.metadata["bandit"] = state.bandit.as_dict()
         # §10.3 的选择策略: ε 与抽签种子落盘, 于是逐轮那个抽签值可以**离线复算**
         # (`selection.explore_draw(seed, round)`), 而不必把每个随机数都记下来。
         # §10.4: 「有希望的区域已穷尽」的逐轮判定 (含被拒绝的停滞 —— 那正是它的观察面)
-        artifact.metadata["coverage"] = coverage_ledger.as_dict()
-        artifact.metadata["selection_policy"] = {
-            "epsilon": self.selection_epsilon, "seed": _selection_seed,
+        state.artifact.metadata["coverage"] = state.coverage_ledger.as_dict()
+        state.artifact.metadata["selection_policy"] = {
+            "epsilon": self.selection_epsilon, "seed": state._selection_seed,
             "rule": "score(c) = P(beats_best) × 预期增益 / 预期测量秒",
             "seconds_source": "控制端测量墙钟 (§10.2 墙钟预算同一个货币, 不是卡上时间)",
         }
         # §10.2 的账本同样落盘: 「计划是多少 / 花了多少 / 谁被挡住了」必须能被读到,
         # 否则预算就是一个只在 `print` 里活过的装置。
-        artifact.metadata["budget"] = self._budget.as_dict()
+        state.artifact.metadata["budget"] = self._budget.as_dict()
         # §10.3 的逐轮裁决: 门是**判据**, 判过什么必须留痕 (否则「没升级」与
         # 「没接门」在下游看起来一样)。
-        artifact.metadata["escalation"] = self._escalation_log
+        state.artifact.metadata["escalation"] = self._escalation_log
 
         from .report import write_report
-        _admission = (artifact.metadata or {}).get("corpus_admission") or {}
+        _admission = (state.artifact.metadata or {}).get("corpus_admission") or {}
         _refusals = ([_admission.get("reason")]
                      if _admission.get("kept") is False and _admission.get("reason")
                      else None)
-        write_report(saved_dir, artifact=artifact, task=task, refusals=_refusals)
+        write_report(saved_dir, artifact=state.artifact, task=state.task, refusals=_refusals)
         print(f"[Conductor] 报告已写出: {saved_dir}/report.md")
 
         # 每次运行都在日志里报一句语料现状。这条的存在理由是缺口 2 的失效方式本身:
@@ -2639,29 +2804,30 @@ class Conductor:
               f"·参考侧判不出 {self._reference_hold_rounds} 轮 (没入库)")
         # 候选新颖度: 现在只有「重复了几轮」这一个数, 它的读者是 doc 47 里那条基率 ——
         # 在拿签名去省 GPU 时间之前, 先得知道重复到底常不常见。
-        n_rounds = len(artifact.iteration_history)
-        print(f"[Novelty] {n_rounds} 轮候选, {len({s for _, s in round_signatures})} 个不同结构, "
-              f"其中 {duplicate_rounds} 轮与更早的轮次结构相同")
+        n_rounds = len(state.artifact.iteration_history)
+        print(f"[Novelty] {n_rounds} 轮候选, {len({s for _, s in state.round_signatures})} 个不同结构, "
+              f"其中 {state.duplicate_rounds} 轮与更早的轮次结构相同")
 
-        if invalid_measurement_rounds:
+        if state.invalid_measurement_rounds:
             # 括号里以前写死「污染 / launch 地板支配」两项, 而判据已经有五项 (还有
             # 样本离散度、数字的出处、环境漂移)。列举会过期, 逐轮的原因本来就在上面
             # 打过一遍, 这里只报数。
-            print(f"\n[Conductor] ⚠️ 本次 {invalid_measurement_rounds} 轮的 L3 测量被判为不可信 "
+            print(f"\n[Conductor] ⚠️ 本次 {state.invalid_measurement_rounds} 轮的 L3 测量被判为不可信 "
                   f"(逐轮原因见上), 这些轮次未参与配方禁用与停滞计数")
 
-        if refused_rounds:
-            print(f"\n[Conductor] ⛔ 本次 {refused_rounds} 轮的 L3 因**出处不对**而不记为通过 "
+        if state.refused_rounds:
+            print(f"\n[Conductor] ⛔ 本次 {state.refused_rounds} 轮的 L3 因**出处不对**而不记为通过 "
                   f"(任务声明了执行侧没有的能力) —— 这些轮不是「核太慢」, 是压根没测过"
                   f"一个可判定的东西; 它们烧了 LLM 与远程编译, 没产出关于这台机器的证据")
 
-        self._print_summary(artifact, task, saved_dir)
+        self._print_summary(state.artifact, state.task, saved_dir)
 
         # 执行结束后打印实际使用的 LLM 模型 (可能已降级)
         if self.llm and hasattr(self.llm, '_fallback_triggered') and self.llm._fallback_triggered:
             print(f"\n[Conductor] ⚠️ 本次执行已降级: 主模型 [{self.llm.model}] 失败, "
                   f"实际使用 [{self.llm._active_model}] @ {self.llm._active_base_url}")
-        return artifact
+        return state.artifact
+
 
     def _plan_phases(self):
         """§10.3 的「计划约束选择」: 调 `selection.choose` 时该传什么**预算相位**。
