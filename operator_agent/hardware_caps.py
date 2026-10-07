@@ -296,6 +296,25 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
 }
 
 
+def spec_row(model: str) -> Tuple[float, float, float, float, float]:
+    """该型号的数值规格行: (FP32, TF32, FP16, BF16 TFLOPS, 带宽 GB/s)。
+
+    **这些数字的唯一真源。** `verifier._PEAK_BY_NAME` / `_PEAK_BY_CC` 里凡是本表也
+    认得的卡都从这里派生 —— 此前是两边各写一遍 (5 张卡 × 5 个数逐位相同, 全靠手抄维持
+    一致), 而本模块自己的注释就写着「与 verifier._PEAK_BY_NAME["h20"] 同一口径」,
+    一句没有守卫的口头约定: 只改一处, 同一台机器的 roofline 分母与 caps 带宽就不再同源,
+    而且没有任何东西会红。
+
+    口径的分工留在调用方: 本函数只给**数字**, 谁有资格拿它当判停的分母由 verifier 那边
+    逐行写明 (_PEAK_SOURCE), 以 ⚠️ 开头的行照旧视为口径未核。
+
+    这台卡不在表里直接抛 KeyError —— 「不知道」不许被折成一个能当分母的数。
+    """
+    caps = _KNOWN_HARDWARE[model]
+    return (caps.fp32_tflops, caps.tf32_tflops, caps.fp16_tflops,
+            caps.bf16_tflops, caps.global_mem_bandwidth_gbs)
+
+
 def _nvidia_cc_major(cc: str) -> int:
     """把 compute_capability 字符串解析成主版本号, 解析不出来返回 0。
 

@@ -39,7 +39,7 @@ from .measurement import (GATE_PARAM_KEYS, PERF_CRITERION_ABSOLUTE_GFLOPS,
                           aggregate_note, single_ruler, transport_outcome_of_result)
 from .hardware_caps import (
     detect_hardware_caps, device_key_of, measured_peak_record,
-    measured_peaks_for, remember_reference_lower_bound,
+    measured_peaks_for, remember_reference_lower_bound, spec_row,
 )
 from .peak_probe import precision_key_of, probe_peak, sample_from_l3_metrics
 from .placement import lease_evidence, observed_lease
@@ -105,21 +105,30 @@ _REMOTE_L2_METRIC_KEYS = (
 # 每一行的口径记在 _PEAK_SOURCE 里, 并随 Roofline 日志一起打出来 —— 未经核实的行
 # 会带着「口径不明」出现在每一轮验证的输出里, 而不是安静地假装是权威。
 _PEAK_BY_NAME: dict[str, tuple[float, float, float, float, float]] = {
+    # 与 hardware_caps 共有的卡: **数值从那边派生 (spec_row), 这里不再写第二遍**。
+    # 此前两边各写一遍 (5 张卡 × 5 个数逐位相同, 全靠手抄维持一致), 而 hardware_caps
+    # 自己的注释就写着「与 verifier._PEAK_BY_NAME["h20"] 同一口径」—— 一句没有守卫的
+    # 口头约定: 只改一处, 同一台机器的 roofline 分母与 caps 带宽就悄悄不同源了。
+    # ⚠️ 口径与出处仍归这边: 每行照样要在 _PEAK_SOURCE 里写明凭什么, 派生不改变这件事。
     # NVIDIA 官方规格页 (dense; 大字号那几个是 2:4 sparse, 差整 2 倍) + 与
     # flash-attention benchmarks/benchmark_attn.py 的 BF16 dense 表交叉核对
-    "a100": (19.5,  156.0, 312.0, 312.0, 2039.0),
-    "h100": (67.0,  494.7, 989.4, 989.4, 3350.0),
-    "h200": (67.0,  494.7, 989.4, 989.4, 4800.0),
+    "a100": spec_row("a100"),
+    "h100": spec_row("h100"),
     # H20 没有公开的 NVIDIA 规格页 (两个官方 URL 均 404)。fp16/bf16/带宽取
     # flash-attention 硬编码的 dense 表 (148e12 / 4.0e12), 它自称来自官方规格并用
     # SM×tensor_core_clock×ops_per_cycle 交叉核对过; tf32 = bf16/2 是 Hopper 惯例
     # (H100 989.4 vs 494.7 就是这个比例); fp32 由 78 SM × 128 FMA × 2 × 1.98 GHz 推得。
     # 第三方规格页给 fp32 写 44 TFLOPS, 与上面的算术不自洽 (要 2.2 GHz), 故不用。
-    "h20":  (39.5,  74.0,  148.0, 148.0, 4000.0),
-    "v100": (15.7,  0.0,   125.0, 125.0, 900.0),
-    # ⚠️ 以下四行**未核实口径** (很可能混了 2:4 sparse / FP16-with-FP32-accumulate)。
+    # (这五个数现在落在 hardware_caps 的 h20 条目里, 由上面那个 spec_row 取回来。)
+    "h20":  spec_row("h20"),
+    "v100": spec_row("v100"),
+    # ⚠️ 以下这些行**未核实口径** (很可能混了 2:4 sparse / FP16-with-FP32-accumulate)。
     # 保留数值不臆改, 但 _PEAK_SOURCE 会标「未核」并打进日志, 别拿它们的达成率做判停决定。
-    "3090": (16.3,  130.6, 326.0, 326.0, 936.0),
+    # (原文写「以下四行」而实际列了五行, 顺手改成与事实相符的说法。)
+    "3090": spec_row("3090"),
+    # hardware_caps 里**没有**下面这几张卡的条目: 补一条要连 launch 地板 / smem / 能力位
+    # 一起补齐, 那是实测活, 不臆造 (docs/research/49 §八 第 5 条)。所以数值只能留在这里。
+    "h200": (67.0,  494.7, 989.4, 989.4, 4800.0),
     "4090": (82.6,  82.6,  330.0, 330.0, 1008.0),  # 4090 FP32=82.6 (no TF32 boost for Ada? actually Ada has TF32)
     "a6000":(38.7,  310.0, 77.4,  77.4,  768.0),
     "a5000":(27.8,  222.0, 55.5,  55.5,  768.0),
@@ -164,15 +173,15 @@ _PEAK_BY_CC: dict[str, tuple[float, float, float, float, float]] = {
     #
     # ⚠️ 分母偏大 vs 偏小的不对称: 偏大只是让判停出口不开 (白烧轮次), 偏小会**提前停**
     # (把还能优化的核判成已到顶)。所以拿不准时一律取较大的那个口径。
-    "8.0":  (19.5,  156.0, 312.0, 312.0, 2039.0),  # A100 (80GB, HBM2e)
+    "8.0":  spec_row("a100"),                      # A100 (80GB, HBM2e)
     "8.6":  (19.5,  156.0, 312.0, 312.0, 1555.0),  # A100 (40GB), A40
     # 8.9 是 Ada 而不是 H100 (hardware_caps 自己写着 h100 的 cc 是 9.0)。按 L40S 填:
     # 362 是 **FP16 累加** 的 dense 率; 用 FP32 累加时上限其实是 181。取 362 是因为
     # 上面那条不对称 —— 偏大只是不出口, 偏小会提前停。
     "8.9":  (91.3,  181.0, 362.0, 362.0, 864.0),
-    "9.0":  (67.0,  494.7, 989.4, 989.4, 3350.0),  # H100 SXM dense (cc 9.0 也含 H20/H200)
-    "7.5":  (16.3,  130.6, 326.0, 326.0, 936.0),   # RTX 3090 / A40 (⚠️口径未核)
-    "7.0":  (15.7,  0.0,   125.0, 125.0, 900.0),   # V100 (Volta, no TF32)
+    "9.0":  spec_row("h100"),                      # H100 SXM dense (cc 9.0 也含 H20/H200)
+    "7.5":  spec_row("3090"),                      # RTX 3090 / A40 (⚠️口径未核)
+    "7.0":  spec_row("v100"),                      # V100 (Volta, no TF32)
 }
 
 _PEAK_CC_SOURCE: dict[str, str] = {
