@@ -334,6 +334,19 @@ def _claim_level_lines(m: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _tri(value: Any) -> str:
+    """三态显示：`True`/`False`/`None` ⇒ `是`/`否`/`未确立`（形状不对也按未确立印）
+
+    与判据侧同一条纪律：`None` = **未确立**，不许印成「否」—— 报告里一个「否」会被读成
+    「量过、没有越限」，而那是另一件事（`tests/test_implementation_decision.py` 钉住）。
+    """
+    if value is True:
+        return "是"
+    if value is False:
+        return "否"
+    return "未确立"
+
+
 def _implementation_decision_lines(m: Dict[str, Any]) -> List[str]:
     """§17.1 的实现裁决（交付物第 1 件里那一个显式结论 + 它为什么是这个结论）。
 
@@ -346,7 +359,9 @@ def _implementation_decision_lines(m: Dict[str, Any]) -> List[str]:
         return []
     out = [f"- 实现裁决 (§17.1): `{d['decision']}` "
            f"(声明等级 `{d.get('claim_level') or '未判'}`, "
-           f"上限 `{d.get('claim_ceiling') or '未判'}`)"]
+           f"上限 `{d.get('claim_ceiling') or '未判'}`; "
+           f"必判 case 全对 `{_tri(d.get('required_cases_ok'))}`, "
+           f"回退越限 `{_tri(d.get('regression_over_limit'))}`)"]
     for reason in (d.get("reasons") or []):
         out.append(f"  - {reason}")
     return out

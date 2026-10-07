@@ -374,6 +374,10 @@ def claim_level(*,
 # 读数就永久拉黑一个配方」是同一失效模式的两个方向。裁决本身就是一个会被人**拿去部署**
 # 的结论，所以它读的证据与 §4.4/§22.3 是同一套，不许在下游另开一个没有闸门的新口子。
 
+#: 判据是**严格**越限, 但浮点减法在「恰好等于上限」时会给出 1e-17 级的正差 —— 那是
+#: 表示误差, 不是回退。留 1e-9 的余量: 远大于表示误差, 远小于任何真实回退的尺度。
+REGRESSION_SLACK = 1e-9
+
 DECISION_USE_CUSTOM = "use_custom"
 DECISION_USE_LIBRARY = "use_library"
 DECISION_INCONCLUSIVE = "inconclusive"
@@ -429,9 +433,110 @@ def _claim_record_of(claim_record) -> ClaimRecord:
     return ClaimRecord(level="", ceiling="", coverage_mode="")
 
 
+def required_cases_ok(required_cases, evaluated,
+                      ) -> Tuple[Optional[bool], Tuple[str, ...]]:
+    """§6.2 条款 2 的判据面：「所有必判 case 都正确」—— 三态 + 逐 run 理由
+
+    * `required_cases`：契约声明的 case（`contract.case_key` 字符串）
+    * `evaluated`：本次**评过**的 case → 该 case 上的正确性（`True` / `False` / `None`）
+      —— 键在 = 评过；值 `None` = 评过但没得出正确性结论（三态，**不当 False**）
+
+    三条读法（登记在 CHECKLOG I92）：
+
+      * 契约**没声明** ⇒ `None`：这不是「都通过了」，是**没有判据**。这里要是 vacuous
+        truth，那「没声明」就比「声明了且都过」更容易拿到 `use_custom` —— 正好反了。
+      * 声明了但本次**没评过** ⇒ `None`（未确立），理由里点名缺哪几条：§6.2 条款 2 要求
+        在**全部**形状上通过，没评过的形状不是「通过」。
+      * 有 case **评过且判成不正确** ⇒ `False`（唯一能给出否定的情形）。正确性不通过的
+        候选本来就进不了 best-known-good，这里的 `False` 是给理由用的，不是新判决。
+    """
+    required = tuple(required_cases or ())
+    if not required:
+        return None, ("契约没有声明 required_cases（老契约 / 任务没声明）"
+                      "⇒ 「所有必判 case 正确」没有判据 ⇒ 未确立",)
+    if not isinstance(evaluated, Mapping):
+        evaluated = {}
+    missing = [c for c in required if c not in evaluated]
+    if missing:
+        seen = ", ".join(sorted(str(k) for k in evaluated)) or "（本次一条 case 都没记）"
+        return None, (f"契约要求的 case {sorted(missing)} 本次没有评过"
+                      f"（本次评过：{seen}）⇒ 「全部通过」未确立",)
+    unjudged = [c for c in required if evaluated.get(c) is None]
+    if unjudged:
+        return None, (f"必判 case {sorted(unjudged)} 评过但没有正确性结论 ⇒ 未确立",)
+    failed = [c for c in required if evaluated.get(c) is False]
+    if failed:
+        return False, (f"必判 case {sorted(failed)} 上正确性不通过 ⇒ §6.2 条款 2 不成立",)
+    return True, (f"{len(required)} 条必判 case 本次都评过且都正确",)
+
+
+def regression_over_limit(max_regression, speedups,
+                          target_metric: str = "speedup_vs_baseline",
+                          ) -> Tuple[Optional[bool], Tuple[str, ...]]:
+    """§6.2 条款 3 的判据面：「有 case 的回退超过硬上限」—— 三态 + 逐 run 理由
+
+    * `max_regression`：契约声明的 `((case, 允许回退比例), ...)`（也接受 dict）
+    * `speedups`：本次量到的 case → 加速比（`None` = 量过但没得出数值）
+    * 判据：`1 - speedup > limit` ⇒ 越限（`limit` 是**允许的回退比例**；0 = 一点都不许退；
+      负值 = 要求比基线更快）
+
+    四条读法（登记在 CHECKLOG I92）：
+
+      * 契约**没声明**上限 ⇒ `None`（没有判据，不是「都没越限」）；
+      * 声明了上限、但本次**没量到那条 case 的加速比** ⇒ `None`（未确立）—— 「没量到」
+        不许当成「没越限」，否则「一次噪声读数造成永久后果」就换个方向回来了；
+      * 目标指标**不是** `speedup_vs_baseline` ⇒ `None`：今天只有这一种口径，吞吐/延迟的
+        「回退」要另一套换算，宁可未确立也不猜（与 §3.2 缺数值语义即拒绝同一条纪律）；
+      * 上限声明在**本次没评的 case** 上 ⇒ 那一条**不进判据**（它既不越限也不阻塞），
+        但理由里会说「本次没量到它」—— 拿一条没人量过的 case 去挡 `use_custom` 才是自锁。
+    """
+    if not max_regression:
+        return None, ("契约没有声明 max_regression ⇒ 回退越限没有判据 ⇒ 未确立",)
+    if not isinstance(max_regression, (Mapping, list, tuple)):
+        return None, (f"max_regression 的形状读不出来 " 
+                      f"({type(max_regression).__name__}) ⇒ 未确立",)
+    pairs = (max_regression.items() if isinstance(max_regression, Mapping)
+             else max_regression)
+    limits: dict = {}
+    for item in pairs:
+        try:
+            key, value = item
+        except (TypeError, ValueError):
+            return None, (f"max_regression 里有一项读不出来: {item!r} ⇒ 未确立",)
+        try:
+            limits[str(key)] = float(value)
+        except (TypeError, ValueError):
+            return None, (f"max_regression[{key!r}] 不是数值: {value!r} ⇒ 未确立",)
+    if target_metric != "speedup_vs_baseline":
+        return None, (f"目标指标是 {target_metric} ⇒ 今天只有 speedup_vs_baseline 口径的"
+                      f"回退判据 ⇒ 未确立",)
+    if not isinstance(speedups, Mapping):
+        speedups = {}
+    measured: dict = {}
+    for case in limits:
+        try:
+            value = speedups.get(case)
+            measured[case] = None if value is None else float(value)
+        except (TypeError, ValueError):
+            measured[case] = None
+    unmeasured = sorted(c for c in limits if measured.get(c) is None)
+    if unmeasured:
+        still = sorted(c for c in limits if c not in unmeasured)
+        tail = f"（本次量到加速比的：{still}）" if still else ""
+        return None, (f"契约给了 case {unmeasured} 的回退上限, 但本次没有它们的加速比"
+                      f" ⇒ 未确立{tail}",)
+    over = [(c, 1.0 - measured[c], limits[c]) for c in sorted(limits)
+            if (1.0 - measured[c]) > limits[c] + REGRESSION_SLACK]
+    if over:
+        detail = "、".join(f"{c} 回退 {r:.4f} > 上限 {lim:g}" for c, r, lim in over)
+        return True, (f"{detail} ⇒ §6.2 条款 3「候选不得晋级」",)
+    return False, ("每条声明了回退上限的 case 都在限内",)
+
+
 def implementation_decision(*, eligibility=None, claim_record=None,
                             required_cases_ok: Optional[bool] = None,
                             regression_over_limit: Optional[bool] = None,
+                            evidence_notes=(),
                             ) -> DecisionRecord:
     """按 §17.1 推导实现裁决（纯函数；**裁决的唯一推导处**）。
 
@@ -451,12 +556,17 @@ def implementation_decision(*, eligibility=None, claim_record=None,
        今天**有数据模型**的那一条（§6.2 条款 3 明写「`USE_CUSTOM` 也不成立」）。
     3. 其余 ⇒ `inconclusive`（**含 `required_cases_ok is None`**）。
 
-    ⚠️ 三条读法与边界（与设计原句一起读，登记在 CHECKLOG I91）：
+    `evidence_notes`：**逐 run** 的证据来源说明（由 `required_cases_ok` / `regression_over_limit`
+    两个纯函数给出，见 §6.2 条款 2/3）。它进理由**最前面**：同一个 `None` 在不同运行里
+    原因不同（契约没声明 / 契约要求的 case 本次没评过 / 目标指标不是加速比 / 没量到那条
+    case），读报告的人要能分出是哪一种。裁决本身**不**再解释证据来源（单一真源）。
+
+    ⚠️ 三条读法与边界（与设计原句一起读，登记在 CHECKLOG I91 / I92）：
 
       * 「`USE_LIBRARY` 至少要求 `can_report`」读成**必要条件**，不是「`can_report` ⇒ 用库」。
         理由是本段自己的立论：`USE_LIBRARY` 是一个会被人拿去部署的**否定建议**，而
-        「契约里没有 `required_cases` 的生产者」不是候选不适用 —— 把它读成「建议你别上
-        自定义核」正是本段点名的失效模式。所以门 3 才是默认落点。
+        「本次没量到」「契约没声明 required_cases」都不是候选不适用 —— 把它们读成
+        「建议你别上自定义核」正是本段点名的失效模式。所以门 3 才是默认落点。
       * `required_cases_ok is False`（有的必判 case 不正确）今天也落 `inconclusive`：
         设计给 `USE_LIBRARY` 的三条理由（稳定慢 / 维护成本 / 回退越限）都**预设自定义
         实现是正确的**，而正确性不成立的候选本来就进不了 best-known-good。
@@ -473,7 +583,8 @@ def implementation_decision(*, eligibility=None, claim_record=None,
     rec = _claim_record_of(claim_record)
     level = rec.level or None
     can_report = getattr(elig, "can_report", None) if elig is not None else None
-    reasons: list = []
+    # 逐 run 的证据来源说明排在最前：同一个 `None` 在不同运行里原因不同（见 docstring）。
+    reasons: list = [str(n) for n in (evidence_notes or ())]
 
     def _record(decision: str, more) -> DecisionRecord:
         return DecisionRecord(decision=decision, claim_level=rec.level,
@@ -494,11 +605,11 @@ def implementation_decision(*, eligibility=None, claim_record=None,
                                    else "缺失（没有 §4.4 的记录）") + " (门 1)")
     if required_cases_ok is not True:
         blockers.append("required_cases 不是全对：" +
-                        ("未确立（今天没有生产者）" if required_cases_ok is None
+                        ("未确立（逐 run 的原因见「证据说明」）" if required_cases_ok is None
                          else "有必判 case 不正确") + " (门 1)")
     if regression_over_limit is not False:
         blockers.append("回退越限不是「没有」：" +
-                        ("未确立（今天没有 max_regression 的生产者）"
+                        ("未确立（逐 run 的原因见「证据说明」）"
                          if regression_over_limit is None else "有回退越限") +
                         " (§6.2 条款 3)")
     if not blockers:

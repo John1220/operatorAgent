@@ -32,6 +32,7 @@ from operator_agent.eligibility import (  # noqa: E402
     CLAIM_PROMOTABLE, CLAIM_PROVISIONAL, CLAIM_UNOBSERVED, CLAIM_VALIDATED,
     DEGRADED, DECISION_INCONCLUSIVE, DECISION_USE_CUSTOM, DECISION_USE_LIBRARY,
     IMPLEMENTATION_DECISIONS, DecisionRecord, at_least, implementation_decision,
+    regression_over_limit, required_cases_ok,
 )
 
 _VALIDATED = object()
@@ -159,8 +160,16 @@ class TestUseCustomNeedsAllThree(unittest.TestCase):
     def test_an_unestablished_regression_blocks_it(self):
         d = _decide(required_cases_ok=True, regression_over_limit=None)
         self.assertNotEqual(DECISION_USE_CUSTOM, d.decision)
-        self.assertIn("max_regression", " ".join(d.reasons))
-
+        self.assertIn("回退越限不是「没有」", " ".join(d.reasons))
+        # 「缺的是哪一件证据、为什么缺」由**逐 run 的证据说明**说（生产路径传的就是它）
+        # —— 裁决本身只说「未确立」, 来源只有一个地方讲（单一真源, 见 I92）。
+        _v, why = regression_over_limit((), {})
+        d2 = _decide(required_cases_ok=True, regression_over_limit=None,
+                     evidence_notes=why)
+        self.assertIn("max_regression", " ".join(d2.reasons))
+        self.assertLess(" ".join(d2.reasons).index("max_regression"),
+                        " ".join(d2.reasons).index("门 3"),
+                        "证据说明排在理由最前面")
     def test_a_measured_regression_recommends_the_library(self):
         """门 2: §6.2 条款 3「回退越限 ⇒ 候选不得晋级」—— 设计点名的那条用库理由"""
         d = _decide(required_cases_ok=True, regression_over_limit=True)
@@ -188,7 +197,7 @@ class TestTheFallbackIsNotASilentLibraryRecommendation(unittest.TestCase):
                     regression_over_limit=None)
         reasons = " ".join(d.reasons)
         for piece in ("声明等级 observed < validated", "有必判 case 不正确",
-                      "未确立（今天没有 max_regression 的生产者）"):
+                      "未确立（逐 run 的原因见「证据说明」）"):
             self.assertIn(piece, reasons, piece)
 
     def test_a_wrong_required_case_is_not_a_library_recommendation(self):
@@ -288,11 +297,29 @@ class TestTheOnlyProducer(unittest.TestCase):
                         "裁决记的必须是**入库之后**那个等级（终态）")
 
     def test_the_production_call_site_does_not_invent_the_two_evidence(self):
-        """今天两条证据没有生产者 —— 不许塞 False 冒充「量过、没有回退」(fail-open)"""
-        src = self._src("conductor.py")
-        self.assertNotIn("required_cases_ok=", src)
-        self.assertNotIn("regression_over_limit=", src)
+        """调用点不许**自己写**证据值, 必须由两个纯函数推导（fail-open 的老入口）
 
+        本片之前这两条证据恒 `None`（契约里没有那两个字段、也没有「本次评了哪条 case」的
+        账），所以当时的守卫是「不许出现这两个键」。I92 起生产者是
+        `eligibility.required_cases_ok` / `regression_over_limit` —— 守卫的形态跟着变成
+        「不许出现**字面量**、且必须调用那两个推导」：一个 `required_cases_ok=True` 会让
+        没有量具的字段自己长出结论来（正是这一片要防的那件事）。
+        """
+        src = self._src("conductor.py")
+        for literal in ("required_cases_ok=True", "required_cases_ok=False",
+                        "regression_over_limit=True", "regression_over_limit=False"):
+            self.assertNotIn(literal, src, literal)
+        self.assertIn("required_cases_ok(contract.required_cases", src)
+        self.assertIn("regression_over_limit(contract.max_regression", src)
+
+    def test_the_case_key_is_published_where_both_the_reading_and_the_inputs_exist(self):
+        """「本次评了哪条 case」与 L3 读数写在**同一处**（判据侧没有输入可查）"""
+        src = self._src("conductor.py")
+        key_at = src.index('artifact.benchmark_data["case_key"] = case_key(test_inputs)')
+        l3_at = src.index("artifact.benchmark_data = l3.metrics")
+        self.assertLess(l3_at, key_at, "case_key 必须与 L3 读数同处发布")
+        self.assertEqual(1, src.count('["case_key"] = case_key('))
+    
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

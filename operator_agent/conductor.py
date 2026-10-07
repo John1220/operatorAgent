@@ -2468,6 +2468,14 @@ class Conductor:
             l3 = next((r for r in all_verification_results if r.level == VerificationLevel.L3_PERFORMANCE), None)
             if l3:
                 artifact.benchmark_data = l3.metrics
+                from .contract import case_key
+
+                # §6.2 条款 2/4 的第一件证据：**本次评的是哪一条 case**（输入形状签名，
+                # `contract.case_key`）。写在这里的理由：这是全仓唯一一处「本轮的 L3 读数」
+                # 与「本轮的输入」同时在手的地方 —— 判据侧（`_save_to_db` 的两条证据）
+                # 读的就是这一格。没有输入 ⇒ 空串 = **没有 case**（判据按未确立走），
+                # 不拿别的键冒充（见 I92）。
+                artifact.benchmark_data["case_key"] = case_key(test_inputs)
 
             # 提取编译元信息 (Triton: num_warps, num_stages 等)
             l1 = next((r for r in all_verification_results if r.level == VerificationLevel.L1_COMPILE), None)
@@ -2969,6 +2977,18 @@ class Conductor:
               f"重测 {artifact.remeasure.speedup if artifact.remeasure.speedup is not None else 'n/a'}x "
               f"({artifact.remeasure.validity or '未报档位'})")
 
+    @staticmethod
+    def _l2_verdict(artifact: KernelArtifact) -> Optional[bool]:
+        """L2 的结论（`True` / `False`）；没有 L2 结果 ⇒ `None`（缺证据不是证据）。
+
+        §4.4 的 `correctness_verified` 与 §6.2 条款 2 的「**这条 case** 正确吗」读的是
+        **同一份 L2 结果** —— 两处各挑一次就会漂（本仓反复收过的那类账）。
+        """
+        l2 = [r for r in (getattr(artifact, "verification_results", None) or [])
+              if str(getattr(getattr(r, "level", None), "value",
+                             getattr(r, "level", ""))).lower() == "l2"]
+        return (all(bool(r.passed) for r in l2) if l2 else None)
+
     def _claim_level_for(self, artifact: KernelArtifact, task: TaskSchema,
                          metrics: dict, persisted: bool = False):
         """§4.4 的声明等级：把这次读数手上的证据摊给 `eligibility.claim_level`。
@@ -2983,15 +3003,12 @@ class Conductor:
         from .eligibility import claim_level
         from .source_lang import classify
 
-        l2 = [r for r in (getattr(artifact, "verification_results", None) or [])
-              if str(getattr(getattr(r, "level", None), "value",
-                             getattr(r, "level", ""))).lower() == "l2"]
         lang = classify(str(getattr(artifact, "code", "") or ""),
                         str(getattr(getattr(task, "target", None), "dsl", "") or ""))
         return claim_level(
             eligibility=metrics.get("eligibility"),
             validity=metrics.get("measurement_validity"),
-            correctness_verified=(all(bool(r.passed) for r in l2) if l2 else None),
+            correctness_verified=self._l2_verdict(artifact),
             coverage_mode=lang.coverage,
             persisted=persisted,
         )
@@ -3009,7 +3026,9 @@ class Conductor:
         「三级验证都点了通过」, 而缺口 1 的真机数据证明那个通过可以是被 launch 地板
         或邻居抢占造出来的 (doc 31/32/33)。一次侥幸读数不能变成永久真理。
         """
-        from .eligibility import implementation_decision
+        from .contract import freeze_from_task
+        from .eligibility import (implementation_decision, regression_over_limit,
+                                  required_cases_ok)
         from .kernel_db import KernelRecord
         from .oracle import admit_to_corpus
 
@@ -3060,14 +3079,35 @@ class Conductor:
         final = claim.as_dict()
         artifact.metadata["claim_level"] = final
         metrics["claim_level"] = final
+        # §6.2 条款 2/3 的两条证据：**逐 run 可判**（I92 之前恒 `None` —— 契约里既没有
+        # `required_cases` 也没有 `max_regression`，也没有「本次评了哪一条 case」的账）。
+        # 契约从**同一个任务**重新冻结（哈希不一致就不拿新判据去判旧读数），两条证据由
+        # `eligibility` 的两个纯函数推导（三态 + 逐 run 理由）。口径与产物同一条纪律：
+        # 写进 `metrics` 的就是判据读的那一份。
+        contract = freeze_from_task(task)
+        declared = str(metrics.get("contract_hash") or "")
+        case = str(metrics.get("case_key") or "")
+        if declared and (contract.hash or contract.compute_hash()) != declared:
+            rco: Optional[bool] = None
+            rol: Optional[bool] = None
+            notes = (f"本次评测用的契约哈希 {declared[:12]}… 与当前任务重算的 "
+                     f"{(contract.hash or contract.compute_hash())[:12]}… 不一致 "
+                     f"⇒ 不拿新判据去判旧读数 ⇒ 两条证据都未确立",)
+        else:
+            # 「本次评过哪条 case」与「这条 case 正确吗」是同一份 L2 结果的两种读法
+            # （`_l2_verdict`）；没有 case 键 ⇒ 空账 ⇒ 两条证据都落未确立。
+            evaluated = {case: self._l2_verdict(artifact)} if case else {}
+            speedups = {case: metrics.get("speedup_vs_baseline")} if case else {}
+            rco, rco_why = required_cases_ok(contract.required_cases, evaluated)
+            rol, rol_why = regression_over_limit(contract.max_regression, speedups,
+                                                 target_metric=contract.target_metric)
+            notes = tuple(rco_why) + tuple(rol_why)
         # §17.1 的实现裁决：推导只有一处（`eligibility.implementation_decision`），这里只把
-        # 这次运行手上**有**的证据摊进去。两条证据今天**都没有生产者**（契约里既没有
-        # `required_cases` 也没有 `max_regression`；逐形状的正确性/回退证据要 §20.1 的
-        # CorrectnessSuite）⇒ 不传 ⇒ 记录里是 `None`（= 未确立）⇒ 裁决落不到 `use_custom`。
-        # 这是**诚实的结论**，不是缺省值：缺证据不是证据，而「建议用库」同样要有依据
-        # （见 CHECKLOG I91）。口径与产物同一条纪律：写进 `metrics` 的就是判据读的那一份。
+        # 这次运行手上**有**的证据摊进去（见 CHECKLOG I91 / I92）。
         metrics["implementation_decision"] = implementation_decision(
-            eligibility=metrics.get("eligibility"), claim_record=claim).as_dict()
+            eligibility=metrics.get("eligibility"), claim_record=claim,
+            required_cases_ok=rco, regression_over_limit=rol,
+            evidence_notes=notes).as_dict()
         if not keep:
             print(f"[KernelDB] 未入库 (只留在本次进程): {reason}")
             self.kernel_db.add(record)

@@ -51,6 +51,7 @@ import numpy as np  # noqa: E402
 
 from operator_agent.backend_caps import Cap  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402
+from operator_agent.contract import case_key  # noqa: E402
 from operator_agent.run_layout import new_run_root  # noqa: E402
 from operator_agent.llm_client import (  # noqa: E402
     LLMClient, format_sampling_configs)
@@ -82,6 +83,10 @@ CASES = [
 # 所以必须用真实门槛, 否则量到的是一个永远失败的循环。
 MIN_SPEEDUP = 1.0
 MAX_ERROR = 1e-2
+#: §6.2 条款 3 的**操作者声明**（不是机器学出来的常量）：关键 shape 上允许的回退比例。
+#: 判据要的是「有一个被声明过的上限」，值本身是人的判断；它只影响 §17.1 的实现裁决
+#: （「自己实现 vs 直接用库」那一条建议），**不**参与入库门（§4.4 的阶梯与品种门都不读它）。
+MAX_REGRESSION = 0.05
 
 
 def llm_from_config() -> LLMClient:
@@ -102,7 +107,8 @@ def llm_from_config() -> LLMClient:
     return client
 
 
-def _task(kernel_type: str, precision: Precision) -> TaskSchema:
+def _task(kernel_type: str, precision: Precision, *, required_cases=(),
+          max_regression=None) -> TaskSchema:
     return TaskSchema(
         task_type=TaskType.OPERATOR_GENERATION,
         source=SourceSpec(kernel_type=kernel_type, complexity=TaskComplexity.MEDIUM),
@@ -114,7 +120,9 @@ def _task(kernel_type: str, precision: Precision) -> TaskSchema:
         target=TargetSpec(hardware="nvidia_gpu", dsl="triton",
                           required_caps=(Cap.REAL_DEVICE, Cap.SAME_DEVICE_BASELINE)),
         constraints=ConstraintSpec(precision=precision, min_speedup=MIN_SPEEDUP,
-                                   max_error=MAX_ERROR),
+                                   max_error=MAX_ERROR,
+                                   required_cases=tuple(required_cases or ()),
+                                   max_regression=dict(max_regression or {})),
     )
 
 
@@ -1216,8 +1224,16 @@ def run_one(label, kernel_type, precision, shape, backend, rounds, run_root=""):
     try:
         conductor = Conductor(backend=backend, llm=llm, max_optimize_rounds=rounds,
                               run_root=run_root)
-        art = conductor.execute(_task(kernel_type, precision),
-                                inputs_for(kernel_type, shape), target_gflops=0.0)
+        # §6.2 条款 2/3 的声明：**harness 是唯一一处「契约与输入同时在手」的地方**
+        # （task 与 inputs 都在这里造）。必判 case 的清单与它的硬回退上限从任务进契约
+        # ⇒ 进 hash ⇒ 判据不可改（CHECKLOG I92）。case 身份 = 输入形状签名，与评测侧
+        # 发布的那一格**同一个函数**（`contract.case_key`）—— 两处各写一个格式就会漂。
+        inputs = inputs_for(kernel_type, shape)
+        _case = case_key(inputs)
+        art = conductor.execute(
+            _task(kernel_type, precision, required_cases=(_case,),
+                  max_regression={_case: MAX_REGRESSION}),
+            inputs, target_gflops=0.0)
     except Exception as exc:  # noqa: BLE001
         # 一次 ssh 抖动不该毁掉整场测量: 记成崩溃样本, 继续下一个
         rec["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"

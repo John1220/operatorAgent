@@ -5,7 +5,8 @@ Defines all schemas and data structures used across the operator agent system.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
+import math
 import uuid
 import time
 
@@ -261,6 +262,12 @@ class ConstraintSpec:
     precision: Precision = Precision.FP32
     min_speedup: float = 1.0
     max_error: float = 1e-5
+    #: §6.2 条款 2/4：必须参与判决的 case（`contract.case_key` 的字符串，缺一不可）。
+    #: 空 = **任务没声明** ⇒ 契约里也是空 ⇒ 判据按「未确立」走，不是「都通过了」。
+    required_cases: tuple = ()
+    #: §6.2 条款 3：`{case: 允许的回退比例}`（JSON 原生 dict；冻结进契约时转成
+    #: tuple-of-pairs 以进 hash）。negative 值 = 要求**比基线更快**（值必须 > -1）。
+    max_regression: dict = field(default_factory=dict)
 
     def validate(self) -> list[str]:
         errors = []
@@ -274,6 +281,24 @@ class ConstraintSpec:
             errors.append(f"constraints.max_error 必须是数值, 实际 {type(self.max_error).__name__}")
         elif self.max_error < 0:
             errors.append(f"constraints.max_error 不能为负, 实际 {self.max_error}")
+        # §6.2 条款 2/3 的两项声明: 读不出来就报错。「一条读不出来的硬回退上限」比
+        # 「没声明」危险得多 —— 判据面会以为自己有量具。
+        for case in self.required_cases or ():
+            if not isinstance(case, str) or not case.strip():
+                errors.append(f"constraints.required_cases 里有一条不是非空字符串, 实际 {case!r}")
+        if self.max_regression and not isinstance(self.max_regression, Mapping):
+            errors.append("constraints.max_regression 必须是 {case: 数值} 映射, "
+                          f"实际 {type(self.max_regression).__name__}")
+        else:
+            for case, limit in (self.max_regression or {}).items():
+                if not isinstance(case, str) or not case.strip():
+                    errors.append(f"constraints.max_regression 的 case 不是非空字符串, 实际 {case!r}")
+                if not isinstance(limit, (int, float)) or isinstance(limit, bool):
+                    errors.append(f"constraints.max_regression[{case!r}] 必须是数值, "
+                                  f"实际 {type(limit).__name__}")
+                elif not math.isfinite(float(limit)) or float(limit) <= -1.0:
+                    errors.append(f"constraints.max_regression[{case!r}] 必须 > -1 且有限, "
+                                  f"实际 {limit!r}")
         return errors
 
 
@@ -301,6 +326,17 @@ class TaskSchema:
         if self.target.required_caps:
             target_dict["required_caps"] = sorted(
                 c.value for c in self.target.required_caps)
+        constraints_dict = {
+            "precision": self.constraints.precision.value,
+            "min_speedup": self.constraints.min_speedup,
+            "max_error": self.constraints.max_error,
+        }
+        # 只在非空时写（同 target.required_caps 的理由）：产物里一个恒为 [] / {} 的键会被
+        # 读成「任务声明过、要求为空」，而绝大多数任务确实没声明 —— 两种情形该长得不一样。
+        if self.constraints.required_cases:
+            constraints_dict["required_cases"] = list(self.constraints.required_cases)
+        if self.constraints.max_regression:
+            constraints_dict["max_regression"] = dict(self.constraints.max_regression)
         return {
             "task_id": self.task_id,
             "task_type": self.task_type.value,
@@ -311,11 +347,7 @@ class TaskSchema:
                 "complexity": self.source.complexity.value,
             },
             "target": target_dict,
-            "constraints": {
-                "precision": self.constraints.precision.value,
-                "min_speedup": self.constraints.min_speedup,
-                "max_error": self.constraints.max_error,
-            },
+            "constraints": constraints_dict,
         }
 
     def validate(self) -> list[str]:
