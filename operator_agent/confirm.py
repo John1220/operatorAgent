@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
+from .eligibility import CLAIM_PERSISTED, at_least
+
 
 @dataclass
 class ConfirmRecord:
@@ -150,6 +152,16 @@ class UnableToEstablish:
                      "资格位 can_persist=False",
                      kind="measurement",
                      evidence=f"eligibility={_elig}")
+        # §22.3: 静态审计的覆盖是**判据**，不只是留痕 —— 等级上限低于 persisted 时，
+        # 「这份结论为什么站不到最高一级」必须出现在这一节里。上限这一格与入库门的
+        # 覆盖门读的是同一个数（`metrics["claim_level"]["ceiling"]`）。
+        _cl = metrics.get("claim_level")
+        if isinstance(_cl, dict) and _cl.get("ceiling") and not at_least(
+                _cl.get("ceiling"), CLAIM_PERSISTED):
+            self.add(f"结论最多只能到 `{_cl.get('ceiling')}` 级 (声明等级受限)",
+                     "静态审计覆盖不足 (§22.3): 这份源码的静态检查能力撑不起长期结论",
+                     kind="provenance",
+                     evidence=f"coverage_mode={_cl.get('coverage_mode') or '未判'}")
         # 三态: **缺键 ≠ 没加速**。只在「这明显是一份 L3 读数」时才这么问, 否则
         # 别的调用方 (传小字典进来的量具) 会被这句话淹没。
         # `can_gate is False` 那条**已经**说过这句话了 (「该轮加速比不足以支撑结论」),

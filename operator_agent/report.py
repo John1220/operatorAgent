@@ -280,6 +280,23 @@ def collect_unable(*, artifact: Any, observations: Optional[Sequence[dict]] = No
 # ─── 渲染 ──────────────────────────────────────────────────────────
 
 
+def _claim_level_lines(m: Dict[str, Any]) -> List[str]:
+    """§4.4 的声明等级（一行 + 受限时的原因）。
+
+    缺键 ⇒ **不印**：缺证据不是有效证据，而印一个默认等级会让「没算」读成「算出来是它」。
+    这一行的量（`ceiling` / `coverage_mode`）与入库门读的是同一个 dict ——
+    `metrics["claim_level"]` 由 `Conductor._save_to_db` 一处写入。
+    """
+    c = _get(m, "claim_level", None)
+    if not isinstance(c, dict) or not c.get("level"):
+        return []
+    out = [f"- 声明等级 (§4.4): `{c['level']}` (上限 `{c.get('ceiling', '?')}`, "
+           f"静态覆盖 `{c.get('coverage_mode') or '未判'}`)"]
+    for reason in (c.get("reasons") or []):
+        out.append(f"  - {reason}")
+    return out
+
+
 def _best_known_good(artifact: Any, m: Dict[str, Any]) -> List[str]:
     out = ["## 1. best-known-good", ""]
     code = str(getattr(artifact, "code", "") or "")
@@ -377,6 +394,7 @@ def build_report(*, artifact: Any, task: Any = None,
              f"- kernel_id: `{getattr(artifact, 'kernel_id', '')}`",
              f"- 轮数: {len(_rounds(artifact))}",
              ""]
+    lines += _claim_level_lines(m)
     lines += _best_known_good(artifact, m)
     lines += _evidence_chain(artifact)
     u = collect_unable(artifact=artifact, observations=observations,

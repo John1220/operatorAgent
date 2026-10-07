@@ -230,15 +230,33 @@ class TestGateWiring(unittest.TestCase):
         return KernelArtifact(kernel_id="kw", task_id="t", code="# x",
                               language="triton", benchmark_data=metrics)
 
-    def _task(self):
+    def _task(self, dsl="triton"):
         from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
                                             TargetSpec, TaskComplexity, TaskSchema,
                                             TaskType)
         return TaskSchema(task_type=TaskType.OPERATOR_GENERATION,
                           source=SourceSpec(kernel_type="matmul",
                                             complexity=TaskComplexity.MEDIUM),
-                          target=TargetSpec(hardware="nvidia_gpu", dsl="triton"),
+                          target=TargetSpec(hardware="nvidia_gpu", dsl=dsl),
                           constraints=ConstraintSpec(precision=Precision.FP16))
+
+    #: 一份「除了来源形态之外一切都好」的读数 —— 用来把 §22.3 的覆盖那一条单独照亮
+    _ALL_TRUE_MASK = {"can_verdict": True, "can_tune": True, "can_persist": True,
+                      "can_report": True, "can_count_progress": True}
+
+    def _good_metrics(self, **extra):
+        m = {"gflops": 140.0, "speedup_vs_baseline": 1.35,
+             "measurement_can_gate": True, "measurement_validity": "valid",
+             "eligibility": dict(self._ALL_TRUE_MASK)}
+        m.update(extra)
+        return m
+
+    def _confirmed(self, metrics):
+        from operator_agent.confirm import ConfirmRecord
+        art = self._artifact(metrics)
+        art.remeasure = ConfirmRecord(ok=True, speedup=1.4, validity="valid",
+                                      independent=True)
+        return art
 
     def test_untrusted_measurement_is_not_written_to_disk(self):
         with tempfile.TemporaryDirectory() as d:
@@ -274,6 +292,53 @@ class TestGateWiring(unittest.TestCase):
             self.assertIsNotNone(reloaded)
             self.assertAlmostEqual(1.35, reloaded.score, places=6)
             self.assertEqual("valid", reloaded.measurement_validity)
+
+
+    def test_the_claim_level_is_produced_and_published(self):
+        """§4.4/§22.3 的**生产者**: `_save_to_db` 一处写入 claim_level
+
+        判据读的那一格与产物里留下的那一格必须是同一个 dict（与 eligibility /
+        observation 同一条纪律）—— 否则「报告说它在 validated、门却按另一个上限判」
+        会在产物上读不出来。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            c = self._conductor(str(Path(d) / "kernel_db.jsonl"))
+            art = self._confirmed(self._good_metrics())
+            self.assertTrue(c._save_to_db(art, self._task()))
+            self.assertEqual("persisted", art.metadata["claim_level"]["level"])
+            self.assertEqual("persisted", art.benchmark_data["claim_level"]["ceiling"])
+            self.assertEqual("ast", art.benchmark_data["claim_level"]["coverage_mode"])
+            self.assertEqual("persisted", art.benchmark_data["claim_level"]["level"],
+                             "入库之后产物理该是 persisted（§4.4 的最后一跳）")
+
+    def test_a_regex_only_source_is_refused_even_with_a_confirmation(self):
+        """§22.3 的下游那一半: 覆盖不足 ⇒ 上限 < promotable ⇒ 不许入库
+
+        它拦的是**候选的来源形态**（cuda_c 只有文本规则），不是读数质量 ——
+        所以两次确认过了也不放行，而拒因必须自己说出「§22.3」这件事。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            p = str(Path(d) / "kernel_db.jsonl")
+            c = self._conductor(p)
+            art = self._confirmed(self._good_metrics())
+            kept = c._save_to_db(art, self._task(dsl="cuda_c"))
+            self.assertFalse(kept, "覆盖只有 regex_only 的源码进了长期记忆")
+            self.assertEqual("validated", art.metadata["claim_level"]["ceiling"])
+            self.assertEqual("regex_only", art.metadata["claim_level"]["coverage_mode"])
+            self.assertIn("§22.3", art.metadata["corpus_admission"]["reason"])
+            self.assertFalse(Path(p).exists())
+            self.assertIsNotNone(c.kernel_db.get("kw"), "内存里仍可留作示范")
+
+    def test_a_triton_source_with_the_same_metrics_is_kept(self):
+        """只差来源形态这一格: 同一份读数、同一次确认 ⇒ ast 那一边照常入库
+
+        这一对是**对照臂** —— 少了它, 上面那条拒因可能来自任何别的东西。
+        """
+        with tempfile.TemporaryDirectory() as d:
+            c = self._conductor(str(Path(d) / "kernel_db.jsonl"))
+            art = self._confirmed(self._good_metrics())
+            self.assertTrue(c._save_to_db(art, self._task(dsl="triton")))
+            self.assertEqual("ast", art.metadata["claim_level"]["coverage_mode"])
 
 
 class TestHermetic(unittest.TestCase):

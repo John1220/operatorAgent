@@ -4,7 +4,8 @@
 
     契约哈希  →  心跳窗口  →  资格位  →  观测(值+溯源+资格)
 
-入库则再叠一道（同模块的 `admit_to_corpus`）: 资格 `can_persist` **且** 两次确认。
+入库则再叠一道（同模块的 `admit_to_corpus`）: 资格 `can_persist` **且** 声明等级上限够
+（§22.3 的静态覆盖）**且** 两次确认。
 两步分开是有意的 —— 重测要花机时，而它只在**要进语料**时才需要，不该由「每次评测」
 触发。（`evaluate` 原先收着一个从不使用的 `remeasure` 形参，那个形状会让人以为它
 在做这件事；形参已删。）
@@ -29,7 +30,8 @@ from .calibration import RULER_BROKEN, HeartbeatResult, ruler_broken_window
 from .confirm import ConfirmRecord, confirm_persist
 from .contract import ContractError, FrozenContract, assert_hash
 from .eligibility import ALL_FALSE as ELIG_ALL_FALSE
-from .eligibility import Eligibility, derive_eligibility, exceeds_measured_peak
+from .eligibility import (CLAIM_PROMOTABLE, Eligibility, at_least,
+                          derive_eligibility, exceeds_measured_peak)
 from .measurement import persist_decision
 from .placement import pairing_conflict
 
@@ -355,29 +357,34 @@ def admit_to_corpus(metrics: Mapping,
                     requires_remeasure: bool = True) -> tuple:
     """入库判据 —— **唯一**一处决定「这次读数能不能进长期记忆」(设计 §10.5-4)。
 
-    三道门, 顺序即短路顺序:
+    四道门, 顺序即短路顺序:
       1. `persist_decision(metrics)` —— 这一次读数够不够格 (缺证据 / 不是真卡 / 被抢占)
       2. 资格位 `can_persist` —— DEGRADED 不许写长期记忆
-      3. 两次独立确认 —— `requires_remeasure=True` 时由 `confirm_persist` 判
+      3. **声明等级上限** `metrics["claim_level"]["ceiling"]` —— 静态审计覆盖不足
+         (§22.3: 这份源码的静态检查能力) 不许变成永久结论; 它是**静态**事实, 所以排在
+         花机时的第 4 道门之前 (与 §21.4「零 GPU 时间」同一条纪律)
+      4. 两次独立确认 —— `requires_remeasure=True` 时由 `confirm_persist` 判
          (**生产路径恒开**: 见下面那段 ⚠️)
 
     返回 (允许?, 理由)。任一关不过就拒。
 
     **为什么吃 `metrics` 而不是 `Observation`** (2026-10-01): 生产路径手里只有**序列化过的**
     读数 (`VerificationResult.metrics` 搬的是能 JSON 化的东西), 而判据原先要一个 `Observation`
-    对象 ⇒ 调用方只能**自己再写一遍**这三道门, 于是同一个决定有了两个实现、两种理由文本,
+    对象 ⇒ 调用方只能**自己再写一遍**这几道门, 于是同一个决定有了两个实现、两种理由文本,
     而用例测的是没有生产调用者的那一个 —— 「判据不在链路上」的同族 (spine-review P0-1)。
     现在判据的输入就是生产路径真正持有的东西: 同一份 metrics, 同一处产出理由。
     形状与 `measurement.persist_decision` 一致 (它也是吃 metrics 的判据), 两道门不再各说各话。
 
-    **两处三态, 都是刻意的** (缺键 ≠ 判过且不合格):
+    **三处三态, 都是刻意的** (缺键 ≠ 判过且不合格):
+      - `metrics["claim_level"]` **缺失** = 这条读数没有声明等级 (老产物 / 没走 §4.4 的
+        推导) ⇒ 不做追溯性重判; 有键而形状不对 / 上限读不懂 ⇒ **拒** (fail-closed);
       - `metrics["eligibility"]` **缺失** = 这条读数没经过收口点 (老产物) ⇒ 不做追溯性重判;
         有键而 `can_persist` 缺失 ⇒ 判**不合格** (五位掩码缺一位就没有「能入库」的凭据);
       - `metrics["observation"]` 缺失 = 没有评测记录 ⇒ 两次确认那条判据拿不到判据戳,
         按 `confirm_persist` 的既有规矩「无从证明两次量的是同一条判据」时**没带就拒**
         (它只在首次那头给了哈希时才判同一性 —— 这里退化成不判, 不是判过)。
 
-    ⚠️ **第 3 道门在生产路径上恒开** (2026-10-03, CHECKLOG I79)。设计 §3.5 把「长期记忆的
+    ⚠️ **两次确认那道门在生产路径上恒开** (2026-10-03, CHECKLOG I79)。设计 §3.5 把「长期记忆的
     独立确认」列在**不允许配置**那一栏 —— 无开关、无环境变量、不可被任务参数改写 ——
     所以生产调用方 (`Conductor._save_to_db`) 写死 `requires_remeasure=True`, 而
     `Conductor` 上那个默认 `False` 的构造参数已经删掉 (它正是「默认关的安全装置等于
@@ -416,6 +423,20 @@ def admit_to_corpus(metrics: Mapping,
             return False, (f"资格位 can_persist=False (validity="
                            f"{metrics.get('measurement_validity') or '未报'}): "
                            + "; ".join(causes))
+
+    # 第 3 道门 (§22.3): 「覆盖不足只能影响 ClaimLevel 与 promotion」—— 这一格就是
+    # promotion 那一半。判的是**上限**而不是已达等级: 已达等级此刻还压在两次确认之下,
+    # 而那正是第 4 道门要判的事; 覆盖能负责的只是「这份源码的结论最多能站到哪一级」。
+    claim = metrics.get("claim_level")
+    if claim is not None:
+        if not isinstance(claim, Mapping):
+            return False, (f"claim_level 的形状不是 dict: {type(claim).__name__} "
+                           f"—— 读不懂的等级不许当通过")
+        ceiling = claim.get("ceiling")
+        if not at_least(ceiling, CLAIM_PROMOTABLE):
+            mode = claim.get("coverage_mode") or "未判"
+            return False, (f"声明等级上限 {ceiling!r} < {CLAIM_PROMOTABLE}: 静态审计覆盖 "
+                           f"{mode} 撑不起长期记忆 (§22.3)")
 
     if not requires_remeasure:
         return True, (f"{why} —— 本次**未要求**两次确认 (requires_remeasure=False): "

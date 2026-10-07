@@ -1068,6 +1068,21 @@
 - **仍欠的账（不许读成本条已收口）**：① 布局里只有**候选源码**这一件产物，`report` / `measurements` / `kernel_db` 未搬；② 「候选被**挡住**」仍证不了 —— 同 uid（本地 `exec` / 远端 `/tmp` + `exec_module`），属主能 `chmod` 回去；③ 远端 runner 侧零覆盖；④ 同一个路径**每轮覆盖**是被接受的语义（它回答「这一轮的候选在哪」，不是历史版本库）
 - **类别**：I · **状态**：⚠️ §22.1 的**生产接线**已落（根 + 落盘 + 三个驱动 + 守卫 + 变异），harness 侧权限位那一半见 I82，隔离本体仍归 §22.2（I85/I87）
 
+### I89 · §22.3 的 `AuditCoverage` 一直是「有生产者、零消费者」：`ClaimLevel`（§4.4）整个字段不存在，覆盖不足在产物里只是留痕
+- **原话**：设计 §22.3「审计输出必须把覆盖情况表达成**数据**，而不是有/没有问题……coverage 不足只能影响 `ClaimLevel` 与 promotion，不能替代执行沙箱」；§4.4 的六级阶梯（`UNOBSERVED → OBSERVED → PROVISIONAL → VALIDATED → PROMOTABLE → PERSISTED`，严格上升，每一级上升都要有对应证据）；§17.1 的 `ImplementationDecision` 要求 `ClaimLevel ≥ VALIDATED`
+- **实证**：`agent_runtime.AuditCoverage`（§21.4 `PrecompileVerdict.coverage`）把 `mode` / `covered_rules` / `uncovered_rules` 都算出来了，也进了 `iteration_history` 的血缘；但全仓 `grep -rn "ClaimLevel|claim_level"` **零命中** —— 设计 §4.4 那六级在代码里**没有对应物**（只有 `can_*` 五位掩码答「这个数能干什么」，没人答「这条结论站在哪一级」），`oracle.admit_to_corpus` 的四道门里也**没有一格**读覆盖 ⇒ 一份静态审计只能做文本规则的来源（`cuda_c` ⇒ `regex_only`）与一份看得穿源码的 `triton` 来源在入库判据里**完全等价**：同一片里新增的入库门消费者是**从零开始**的，不是「已有判据没接线」
+- **后果**：不改会怎样 —— ①「coverage 不足只能影响 ClaimLevel 与 promotion」这句话在实现里**无处落地**：覆盖表读起来像一个已经生效的门，实际没有任何后果（与 I82/I88 同族：判据算了、留了痕，但没人读）；② 长期记忆的质量上限由「谁跑得快」决定，而不是由「这份源码的静态检查能力」决定；③ §17.1 的 `ImplementationDecision` 没有可读的前置 ⇒ 那个决定也实现不了
+- **落地内容（2026-10-07，切片 D）**：
+  * `eligibility.py`：§4.4 的闭合词表 `CLAIM_LEVELS`（六个字符串常数，**顺序即升序**；设计原文是 `StrEnum`，本仓跑 3.9 ⇒ 与 `measurement.Validity` 同款）+ `claim_rank`（词表外 ⇒ `-1`，fail-closed）+ `at_least`；**唯一推导处** `claim_level(eligibility, validity, correctness_verified, coverage_mode, independent_confirmation, persisted)`；覆盖上限表 `CLAIM_CEILING_BY_COVERAGE`（`ast` ⇒ `persisted`（不设限）/ `regex_only` ⇒ `validated` / `none` **与没判过** ⇒ `provisional`，词表外一律按最保守那档）+ `claim_ceiling`；`Eligibility.from_mapping`（缺一位 ⇒ `None`，不许补齐）
+  * 上限按 **`mode`** 而不按「`uncovered_rules` 非空就压级」：后者会**自锁** —— `AuditCoverage` 把 `not_applicable` 与 `unknown` 一起收进 `uncovered_rules`，而 §21.4 第 7 条（引用不存在的能力）对**每一份** patch 候选都是 `not_applicable`（仓里没有任何语言的 API 面清单）⇒ 拿它压级会让每一份候选都到不了 `promotable`、入库率归零，而那个尺子拦的是**量具缺失**，不是候选的问题。`uncovered_rules` 走报告（见下）
+  * `oracle.admit_to_corpus`：新增**第 3 道门**（在资格位之后、两次确认之前 —— 它是**静态**事实，与 §21.4「零 GPU 时间」同一条纪律）：`metrics["claim_level"]["ceiling"] ≥ promotable` 才放行。三态：缺 `claim_level` 键 = 老产物 ⇒ 不追溯重判；有键而形状不对 / 上限读不懂 ⇒ **拒**（fail-closed）。判**上限**而不判已达等级：已达等级此刻还压在两次确认之下，那正是第 4 道门的事
+  * `conductor._save_to_db`（**唯一生产者**）：新增 `_claim_level_for` 摊平证据（L2 的 `verification_results` / 五位掩码 / `measurement_validity` / `source_lang.classify(artifact.code, task.target.dsl)`），写进 `metrics["claim_level"]`（=门的输入）与 `artifact.metadata["claim_level"]`（=产物）；入库后按 `persisted=True` 重算终态并回写同一个键（`ceiling` 不随 `persisted` 变 ⇒ 不会动到门刚读过的数）
+  * 下游两个人：报告多一行 `声明等级 (§4.4)`（缺键 **不印** —— 印一个默认等级会把「没算」读成「算出来是它」），`confirm.UnableToEstablish.extend_metrics` 在上限 < `persisted` 时收一条进「我无法确立的事」（§17）
+  * 守卫：`tests/test_claim_level.py`（40 条：六级阶梯各自的证据 / 覆盖上限与保守默认 / 三态不补齐 / **同一个数**（`precompile_checks(...).coverage.mode == classify(source, declared).coverage`）/ 入库门读上限与门的顺序 / 报告与「无法确立」/ 结构守卫「写入点在调用点之前」）+ `tests/test_kernel_db_persistence.py::TestGateWiring` 三条端到端（生产者写进去 ⇒ 落盘被覆盖上限决定；`cuda_c` 拒 / `triton` 收的**对照臂**，只差来源形态这一格）
+- **出处**：`operator_agent/eligibility.py`（`CLAIM_LEVELS` / `claim_rank` / `claim_ceiling` / `claim_level` / `Eligibility.from_mapping`）、`operator_agent/oracle.py`（第 3 道门）、`operator_agent/conductor.py`（`_claim_level_for` / `_save_to_db`）、`operator_agent/confirm.py`、`operator_agent/report.py`、`operator_agent/source_lang.py`（`classify` 是 `mode` 的**唯一出处**）；变异表 `benchmarks/mut_specs/claim_level.py` 8 行，标定读数（2026-10-07）：**行为 8/8 + 结构 0/0，0 逃逸**
+- **仍欠的账（不许读成本条已收口）**：① 阶梯里只有**覆盖**那一格进了入库门：`validity` / `eligibility` 由门 1/2 管，L2 正确性由调用方的 `all_passed` 前置管（`_save_to_db` 唯一生产调用点在 `if artifact.all_passed:` 里）；「已达等级 < validated 不许入库」这条更强的门**没加** —— 合成产物（测试 / 基准直接调 `_save_to_db`）会绕开那个前置，那是调用方的前置被绕开，不是门的洞（登记）；② `promotable` 今天只作为**门槛**出现（本仓「独立确认」与「入库」是同一步），终态只有 `persisted`；§24.3 的 promotion policy 独立出来之后才会成为一级；③ `uncovered_rules` 只进了留痕与报告，**没有**参与压级（理由见上）；④ 设计词表里的 `typed_ast` 与 `opencl` / `sycl` 今天没有生产者（`source_lang` 只产三种），落到保守默认 `provisional`；⑤ §17.1 的 `ImplementationDecision` 仍未消费 `ClaimLevel`
+- **类别**：I · **状态**：✅ §22.3 的「影响 ClaimLevel 与 promotion」两半都已接线并有守卫（覆盖上限压级 + 入库门读上限 + 报告/「无法确立」各有一处读者）；上面五条欠账登记
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -2323,6 +2338,7 @@
 | I86 | 「离线全绿、真机必炸」的一类盲区: 漏导入 (`PATCH_KINDS`) 藏在**从来没有被离线执行到的那一支**里 —— `import operator_agent` 通过、离线套件全绿 (`and` 短路), 真机第 2 轮 `NameError` 把一次 6 次上限的 A/B 实验整跑带走 | I | ✅ 已修 (`PATCH_KINDS` 进名单 + 「把信封真喂进一次 `Conductor.execute`」的守卫 ⇒ 那一支必须被执行到) |
 | I87 | §22.2 的第一项「编译超时」一直是空的: 编译期在 harness 进程里 `exec` —— 候选在模块顶层死循环就能在**进 L1 之前**拖死评测进程 (运行期那道门在上游够不着); 同一片还抓出「异常跨进程重建只保住 `str()`、丢掉 `msg/lineno/offset/text`」与「阶段级上限只有声明没有消费端」 | I | ⚠️ 本地两个后端已落 (`run_compile` + 第 5 张词表 `MODES`; 契约逐字不变; `GuardRefusal` 第三档 + `compile_status=compile_*` + 签名桶 + 语料探针认本地; `Conductor`→后端→`exec_guard` 的上限链; 守卫 24 条 + 13 行变异); 欠账: L1 成功那趟的强制读数无发布面 / 账本里仍有 6 处候选侧进程内 exec / 远端零覆盖 / 编译档默认值未真机实测 |
 | I88 | §22.1 的 `run_root` 零生产调用点 ⇒ 判据指着的路径上没有文件、`write_for` 零调用者: 权限位保护的是**零个产物**; 且 `new_run_root` 第一版「秒级时间戳 + pid」同秒撞名 (自己注释要防的「上一轮候选被覆盖」) | I | ⚠️ 2026-10-07 切片 C: 三个真机驱动接根 + 过门候选落 `candidate/` (被拒不留痕) + 守卫 10 条 + 变异 6 行 (行为 5/5 + 结构 1/1, 0 逃逸); 只搬候选源码, 同 uid ⇒「候选被挡住」仍证不了 |
+| I89 | §22.3 的 `AuditCoverage` 零消费者: `ClaimLevel`（§4.4 六级阶梯）全仓不存在, 覆盖不足在产物里只是留痕 ⇒ `regex_only`/`none` 的来源与 `ast` 来源在入库判据里完全等价 | I | ✅ 2026-10-07 切片 D: `claim_level` 唯一推导处 + 覆盖上限（`ast` 不设限 / `regex_only`⇒validated / `none`与没判过⇒provisional）+ 入库门第 3 道门读上限 + 报告与「无法确立」各一处读者; 守卫 43 条 + 变异 8 行 (行为 8/8、0 逃逸); 欠账: 已达等级未进门 / `promotable` 今天只是门槛 / `uncovered_rules` 不压级 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

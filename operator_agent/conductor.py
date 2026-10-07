@@ -326,7 +326,7 @@ class Conductor:
         # 变量、不可被任务参数改写), 而那个默认 `False` 的参数正好是「默认关的安全装置
         # 等于不存在」那条纪律的反例 —— 默认配置下单次读数就能进语料。现在它是
         # **无条件**的: `all_passed` 的产物先补一次独立重测 (`_produce_remeasure`),
-        # 再过 `admit_to_corpus` 的第 3 道门。消融 (§14-9 要的「关掉资格审计的后果」
+        # 再过 `admit_to_corpus` 的两次确认那道门。消融 (§14-9 要的「关掉资格审计的后果」
         # 那一臂) 只能在 harness 侧 patch, 见 `tests/test_spine_wiring.py` 里那条用例
         # —— §3.5 规则 3: 能一键关掉的尺子会先被用在无人值守的夜里。
         # 设计 §10.2 的三种预算 (`operator_agent/budget.py`)。**默认全关**: 没设上限
@@ -439,7 +439,7 @@ class Conductor:
 
         #: 永久结论**必须**量两遍 (设计 §10.5-4 / §3.5 的不变量, 不是开关)。
         #: 生产者是 `_produce_remeasure`, 消费者是入库判据 (`oracle.admit_to_corpus`
-        #: 的第 3 道门, 生产路径恒传 `requires_remeasure=True`)。两者成对存在, 所以
+        #: 的两次确认那道门, 生产路径恒传 `requires_remeasure=True`)。两者成对存在, 所以
         #: 「一律要求」不再是「一律拒」: 每一份要进语料的结论都会**先**补一次独立重测。
         #: 曾经这里是一个默认 `False` 的构造参数 ⇒ 默认配置下单次读数即可入库 (I79)。
 
@@ -2969,12 +2969,39 @@ class Conductor:
               f"重测 {artifact.remeasure.speedup if artifact.remeasure.speedup is not None else 'n/a'}x "
               f"({artifact.remeasure.validity or '未报档位'})")
 
+    def _claim_level_for(self, artifact: KernelArtifact, task: TaskSchema,
+                         metrics: dict, persisted: bool = False):
+        """§4.4 的声明等级：把这次读数手上的证据摊给 `eligibility.claim_level`。
+
+        这里**不算等级**（阶梯与覆盖上限都在那一个纯函数里），只摊平三件证据：
+          * `eligibility` —— 产物里的五位掩码（缺一位 ⇒ 按「没有资格位」处理，不许补齐）；
+          * `correctness_verified` —— L2 的结论（没有 L2 结果 ⇒ `None`，缺证据不升 validated）；
+          * `coverage_mode` —— `source_lang.classify(候选源码, 声明的 dsl)`，与 §21.4 的
+            `PrecompileVerdict.coverage.mode` **同源**（守卫钉住这条等式，见
+            `tests/test_claim_level.py`）。
+        """
+        from .eligibility import claim_level
+        from .source_lang import classify
+
+        l2 = [r for r in (getattr(artifact, "verification_results", None) or [])
+              if str(getattr(getattr(r, "level", None), "value",
+                             getattr(r, "level", ""))).lower() == "l2"]
+        lang = classify(str(getattr(artifact, "code", "") or ""),
+                        str(getattr(getattr(task, "target", None), "dsl", "") or ""))
+        return claim_level(
+            eligibility=metrics.get("eligibility"),
+            validity=metrics.get("measurement_validity"),
+            correctness_verified=(all(bool(r.passed) for r in l2) if l2 else None),
+            coverage_mode=lang.coverage,
+            persisted=persisted,
+        )
+
     def _save_to_db(self, artifact: KernelArtifact, task: TaskSchema):
         """把这次的核写进跨运行经验库 (缺口 2)。门不过就只进内存, 不落盘。
 
-        判据**只有一处** (`oracle.admit_to_corpus`, 设计 §10.5-4): 三道门 (读数够不够格 /
-        资格位 can_persist / 两次独立确认) 的顺序与理由文本都在那里。这里以前自己又写了
-        一遍这三道门 —— 2026-10-01 核实: 那个判据函数全仓没有生产调用者, 而两份实现的口径
+        判据**只有一处** (`oracle.admit_to_corpus`, 设计 §10.5-4): 四道门 (读数够不够格 /
+        资格位 can_persist / 声明等级上限 §22.3 / 两次独立确认) 的顺序与理由文本都在那里。
+        这里以前自己又写了一遍这三道门 —— 2026-10-01 核实: 那个判据函数全仓没有生产调用者, 而两份实现的口径
         并不一样 (`admit_to_corpus` 永远要求重测, 这里默认不要求), 用例测的是前者。同一个
         决定两个实现, 就是「判据不在链路上」的同族 (spine-review P0-1)。
 
@@ -2986,6 +3013,14 @@ class Conductor:
         from .oracle import admit_to_corpus
 
         metrics = artifact.benchmark_data or {}
+        # §4.4 的声明等级：**推导只有一处**（`eligibility.claim_level`），这里只负责把这次
+        # 读数手上的证据摊进去。覆盖那一格与 §22.3 的 `AuditCoverage.mode` 读的是**同一个
+        # 函数**（`source_lang.classify`）在同一个来源上的结论，于是「上游发布在血缘里的那个
+        # mode」与「入库门拿来判的那个 mode」不会漂（守卫钉住这条等式）。
+        claim = self._claim_level_for(artifact, task, metrics)
+        # 判据的输入与产物是同一份（与 eligibility / observation 同一条纪律）：
+        # `admit_to_corpus` 的覆盖门读的就是这里写进去的那个上限。
+        metrics["claim_level"] = claim.as_dict()
         keep, reason = admit_to_corpus(
             metrics,
             getattr(artifact, "remeasure", None),
@@ -3015,6 +3050,15 @@ class Conductor:
         if artifact.metadata is None:
             artifact.metadata = {}
         artifact.metadata["corpus_admission"] = {"kept": bool(keep), "reason": str(reason)}
+        # 入库本身就是 `promotable → persisted` 那一级上升（§4.4），所以入没入库之后
+        # 要重算一次等级：产物里记的是**最后**的那个地位，不是入库之前那个。
+        # 覆盖上限（`ceiling`）不随 `persisted` 变，所以把同一个键改写成终态不会动到
+        # 刚刚那道门读过的数 —— 门已经跑完了。
+        if keep:
+            claim = self._claim_level_for(artifact, task, metrics, persisted=True)
+        final = claim.as_dict()
+        artifact.metadata["claim_level"] = final
+        metrics["claim_level"] = final
         if not keep:
             print(f"[KernelDB] 未入库 (只留在本次进程): {reason}")
             self.kernel_db.add(record)

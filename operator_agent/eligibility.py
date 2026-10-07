@@ -33,7 +33,9 @@ l3_pass_is_refused / backend_real_device) 与心跳、契约哈希、峰值、li
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, Mapping, Optional, Tuple
+
+from .source_lang import COVERAGE_AST, COVERAGE_NONE, COVERAGE_REGEX
 
 # §4.3 第 5 条的常数: value > 参考下界 × 1.05 判为「测量错了」而不是「很棒」。
 #
@@ -65,6 +67,22 @@ class Eligibility:
             "can_report": self.can_report,
             "can_count_progress": self.can_count_progress,
         }
+
+    @classmethod
+    def from_mapping(cls, mapping) -> Optional["Eligibility"]:
+        """从产物里的扁平 dict 还原五位掩码。**缺一位 ⇒ None**（不是「默认 True」）
+
+        与 `oracle.admit_to_corpus` 的既有口径同源（有键但掩码不全 ⇒ 判不合格），
+        但这里更保守：掩码不全一律返回 `None`，由调用方按「**没有资格位**」处理 ——
+        缺证据不是有效证据，而「默认补齐」正是本仓反复记过的那类自欺。
+        """
+        if not isinstance(mapping, Mapping):
+            return None
+        keys = ("can_verdict", "can_tune", "can_persist", "can_report",
+                "can_count_progress")
+        if any(k not in mapping for k in keys):
+            return None
+        return cls(*[bool(mapping[k]) for k in keys])
 
 
 #: 全 False —— 规则 1~5: 这个数没有指称对象 / 测的是别的东西 / 物理上不可能
@@ -184,3 +202,160 @@ def derive_eligibility(
 
     # 规则 9
     return ALL_TRUE
+
+
+# ─── §4.4 声明等级 (ClaimLevel)：能力位之外的「这条结论现在处于什么地位」 ─────
+#
+# 设计原文是一个 `StrEnum`；本仓跑 3.9（`StrEnum` 要 3.11），所以与
+# `measurement.Validity` 同款：**字符串常数 + 升序元组**，产物里记字符串。
+#
+# 与资格位的关系：`can_*` 回答「这个数能干什么」，声明等级回答「这条结论站到了哪一级、
+# 还差哪一件证据」。两者的判据是**分开的**：等级只由本模块这一段推导，消费方（入库判据 /
+# 报告）不许自己再排一次序。
+
+CLAIM_UNOBSERVED = "unobserved"      # 没有可用测量 —— 不能判决、不能学习
+CLAIM_OBSERVED = "observed"          # 有原始观测，但资格不足 —— 只能诊断与继续探索
+CLAIM_PROVISIONAL = "provisional"    # 当前运行内可比较 —— 可局部搜索, 不能晋级 best
+CLAIM_VALIDATED = "validated"        # 通过正确性与测量门禁 —— 可参与正式比较
+CLAIM_PROMOTABLE = "promotable"      # 通过独立确认 —— 可以替换运行级 best
+CLAIM_PERSISTED = "persisted"        # 进入长期知识库 —— 可跨任务复用
+
+#: **顺序即升序**（§4.4：等级只能逐级上升，每一级上升都要有对应证据）。
+CLAIM_LEVELS: Tuple[str, ...] = (
+    CLAIM_UNOBSERVED, CLAIM_OBSERVED, CLAIM_PROVISIONAL,
+    CLAIM_VALIDATED, CLAIM_PROMOTABLE, CLAIM_PERSISTED,
+)
+
+
+def claim_rank(level: Optional[str]) -> int:
+    """等级的序号（越大越高）。**不在词表里 ⇒ -1** —— fail-closed：读不懂的等级
+    不比任何一级高（与「缺证据不是有效证据」同一条纪律）。"""
+    try:
+        return CLAIM_LEVELS.index(str(level))
+    except ValueError:
+        return -1
+
+
+def at_least(level: Optional[str], floor: str) -> bool:
+    """`level >= floor`? 任一侧不在词表里 ⇒ False"""
+    return claim_rank(level) >= claim_rank(floor) >= 0
+
+
+#: §22.3：静态审计的**覆盖强度**决定「这份源码的结论最多能站到哪一级」。
+#: 为什么上限按 `mode` 而不按 `uncovered_rules` 是否为空：见 `claim_ceiling`。
+CLAIM_CEILING_BY_COVERAGE: Dict[str, str] = {
+    COVERAGE_AST: CLAIM_PERSISTED,        # 看得穿源码（Python AST）⇒ 不设限
+    COVERAGE_REGEX: CLAIM_VALIDATED,      # 真实但更弱：运行内可比, 不足以永久
+    COVERAGE_NONE: CLAIM_PROVISIONAL,     # 判不了（无法确立 ≠ 通过）
+}
+
+
+def claim_ceiling(coverage_mode: Optional[str]) -> str:
+    """覆盖强度 → 等级上限。词表外的值（含 `None` / 空串 = **没判过**）按最保守那档。
+
+    **为什么用 `mode` 而不是「`uncovered_rules` 非空就压级」**：后者会自锁 ——
+    `PrecompileVerdict.coverage` 把 `not_applicable` 与 `unknown` 一起收进
+    `uncovered_rules`，而 §21.4 第 7 条（引用不存在的能力）对**每一份** patch 候选都是
+    `not_applicable`（仓里没有任何语言的 API 面清单）。拿它压级 ⇒ 每一份候选都到不了
+    `promotable` ⇒ 入库率归零，而那把尺子拦的是**量具缺失**，不是候选的问题。
+    `mode` 说的是「这份源码的静态检查能力」，那才是 §22.3 的判据面；
+    `uncovered_rules` 作为证据进报告（`confirm.UnableToEstablish.extend_metrics`）。
+    """
+    return CLAIM_CEILING_BY_COVERAGE.get(str(coverage_mode or "").strip().lower(),
+                                         CLAIM_PROVISIONAL)
+
+
+@dataclass(frozen=True)
+class ClaimRecord:
+    """一次读数的声明等级 + 它为什么停在那一级（产物里记这个）。"""
+
+    level: str
+    ceiling: str
+    coverage_mode: str
+    reasons: Tuple[str, ...] = ()
+
+    def as_dict(self) -> dict:
+        return {"level": self.level, "ceiling": self.ceiling,
+                "coverage_mode": self.coverage_mode, "reasons": list(self.reasons)}
+
+
+def claim_level(*,
+                eligibility: Optional[object] = None,
+                validity: Optional[object] = None,
+                correctness_verified: Optional[bool] = None,
+                coverage_mode: Optional[str] = None,
+                independent_confirmation: Optional[bool] = None,
+                persisted: bool = False) -> ClaimRecord:
+    """按 §4.4 的阶梯推导声明等级（纯函数；**等级的唯一推导处**）。
+
+    阶梯（顺序即依赖，每一级都要有对应证据，缺证据不许升）：
+
+    | 等级 | 需要的证据 |
+    |---|---|
+    | `unobserved` | 没有可用测量：没有资格位且没有档位，或 `can_verdict=False`（整组拒绝） |
+    | `observed` | 有原始观测但资格不足：有档位没资格位，或 `can_tune=False` |
+    | `provisional` | 有 `can_tune` 的读数；但档位不是 `valid`，或正确性没有凭据 |
+    | `validated` | 档位 `valid` **且** 正确性有凭据（§20 / 规则 9） |
+    | `promotable` | 通过一次独立确认（§10.5-4） |
+    | `persisted` | 入库判据通过（§24.3） |
+
+    最后**逐级上升不许越级**的保障落在一处：`level = min(阶梯, 覆盖上限)`（§22.3）。
+    覆盖不足只**压级**，不改变任何资格位（`can_*` 仍然由 §4.3 的八条规则说了算）——
+    「coverage 不足只能影响 ClaimLevel 与 promotion，不能替代执行沙箱」。
+
+    三态纪律（设计与本仓的基线）：
+      * `eligibility=None`（没经过收口点）⇒ 按「没有资格位」处理，不许补齐；
+      * `correctness_verified=None`（没带凭据）⇒ **不升** `validated`（缺证据不是有效证据）；
+      * `coverage_mode=None`（没判过）⇒ 上限按最保守那档（`provisional`）。
+
+    ⚠️ **`promotable` 今天在产物里很少出现**：本仓的「独立确认」与「入库」是**同一步**
+    （`oracle.admit_to_corpus` 的第 3 道门），通过独立确认那一刻就已经入库 ⇒ 直接
+    `persisted`。`promotable` 今天的角色是**门槛**（入库门要求覆盖上限 ≥ 它），
+    等 §24.3 的 promotion policy 从入库里独立出来之后才会成为终态。不许把它读成
+    「今天有一条路径能停在 promotable」。
+    """
+    elig = eligibility
+    if elig is not None and not isinstance(elig, Eligibility):
+        elig = Eligibility.from_mapping(elig)
+
+    ceiling = claim_ceiling(coverage_mode)
+    mode = str(coverage_mode or "")
+    tier = _tier(validity)
+    reasons: list = []
+
+    # ── 阶梯（从下往上，只取**证据齐全**的最高一级）──
+    if persisted:
+        base = CLAIM_PERSISTED
+    elif independent_confirmation is True:
+        base = CLAIM_PROMOTABLE
+    elif elig is None and tier is None:
+        base = CLAIM_UNOBSERVED
+        reasons.append("没有资格位也没有档位 ⇒ 没有可用测量")
+    elif elig is not None and not elig.can_verdict:
+        base = CLAIM_UNOBSERVED
+        reasons.append("can_verdict=False（整组拒绝）⇒ 这个数没有指称对象")
+    elif elig is None or not elig.can_tune:
+        base = CLAIM_OBSERVED
+        reasons.append("有原始观测但资格不足（" +
+                       ("没有资格位" if elig is None else "can_tune=False") + "）")
+    elif tier != "valid" or correctness_verified is not True:
+        base = CLAIM_PROVISIONAL
+        if tier != "valid":
+            reasons.append(f"档位 {tier or '未报'} ≠ valid ⇒ 未达 validated")
+        else:
+            reasons.append("正确性没有凭据（correctness_verified 不是 True）⇒ 未达 validated")
+    else:
+        base = CLAIM_VALIDATED
+
+    level = base
+    if claim_rank(ceiling) < claim_rank(CLAIM_PERSISTED):
+        # 上限本身也要印出来（哪怕它没有压住当前这一级）—— 否则「为什么进不了语料」
+        # 在产物里只剩入库门那句拒因，而拒因的量在覆盖这一格。
+        reasons.append(f"静态审计覆盖 {mode or '未判'} ⇒ 等级上限 {ceiling} (§22.3)")
+        if claim_rank(ceiling) < claim_rank(base):
+            level = ceiling
+    if claim_rank(level) < claim_rank(CLAIM_PERSISTED) and not persisted:
+        reasons.append(f"没有入库 ⇒ 未达 {CLAIM_PERSISTED}")
+    return ClaimRecord(level=level, ceiling=ceiling, coverage_mode=mode,
+                       reasons=tuple(reasons))
+
