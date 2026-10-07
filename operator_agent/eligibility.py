@@ -254,12 +254,16 @@ def claim_ceiling(coverage_mode: Optional[str]) -> str:
     """覆盖强度 → 等级上限。词表外的值（含 `None` / 空串 = **没判过**）按最保守那档。
 
     **为什么用 `mode` 而不是「`uncovered_rules` 非空就压级」**：后者会自锁 ——
-    `PrecompileVerdict.coverage` 把 `not_applicable` 与 `unknown` 一起收进
-    `uncovered_rules`，而 §21.4 第 7 条（引用不存在的能力）对**每一份** patch 候选都是
-    `not_applicable`（仓里没有任何语言的 API 面清单）。拿它压级 ⇒ 每一份候选都到不了
-    `promotable` ⇒ 入库率归零，而那把尺子拦的是**量具缺失**，不是候选的问题。
-    `mode` 说的是「这份源码的静态检查能力」，那才是 §22.3 的判据面；
-    `uncovered_rules` 作为证据进报告（`confirm.UnableToEstablish.extend_metrics`）。
+    §21.4 第 7 条（引用不存在的能力）的**源码半边**对**每一份** patch 候选都是 `unknown`
+    （仓里没有任何语言的 API 面清单 ⇒ **有对象、没量具**），于是 `uncovered_rules`
+    永远至少是 `{capability}`。拿它压级 ⇒ 每一份候选都到不了 `promotable` ⇒ 入库率归零，
+    而那把尺子拦的是**量具缺失**，不是候选的问题。`mode` 说的是「这份源码的静态检查
+    能力」，那才是 §22.3 的判据面；`uncovered_rules` 作为证据进报告
+    （`report._uncovered_rules_from_lineage`）。
+
+    （2026-10-07 之前 `uncovered_rules` 还把 `not_applicable` 一起收进来，见 CHECKLOG
+    I90 —— 那让「这一层查不了」多报两条。改成只收 `unknown` 之后这条自锁的理由不变，
+    只是集合从「混着的四条」变成「永远的那一条」。）
     """
     return CLAIM_CEILING_BY_COVERAGE.get(str(coverage_mode or "").strip().lower(),
                                          CLAIM_PROVISIONAL)

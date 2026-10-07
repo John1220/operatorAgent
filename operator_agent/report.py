@@ -68,6 +68,30 @@ def _rounds(artifact: Any) -> List[Dict[str, Any]]:
     return [h for h in hist if isinstance(h, dict)] if isinstance(hist, list) else []
 
 
+def _uncovered_rules_from_lineage(artifact: Any) -> List[Tuple[str, str]]:
+    """§21.4/§22.3 的覆盖缺口: 最后一轮裁决里「有对象但没量具」的判据 → (rule, detail)
+
+    只取**最后一轮有裁决的**那一轮: 报告说的是「这次运行结束时还立不住的事」, 更早轮次的
+    缺口若已经补上, 再印一遍就是复读（这一节一旦开始复读就会被跳过不读）。
+    三态: 没有血缘 / 没有 `agent_action` / 没有 `coverage` ⇒ 返回空 —— 那表示**没判过**
+    （老产物、没走 §21 的路径），不是「没有缺口」。
+
+    ⚠️ 这里只读 `uncovered_rules`（= `unknown`: 有对象、没量具）。`not_applicable` 是
+    「这一份候选没有这个对象」, **不是**这一节能说的事 —— 两者在 2026-10-07 之前被并成
+    一个集合（CHECKLOG I90），读起来像「这一层的静态检查很弱」。
+    """
+    for h in reversed(_rounds(artifact)):
+        pre = _get(_get(h, "agent_action", None), "precompile", None)
+        cov = _get(pre, "coverage", None)
+        if not isinstance(cov, dict):
+            continue
+        uncovered = cov.get("uncovered_rules") or []
+        details = {o.get("rule"): o.get("detail", "")
+                   for o in (_get(pre, "outcomes", None) or []) if isinstance(o, dict)}
+        return [(str(r), str(details.get(r, ""))) for r in uncovered]
+    return []
+
+
 # ─── 「空清单的依据」: 逐项核过, 核不过就变成条目 ────────────────────
 
 
@@ -261,7 +285,20 @@ def collect_unable(*, artifact: Any, observations: Optional[Sequence[dict]] = No
         u.add("这条结论没有进入长期记忆", reason, kind="other",
               evidence="oracle.admit_to_corpus 的拒因")
 
-    # 4. 去重: 同一条 (claim, reason) 可能同时来自 metrics 与前置项 —— 这一节一旦开始
+    # 4. §21.4/§22.3 的覆盖缺口 («有对象但没量具» 的判据)。覆盖数据在血缘里留了痕,
+    #    读它的只有这里 —— 一条判据没有量具是**这一轮没能确立**的事, 必须出现在这一节,
+    #    否则读产物的人会以为源码级「幻觉 API」是查过的（真实代价: 曾白烧一轮 Fixer）。
+    gaps = _uncovered_rules_from_lineage(artifact)
+    if gaps:
+        rules = ", ".join(sorted(r for r, _ in gaps))
+        detail = "; ".join(d for _, d in gaps if d)
+        u.add(f"这一层的静态审计有判据没有量具 ({rules})",
+              detail or "该判据有对象但没有量具 (§21.4 / §22.3)",
+              kind="measurement",
+              evidence=("iteration_history[].agent_action.precompile.coverage"
+                        ".uncovered_rules"))
+
+    # 5. 去重: 同一条 (claim, reason) 可能同时来自 metrics 与前置项 —— 这一节一旦开始
     #    复读就会被跳过不读。
     seen, uniq = set(), []
     for it in u.items:

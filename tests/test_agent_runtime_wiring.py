@@ -203,17 +203,23 @@ class TestTheGateIsOnTheRealLoop(unittest.TestCase):
         self.assertEqual([["A", "B"]], ctx["input_key_sets"])
         self.assertTrue(ctx["spend_committed"], "候选这个位置已经花过钱了")
         self.assertIsNone(ctx["tokens_left"], "没设上限被写成了别的数")
-        # 覆盖率: 这份候选**真被查过**的那几条, 与「没有对象 / 查不了」的分开记。
-        # 首轮没有父代 ⇒ 两条以父代为基线的判据是 `not_applicable`（不是「通过」）。
+        # 覆盖率 = 「真被查过」+「有对象但没量具」这两端。首轮没有父代 ⇒ 两条以父代为
+        # 基线的判据是 `not_applicable`（**这一份候选没有这个对象**），它们**不进**覆盖表：
+        # 把「没有对象」并进 uncovered 会让「这一层查不了」多报两条 (I90)。
         pre = verdict["precompile"]
+
+        def _state(rule):
+            return next(o["state"] for o in pre["outcomes"] if o["rule"] == rule)
+
         self.assertEqual(["abi", "protected_paths", "write_scope"],
                          pre["coverage"]["covered_rules"])
-        self.assertEqual(["capability", "duplicate_of_parent", "new_dependency"],
-                         pre["coverage"]["uncovered_rules"])
-        self.assertEqual("not_applicable", pre["state_of"]["new_dependency"]
-                         if isinstance(pre.get("state_of"), dict) else
-                         next(o["state"] for o in pre["outcomes"]
-                              if o["rule"] == "new_dependency"))
+        self.assertEqual(["capability"], pre["coverage"]["uncovered_rules"])
+        for rule in ("new_dependency", "duplicate_of_parent"):
+            self.assertEqual("not_applicable", _state(rule), rule)
+            self.assertNotIn(rule, pre["coverage"]["covered_rules"], rule)
+            self.assertNotIn(rule, pre["coverage"]["uncovered_rules"], rule)
+        self.assertEqual("unknown", _state("capability"),
+                         "源码级「幻觉 API」是**有对象、没量具**, 不是「没有对象」")
 
     def test_a_clean_run_is_never_refused_and_says_so(self):
         """反向: 门不是「一律拒」—— 正常候选全过, 且计数是 0 而不是缺省"""

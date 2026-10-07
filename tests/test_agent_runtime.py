@@ -419,11 +419,23 @@ class TestPrecompileChecks(unittest.TestCase):
     def test_the_source_level_hallucinated_api_half_is_reported_uncovered(self):
         """「查不了」必须出现在覆盖表里，而不是被读成「没有幻觉 API」"""
         v = self.rt.admit(_action(), _ctx())
-        self.assertEqual(ar.STATE_NOT_APPLICABLE, v.precompile.state_of("capability"))
+        self.assertEqual(ar.STATE_UNKNOWN, v.precompile.state_of("capability"))
         self.assertIn("capability", v.precompile.coverage.uncovered_rules)
-        self.assertIn("API 面清单", v.precompile.state_of("capability") and
-                      next(o.detail for o in v.precompile.outcomes
-                           if o.rule == "capability"))
+        self.assertIn("API 面清单", next(o.detail for o in v.precompile.outcomes
+                                         if o.rule == "capability"))
+
+    def test_a_rule_without_an_object_is_not_a_coverage_gap(self):
+        """`not_applicable` 不进覆盖表: 「这一份候选没有这个对象」不是「这一层查不了」(I90)
+
+        没有父代 ⇒ `new_dependency` / `duplicate_of_parent` 两条**没有对象**。它们的名字
+        只出现在 `outcomes` 里，覆盖表两端都不收 —— 否则「七条里四条没覆盖」会被读成
+        「这一层的静态检查很弱」，而其中两条只是「这一轮不适用」。"""
+        v = self.rt.admit(_action(patch=_patch(parent="")), _ctx())
+        for rule in ("new_dependency", "duplicate_of_parent"):
+            self.assertEqual(ar.STATE_NOT_APPLICABLE, v.precompile.state_of(rule), rule)
+            self.assertNotIn(rule, v.precompile.coverage.uncovered_rules, rule)
+            self.assertNotIn(rule, v.precompile.coverage.covered_rules, rule)
+        self.assertTrue(v.accepted, "`not_applicable` 不是拒绝理由")
 
     def test_a_patchless_action_still_reports_every_rule(self):
         """没有 patch 的动作也要给全六条结论 —— 缺行会被读成「都通过了」"""

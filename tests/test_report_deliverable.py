@@ -225,6 +225,68 @@ def _task():
                                    max_error=1e-3))
 
 
+
+class TestTheStaticAuditGapIsInTheDeliverable(unittest.TestCase):
+    """§21.4/§22.3 的覆盖缺口只有**一个**人类可读的下游: 这一节 (CHECKLOG I90)
+
+    血缘里的 `precompile.coverage.uncovered_rules` 在本片之前没有任何读者 ——
+    报告里读起来像「源码级幻觉 API 查过了」。这一组钉住「有缺口 ⇒ 有条目」「没缺口 ⇒
+    不许多一条」「没判过 ⇒ 不说话」三态。
+    """
+
+    def _with_verdict(self, uncovered, outcomes=None):
+        a = _artifact()
+        a.iteration_history = [
+            {"round": 1, "action": "generate",
+             "levels_passed": {"L1": True, "L2": True, "L3": True},
+             "agent_action": {"precompile": {
+                 "coverage": {"language": "python", "mode": "ast",
+                              "covered_rules": ["write_scope"],
+                              "uncovered_rules": list(uncovered)},
+                 "outcomes": outcomes or []}}},
+        ]
+        return a
+
+    def _gap_items(self, artifact):
+        return [i for i in collect_unable(artifact=artifact).items if "没有量具" in i.claim]
+
+    def test_an_uncovered_rule_becomes_an_item_with_its_detail(self):
+        a = self._with_verdict(
+            ["capability"],
+            [{"rule": "capability", "state": "unknown",
+              "detail": "源码级「幻觉 API」没有判据: 仓里没有任何语言的 API 面清单"}])
+        text = _unable_text(a)
+        self.assertIn("没有量具", text)
+        self.assertIn("capability", text)
+        self.assertIn("API 面清单", text, "缺口要带逐条详情, 不是一个光秃秃的判据名")
+
+    def test_no_gap_means_no_item(self):
+        """反向: 凹缺口为空时不许多印一条 (这一节一旦复读就会被跳过不读)"""
+        self.assertEqual([], self._gap_items(self._with_verdict([])))
+
+    def test_a_run_without_a_verdict_says_nothing(self):
+        """三态: 没有血缘 / 没走 §21 的路径 = **没判过**, 不是「没有缺口」"""
+        self.assertEqual([], self._gap_items(_artifact()))
+
+    def test_a_not_applicable_rule_is_not_a_gap(self):
+        """`not_applicable` 不进这一节: 「这一份候选没有对象」不是「这一层查不了」(I90)"""
+        a = self._with_verdict(
+            [], [{"rule": "new_dependency", "state": "not_applicable",
+                  "detail": "没有父代 ⇒ 这条判据没有对象"}])
+        self.assertEqual([], self._gap_items(a))
+
+    def test_only_the_last_adjudicated_round_is_read(self):
+        """更早轮次的缺口若已经补上, 不再印 —— 报告说的是「结束时还立不住的事」"""
+        a = _artifact()
+        a.iteration_history = [
+            {"round": 1, "agent_action": {"precompile": {
+                "coverage": {"uncovered_rules": ["capability"]}, "outcomes": []}}},
+            {"round": 2, "agent_action": {"precompile": {
+                "coverage": {"uncovered_rules": []}, "outcomes": []}}},
+        ]
+        self.assertEqual([], self._gap_items(a))
+
+
 class TestThroughARealRun(unittest.TestCase):
     """模块写好了 ≠ 接上了。这一组断言的是**产物目录里真有那份文件**。
 
@@ -280,6 +342,17 @@ class TestThroughARealRun(unittest.TestCase):
             self.assertIn("**没有**做重测", txt)
         else:
             self.assertIn("有: ", txt)
+
+    def test_the_static_audit_gap_reaches_the_written_report(self):
+        """§21.4 源码级「幻觉 API」判不了 ⇒ 必须出现在这份**真跑出来**的报告里
+
+        这一条走的是真的 `Conductor.execute`（不是手搓 artifact）: 覆盖表在血缘里,
+        而把血缘读成一句话的只有 `report.collect_unable`（CHECKLOG I90）。
+        """
+        art, _ = self._run()
+        txt = (Path(art.saved_dir) / REPORT_NAME).read_text(encoding="utf-8")
+        self.assertIn("没有量具", txt)
+        self.assertIn("capability", txt)
 
 
 if __name__ == "__main__":

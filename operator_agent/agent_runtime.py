@@ -24,7 +24,8 @@ Conductor 把 str 送进 L1/L2/L3。这条形状能跑，但它让设计 §21 �
 ## 三条刻意保守的口径（误拦截比误放行贵，但「没查」不许当「通过」）
 
 * **只有 `violation` 才拒绝**。`unknown` / `not_applicable` 是**结论**，进产物、进报告，
-  但不改判决 —— 它们表示「这条判据今天对这份候选没有量具」，不是「它有问题」。
+  但不改判决 —— 它们表示「这条判据今天在这份候选上没查成」，不是「它有问题」；
+  没查成还分两种：**没有对象**（`not_applicable`）与**有对象但没量具 / 缺输入**（`unknown`）。
   两者的方向相反：把 `unknown` 读成拒绝会让整条生成路径停摆，读成通过就是 fail-open。
 * **判据不重造**。七条里能复用的全部复用现成的单一真源：接口契约用
   `interface_contract.check_kernel_interface`、重复用 `novelty.signature_of`、
@@ -33,7 +34,8 @@ Conductor 把 str 送进 L1/L2/L3。这条形状能跑，但它让设计 §21 �
   `Patch`（候选改动的对象）与路径范围判据。
 * **今天没有的东西明写**。`spill-bound` / `bank-conflict` 没有量具、
   `profiler` / `shape_sweep` 没有消费者、源码级「幻觉 API」没有 API 面清单 ——
-  三处都进 `AuditCoverage.uncovered_rules` / 动作拒绝理由，而不是留空。
+  三处都不留空：前两处是**拒绝理由**（违约），第三处是 `unknown` ⇒ 进
+  `AuditCoverage.uncovered_rules`，并在报告里成为一条「我无法确立的事」。
 
 ## 接在哪一点上（位置是判据的一部分）
 
@@ -215,8 +217,10 @@ def candidate_path(run_root: str = "", ext: str = "py") -> str:
 #: 判据的四种结论。**三态 + 违约**，四者不许压成布尔：
 #:   * `ok`            这条判据在这份候选上跑过，没有违规；
 #:   * `violation`     跑过、且违规（唯一会拒绝的一档）；
-#:   * `not_applicable`这条判据对这份候选**没有对象/没有量具**；
-#:   * `unknown`       有对象但**判不了**（缺输入），既不是通过也不是不适用。
+#:   * `not_applicable`这一份候选**没有这个对象**（首轮没有父代 ⇒ 两条以父代为基线的判据）；
+#:   * `unknown`       有对象但**判不了**（缺量具 / 缺输入），既不是通过也不是不适用。
+#: 这两档不许互相借名（I90）：把「没有量具」记成「没有对象」，覆盖表就会把这一层的
+#: 静态检查能力报高 —— 而反过来（把「没有对象」记成「没有量具」）会把能力报低。
 STATE_OK = "ok"
 STATE_VIOLATION = "violation"
 STATE_NOT_APPLICABLE = "not_applicable"
@@ -589,6 +593,15 @@ class AuditCoverage:
     这里先按同一个形状把**进编译前这七条**的覆盖表达出来 —— 于是「这一层今天能判什么」
     不需要读者去读代码，`covered_rules` / `uncovered_rules` 两个集合就是答案。
 
+    ⚠️ 四个结论按**同一个**三态划分落到不同的格里（2026-10-07，[CHECKLOG I90]）：
+      * `ok` / `violation` ⇒ 这份候选真被查过 ⇒ `covered_rules`；
+      * `unknown` ⇒ **有对象但没量具** ⇒ `uncovered_rules`（§22.3 说的覆盖缺口）；
+      * `not_applicable` ⇒ **这一份候选没有这个对象**（首轮没有父代 ⇒ 两条以父代为基线的
+        判据没有对象）⇒ **不进覆盖表**。适用性是**逐候选**的一轴，覆盖是**静态能力**的另一轴
+        （§22.3 的标题就是「不同语言/形态的静态检查能力不同」）—— 把两者并进同一个集合，
+        「七条里四条没覆盖」这种读法就会出现，而其中三条只是「这一轮不适用」。
+        它逐条在 `PrecompileVerdict.outcomes` 里有名有姓。
+
     ⚠️ `mode` 说的是**源码**那一半的覆盖强度（`ast` / `regex_only` / `none`），
     它**不**代表每条判据的适用性 —— 后者在 `PrecompileVerdict.outcomes` 里逐条给出。
     """
@@ -633,8 +646,9 @@ class PrecompileVerdict:
         lang = self.language_verdict
         covered = {o.rule for o in self.outcomes
                    if o.state in (STATE_OK, STATE_VIOLATION)}
-        uncovered = {o.rule for o in self.outcomes
-                     if o.state in (STATE_NOT_APPLICABLE, STATE_UNKNOWN)}
+        # 只收「有对象但没量具」那一档（I90）。`not_applicable` = 这一份候选没有这个对象,
+        # 它不是覆盖缺口 —— 并进来就等于把「这一轮不适用」读成「这一层查不了」。
+        uncovered = {o.rule for o in self.outcomes if o.state == STATE_UNKNOWN}
         if lang is None:
             mode, name = COVERAGE_NONE, ""
         else:
@@ -1135,6 +1149,11 @@ def _check_capability(action: AgentAction, ctx: ActionContext,
         它进 `uncovered_rules`，而不是被读成「没有幻觉 API」。
         真实代价有记录：`tl.cache` 这类不存在的 API 曾白烧一轮 Fixer（见
         `triton_opt_rules.py` 里那一行注释）。
+
+    **这一半的状态是 `unknown`，不是 `not_applicable`**（2026-10-07，I90）：对象**在**
+    （源码里有 API 调用），判不了的是**量具**。`not_applicable` 在这套词表里说的是
+    「这一份候选没有这个对象」（首轮没有父代 ⇒ `new_dependency` 没有对象），两者混用
+    恰好会把「这把尺子没有」写成「没有什么可量的」—— 本仓记过最多次的那类压平。
     """
     problems = []
     if action.expected_bottleneck:
@@ -1171,7 +1190,7 @@ def _check_capability(action: AgentAction, ctx: ActionContext,
     if action.patch is None:
         return CheckOutcome("capability", STATE_OK, "动作没有声明任何能力 (无需能力判据)")
     return CheckOutcome(
-        "capability", STATE_NOT_APPLICABLE,
+        "capability", STATE_UNKNOWN,
         "源码级「幻觉 API」没有判据: 仓里没有任何语言的 API 面清单 "
         "(没有 Triton 白名单/符号表) ⇒ 这一半判不了 (不是「没有幻觉 API」)")
 

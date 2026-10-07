@@ -315,7 +315,10 @@ def scene_4():
         print("  " + pad(o.rule, 24) + pad(o.state, 16) + clip(o.detail))
     cov = verdict.coverage
     print(f"\n  覆盖率: 真查过的 {list(cov.covered_rules)}")
-    print(f"          今天没有对象的 {list(cov.uncovered_rules)}")
+    print(f"          今天**判不了**的 (有对象、没量具) {list(cov.uncovered_rules)}")
+    print("          「这一份候选没有这个对象」那一档 (首轮的 "
+          f"{[o.rule for o in verdict.outcomes if o.state == ar.STATE_NOT_APPLICABLE]})"
+          " **不进**覆盖表 —— 适用性是逐候选的一轴, 覆盖是静态能力的另一轴 (I90)")
     print(f"  裁决: accepted={verdict.accepted} —— 只有 `violation` 才拒绝; "
           f"`unknown` / `not_applicable` 是**结论**, 不是「没问题」也不是「有问题」。")
     print("\n  同一条判据, 只换目标路径 ⇒ 违约 (这是唯一会拒绝的一档):")
