@@ -1128,7 +1128,7 @@ class Verifier:
                 "kernel_min_ms": round(kernel_min_ms, 6)}
 
     def _publish_case_ledger(self, metrics: dict, kernel_code: str, test_inputs,
-                             task: TaskSchema) -> None:
+                             task: TaskSchema) -> Optional[str]:
         """把**逐 case** 的加速比账本写进这次 L3 的 metrics（`metrics["cases"]`）
 
         §6.2 条款 2/3 的证据面要求「本次评了哪几条 case、各自多少」。在此之前 L3 明
@@ -1146,10 +1146,12 @@ class Verifier:
         逐组做（正确性按组、身份按签名，两件事本来就不是一个粒度）。
         """
         input_sets = test_inputs if isinstance(test_inputs, list) else [test_inputs]
-        if len(input_sets) < 2:
-            return
-        ledger = {}
+        # 返回值 = **主 case 的身份**（单组输入时不写账本，但调用方要拿它去目标函数里找权重）
         first = case_key(input_sets[0])
+        primary = str(first) if first else None
+        if len(input_sets) < 2:
+            return primary
+        ledger = {}
         if first:
             ledger[first] = {"speedup_vs_baseline": metrics.get("speedup_vs_baseline"),
                              "basis": "主 case: 本次 L3 那个读数（未重复测）"}
@@ -1160,6 +1162,7 @@ class Verifier:
             ledger[key] = self._measure_case_speedup(kernel_code, inputs, task)
         if len(ledger) > 1:
             metrics["cases"] = ledger
+        return primary
 
     def _verify_performance(self, kernel_code: str, test_inputs, target_gflops: float,
                             task: TaskSchema,
@@ -1392,7 +1395,11 @@ class Verifier:
                     "arm_device_labels": {"candidate": _cand_dev,
                                           "baseline": _base_dev},
                 })
-                passed = speedup >= min_required
+                # §16 收口（CHECKLOG I95）: 性能面**判的是什么**不再在这里定 —— 这里只立
+                # 「前置条件（窗口/配对/污染）都没否掉」，判决在返回前那一处算
+                # （`_apply_performance_verdict`: 声明了目标函数就判目标函数，没声明退回
+                # 主 case 并把「§16 未收口」写进产物）。
+                passed = True
                 if _win_scope == WINDOW_DIFFERENT:
                     # 跨窗与跨卡同一族: 「同一时间窗」是 §11-2 给加速比立的**指称前提**
                     # (热/时钟状态可比), 观测到两臂不在同一扇窗里 ⇒ 这个数没有指称对象,
@@ -1446,8 +1453,11 @@ class Verifier:
                 if not metrics.get("benchmark_contaminated") and others:
                     msg += f" (注: 卡与 {others} 个其他进程共享, 瞬时 util={util}%)"
 
+                # 账本先发布（性能判决要读它），判决只算一次、只在这一处（两条路同一份）。
+                _primary = self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
+                passed = self._apply_performance_verdict(passed, metrics, task, speedup,
+                                                         primary_key=_primary)
                 print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
-                self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
                 return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                           passed=passed, message=msg, metrics=metrics)
 
@@ -1476,7 +1486,8 @@ class Verifier:
                 "baseline_reused": bool(baseline.get("baseline_reused")),
                 "perf_criterion": PERF_CRITERION_SPEEDUP,
             })
-            passed = speedup >= min_required
+            # 同远程那条路: 判的是什么在返回前那一处算（§16 收口, I95）。
+            passed = True
             base_ms = baseline["baseline_time_ms"]
             ratio_triple = f"{kernel_min_ms:.4g}/{base_ms:.4g} ({speedup:.2f}x)"
             # 基线是**这次量的**还是**缓存里那条**: 复用时消息里必须写出来 (§11-2 的
@@ -1498,8 +1509,10 @@ class Verifier:
                 environment_drift=environment_drift,
                 heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
             passed = self._refuse_l3_pass(passed, assessment)
+            _primary = self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
+            passed = self._apply_performance_verdict(passed, metrics, task, speedup,
+                                                     primary_key=_primary)
             print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
-            self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
             return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                       passed=passed, message=msg, metrics=metrics)
 
@@ -1524,6 +1537,62 @@ class Verifier:
         print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
         return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                   passed=passed, message=msg, metrics=metrics)
+
+    def _apply_performance_verdict(self, prior: bool, metrics: dict, task,
+                                   primary_speedup, primary_key=None) -> bool:
+        """§16 收口: 性能面的**成功标准**只在这一处算（CHECKLOG I95）
+
+        `prior` = 前置条件那几条拒绝（窗口/配对/污染/测量档位）的结论 —— 它们与「判的是
+        哪个量」无关，照旧在调用点算; 本方法只算**判的是什么**，并把结论发布进
+        `metrics["performance_verdict"]`（含依据；`basis` 是这一片唯一的新不变量）。
+
+        判据面在 `eligibility.performance_verdict`（纯函数，一个事实一处生产）: 契约声明了
+        目标函数 ⇒ 判目标函数（未确立 ⇒ **不通过**，fail-closed）; 没声明 ⇒ 退回主 case 的
+        加速比，并把「§16 没对它收口」写进依据。
+
+        契约冻不住时读**任务里的原始声明**（只为了不把「声明了目标函数」看成「没声明」——
+        那会把一次 fail-closed 变成一次静默放水），并在依据里登记；`contract_frozen` 那一格
+        让产物自己说得清判据是从哪来的。
+        """
+        from .contract import freeze_from_task
+        from .eligibility import (case_speedups, performance_verdict,
+                                  regression_over_limit)
+
+        min_required = float(getattr(getattr(task, "constraints", None),
+                                    "min_speedup", 0.0) or 0.0)
+        contract = None
+        if task is not None:
+            try:
+                contract = freeze_from_task(task)
+            except Exception:  # noqa: BLE001 —— 契约不可判定 ⇒ 读任务里的原始声明
+                contract = None
+        if contract is not None:
+            weights, aggregate = tuple(contract.case_weights), str(contract.aggregate or "")
+            limits = tuple(contract.max_regression)
+        else:
+            cons = getattr(task, "constraints", None)
+            weights = tuple(getattr(cons, "case_weights", ()) or ())
+            aggregate = str(getattr(cons, "aggregate", "") or "")
+            limits = tuple(getattr(cons, "max_regression", ()) or ())
+        speedups = case_speedups(metrics, case_key_hint=primary_key,
+                                speedup_hint=primary_speedup)
+        # §6.2 条款 3 的判据也在判据层（`regression_over_limit`）—— 这里只传结论。
+        rol, rol_why = regression_over_limit(limits, speedups)
+        passed, basis, why, value = performance_verdict(
+            min_required, aggregate=aggregate, case_weights=weights,
+            case_speedups=speedups, primary_speedup=primary_speedup,
+            max_regression=limits, regression_over_limit_value=rol)
+        if contract is None and task is not None:
+            why += "（契约不可判定 ⇒ 判据面读的是任务里的原始声明）"
+        metrics["performance_verdict"] = {
+            "basis": basis, "passed": bool(passed), "value": value,
+            "min_speedup": min_required, "why": why,
+            "cases": len(speedups), "regression_over_limit": rol,
+            "regression_why": list(rol_why), "contract_frozen": contract is not None,
+        }
+        verdict_text = "过" if passed else "不过"
+        print(f"  [Verifier] 性能结论 (§16): {basis} ⇒ {verdict_text} —— {why}")
+        return bool(prior) and bool(passed)
 
     @staticmethod
     def _refuse_l3_pass(passed: bool, assessment) -> bool:

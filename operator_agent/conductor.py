@@ -3053,33 +3053,6 @@ class Conductor:
             return freeze_from_task(task)
         except Exception:  # noqa: BLE001 —— 契约不可判定 = 没有契约（不是「空判据」）
             return None
-    @staticmethod
-    def _case_speedups_from_metrics(metrics: dict) -> dict:
-        """从产物里读出「case → 本次加速比」的账（逐 case 账本优先, 退回单 case 那格）
-
-        两个来源是**同一件事的两种形状**（多组输入 / 单组输入）: 多组时账本由
-        `Verifier._publish_case_ledger` 发布在 `metrics["cases"]`; 单组时只有 I92 那一格
-        `metrics["case_key"]`。收口只在这一处 —— 判据面的两条 (`required_cases_ok` /
-        `regression_over_limit`) 与目标函数都读它。
-
-        三态: 账本里某一项读不出 `speedup_vs_baseline` ⇒ 记 `None` = **量过但没得出**
-        数值（判据面读作「未量到」, 不是 0）。
-        """
-        ledger = metrics.get("cases")
-        if isinstance(ledger, Mapping) and ledger:
-            out = {}
-            for case, entry in ledger.items():
-                if not str(case):
-                    continue
-                value = (entry.get("speedup_vs_baseline")
-                         if isinstance(entry, Mapping) else entry)
-                out[str(case)] = None if value is None else value
-            if out:
-                return out
-        case = str(metrics.get("case_key") or "")
-        if case:
-            return {case: metrics.get("speedup_vs_baseline")}
-        return {}
 
     def _claim_level_for(self, artifact: KernelArtifact, task: TaskSchema,
                          metrics: dict, persisted: bool = False):
@@ -3119,7 +3092,7 @@ class Conductor:
         或邻居抢占造出来的 (doc 31/32/33)。一次侥幸读数不能变成永久真理。
         """
         from .contract import freeze_from_task
-        from .eligibility import (aggregate_speedup, implementation_decision,
+        from .eligibility import (aggregate_speedup, case_speedups, implementation_decision,
                                   regression_over_limit, required_cases_ok)
         from .kernel_db import KernelRecord
         from .oracle import admit_to_corpus
@@ -3188,8 +3161,8 @@ class Conductor:
         else:
             # 「本次评过**哪些** case、各自多少」= 逐 case 账本（多组输入时由
             # `Verifier._publish_case_ledger` 发布 `metrics["cases"]`），单组输入退回 I92
-            # 那一格 —— 两种形状在 `_case_speedups_from_metrics` 里收口成同一份账。
-            speedups = self._case_speedups_from_metrics(metrics)
+            # 那一格 —— 两种形状在 `eligibility.case_speedups` 里收口成同一份账（I95 搬家:
+            speedups = case_speedups(metrics)
             # 正确性**按组**、身份**按签名**（见 verifier 那段注释）: 账本里的每一条都过了
             # L2（任一组不过就回不到这里），所以逐 case 的正确性读的是**同一份 L2 结果**
             # （`_l2_verdict`）—— 与 §4.4 的 `correctness_verified` 同一处, 看一遍不看两遍。

@@ -473,6 +473,106 @@ def required_cases_ok(required_cases, evaluated,
     return True, (f"{len(required)} 条必判 case 本次都评过且都正确",)
 
 
+def case_speedups(metrics, case_key_hint=None, speedup_hint=None) -> dict:
+    """从产物里读出「case → 本次加速比」的账（逐 case 账本优先, 退回单 case 那格）
+
+    两个来源是**同一件事的两种形状**（多组输入 / 单组输入）: 多组时账本由
+    `Verifier._publish_case_ledger` 发布在 `metrics["cases"]`; 单组时只有 I92 那一格
+    `metrics["case_key"]`。收口只在这一处 —— 判据面的两条 (`required_cases_ok` /
+    `regression_over_limit`)、目标函数、以及 §16 的性能面判决（`performance_verdict`）
+    都读它。
+
+    三态: 账本里某一项读不出 `speedup_vs_baseline` ⇒ 记 `None` = **量过但没得出**
+    数值（判据面读作「未量到」, 不是 0）。
+
+    WHY 在资格层而不是评测侧（I95 搬家）: §16 收口之后，**评测侧的准入门**也要读这份账
+    （目标函数是判据），而门里的 `Verifier` 不该去 import 调用方的 `Conductor` —— 一个
+    事实一处生产，往判据方向搬。
+    """
+    ledger = metrics.get("cases")
+    if isinstance(ledger, Mapping) and ledger:
+        out = {}
+        for case, entry in ledger.items():
+            if not str(case):
+                continue
+            value = (entry.get("speedup_vs_baseline")
+                     if isinstance(entry, Mapping) else entry)
+            out[str(case)] = None if value is None else value
+        if out:
+            return out
+    case = str(metrics.get("case_key") or "")
+    if case:
+        return {case: metrics.get("speedup_vs_baseline")}
+    # 评测侧的 metrics 里没有那一格（单组输入时账本**刻意**不写进产物 —— I93 的 hash 中性），
+    # 所以主 case 的身份由调用方递进来（`Verifier` 那条路）。这不是第二个判定口径: 递进来的
+    # 就是**同一个** `case_key(...)` 的返回值，本函数仍是唯一那份账。
+    hint = str(case_key_hint or "")
+    if hint:
+        return {hint: speedup_hint}
+    return {}
+
+
+PERF_BASIS_OBJECTIVE = "objective"
+PERF_BASIS_PRIMARY_CASE = "primary_case"
+
+
+def performance_verdict(min_speedup: float, *, aggregate: str = "",
+                        case_weights=(), case_speedups=None,
+                        primary_speedup: Optional[float] = None,
+                        max_regression=(), regression_over_limit_value=None,
+                        ) -> Tuple[Optional[bool], str, str, Optional[float]]:
+    """§16 收口: 性能面的**成功标准**是什么 —— 目标函数进门槛（CHECKLOG I95）
+
+    设计 §16 的反模式点名的是「**用单形状的加速比作为成功标准**」；§3.4 说性能 =
+    `cases` + 权重 + 聚合成目标函数；§6.2 条款 3 说逐 shape 的硬回退**优先于**聚合。
+    这个函数就是这三句话的判据面，返回 `(passed, basis, why, value)`：
+
+    * **声明了目标函数**（`case_weights` 或 `aggregate` 有其一）⇒ `basis="objective"`：
+      - 目标函数**未确立**（权重或口径缺一半 / 本次没量全 / 非正加速比进不了几何平均）
+        ⇒ `passed=False`（**fail-closed**）—— 声明了目标函数就是承诺按它评，「评不出来」
+        不是「没有判据」而是「**没有证据说达标**」。放它过去等于允许「声明了分布、
+        实际按单形状过」；
+      - 判 `value < min_speedup` ⇒ `False`；逐 case 硬回退越限（条款 3）⇒ `False`；
+      - **不再**顺带要求主 case 也达标: 主 case 只是分布里的一条（拿它当标准正是 §16 的
+        反模式）。
+    * **没声明**（两样都空）⇒ `basis="primary_case"`：退回今天的口径 `主 case 加速比 >==
+      门槛`，并把「**§16 没对它收口**」写进理由 —— 这台机器上仍然存在以单形状为成功标准
+      的路，但它必须是**看得见的**（产物里有 `basis`），不是默认。
+
+    `regression_over_limit_value` 由调用方算好传进来（判据在 `regression_over_limit`,
+    一个事实一处生产）; `max_regression` 只用来把「回退那条判据本身没立起来」写进理由。
+    """
+    declared = bool(case_weights) or bool(aggregate)
+    if not declared:
+        value = None if primary_speedup is None else float(primary_speedup)
+        passed = float(primary_speedup or 0.0) >= float(min_speedup)
+        mark = ">=" if passed else "<"
+        if primary_speedup is not None:
+            why = (f"契约没声明目标函数 ⇒ 退回**主 case** 加速比 {mark} 门槛 "
+                   f"—— ⚠️ §16 未收口: 这一次的成功标准是**单形状**的")
+        else:
+            why = ("契约没声明目标函数, 也没有加速比读数 ⇒ 退回主 case 口径判不了 ⇒ 不通过"
+                   "（⚠️ §16 未收口: 成功标准是单形状的）")
+        return passed, PERF_BASIS_PRIMARY_CASE, why, value
+    value, why_obj = aggregate_speedup(case_weights, case_speedups or {}, aggregate)
+    # `aggregate_speedup` 的理由是**一条一条**的（可能多条）—— 印成元组会让人以为
+    # 那是数据结构; 拼成一句（判据面读的是那句话，不是它的形状）。
+    why_text = "；".join(str(x) for x in why_obj) if isinstance(why_obj, (tuple, list)) else str(why_obj)
+    if value is None:
+        return (False, PERF_BASIS_OBJECTIVE,
+                f"契约声明了目标函数, 但目标函数未确立 ⇒ 不通过（声明即承诺按它评）: {why_text}",
+                None)
+    if regression_over_limit_value is True:
+        return (False, PERF_BASIS_OBJECTIVE,
+                f"逐 case 硬回退越限 (§6.2 条款 3: 回退优先于聚合) ⇒ 不通过; 目标函数值 {value:.4g}",
+                value)
+    passed = value >= float(min_speedup)
+    why = (f"目标函数 {aggregate} = {value:.4g} "
+           f"{'>=' if passed else '<'} 门槛 {float(min_speedup):.4g}")
+    if regression_over_limit_value is None and max_regression:
+        why += "; ⚠️ 回退判据本次未确立（有声明过的 case 没量到）"
+    return passed, PERF_BASIS_OBJECTIVE, why, value
+
 def regression_over_limit(max_regression, speedups,
                           target_metric: str = "speedup_vs_baseline",
                           ) -> Tuple[Optional[bool], Tuple[str, ...]]:

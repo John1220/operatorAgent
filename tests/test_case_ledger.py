@@ -377,10 +377,14 @@ class TestOneProducerPerFact(unittest.TestCase):
         self.assertEqual(1, self._src("operator_agent/eligibility.py")
                          .count("def aggregate_speedup("))
 
-    def test_the_ledger_reader_has_one_definition_and_one_caller(self):
-        cu = self._src("operator_agent/conductor.py")
-        self.assertEqual(1, cu.count("def _case_speedups_from_metrics("))
-        self.assertEqual(1, cu.count("self._case_speedups_from_metrics("))
+    def test_the_ledger_reader_has_one_definition_and_no_second_copy(self):
+        """收口在判据层（I95 搬家: 评测侧的门也要读这份账, 而门里不 import 调用方）"""
+        el = self._src("operator_agent/eligibility.py")
+        self.assertEqual(1, el.count("def case_speedups("))
+        self.assertEqual(1, el.count("def performance_verdict("))
+        for rel in ("operator_agent/conductor.py", "operator_agent/verifier.py"):
+            self.assertNotIn("def case_speedups(", self._src(rel), rel)
+        self.assertIn("case_speedups(metrics)", self._src("operator_agent/conductor.py"))
 
     def test_the_reporter_derives_nothing(self):
         rp = self._src("operator_agent/report.py")

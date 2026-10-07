@@ -34,7 +34,7 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .confirm import UnableItem, UnableToEstablish
 
@@ -367,6 +367,38 @@ def _implementation_decision_lines(m: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _performance_verdict_lines(m: Dict[str, Any]) -> List[str]:
+    """§16 收口那一格：这一次性能面的**成功标准是什么**（CHECKLOG I95）
+
+    三态: 老产物没有这一格（`performance_verdict`）⇒ 一个字都不印 —— 不许拿「没这一格」
+    去猜「按主 case 判的」。`basis` 是这一片唯一的新不变量: 契约声明了目标函数就判目标
+    函数；没声明才退回主 case，并且**把「§16 没对它收口」印出来** —— 单形状成功标准在
+    这台机器上仍然可能发生，但它必须是看得见的，不是默认。
+    """
+    v = m.get("performance_verdict")
+    if not isinstance(v, Mapping):
+        return []
+    verdict = "过" if v.get("passed") is True else ("不过" if v.get("passed") is False else "未确立")
+    if v.get("basis") == "objective":
+        value = v.get("value")
+        shown = f"{float(value):.4g}" if isinstance(value, (int, float)) else "未确立"
+        floor = v.get("min_speedup")
+        # 门槛只在**它真是一个数**的时候印: 老产物/局部载荷里可能没有这一格, 印一个
+        # 字面的 `None` 会让人以为「门槛是 None」是一条判据。
+        floor_text = f"(门槛 ≥ {floor})" if isinstance(floor, (int, float)) else ""
+        out = [f"- 性能结论依据 (§16): **目标函数** = {shown} {floor_text} ⇒ {verdict}"
+               f"（契约声明了目标函数 ⇒ 判的是分布, 不是单形状）"]
+    else:
+        out = [f"- 性能结论依据 (§16): **主 case 加速比** ⇒ {verdict}"
+               f" —— ⚠️ 契约没声明目标函数 ⇒ 这一次的成功标准是**单形状**的（§16 未对它收口）"]
+    if v.get("why"):
+        out.append(f"  - {v['why']}")
+    if v.get("cases") is not None:
+        out.append(f"  - 本次账本里的 case 数: {v.get('cases')}"
+                   + ("（逐 case 硬回退判据: " + _tri(v.get("regression_over_limit")) + "）"
+                      if "regression_over_limit" in v else ""))
+    return out
+
 def _case_input_lines(m: Dict[str, Any]) -> List[str]:
     """§3.4 的**输入来源**与「契约↔本次」对账（三态：契约没声明 ⇒ 不印）
 
@@ -444,6 +476,7 @@ def _best_known_good(artifact: Any, m: Dict[str, Any]) -> List[str]:
         out.append(f"- 循环停因: `{stop.get('reason')}` "
                    f"(第 {stop.get('round')} 轮) {stop.get('detail') or ''}".rstrip())
     out += _case_input_lines(m)
+    out += _performance_verdict_lines(m)
     out += _objective_lines(m)
     out += _implementation_decision_lines(m)
     out.append("")
