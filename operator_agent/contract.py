@@ -23,6 +23,11 @@ import math
 from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping, Optional
 
+# `BenchmarkCase` / `TensorSpec` 与 **case 身份** 同处一个模块（`bench_cases`）：身份与声明
+# 必须一起改，分两个模块迟早会漂。`case_key` 从这里**再导出**（`contract.case_key` 仍是合法
+# 名字 ⇒ verifier / conductor / tests 的老调用点一字不动；定义搬家的理由见 I94）。
+from .bench_cases import (BenchmarkCase, BenchCaseError, TensorSpec,  # noqa: F401
+                          case_key, cases_from_shapes, known_layouts)
 
 class ContractError(ValueError):
     """契约不可判定 / 哈希不匹配 —— 失败关闭, 不猜"""
@@ -90,34 +95,9 @@ class ShapeDist:
         return errs
 
 
-def case_key(inputs: Any) -> str:
-    """一次评测的 **case 身份** = 输入集的形状签名（`A=64x64|B=64x64`）
-
-    §6.2 条款 2 要求「候选须在**全部**形状上通过」，条款 4 要求 `required_cases` 进契约
-    hash；本仓要用它判「所有必判 case 正确」就必须先能回答**本次评的是哪一条 case**。
-    这个函数就是那个身份：按输入名排序 ⇒ 同一组输入任何时候都是同一个 key，产物里可离线
-    复算、可逐字比对。
-
-    为什么不是 `ShapeDist` 里那个 kernel 级 shape：设计 §6.2 的 case 是 `BenchmarkCase`
-    （带**具体输入**的那一条），而今天 `ShapeDist` 只参与校验与哈希（§3.4 的欠账），实测
-    还有「契约声明 256x256x256、本次评的是 64x64」的产物 —— 拿它当身份会让「评过没有」
-    永远判不了。两个空间的合一是 `BenchmarkCase` 进契约那天的事（CHECKLOG I92）。
-
-    三态：形状取不到（值没有 `.shape`）⇒ 那一位写 `?`（**不是** 0，也不是省略）；
-    `inputs` 不是映射或为空 ⇒ 返回空串 = **没有 case**（调用方按「没判过」处理，
-    **不许**拿空串去匹配 `required_cases`）。
-    """
-    if not isinstance(inputs, Mapping):
-        return ""
-    parts = []
-    for name in sorted(inputs):
-        shape: tuple = ()
-        try:
-            shape = tuple(int(d) for d in (getattr(inputs[name], "shape", None) or ()))
-        except (TypeError, ValueError):
-            shape = ()
-        parts.append(f"{name}=" + ("x".join(str(d) for d in shape) if shape else "?"))
-    return "|".join(parts)
+# `case_key` 的定义在 `bench_cases.py`（I94 搬家：与 `BenchmarkCase` 同处 ⇒ 数组路径与
+# 声明路径**同一个函数**）。这里只是再导出，老调用点（`from .contract import case_key`）
+# 一字不动。
 
 
 #: §6.2 的**聚合口径**（目标函数）。设计原文给的是
@@ -145,6 +125,12 @@ class FrozenContract:
     min_speedup: float
     target_metric: str = "speedup_vs_baseline"   # 吞吐 / 延迟 / 显存 / 加速比
     required_caps: tuple = ()                    # Cap.value 字符串
+    #: §3.4 的 `BenchmarkCase`：**带具体输入**的那一条 case（`(BenchmarkCase, ...)`）。
+    #: 空 tuple = **契约没声明具体输入**（老契约）⇒ 评测的输入由调用方给，case 身份只能
+    #: 事后从数组读（`case_key`）。声明了 ⇒ 契约**拥有输入**（`materialize()` 造得出同一组
+    #: 数组），且 `required_cases` / `max_regression` / `case_weights` 的 key 必须都指向这些
+    #: case（CONTRACT_LINT 收紧）。进 hash：**评的是什么输入**也是判据的一部分。
+    cases: tuple = ()
     #: §6.2 条款 2/4：必须参与判决的 case（`case_key` 字符串，缺一不可）。
     #: 空 tuple = **契约没声明**（老契约）⇒ 判据按「未确立」处理，不是「都通过了」。
     required_cases: tuple = ()
@@ -172,6 +158,12 @@ class FrozenContract:
             "target_metric": self.target_metric,
             "required_caps": sorted(self.required_caps),
         }
+        # §3.4：**具体输入**进 hash（同「空声明不进」的纪律）。声明的形状/dtype/seed 改一个
+        # 字就是另一份判据 —— 「评的是哪组输入」被悄悄换掉而 hash 不变，是最难发现的一类
+        # 判据漂移（I94）。⚠️ case 身份仍是**形状签名**（I92 的读法）: 同形状不同 dtype 的两条
+        # case 在身份上分不开 ⇒ CONTRACT_LINT 直接拒绝（见 `_lint_cases`）。
+        if self.cases:
+            d["cases"] = [c.content_dict() for c in self.cases]
         # §6.2 条款 4：这两项**全部进契约 hash** —— 判据变成可改的常量就等于没有判据。
         # 但**空的声明不进**：空 = 没声明（判据面按「未确立」走），与本片之前冻结的契约
         # 是同一份判据内容 ⇒ 同一个 hash（那样旧载荷还能被 `load_dict` 复盘，而
@@ -187,6 +179,17 @@ class FrozenContract:
         if self.aggregate:
             d["aggregate"] = str(self.aggregate)
         return d
+
+    def case(self, key: str) -> Optional[BenchmarkCase]:
+        """这条 key 对应的**具体输入**；没声明 / 没这条 ⇒ `None`（不造一个空壳出来）
+
+        三态同族：`None` = **契约没声明这条 case 的输入**（老契约，或走「调用方自带输入」那条
+        路），此时输入从哪来由调用方回答（`metrics["case_source"]`）。
+        """
+        for item in self.cases:
+            if item.key() == str(key):
+                return item
+        return None
 
     def regression_limit(self, case: str) -> Optional[float]:
         """这条 case 声明的允许回退比例；没为它声明 ⇒ `None`（**不是** 0）
@@ -239,6 +242,49 @@ def _weight_pairs(raw) -> tuple:
     items = raw.items() if isinstance(raw, Mapping) else raw
     return tuple((str(k), v) for k, v in items)
 
+
+def _lint_cases(cases, required_cases, max_regression, case_weights) -> list:
+    """§3.4 的 `cases` 进契约前的 CONTRACT_LINT（失败关闭 + 一个空间）。
+
+    两条**收紧**（只在声明了 cases 时生效 ⇒ 老契约一字不受影响）：
+
+    1. **身份分不开就拒绝**：case 身份是**形状签名**（I92 的读法）⇒ 同形状不同 dtype 的两条
+       case 会是同一个 key，账本与判据里都分不开 ⇒ 拒绝冻结（想分开就得把 dtype 并进身份，
+       那会改已发布的 key 格式 ⇒ 另开一片）。
+    2. **key 空间必须指向声明过的 case**：`required_cases` / `max_regression` / `case_weights`
+       里出现一个不在 `cases` 里的 key ⇒ 拒绝冻结。契约一旦拥有输入，「这条 key 是哪组输入」
+       就不该再靠猜 —— 指向不存在的 case 的判据是一条永远判不了的判据（I92 的欠账）。
+    """
+    errs = []
+    keys = []
+    for item in cases or ():
+        if not isinstance(item, BenchmarkCase):
+            errs.append(f"cases 里有一项不是 BenchmarkCase: {type(item).__name__}")
+            continue
+        errs += [f"case[{item.name!r}]: {e}" for e in item.validate()]
+        keys.append(item.key())
+    if not keys:
+        return errs
+    dupes = sorted({k for k in keys if keys.count(k) > 1})
+    if dupes:
+        errs.append(f"cases 里有两条身份相同的 case（身份 = 形状签名）: {dupes}"
+                    " ⇒ 账本与判据都分不开 ⇒ 拒绝冻结")
+    declared = set(keys)
+    for key in required_cases or ():
+        if isinstance(key, str) and key and key not in declared:
+            errs.append(f"required_cases 指向的 case {key!r} 不在契约声明的 cases 里"
+                        " ⇒ 拒绝冻结")
+    for label, items in (("max_regression", max_regression or ()),
+                         ("case_weights", case_weights or ())):
+        for item in items:
+            try:
+                key = item[0]
+            except (TypeError, ValueError):
+                continue   # 形状不对由 `_lint_case_declarations` 报, 这里不抢答
+            if isinstance(key, str) and key and key not in declared:
+                errs.append(f"{label} 指向的 case {key!r} 不在契约声明的 cases 里"
+                            " ⇒ 拒绝冻结")
+    return errs
 
 def _lint_case_declarations(required_cases, max_regression,
                             case_weights=(), aggregate="") -> list:
@@ -300,7 +346,8 @@ def freeze(kernel_type: str,
            required_cases=(),
            max_regression=(),
            case_weights=(),
-           aggregate: str = "") -> FrozenContract:
+           aggregate: str = "",
+           cases=()) -> FrozenContract:
     """CONTRACT_LINT + 冻结。任何 validate 失败都抛 ContractError —— **失败关闭**。
 
     「不可判定就交还给人」(设计 §10.1 REJECT): 这里不猜默认值。缺数值语义的契约
@@ -319,6 +366,7 @@ def freeze(kernel_type: str,
     errs += [f"shapes: {e}" for e in shapes.validate()]
     errs += _lint_case_declarations(required_cases, max_regression,
                                     case_weights, aggregate)
+    errs += _lint_cases(cases, required_cases, max_regression, case_weights)
     if errs:
         raise ContractError("契约不可判定: " + "; ".join(errs))
 
@@ -331,6 +379,8 @@ def freeze(kernel_type: str,
         min_speedup=float(min_speedup),
         target_metric=target_metric,
         required_caps=tuple(sorted(required_caps or ())),
+        # 顺序无语义 ⇒ 按**身份**排序（同「同内容两份拷贝必须同哈希」那条要求）。
+        cases=tuple(sorted(cases or (), key=lambda c: c.key())),
         notes=notes,
         # 顺序无语义 ⇒ 规范化成「排序去重」：同一份判据不该有两种 hash（同内容两份拷贝
         # 必须同哈希是契约哈希的第一条要求, 见模块 docstring）。
@@ -349,6 +399,7 @@ def freeze(kernel_type: str,
         min_speedup=c.min_speedup,
         target_metric=c.target_metric,
         required_caps=c.required_caps,
+        cases=c.cases,
         required_cases=c.required_cases,
         max_regression=c.max_regression,
         case_weights=c.case_weights,
@@ -394,6 +445,9 @@ def load_dict(payload: Mapping[str, Any]) -> FrozenContract:
             max_regression=_regression_pairs(payload.get("max_regression")),
             case_weights=_weight_pairs(payload.get("case_weights")),
             aggregate=str(payload.get("aggregate") or ""),
+            # 具体输入（老载荷没有这个键 ⇒ 空 = 没声明，输入由调用方给）
+            cases=tuple(BenchmarkCase.from_dict(d)
+                        for d in (payload.get("cases") or ())),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ContractError(f"无法从载荷重建契约: {exc}") from exc
@@ -418,6 +472,11 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
     `task.constraints` **透传**: 任务侧是唯一一处「契约与输入同时在手」的地方
     (harness 既建 task 又建 inputs), 声明从这里进契约 ⇒ 进 hash ⇒ 判据不可改。
     任务没声明 ⇒ 空 (**未声明**), 判据面按「未确立」走 —— 不替调用方补默认值。
+
+    **§3.4 起契约还拥有输入**（I94）: 任务声明了 `shapes`（或直接给 `cases` 声明）⇒ 按
+    `bench_cases.cases_from_shapes` 派生 `BenchmarkCase`（**具体输入**），进 hash；派生出的
+    全部 case 在没有显式 `required_cases` 时就是「全部必判」（§3.4 规范 2 的原话）。两条
+    声明同时给时必须对得上，未知 kernel_type 的布局一律**拒绝**（不猜）。
     """
     import numpy as np
     from .schemas import Precision, TaskSchema  # noqa: F401
@@ -428,21 +487,59 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
     dtype_s = dtype or (getattr(prec, "value", None) or "fp32")
     max_error = float(getattr(cons, "max_error", 1e-4) or 1e-4)
     min_speedup = float(getattr(cons, "min_speedup", 1.0) or 1.0)
+    # ── §3.4: 形状分布 → **具体输入**（`BenchmarkCase`）──
+    #
+    # 任务**没声明**形状分布 ⇒ 契约里仍是那个代表形状（与本片之前**同一份判据内容** ⇒
+    # 同一个 hash，老产物照旧复盘），也不派生任何 case（输入由调用方给）。
+    # 任务**声明了** shapes ⇒ 契约按它派生 cases: 契约从此**拥有输入**。未知布局的
+    # kernel_type 一律拒绝（不猜 —— 猜错会让「评的是什么」静默漂移）。
+    declared_shapes = tuple(getattr(cons, "shapes", ()) or ())
+    shape_entries = (tuple((tuple(int(d) for d in s), 1.0) for s in declared_shapes)
+                     if declared_shapes else (((64, 64, 64), 1.0),))
+    raw_cases = tuple(getattr(cons, "cases", ()) or ())
+    cases = ()
+    if raw_cases:
+        try:
+            # 两条都收: JSON 原生的 dict（落盘/传输）与进程里的 `BenchmarkCase`（真机驱动）
+            cases = tuple(item if isinstance(item, BenchmarkCase)
+                          else BenchmarkCase.from_dict(item) for item in raw_cases)
+        except BenchCaseError as exc:
+            raise ContractError(f"任务声明的 cases 读不出来: {exc}") from exc
+    if declared_shapes:
+        derived = cases_from_shapes(kt, shape_entries, dtype_s)
+        if derived is None:
+            raise ContractError(
+                f"任务声明了 shapes, 但 kernel_type={kt!r} 没有输入布局表 ⇒ 造不出具体输入"
+                f"（不猜布局）; 有布局的是 {known_layouts()}")
+        if cases and {c.key() for c in cases} != {c.key() for c in derived}:
+            raise ContractError(
+                "任务同时声明了 shapes 与 cases, 但两处派生的 case 身份对不上: "
+                f"{sorted(c.key() for c in cases)} vs {sorted(c.key() for c in derived)}"
+                " ⇒ 拒绝冻结（两个真相来源迟早会漂）")
+        if not cases:
+            cases = derived
+    required_cases = tuple(getattr(cons, "required_cases", ()) or ())
+    if cases and not required_cases:
+        # §3.4 规范 2 的**原话**是「候选须在**全部**形状上通过」—— 声明了形状集/输入集，
+        # 那个「全部」就是它们。这不是替人补默认值: 派生结果写进契约（进 hash）⇒ 在产物
+        # 里看得见，而且**没声明** shapes/cases 的任务一个字都不动（仍三态未确立）。
+        required_cases = tuple(c.key() for c in cases)
     return freeze(
         kernel_type=kt,
         dtype_semantics=DTypeSemantics(dtype=dtype_s, tf32=tf32,
                                        accum="fp32" if dtype_s in ("fp32", "fp16") else "fp32"),
         baseline=BaselineDef(name=baseline_name, same_device=True,
                              same_window=True, same_dtype_semantics=True),
-        shapes=ShapeDist(entries=(((64, 64, 64), 1.0),)),
+        shapes=ShapeDist(entries=shape_entries),
         max_error=max_error,
         min_speedup=min_speedup,
         required_caps=tuple(sorted(
             getattr(getattr(task, "target", None), "required_caps", ()) or ()
         )),
-        required_cases=tuple(getattr(cons, "required_cases", ()) or ()),
+        required_cases=required_cases,
         # 任务侧写的是 dict（JSON 原生），冻结契约收的是 tuple-of-pairs（可哈希）
         max_regression=_regression_pairs(getattr(cons, "max_regression", None)),
         case_weights=_weight_pairs(getattr(cons, "case_weights", None)),
         aggregate=str(getattr(cons, "aggregate", "") or ""),
+        cases=cases,
     )

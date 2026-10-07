@@ -51,7 +51,7 @@ import numpy as np  # noqa: E402
 
 from operator_agent.backend_caps import Cap  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.contract import case_key  # noqa: E402
+from operator_agent.bench_cases import case_from_inputs, case_key  # noqa: E402
 from operator_agent.run_layout import new_run_root  # noqa: E402
 from operator_agent.llm_client import (  # noqa: E402
     LLMClient, format_sampling_configs)
@@ -115,7 +115,7 @@ def llm_from_config() -> LLMClient:
 
 
 def _task(kernel_type: str, precision: Precision, *, required_cases=(),
-          max_regression=None, case_weights=None) -> TaskSchema:
+          max_regression=None, case_weights=None, cases=()) -> TaskSchema:
     return TaskSchema(
         task_type=TaskType.OPERATOR_GENERATION,
         source=SourceSpec(kernel_type=kernel_type, complexity=TaskComplexity.MEDIUM),
@@ -131,7 +131,9 @@ def _task(kernel_type: str, precision: Precision, *, required_cases=(),
                                    required_cases=tuple(required_cases or ()),
                                    max_regression=dict(max_regression or {}),
                                    case_weights=dict(case_weights or {}),
-                                   aggregate=CASE_AGGREGATE),
+                                   aggregate=CASE_AGGREGATE,
+                                   # §3.4（I94）: 让**契约拥有输入** —— 声明由这组输入派生
+                                   cases=tuple(cases or ())),
     )
 
 
@@ -1239,12 +1241,16 @@ def run_one(label, kernel_type, precision, shape, backend, rounds, run_root=""):
         # 发布的那一格**同一个函数**（`contract.case_key`）—— 两处各写一个格式就会漂。
         inputs = inputs_for(kernel_type, shape)
         _case = case_key(inputs)
+        # §3.4（I94）: 契约**拥有输入** —— 声明从这组输入自己派生（`case_from_inputs` 读形状
+        # 与数值语义），所以「契约说评什么」与「本次评了什么」不可能对不上。未知布局的算子
+        # 也能这样声明（不依赖那张布局表）。
+        _declared = case_from_inputs(inputs, name=f"{kernel_type}-{shape}")
         art = conductor.execute(
             _task(kernel_type, precision, required_cases=(_case,),
                   max_regression={_case: MAX_REGRESSION},
                   # 权重与必判清单是**同一条 case**（同一个 `_case` 变量）: 声明与输入
                   # 来自同一次构造，不许各写一个字符串。
-                  case_weights={_case: SINGLE_CASE_WEIGHT}),
+                  case_weights={_case: SINGLE_CASE_WEIGHT}, cases=(_declared,)),
             inputs, target_gflops=0.0)
     except Exception as exc:  # noqa: BLE001
         # 一次 ssh 抖动不该毁掉整场测量: 记成崩溃样本, 继续下一个

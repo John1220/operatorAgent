@@ -12,7 +12,7 @@ import time
 
 # 聚合口径的词表与契约**共用一份常量**（只有一个来源, 免得任务侧与契约侧漂成两个
 # 词表）。`contract` 不 import 本模块 ⇒ 无环（见那边的模块 docstring）。
-from .contract import CASE_AGGREGATES
+from .contract import CASE_AGGREGATES, BenchCaseError, BenchmarkCase
 from .backend_caps import Cap
 
 
@@ -259,6 +259,18 @@ class TargetSpec:
         return errors
 
 
+def _as_case(item):
+    """`ConstraintSpec.cases` 的一项 → `BenchmarkCase`
+
+    两条都收：**JSON 原生的 dict**（落盘/传输那条路）与**已经在进程里的 `BenchmarkCase`**
+    （真机驱动那条路 —— 声明就是从它手里那组输入派生的，再往返一趟 JSON 只会多一个会漂的
+    环节）。读不出来抛 `BenchCaseError`（失败关闭）。
+    """
+    if isinstance(item, BenchmarkCase):
+        return item
+    return BenchmarkCase.from_dict(item)
+
+
 @dataclass
 class ConstraintSpec:
     """约束条件"""
@@ -276,6 +288,15 @@ class ConstraintSpec:
     case_weights: dict = field(default_factory=dict)
     #: §6.2 的聚合口径（`contract.CASE_AGGREGATES` 之一）。空串 = 没声明。
     aggregate: str = ""
+    #: §3.4 的**形状分布**：kernel 级 shape（matmul 是 `(M,N,K)`、归一化/逐元素是 `(M,N)`）。
+    #: 空 = 任务没声明（契约里仍是老的代表形状，不派生 case）。声明了 ⇒ 契约按它派生
+    #: `cases`（**具体输入**）；并且 §3.4 规范 2 的原话是「候选须在**全部**形状上通过」⇒
+    #: 派生出的全部 case 进 `required_cases`（除非任务自己显式声明了 `required_cases`）。
+    shapes: tuple = ()
+    #: §3.4 的 `BenchmarkCase`（**具体输入**）：`({"name":…, "seed":…, "tensors": [{"name":…,
+    #: "shape":[…], "dtype":…}, …]}, …)`（JSON 原生 —— 任务要能落盘、能过传输）。与 `shapes`
+    #: 同时声明时两处必须对得上（派生 key 集合一致），否则**拒绝冻结**（两个真相来源会漂）。
+    cases: tuple = ()
 
     def validate(self) -> list[str]:
         errors = []
@@ -325,6 +346,29 @@ class ConstraintSpec:
                     _w_sum += float(weight)
             if self.case_weights and _w_sum <= 0:
                 errors.append("constraints.case_weights 的权重之和必须 > 0")
+        # §3.4 的形状分布与具体输入：读不出来就报错（同 `max_regression` 那条纪律 —— 一条
+        # 读不出来的声明比「没声明」危险得多，契约会以为自己有量具）。
+        if self.shapes and not isinstance(self.shapes, (list, tuple)):
+            errors.append("constraints.shapes 必须是 shape 序列, "
+                          f"实际 {type(self.shapes).__name__}")
+        else:
+            for shape in self.shapes or ():
+                if not isinstance(shape, (list, tuple)) or not shape:
+                    errors.append(f"constraints.shapes 里有一条不是非空 shape: {shape!r}")
+                    continue
+                for dim in shape:
+                    if not isinstance(dim, int) or isinstance(dim, bool) or dim < 0:
+                        errors.append(f"constraints.shapes 的维度必须是非负 int: {shape!r}")
+                        break
+        if self.cases and not isinstance(self.cases, (list, tuple)):
+            errors.append("constraints.cases 必须是 case 声明序列, "
+                          f"实际 {type(self.cases).__name__}")
+        else:
+            for item in self.cases or ():
+                try:
+                    _as_case(item)
+                except BenchCaseError as exc:
+                    errors.append(f"constraints.cases 里有一条读不出来: {exc}")
         # 聚合口径走契约的词表（同一份常量, 免得任务侧与契约侧漂成两个词表）
         if self.aggregate and self.aggregate not in CASE_AGGREGATES:
             errors.append(f"constraints.aggregate 不在词表里 {CASE_AGGREGATES}, "
@@ -373,6 +417,13 @@ class TaskSchema:
             constraints_dict["case_weights"] = dict(self.constraints.case_weights)
         if self.constraints.aggregate:
             constraints_dict["aggregate"] = str(self.constraints.aggregate)
+        # §3.4 的两项（形状分布 / 具体输入）同一条纪律: **非空才写**。空 = 没声明 —— 老任务
+        # 载荷里本来也没有这两个键，于是「有↔无」在 to_dict 这一层也是可区分的。
+        if self.constraints.shapes:
+            constraints_dict["shapes"] = [[int(d) for d in s] for s in self.constraints.shapes]
+        if self.constraints.cases:
+            constraints_dict["cases"] = [_as_case(c).to_dict()
+                                         for c in self.constraints.cases]
         return {
             "task_id": self.task_id,
             "task_type": self.task_type.value,

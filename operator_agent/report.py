@@ -367,6 +367,25 @@ def _implementation_decision_lines(m: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _case_input_lines(m: Dict[str, Any]) -> List[str]:
+    """§3.4 的**输入来源**与「契约↔本次」对账（三态：契约没声明 ⇒ 不印）
+
+    `case_source` 空串 = 契约没声明具体输入（输入只能由调用方给）—— 那是老契约的形状，
+    印一行「契约没声明」会把「没这一格」和「有但为空」混起来；`case_match` 只在契约声明了
+    case 时才有这一格（没得对账 ≠ 对上了）。
+    """
+    source = _get(m, "case_source", None)
+    if source not in ("contract", "caller"):
+        return []
+    if source == "contract":
+        out = ["- 输入来源 (§3.4): **契约的 `cases`**（`materialize()` —— 评的就是契约里声明的那组）"]
+    else:
+        out = ["- 输入来源 (§3.4): 调用方给的数组（契约拥有输入那条路这次没走）"]
+    if "case_match" in m:
+        out.append(f"- 契约与本次对得上: {_tri(_get(m, 'case_match'))}"
+                   f"（契约手里 {_get(m, 'case_declared')} 组具体输入，本次评的每一组都在其中）")
+    return out
+
 def _objective_lines(m: Dict[str, Any]) -> List[str]:
     """§6.2 的**目标函数**（权重 + 聚合口径 + 那个数）—— **声明了才印**
 
@@ -424,6 +443,7 @@ def _best_known_good(artifact: Any, m: Dict[str, Any]) -> List[str]:
     if isinstance(stop, dict):
         out.append(f"- 循环停因: `{stop.get('reason')}` "
                    f"(第 {stop.get('round')} 轮) {stop.get('detail') or ''}".rstrip())
+    out += _case_input_lines(m)
     out += _objective_lines(m)
     out += _implementation_decision_lines(m)
     out.append("")

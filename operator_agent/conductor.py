@@ -1051,13 +1051,15 @@ class Conductor:
         resume_from: Optional[str] = None,
     ) -> KernelArtifact:
         """实际执行逻辑 (被 execute 的日志上下文包裹)"""
+        # §3.4 起**契约也拥有输入**（I94）: 调用方传数组（`dict` 或 `list[dict]`），或者
+        # **什么都不传** —— 那时输入由契约的 `cases` 逐个 `materialize()` 造出来。
         # §6.2 条款 2「候选须在**全部**形状上通过」: 调用方可以传**多组**输入
         # （`list[dict]`，每组 = 一条 case）。主 case = 第一组 —— **轮级的所有既有逻辑
         # 一个字节都不动**（轮轴 / 提示词 / 动作上下文 / 停因都按主 case 走）;
         # 而**验证链**拿的是整份列表: L2 逐组判正确性（条款 2 的正确性那半）、L3 逐 case
         # 量加速比（`Verifier._publish_case_ledger` 的账本）。
         # 代价是**声明的**: 传几组就量几组（线性增长）; 只传一组 = 与 I92 之前一字不差。
-        input_sets = list(test_inputs) if isinstance(test_inputs, list) else [test_inputs]
+        input_sets, case_source, declared_cases = self._resolve_input_sets(task, test_inputs)
         test_inputs = input_sets[0]
         backend_name = self.backend.label
         llm_info = f" (LLM: {self.llm})" if self.llm else ""
@@ -2484,6 +2486,16 @@ class Conductor:
                 # 读的就是这一格。没有输入 ⇒ 空串 = **没有 case**（判据按未确立走），
                 # 不拿别的键冒充（见 I92）。
                 artifact.benchmark_data["case_key"] = case_key(test_inputs)
+                # §3.4（I94）: **输入从哪来** + 「契约声明的 case」与「本次评的那几组」对不对
+                # 得上。三态: `case_source` 空串 = 契约没声明具体输入（老契约，输入只能由
+                # 调用方给）; `case_match` 只在契约声明了 case 时才有这一格（没声明 ⇒ 不写，
+                # 免得「没得对账」被读成「对上了」）。`case_declared` = 契约手里有几组具体输入。
+                artifact.benchmark_data["case_source"] = case_source
+                if declared_cases:
+                    evaluated = {case_key(item) for item in input_sets}
+                    artifact.benchmark_data["case_declared"] = len(declared_cases)
+                    artifact.benchmark_data["case_match"] = bool(
+                        evaluated and evaluated <= set(declared_cases))
 
             # 提取编译元信息 (Triton: num_warps, num_stages 等)
             l1 = next((r for r in all_verification_results if r.level == VerificationLevel.L1_COMPILE), None)
@@ -2997,6 +3009,50 @@ class Conductor:
                              getattr(r, "level", ""))).lower() == "l2"]
         return (all(bool(r.passed) for r in l2) if l2 else None)
 
+    def _resolve_input_sets(self, task, test_inputs):
+        """本次要评**哪些 case**、输入从哪来 —— 契约拥有输入 or 调用方给（I94）
+
+        返回 `(input_sets, case_source, declared_cases)`：
+
+        * 调用方给了数组 ⇒ 就是它（`case_source="caller"`）。契约声明了 case 时，产物里的
+          `case_match` 会说清「本次评的是不是契约里声明的那几条」;
+        * 调用方**没给** ⇒ 从契约的 `cases` 逐个 `materialize()`（`case_source="contract"`）。
+          契约拥有输入时，评测的输入就是契约里写的那一组 —— 挡住「针对调用方挑的 shape
+          特化」;
+        * 契约也没声明 case ⇒ **拒绝开工**：没有 case 可评，不许拿别的输入凑。`None` 在过去
+          本来就崩在更深处（一个 `TypeError`），这里把它变成一句说得清的拒绝。
+        """
+        contract = self._contract_for(task)
+        declared_cases = tuple(c.key() for c in contract.cases) if contract is not None else ()
+        if isinstance(test_inputs, list):
+            sets = list(test_inputs)
+        elif test_inputs is not None:
+            sets = [test_inputs]
+        else:
+            sets = []
+        if sets:
+            return sets, ("caller" if declared_cases else ""), declared_cases
+        if not declared_cases:
+            raise ValueError(
+                "没有输入，契约也没声明 cases ⇒ 没有 case 可评（不拿别的输入凑）: "
+                "要么显式传 test_inputs，要么在任务里声明 shapes/cases")
+        return [c.materialize() for c in contract.cases], "contract", declared_cases
+
+    @staticmethod
+    def _contract_for(task):
+        """从任务冻结契约；拿不到 ⇒ `None`（**三态**，不是「空契约」）
+
+        冻结失败**不在这里**抛：调用方给了输入时，契约只是判据面的另一条路（`_save_to_db`
+        会再算一次并比对 hash）。只有**依赖契约取输入**时才非它不可 —— 那条路由
+        `_resolve_input_sets` 自己拒绝（说得清为什么）。
+        """
+        if task is None:
+            return None
+        try:
+            from .contract import freeze_from_task
+            return freeze_from_task(task)
+        except Exception:  # noqa: BLE001 —— 契约不可判定 = 没有契约（不是「空判据」）
+            return None
     @staticmethod
     def _case_speedups_from_metrics(metrics: dict) -> dict:
         """从产物里读出「case → 本次加速比」的账（逐 case 账本优先, 退回单 case 那格）

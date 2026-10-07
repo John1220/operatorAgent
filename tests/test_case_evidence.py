@@ -406,7 +406,15 @@ class TestOneProducerPerFact(unittest.TestCase):
         return (Path(__file__).resolve().parents[1] / rel).read_text(encoding="utf-8")
 
     def test_the_case_identity_has_one_definition(self):
-        self.assertEqual(1, self._src("operator_agent/contract.py").count("def case_key("))
+        """一个定义（I94 起在 `bench_cases.py`，与 `BenchmarkCase` 同处）
+
+        `contract.case_key` 是**再导出**（老调用点一字不动）；定义只许有一处 —— 数组路径与
+        声明路径要是各写一份，「契约声明的 case」与「本次评的 case」迟早对不上。
+        """
+        total = (self._src("operator_agent/bench_cases.py").count("def case_key(")
+                 + self._src("operator_agent/contract.py").count("def case_key("))
+        self.assertEqual(1, total)
+        self.assertIn("from .bench_cases import", self._src("operator_agent/contract.py"))
 
     def test_the_two_faces_have_one_derivation_each(self):
         el = self._src("operator_agent/eligibility.py")
