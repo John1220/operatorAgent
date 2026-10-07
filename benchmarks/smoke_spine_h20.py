@@ -58,6 +58,7 @@ from operator_agent.kernel_db import KernelDatabase  # noqa: E402
 from operator_agent.measurement import Validity, Verdict, verdict  # noqa: E402
 from operator_agent.oracle import admit_to_corpus, evaluate  # noqa: E402
 from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
+from operator_agent.run_layout import new_run_root  # noqa: E402
 from operator_agent.schemas import (ConstraintSpec, KernelArtifact, Precision,  # noqa: E402
                                     SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
                                     TaskType, VerificationLevel)
@@ -441,7 +442,11 @@ def main() -> int:
     workdir = tempfile.mkdtemp(prefix="smoke14_kdb_")
     kernel_jsonl = str(Path(workdir) / "kernel_db.jsonl")
     my_db = KernelDatabase(jsonl_path=kernel_jsonl)
-    cond = Conductor(backend=backend, kernel_db=my_db, llm=None)
+    # §22.1 的布局根：这一跑也有自己的根（过门的候选落 `candidate/`，见
+    # `Conductor._materialize_candidate`）。基目录仍归本驱动（`output/`，gitignore 盖住）。
+    cond = Conductor(backend=backend, kernel_db=my_db, llm=None,
+                     run_root=new_run_root(str(ROOT / "output" / "smoke_spine_h20"),
+                                           "smoke14-8"))
     # J0 前提门 (同 `verify_corpus_honesty`): 注入的语料必须就是被写的那一个, 否则
     # 这一臂会污染仓库语料而自己的记账判据全绿 (那个探针真踩过)。
     if cond.kernel_db is not my_db or str(cond.kernel_db._jsonl) != kernel_jsonl:

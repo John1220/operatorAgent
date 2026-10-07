@@ -62,7 +62,7 @@ from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
                           ruler_note, verdict)
 from .agent_logger import capture_execution
 from .optimization_planner import OptimizationPlanner
-from .run_layout import RunLayout, run_layout
+from .run_layout import ROLE_CANDIDATE, RunLayout, run_layout
 from .exec_guard import Limits
 from .agent_runtime import (
     KIND_PROPOSE_SOURCE_PATCH, KIND_PROPOSE_TEMPLATE, KIND_REPAIR_COMPILE,
@@ -568,6 +568,44 @@ class Conductor:
             return KIND_REPAIR_COMPILE
         return KIND_PROPOSE_SOURCE_PATCH
 
+    @staticmethod
+    def _candidate_ext(task: TaskSchema) -> str:
+        """候选文件的后缀（`candidate/code.<ext>` 那一格）。
+
+        只有一处：§21 的 `Patch.path`（`candidate_path(run_root, ext)`）与 §22.1 落盘时写的
+        相对路径必须指向**同一个文件**，两处各写一份映射迟早对不上。今天三种 DSL 都是 `py`
+        （`cuda_c` 也走 Python 入口，见 §12 的模板后端），表外的值给 `py`。
+        """
+        return {"triton": "py", "cuda_c": "py", "python": "py"}.get(
+            (task.target.dsl or "python").lower(), "py")
+
+    def _materialize_candidate(self, code: str, task: TaskSchema) -> Optional[str]:
+        """把这一轮**过门**的候选写进 §22.1 的 `candidate/` 那一格（唯一写入口）
+
+        WHY（2026-10-06，切片 C）: `run_root` 有生产调用点之后，§21 的 `Patch.path` 变成
+        **真实绝对路径** —— 但那个路径上如果没有文件，§22.1 的权限位保护的就是零个产物，
+        `write_for` 也仍然零生产调用者（I82 的边界说的正是这一格：「声明 + 可运行守卫」）。
+        这一步把「判据指着的路径」与「盘上真实存在的产物」接起来。
+
+        三条刻意划下的线:
+        * **只写候选源码这一件**：`report` / `measurements` / `kernel_db` 那些既有产物今天
+          **不搬**（搬它们要连「谁生成/清理根」一起定，见状态文档 §22 行）；
+        * **只有过门的候选才落盘**：被 §21 拒掉的候选一个字符都不留（与「零远端载荷」同一条
+          纪律，见 I78）；
+        * **没有 `run_root` 就什么都不做**：那是今天的另一档形态（判据活在「声明」那一档），
+          不是「默认建一个相对 CWD 的布局」。
+
+        每轮的源码哈希与 patch 都在 `iteration_history` 里，所以同一个路径**每轮覆盖**是
+        被接受的语义（这个文件回答的是「这一轮的候选在哪」，不是历史版本库）。
+
+        Returns:
+            写入的绝对路径；没有布局时返回 `None`。
+        """
+        if not self.run_root or self.layout is None:
+            return None
+        rel = candidate_path("", self._candidate_ext(task))   # 角色路径 = 布局内相对路径
+        return self.layout.write_for(ROLE_CANDIDATE, rel, code)
+
     def _round_agent_action(self, *, round_num: int, round_action: str, route,
                             current_code: str, parent_code: str, task: TaskSchema,
                             error_shape: Optional[str],
@@ -599,8 +637,7 @@ class Conductor:
             rationale = envelope.rationale
             bottleneck = envelope.expected_bottleneck
             tools = envelope.requested_tools
-        ext = {"triton": "py", "cuda_c": "py", "python": "py"}.get(
-            (task.target.dsl or "python").lower(), "py")
+        ext = self._candidate_ext(task)
         patch: Optional[Patch] = Patch(path=candidate_path(self.run_root, ext),
                                        new_source=current_code,
                                        parent_source=parent_code or "")
@@ -1574,6 +1611,12 @@ class Conductor:
                 # 第二次提交放行 (真机实测: 第 3 轮那份夹带 torch 的候选过了门, 真的上了
                 # 远端编译, 只有 L2 的反作弊静态审计把它拦住)。
                 self._admitted_baseline = current_code
+                # §22.1 的落盘点：过门的候选**走唯一写入口**写进 `candidate/` 那一格
+                # （没有 `run_root` 时是空操作）。它让「§21 判据指着的那个路径」与
+                # 「盘上真实存在的产物」是同一个文件 —— 否则权限位保护的是零个产物。
+                _materialized = self._materialize_candidate(current_code, task)
+                if _materialized:
+                    print(f"  [§22.1] 候选已落盘: {_materialized}")
             if not _action_verdict.accepted:
                 print(f"\n[§21 Runtime] 动作被拒 (零 GPU 秒): "
                       f"{_action_verdict.refusal_note()}")

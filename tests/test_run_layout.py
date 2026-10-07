@@ -355,7 +355,8 @@ class TestOnlyOneDoorInTheHarness(unittest.TestCase):
         """接线也是不变量的一部分: 模块写得再好, 没人调就是死词汇"""
         src = (Path(__file__).resolve().parents[1]
                / "operator_agent" / "conductor.py").read_text(encoding="utf-8")
-        self.assertIn("from .run_layout import RunLayout, run_layout", src)
+        # 逐字钉住接线那一行（名字随调用点增长而变：§22.1 落盘那一格读 `ROLE_CANDIDATE`）
+        self.assertIn("from .run_layout import ROLE_CANDIDATE, RunLayout, run_layout", src)
         self.assertIn("self.layout = run_layout(self.run_root) if self.run_root.strip() else None",
                       src, "布局的创建点变了 —— 复核「一次 execute 一次」与「空根不建」")
         self.assertIn("self.layout: Optional[RunLayout] = None", src)

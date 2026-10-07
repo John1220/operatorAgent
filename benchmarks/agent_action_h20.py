@@ -50,6 +50,7 @@ import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
 from operator_agent import Conductor, LLMClient, RemoteExecutor  # noqa: E402
+from operator_agent.run_layout import new_run_root  # noqa: E402
 from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,  # noqa: E402
                                     TaskSchema, TaskComplexity, TaskType,
                                     TargetSpec, VerificationLevel)
@@ -172,6 +173,11 @@ def _llm_from_config():
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--rounds", type=int, default=3)
+    # §22.1 的布局根落点（一次运行一个新根，`new_run_root` 保证唯一）。
+    # 默认落在被 gitignore 的 `output/` 下：这一跑的目的是**留下可复核的候选文件**
+    # （§21 的 `Patch.path` 与盘上产物指向同一个文件），所以不往 /tmp 里塞。
+    ap.add_argument("--layout-dir", default=str(ROOT / "output" / "agent_action_h20"),
+                    help="§22.1 运行布局的基目录（默认 output/agent_action_h20）")
     args = ap.parse_args()
 
     real_llm = _llm_from_config()
@@ -200,7 +206,8 @@ def main() -> int:
 
     # 单路生成: 流水线的编译剪枝会把这份语法坏码换掉 (见 wiring 用例的注释)
     conductor = Conductor(backend=backend, llm=llm, max_optimize_rounds=args.rounds,
-                          use_coder_pipeline=False)
+                          use_coder_pipeline=False,
+                          run_root=new_run_root(args.layout_dir, "agent-action"))
     t1 = time.monotonic()
     art = conductor.execute(task, inputs, target_gflops=0.0)
     wall = round(time.monotonic() - t1, 1)

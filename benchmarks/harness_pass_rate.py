@@ -51,6 +51,7 @@ import numpy as np  # noqa: E402
 
 from operator_agent.backend_caps import Cap  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402
+from operator_agent.run_layout import new_run_root  # noqa: E402
 from operator_agent.llm_client import (  # noqa: E402
     LLMClient, format_sampling_configs)
 from operator_agent.measurement import (BAND_SAME, BAND_SPEC_DRIFT,  # noqa: E402
@@ -1190,8 +1191,13 @@ def record_rounds(history):
     return out
 
 
-def run_one(label, kernel_type, precision, shape, backend, rounds):
+def run_one(label, kernel_type, precision, shape, backend, rounds, run_root=""):
     """跑一次完整任务, 返回一份原始记录 (不聚合, 便于落盘复盘)
+
+    `run_root`（§22.1）: 一次运行一个布局根，由 `main` 用 `new_run_root(out_dir, label)`
+    算好传进来 —— 于是「哪一个目录是这一次运行的根」只有一处命名，而 `base_dir`（`out_dir`）
+    的清理/保留仍是本驱动的既有策略。**不传**时 `Conductor` 的形态回到「声明」（候选的角色
+    路径是 `candidate/code.<ext>`，不落盘）。
 
     **每次运行新建一个 LLMClient**: `CostTracker` 是挂在 client 上累加的, 共用一个
     client 会让 `metadata["llm_cost"]` 变成**从头到现在的累计值**而不是本次的值。
@@ -1208,7 +1214,8 @@ def run_one(label, kernel_type, precision, shape, backend, rounds):
            "llm_sampling": None, "wall_s": 0.0}
     t0 = time.time()
     try:
-        conductor = Conductor(backend=backend, llm=llm, max_optimize_rounds=rounds)
+        conductor = Conductor(backend=backend, llm=llm, max_optimize_rounds=rounds,
+                              run_root=run_root)
         art = conductor.execute(_task(kernel_type, precision),
                                 inputs_for(kernel_type, shape), target_gflops=0.0)
     except Exception as exc:  # noqa: BLE001
@@ -1300,7 +1307,8 @@ def main() -> int:
         for kernel_type, precision, shape in CASES:
             label = f"{kernel_type}/{precision.value}/{'x'.join(map(str, shape))}#{rep + 1}"
             print(f"\n{'=' * 62}\n[{label}] 真跑 (门槛 {MIN_SPEEDUP}x, 最多 {args.rounds} 轮)\n{'=' * 62}")
-            rec = run_one(label, kernel_type, precision, shape, backend, args.rounds)
+            rec = run_one(label, kernel_type, precision, shape, backend, args.rounds,
+                          run_root=new_run_root(str(out_dir), label))
             runs.append(rec)
             print(f"[{label}] ok={rec['ok']} 轮数={len(rec['rounds'])} "
                   f"最终通过={rec['final_all_passed']} rounds_to_pass={rec['rounds_to_pass']} "

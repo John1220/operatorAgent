@@ -1056,6 +1056,18 @@
 - **类别**：I · **状态**：⚠️ §22.2 第 1 项（编译超时）已在**本地两个后端**落地并接上阶段级上限链；
   上面四条欠账与其余八项一并登记
 
+### I88 · §22.1 的 `run_root` 一直是「声明 + 无生产调用点」：判据指着的路径上没有文件，而权限位保护的是**零个产物**
+- **原话**：设计 §22.1「候选**不能**写入 `contract/`、`harness/`、`baseline/`、`measurements/`、`report/`。这条不是『约定』，而是权限位：违反时写入必须**失败**」；而状态文档 §22.1 行（I82）当时的结论是「`run_root` 今天**没有生产调用点** ⇒ 当前形态是『声明 + 可运行守卫』」
+- **实证**：`Conductor(run_root=...)` 默认 `""`，仓内**零**生产调用点传它；`_round_agent_action` 早就把 `candidate_path(self.run_root, ext)` 写进 §21 的 `Patch.path`，但那个路径上**从来没有文件** —— 过门的候选只活在内存里，`write_for`（§22.1 的唯一写入口）因此是**零生产调用者**：权限位保护的是零个产物，`CrossRoleWrite` / `PermissionError` 两条判据谁也没在生产上开过火。落地当天还印证了 I86 的同族形状两次：① `new_run_root` 第一版用「**秒级**时间戳 + pid」，同一进程同一秒连续两次调用返回**同一个根**（实测两次都是 `run-20261007T070329Z-49156`）—— 正是它自己注释里要防的「上一轮候选被覆盖」，被新守卫当场抓住；② `tests/test_run_layout.py::test_the_module_is_wired_into_the_conductor` 逐字钉着旧的 `from .run_layout import RunLayout, run_layout`，接线改动后立刻红（这类「接线守卫钉字面量」的红是**要的**，不是噪音）
+- **后果**：不改会怎样 —— ①「§21 判据指着的路径」与「盘上产物」脱钩：权限位、角色判据、`Patch.path` 三条都在，但**没有对象**，「候选不能写 harness」这句话在产物上无法被检验（与 I82 的「证不了」叠加，两句话都会被读大）；② 一次真机运行结束后，复盘者拿到的是一个**指向不存在文件**的 `Patch.path`，而候选源码只留在 `result.json` 的字符串里 —— 与设计 §15「Agent 产生的每个 patch 都可审计、可回滚」直接冲突
+- **落地内容（2026-10-07，切片 C）**：
+  * `run_layout.new_run_root(base_dir, label)`：「一次运行一个新根」的**唯一出处**（微秒 UTC 时间戳 + 进程内单调序号 + pid；`label` 收敛成 `[A-Za-z0-9_-]`；空基目录抛 `LayoutError`）。`base_dir` 的归属仍是调用方（清理/保留是驱动的既有策略）
+  * `Conductor._materialize_candidate(code, task)`：**过门**的候选走 `write_for(ROLE_CANDIDATE, "candidate/code.<ext>", code)` 落盘；ext 的唯一映射是 `Conductor._candidate_ext`（§21 的 `Patch.path` 与落盘同源）；**没有 `run_root` 时是空操作**（返回 `None`，不默认建一个相对 CWD 的布局）；调用点在 `if _action_verdict.accepted:` **之内** ⇒ 被 §21 拒掉的候选一个字符都不留（与「零远端载荷」同一条纪律）
+  * 三个真机驱动接上：`benchmarks/harness_pass_rate.py`（每个 case 一个根）、`benchmarks/agent_action_h20.py`（新增 `--layout-dir`，默认 `output/agent_action_h20`）、`benchmarks/smoke_spine_h20.py`（§14-8 那台 `Conductor`）。⚠️ 刻意**不搬**其余产物：`report` / `measurements` / `kernel_db` 今天仍在布局之外 —— 搬它们要连「谁生成/清理根」一起定，不在这一片
+- **出处**：`operator_agent/run_layout.py`（`new_run_root` / `_RUN_SEQ` / 模块边界注释）、`operator_agent/conductor.py`（`_candidate_ext` / `_materialize_candidate` / accepted 分支里那两行）、三个驱动；守卫 `tests/test_run_root_wiring.py`（10 条）+ 既有 `tests/test_run_layout.py`（接线字面量随之更新）；变异表 `benchmarks/mut_specs/run_root_wiring.py` 6 行，标定读数（2026-10-07）：**行为 5/5 + 结构 1/1，0 逃逸**（M1 第一版只删序号、保留了微秒时间戳 ⇒ **逃逸**，改成「整个退回秒级 + pid 的第一版」才变红 —— 逃逸的行说明变异没有真的退回原缺陷，已修）
+- **仍欠的账（不许读成本条已收口）**：① 布局里只有**候选源码**这一件产物，`report` / `measurements` / `kernel_db` 未搬；② 「候选被**挡住**」仍证不了 —— 同 uid（本地 `exec` / 远端 `/tmp` + `exec_module`），属主能 `chmod` 回去；③ 远端 runner 侧零覆盖；④ 同一个路径**每轮覆盖**是被接受的语义（它回答「这一轮的候选在哪」，不是历史版本库）
+- **类别**：I · **状态**：⚠️ §22.1 的**生产接线**已落（根 + 落盘 + 三个驱动 + 守卫 + 变异），harness 侧权限位那一半见 I82，隔离本体仍归 §22.2（I85/I87）
+
 ## M — 公式 / 口径
 
 ### M1 · Roofline 峰值误用 sparse 规格或库实测值当 dense 上界
@@ -2310,6 +2322,7 @@
 | I85 | §22.2「候选执行时的资源隔离」今天只有**本地半片**: 五档状态 + 逐项强制读数是真的 (CPU/文件大小/进程数真拦得住, 设不上的如实报 `not_enforced`), **隔离不是** —— 同 uid、网络没关、无容器/cgroup/白名单, 内存本机设不上, 无 GPU watchdog/设备租约回收, 远端侧零覆盖 (编译超时那一项已在 I87 落地) | I | ⚠️ 本地半片已落 (40 守卫 + 14 行变异; **2026-10-06 复跑串行标定 14/14、0 逃逸**, M12 由结构分母升为行为见证人); 标定还修掉一处**量具余量**缺陷: M2 的证人只等 1.3s 而孙进程要「起解释器 + 1.0s」才落盘 ⇒ 机器一忙就被读成「逃逸」, 等待提到 2.5s 后复跑为真; 其余几项登记未做 |
 | I86 | 「离线全绿、真机必炸」的一类盲区: 漏导入 (`PATCH_KINDS`) 藏在**从来没有被离线执行到的那一支**里 —— `import operator_agent` 通过、离线套件全绿 (`and` 短路), 真机第 2 轮 `NameError` 把一次 6 次上限的 A/B 实验整跑带走 | I | ✅ 已修 (`PATCH_KINDS` 进名单 + 「把信封真喂进一次 `Conductor.execute`」的守卫 ⇒ 那一支必须被执行到) |
 | I87 | §22.2 的第一项「编译超时」一直是空的: 编译期在 harness 进程里 `exec` —— 候选在模块顶层死循环就能在**进 L1 之前**拖死评测进程 (运行期那道门在上游够不着); 同一片还抓出「异常跨进程重建只保住 `str()`、丢掉 `msg/lineno/offset/text`」与「阶段级上限只有声明没有消费端」 | I | ⚠️ 本地两个后端已落 (`run_compile` + 第 5 张词表 `MODES`; 契约逐字不变; `GuardRefusal` 第三档 + `compile_status=compile_*` + 签名桶 + 语料探针认本地; `Conductor`→后端→`exec_guard` 的上限链; 守卫 24 条 + 13 行变异); 欠账: L1 成功那趟的强制读数无发布面 / 账本里仍有 6 处候选侧进程内 exec / 远端零覆盖 / 编译档默认值未真机实测 |
+| I88 | §22.1 的 `run_root` 零生产调用点 ⇒ 判据指着的路径上没有文件、`write_for` 零调用者: 权限位保护的是**零个产物**; 且 `new_run_root` 第一版「秒级时间戳 + pid」同秒撞名 (自己注释要防的「上一轮候选被覆盖」) | I | ⚠️ 2026-10-07 切片 C: 三个真机驱动接根 + 过门候选落 `candidate/` (被拒不留痕) + 守卫 10 条 + 变异 6 行 (行为 5/5 + 结构 1/1, 0 逃逸); 只搬候选源码, 同 uid ⇒「候选被挡住」仍证不了 |
 | M1 | peak 用 sparse/实测当上界 | M/P | ✅ |
 | M2 | AI 用错 itemsize | M | ✅ |
 | M3 | Triton WS「仅 Blackwell」过时 | S | ✅ |

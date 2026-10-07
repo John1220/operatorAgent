@@ -52,11 +52,17 @@ run_root/
 - **它不是函数沙箱**：能执行什么、能联网、能起进程、能用多少内存，本模块一概不管
   （§22.2 清单里的编译超时 / 运行超时 / watchdog / quota / 网络关闭 / 进程树清理 /
   artifact 大小限制**都还没落地**）。
-- **`run_root` 今天没有生产调用方**：`Conductor(run_root=...)` 默认 `""`，仓内没有
-  一处生产调用点传它（传了才建布局）。所以这条不变量的当前形态是
-  「**声明 + 可运行的守卫**」，不是「线上已经在拦」。
+- **生产调用点只覆盖一部分驱动**：`Conductor(run_root=...)` 默认 `""`（不传就不建布局），
+  今天传它的是三个真机驱动 —— `benchmarks/harness_pass_rate.py`、
+  `benchmarks/agent_action_h20.py`、`benchmarks/smoke_spine_h20.py`（都经 `new_run_root`
+  一次运行一个新根）。**过门**的候选随之真的落进 `candidate/` 那一格
+  （`Conductor._materialize_candidate` 走 `write_for` 这唯一入口，被 §21 拒掉的候选一个
+  字符都不留）。⚠️ 没搬进布局的是**其余产物**（`report` / `measurements` / `kernel_db`），
+  而「候选被挡住」这件事仍然证不了（同 uid，见上一条）⇒ 当前形态是
+  「**候选源码有权限位 + 驱动有调用点**」，不是「线上已经在拦」。
 """
 
+import itertools
 import os
 import stat
 from dataclasses import dataclass
@@ -332,6 +338,41 @@ class RunLayout:
             for d in reversed(window):
                 os.chmod(d, PROTECTED_DIR_MODE)
         return final
+
+
+#: 「一次运行一个新根」的进程内单调序号。与「微秒时间戳 + pid」一起保证唯一性 ——
+#: 时间戳的时钟粒度**不保证**连续两次调用拿到不同的值（第一版就是在这里撞的）。
+_RUN_SEQ = itertools.count(1)
+
+
+def new_run_root(base_dir: str, label: str = "run") -> str:
+    """一次运行的布局根：`<base_dir>/<label>-<UTC 时间戳>-<pid>-<序号>`
+
+    为什么要有这个构造函数（而不是各驱动自己拼字符串）:
+
+    * **归属**：`base_dir` 是调用方（驱动）本来就拥有的产物目录 —— 清理/保留是它的既有
+      策略，这里不引入新的「谁负责清理」问题；本函数只负责「每一次运行一个新根」
+      （`run_layout` 幂等重开是允许的，但**同一根跨运行复用**会让上一轮的候选文件被这一轮
+      覆盖）；
+    * **唯一出处**：名字的形状只有一处，否则「哪一个目录是这一轮的根」会散在几个脚本里，
+      而 §21 的 `Patch.path` 与 §22.1 的权限位都要指着它；
+    * **唯一性**：微秒时间戳 + 进程内单调序号 + pid，三者合起来保证「同一进程连续两次
+      调用」与「同一秒内两个进程」都不会拿到同一个根。第一版只有「秒级时间戳 + pid」——
+      同一秒内连续两次调用返回同一个路径，正是本函数自己注释里要防的「上一轮候选被
+      覆盖」（守卫 `tests/test_run_root_wiring.py::TestTheRunRootConstructor` 当场抓到）。
+
+    `label` 会被收成 `[A-Za-z0-9_-]`（只影响可读性，不参与判据）；取不到 base_dir 时抛
+    `LayoutError`（空基目录等于把根落到 CWD —— 与 `run_layout` 拒绝空 run_root 同一条理由）。
+    """
+    import datetime
+    import re
+    if not isinstance(base_dir, str) or not base_dir.strip():
+        raise LayoutError("new_run_root 需要一个非空的 base_dir（空串不是『当前目录』）")
+    safe = re.sub(r"[^A-Za-z0-9_-]", "-", str(label or "run")).strip("-") or "run"
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    seq = next(_RUN_SEQ)
+    return os.path.join(os.path.abspath(os.path.expanduser(base_dir)),
+                        f"{safe}-{stamp}-{os.getpid()}-{seq}")
 
 
 def run_layout(run_root: str) -> RunLayout:
