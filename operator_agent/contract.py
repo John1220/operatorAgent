@@ -147,6 +147,8 @@ class FrozenContract:
     notes: str = ""
     #: 规范化 JSON 的 sha256 —— 不存进 as_dict 的计算路径, 单独算
     hash: str = field(default="", compare=False)
+    # Appended for positional compatibility; None preserves old payload/hash.
+    correctness_profile: Optional[str] = None
 
     def content_dict(self) -> dict:
         """参与哈希的内容 (排除 hash 字段本身与 notes 这类说明性文字)。"""
@@ -168,6 +170,8 @@ class FrozenContract:
             d["cases"] = [c.content_dict() for c in self.cases]
         if self.correctness_suite is not None:
             d["correctness_suite"] = self.correctness_suite.content_dict()
+        if self.correctness_profile is not None:
+            d["correctness_profile"] = self.correctness_profile
         # §6.2 条款 4：这两项**全部进契约 hash** —— 判据变成可改的常量就等于没有判据。
         # 但**空的声明不进**：空 = 没声明（判据面按「未确立」走），与本片之前冻结的契约
         # 是同一份判据内容 ⇒ 同一个 hash（那样旧载荷还能被 `load_dict` 复盘，而
@@ -351,7 +355,7 @@ def freeze(kernel_type: str,
            max_regression=(),
            case_weights=(),
            aggregate: str = "",
-           cases=(), correctness_suite=None) -> FrozenContract:
+           cases=(), correctness_suite=None, correctness_profile=None) -> FrozenContract:
     """CONTRACT_LINT + 冻结。任何 validate 失败都抛 ContractError —— **失败关闭**。
 
     「不可判定就交还给人」(设计 §10.1 REJECT): 这里不猜默认值。缺数值语义的契约
@@ -383,6 +387,12 @@ def freeze(kernel_type: str,
                 errs.append("数值语义要求确定性，但 CorrectnessSuite 关闭了确定性检查")
         except (BenchCaseError, TypeError, ValueError) as exc:
             errs.append(f"correctness_suite: {exc}")
+    if correctness_profile is not None:
+        from .correctness_profiles import declaration_check
+        profile = declaration_check(kernel_type, dtype_semantics.dtype,
+                                    correctness_profile, correctness_suite)
+        if profile["status"] != "passed":
+            errs.append("correctness profile: " + profile.get("reason", "未确立"))
     if errs:
         raise ContractError("契约不可判定: " + "; ".join(errs))
 
@@ -398,6 +408,7 @@ def freeze(kernel_type: str,
         # 顺序无语义 ⇒ 按**身份**排序（同「同内容两份拷贝必须同哈希」那条要求）。
         cases=tuple(sorted(cases or (), key=lambda c: c.key())),
         correctness_suite=correctness_suite,
+        correctness_profile=correctness_profile,
         notes=notes,
         # 顺序无语义 ⇒ 规范化成「排序去重」：同一份判据不该有两种 hash（同内容两份拷贝
         # 必须同哈希是契约哈希的第一条要求, 见模块 docstring）。
@@ -418,6 +429,7 @@ def freeze(kernel_type: str,
         required_caps=c.required_caps,
         cases=c.cases,
         correctness_suite=c.correctness_suite,
+        correctness_profile=c.correctness_profile,
         required_cases=c.required_cases,
         max_regression=c.max_regression,
         case_weights=c.case_weights,
@@ -467,6 +479,7 @@ def load_dict(payload: Mapping[str, Any]) -> FrozenContract:
             cases=tuple(BenchmarkCase.from_dict(d)
                         for d in (payload.get("cases") or ())),
             correctness_suite=payload.get("correctness_suite"),
+            correctness_profile=payload.get("correctness_profile"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ContractError(f"无法从载荷重建契约: {exc}") from exc
@@ -502,6 +515,11 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
 
     kt = (getattr(getattr(task, "source", None), "kernel_type", "") or "unknown").strip()
     cons = getattr(task, "constraints", None)
+    if getattr(cons, "correctness_profile", None) is not None:
+        from .correctness_profiles import profile_check
+        profile = profile_check(task)
+        if profile["status"] != "passed":
+            raise ContractError("任务默认正确性配置未确立: " + profile.get("reason", "unknown"))
     correctness_suite = getattr(cons, "correctness_suite", None)
     if correctness_suite is not None:
         try:
@@ -570,4 +588,5 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
         aggregate=str(getattr(cons, "aggregate", "") or ""),
         cases=cases,
         correctness_suite=correctness_suite,
+        correctness_profile=getattr(cons, "correctness_profile", None),
     )

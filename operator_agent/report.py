@@ -585,6 +585,11 @@ def _correctness_lines(artifact: Any) -> List[str]:
             out.append("| " + " | ".join(cell(v) for v in (
                 row.get("case_id"), f"{row.get('pattern', '-')} / {row.get('layout', '-')}",
                 row.get("verdict"), row.get("reason"))) + " |")
+        profile = c.get("profile")
+        if isinstance(profile, dict):
+            out += ["", f"- 默认正确性配置: `{cell(profile.get('profile'))}` — **{cell(profile.get('status'))}**（声明检查，不是执行结论）"]
+            if profile.get("reason"):
+                out.append(f"  - 无法确立: {cell(profile['reason'])}")
         coverage = c.get("coverage_lint")
         if isinstance(coverage, dict):
             out += ["", f"- 边界覆盖 lint: **{coverage.get('status', 'unknown')}** "

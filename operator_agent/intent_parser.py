@@ -7,12 +7,14 @@ prompt 模板从 prompts/ 目录加载
 
 import re
 import json
+from dataclasses import replace
 from typing import Optional
 from .schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision, DSLEnum,
 )
 from .prompt_manager import PromptManager
+from .correctness_profiles import with_default_correctness
 
 
 class IntentParser:
@@ -24,6 +26,7 @@ class IntentParser:
     OPERATOR_KEYWORDS = {
         "matmul": ["matmul", "mat_mul", "矩阵乘法", "矩阵乘", "gemm", "mm"],
         "attention": ["attention", "flash_attention", "flash attention", "注意力"],
+        "log_softmax": ["log_softmax", "log softmax"],
         "softmax": ["softmax", "soft max"],
         "layernorm": ["layernorm", "layer_norm", "层归一化"],
         "relu": ["relu", "激活函数"],
@@ -61,7 +64,7 @@ class IntentParser:
         """解析自然语言请求为 TaskSchema"""
         if self.llm:
             try:
-                task = self._llm_parse(request)
+                task = self._prepare_correctness(self._llm_parse(request), request)
                 print(f"[IntentParser] LLM 解析完成:")
                 print(f"  算子类型: {task.source.kernel_type}")
                 print(f"  目标硬件: {task.target.hardware}")
@@ -72,7 +75,7 @@ class IntentParser:
             except Exception as e:
                 print(f"[IntentParser] LLM 解析失败 ({e})，回退到规则匹配")
 
-        task = self._rule_parse(request)
+        task = self._prepare_correctness(self._rule_parse(request), request)
         print(f"[IntentParser] 规则解析完成:")
         print(f"  算子类型: {task.source.kernel_type}")
         print(f"  目标硬件: {task.target.hardware}")
@@ -80,6 +83,22 @@ class IntentParser:
         print(f"  精度: {task.constraints.precision.value}")
         print(f"  复杂度: {task.source.complexity.value}")
         return task
+
+    @staticmethod
+    def _prepare_correctness(task, request):
+        # Do not let an omitted LLM field erase explicitly requested non-default
+        # semantics. This is conservative detection, NOT full NL interpretation.
+        source = replace(task.source, fused_ops=list(task.source.fused_ops),
+                         semantic_parameters=dict(task.source.semantic_parameters))
+        if re.search(r"融合|\bfused\b|乘加|\b(?:matmul|gemm|relu|softmax|layernorm)\s*\+|"
+                     r"\+\s*(?:relu|softmax|layernorm|add|bias)\b", request, re.I):
+            source.fused_ops = source.fused_ops or ["unresolved_fusion"]
+        if re.search(r"\b(?:eps|epsilon|affine|normalized_shape|dim|axis|bias|weight)\s*[:=]|"
+                     r"\b(?:affine|transpose|log_softmax)\b|"
+                     r"\b[a-z][a-z0-9]*_(?:softmax|relu|layernorm|matmul)\b|"
+                     r"log softmax|转置|归一化轴|带偏置|带权重", request, re.I):
+            source.semantic_parameters["unresolved_request"] = request
+        return with_default_correctness(replace(task, source=source))
 
     def _llm_parse(self, request: str) -> TaskSchema:
         """调用 LLM 解析意图"""
@@ -103,6 +122,8 @@ class IntentParser:
             source=SourceSpec(
                 kernel_type=result.get("kernel_type", "unknown"),
                 complexity=TaskComplexity(result.get("complexity", "medium")),
+                fused_ops=result.get("fused_ops") if isinstance(result.get("fused_ops"), list) else [],
+                semantic_parameters=result.get("parameters") if isinstance(result.get("parameters"), dict) else {},
             ),
             target=TargetSpec(
                 hardware=hardware,
@@ -154,7 +175,8 @@ class IntentParser:
 
     def _extract_operator(self, text: str) -> str:
         for op_name, keywords in self.OPERATOR_KEYWORDS.items():
-            if any(kw in text for kw in keywords):
+            if any((re.search(r"(?<![a-z0-9_])" + re.escape(kw) + r"(?![a-z0-9_])", text)
+                    if kw.isascii() else kw in text) for kw in keywords):
                 return op_name
         return "unknown"
 
@@ -234,6 +256,11 @@ class TestInputGenerator:
                 M, N, K = 256, 256, 128
             return {"A": (rng.standard_normal((M, K)) * 0.1).astype(dtype),
                     "B": (rng.standard_normal((K, N)) * 0.1).astype(dtype)}
+
+        if task.constraints.correctness_profile is not None and kernel_type in ("relu", "softmax", "layernorm"):
+            rows = matrix_dim[0] if matrix_dim else 128
+            cols = matrix_dim[1] if matrix_dim and len(matrix_dim) == 2 else rows
+            return {"X": rng.standard_normal((rows, cols)).astype(dtype)}
 
         if "softmax" in kernel_type:
             dim = matrix_dim[0] if matrix_dim else 256

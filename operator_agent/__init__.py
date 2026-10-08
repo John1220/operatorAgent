@@ -39,5 +39,6 @@ from .verifier import Verifier
 from .correctness import CorrectnessCase, CorrectnessSuite
 from .correctness_boundaries import (BoundaryAxis, TensorAxes, BoundaryPolicy,
                                      generate_correctness_suite, lint_coverage)
+from .correctness_profiles import with_default_correctness
 from .conductor import Conductor, Router
 from .intent_parser import IntentParser, TestInputGenerator

@@ -2,6 +2,7 @@
 
 日期：2026-10-08。实现：`operator_agent/correctness_boundaries.py`。
 对应 §20 / §3.4 的有限边界样本，不宣称完整 §20 已完成。
+首批默认入口与多算子 H20 链路验收见 [可信默认配置](default-correctness-profiles.md)。
 
 ## 目的与信任边界
 

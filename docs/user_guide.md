@@ -246,6 +246,14 @@ task = parser.parse(user_request)
 print(f"解析结果: kernel_type={task.source.kernel_type}, dsl={task.target.dsl}")
 ```
 
+`parse()` 创建的新任务默认要求 `builtin-l2-v1` 正确性配置：支持二维 ReLU/Matmul/Softmax
+的 fp16/fp32，以及无 affine、末轴、eps=1e-5 的 LayerNorm fp32。生成器为这类任务
+统一提供 `X`（Matmul 为 `A/B`），自动边界 suite 只参与 L2，不替换性能主输入。
+不支持的语义/参数/dtype（包括尚未标定的 fp16 LayerNorm）会在编译前返回 **unknown**，
+而不是静默跳过 suite。直接构造的旧 TaskSchema 不强制迁移；程序化新任务可调用
+`with_default_correctness(task)`，已有显式 suite 不会被覆盖。完整接口与真机验收范围见
+[默认正确性配置](design/default-correctness-profiles.md)。
+
 ### 3.3 使用日志管理
 
 ```python

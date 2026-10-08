@@ -4,6 +4,7 @@
 本地输入保真协议见 [input-fidelity-protocol](input-fidelity-protocol.md)。
 NVIDIA L2 / Torch 协议和真机验收边界见 [remote-input-fidelity-protocol](remote-input-fidelity-protocol.md)。
 自动边界声明、固定生成规则与覆盖门禁见 [correctness-boundary-generation](correctness-boundary-generation.md)。
+新任务的默认采用和多算子生产链路验收见 [default-correctness-profiles](default-correctness-profiles.md)。
 
 ## 接入路径
 
@@ -113,3 +114,9 @@ Verifier/Conductor 预检查 → L2/报告已接通。覆盖不足保持 unknown
 不走 L3。H20 新增 26 个自动 case / 42 项规则，正确 ReLU 通过、错 stride/尾块核被拒；
 含原协议项的真机验收 14/14 符合预期。规则/样本全部进 hash，旧 suite hash 不变；
 生成域须由可信 harness 声明。完整 §20 仍未完成，详见生成文档的范围与运行编号。
+
+第六阶段：IntentParser 新入口默认采用版本化内建 profile，支持四类算子的有限变体；
+未知语义/参数、bf16/int8 与尚未标定的 fp16 LayerNorm 在编译前 unknown。H20 实跑
+Conductor/L2/L3/确认/报告，26/26 符合预期（7 passed、16 failed、3 unknown），
+565 份 CUDA 回读；错误核无 L3、无正向持久化。7 好核的小张量读数全部被正常入库门拒绝，
+不是性能收益或 admission 成功证明。旧直接构造任务未强制迁移，详见默认配置文档。

@@ -21,6 +21,7 @@ from .anticheat import static_audit
 from .contract import case_key
 from .correctness import as_suite, verdict_of
 from .correctness_boundaries import has_boundary_policy, lint_coverage
+from .correctness_profiles import profile_check
 from .bench_cases import BenchCaseError
 from .input_fidelity import InputFidelityError, describe_inputs, check_readback
 from .source_lang import classify
@@ -346,7 +347,7 @@ class Verifier:
         """
         results = []
 
-        preflight = self.correctness_preflight(task)
+        preflight = self.correctness_preflight(task, test_inputs)
         if preflight is not None:
             return [preflight]  # Harness gap, not a compile/candidate failure.
 
@@ -401,6 +402,10 @@ class Verifier:
         不由本方法假设、也不看实例状态。三态: `None` = 没带凭据 (回放/脚本) ⇒ 不写键、
         不追溯改判; **`False` ⇒ 该读数全资格 False** (规则 3 那一族: 这个数没有指称对象)。
         """
+        if task.constraints.correctness_profile is not None:
+            preflight = self.correctness_preflight(task, test_inputs)
+            if preflight is not None:
+                return [preflight]
         l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
                                       environment_drift=environment_drift,
                                       heartbeat=heartbeat,
@@ -528,12 +533,18 @@ class Verifier:
                                       metrics=metrics)
 
     @staticmethod
-    def correctness_preflight(task: TaskSchema) -> Optional[VerificationResult]:
+    def correctness_preflight(task: TaskSchema, test_inputs=None) -> Optional[VerificationResult]:
         """Declared boundary gaps stop before compile, GPU probe or candidate exec.
 
         Legacy suites have no policy and keep their old gate/hash. In particular,
         not declaring a policy must not be reported as passing coverage lint.
         """
+        profile = profile_check(task, test_inputs)
+        if profile["status"] == "unknown":
+            reason = "默认正确性配置无法确立: " + profile["reason"]
+            return VerificationResult(VerificationLevel.L2_FUNCTION, False, message=reason,
+                metrics={"correctness": {"verdict": "unknown", "reason": reason,
+                    "profile": profile, "scope": profile["scope"], "cases": []}})
         raw = task.constraints.correctness_suite
         if not has_boundary_policy(raw):
             return None
@@ -563,11 +574,11 @@ class Verifier:
         this method, so performance ledgers/weights retain their original cases.
         """
         raw = task.constraints.correctness_suite
-        if raw is None:
-            return self._verify_primary_function(kernel_code, test_inputs, expected_output, task)
-        preflight = self.correctness_preflight(task)
+        preflight = self.correctness_preflight(task, test_inputs)
         if preflight is not None:
             return preflight
+        if raw is None:
+            return self._verify_primary_function(kernel_code, test_inputs, expected_output, task)
         try:
             suite = as_suite(raw)
         except (ValueError, TypeError) as exc:
@@ -590,7 +601,7 @@ class Verifier:
         if primary_state != "passed":
             rows = [{"case_id": c.case_id, "verdict": "not_run",
                      "reason": "调用方输入/静态守卫未通过，未运行套件"} for c in suite.cases]
-            return self._suite_result(primary, suite, rows, primary_state)
+            return self._suite_result(primary, suite, rows, primary_state, task)
 
         for case in sorted(suite.cases, key=lambda c: c.case_id):
             row = {"case_id": case.case_id, "shape_key": case.inputs.key(),
@@ -636,10 +647,10 @@ class Verifier:
                     for check in sorted(set(suite.required_checks)))
         state = ("failed" if any(r["verdict"] == "failed" for r in rows) else
                  "unknown" if any(r["verdict"] != "passed" for r in rows) else "passed")
-        return self._suite_result(primary, suite, rows, state)
+        return self._suite_result(primary, suite, rows, state, task)
 
     @staticmethod
-    def _suite_result(primary, suite, rows, state):
+    def _suite_result(primary, suite, rows, state, task=None):
         primary_passed = primary.passed
         primary.passed = state == "passed"
         primary.metrics["correctness"] = {
@@ -651,6 +662,8 @@ class Verifier:
         }
         if suite.coverage_policy is not None:
             primary.metrics["correctness"]["coverage_lint"] = lint_coverage(suite)
+        if task is not None and task.constraints.correctness_profile is not None:
+            primary.metrics["correctness"]["profile"] = profile_check(task)
         problems = [f"{r['case_id']}: {r['reason']}" for r in rows if r["verdict"] != "passed"]
         if state != "passed":
             primary.metrics["correctness"]["reason"] = (

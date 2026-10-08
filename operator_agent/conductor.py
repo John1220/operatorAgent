@@ -1145,7 +1145,7 @@ class Conductor:
         # this as L2 unknown, not a candidate bug eligible for Fixer/corpus lessons.
         # Pure trusted declaration check, not a new optional method required of
         # injected/scripted verifiers (legacy users need not implement it).
-        preflight = Verifier.correctness_preflight(task)
+        preflight = Verifier.correctness_preflight(task, test_inputs)
         if preflight is not None:
             return KernelArtifact(task_id=task.task_id, language=task.target.dsl,
                                   verification_results=[preflight])
@@ -1158,6 +1158,10 @@ class Conductor:
         # 量加速比（`Verifier._publish_case_ledger` 的账本）。
         # 代价是**声明的**: 传几组就量几组（线性增长）; 只传一组 = 与 I92 之前一字不差。
         input_sets, case_source, declared_cases = self._resolve_input_sets(task, test_inputs)
+        preflight = Verifier.correctness_preflight(task, input_sets)
+        if preflight is not None:
+            return KernelArtifact(task_id=task.task_id, language=task.target.dsl,
+                                  verification_results=[preflight])
         test_inputs = input_sets[0]
         backend_name = self.backend.label
         llm_info = f" (LLM: {self.llm})" if self.llm else ""

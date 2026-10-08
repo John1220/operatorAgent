@@ -97,6 +97,18 @@ Torch readonly/负 stride 明确拒绝，不能伪装 contiguous；XPU/HTTP 未�
 串行 Golden compare PASS 4 / REVIEW 0 / FAIL 0 / SKIP 0，未改基线/容忍窗口。
 细则、预算与未覆盖域见 [自动边界生成](../design/correctness-boundary-generation.md)。
 
+**同日第六阶段：首批可信默认 profile 已进新任务入口**。IntentParser 的规则/LLM 分支
+默认带 `builtin-l2-v1`；精确支持 ReLU/Matmul/Softmax fp16/fp32 和无 affine、末轴、eps=1e-5
+的 LayerNorm fp32。未知语义/参数、不支持的 dtype 与 fp16 LayerNorm 编译前 unknown；
+版本、固定 policy 与 suite 同进契约 hash。守卫 `tests/test_correctness_profiles.py`。
+H20 真跑 Conductor/L2/L3/确认/报告 **26/26 预期验收**（7 passed、16 failed、3 unknown），
+565 份 CUDA 回读，14 次配对性能请求；错误核不走 L3/正向持久化。
+小张量读数未获入库资格，7 好核均拒绝正向持久化。运行编号
+`correctness-profiles-h20-20261008T090335752990Z-65336-1`，清理已确认。
+新增守卫 81 项；全量 2918 passed / 1 skipped / 2 条已知非有限参考 warning；串行 Golden
+PASS 4 / REVIEW 0 / FAIL 0 / SKIP 0；6/6 关键变异被捕获。未改基线/容忍窗口。
+细则与早先大载荷传输等待/后续定点清理见 [默认正确性配置](../design/default-correctness-profiles.md)。
+
 **边界**：未知 backing 来源/object/subclass 不猜；完整算子/语义 GPU 验收、
 任意合法域/全部边界组合、梯度/累加精度/aliasing 语义/sanitizer
 仍未完成；旧任务未声明套件时仍走原 L2，**§20 未全部收口**。
@@ -189,7 +201,7 @@ Torch readonly/负 stride 明确拒绝，不能伪装 contiguous；XPU/HTTP 未�
 | §9.4 | `PartitionKey` 已有；`ToolchainKey` / `MeasurementProtocolKey` 零命中 |
 | §13.5 | 器件峰值出口不存在（`peak_measured` 无量具） |
 | §14-9 | 比较器已落、**两臂真机未跑** ⇒ "审计有收益"仍不许声称 |
-| §20 | 门禁与凭据已落；2026-10-08 `CorrectnessSuite` 进契约、L2/候选选择/报告已接通；本地 Python 及 NVIDIA L2/Torch 输入保真已接通，显式合法轴域的有限边界生成/覆盖 lint 及 unknown 预检查已落，H20 ReLU 含自动套件 14/14 预期验收（运行编号见上文）；仍欠任意合法域/全部组合、完整算子/语义真机验收、XPU/HTTP、readonly/负 stride GPU 语义、梯度/累加精度/aliasing 语义/sanitizer 和 GPU launch 探针；旧任务尚未强制声明套件/覆盖 policy |
+| §20 | 门禁与凭据、suite/有限边界 lint/输入保真已落；2026-10-08 新 IntentParser 任务默认声明首批内建 profile，H20 多算子 Conductor/L2/L3/确认/报告 26/26 预期验收，坏核不产生 L3/正向持久化（运行编号见上文）；仍欠任意合法域/全部组合、完整语义/参数、fp16 LayerNorm 标定、XPU/HTTP、readonly/负 stride GPU 语义、梯度/累加精度/aliasing/sanitizer/GPU launch 探针及大载荷写入截止时间；旧直接构造任务未强制迁移，小张量好核未获入库资格 |
 | §22 | §22.1 的 **harness 侧一半已落**（七格 + 权限位 + 唯一写入口，见 I82），且 **2026-10-07 起有生产调用点**：三个真机驱动经 `new_run_root` 建根、过门的候选真的落进 `candidate/`（见 I88）—— 但只搬了候选源码这一件，`report`/`measurements`/`kernel_db` 未进布局；§22.2 的**本地半片已落**（运行期的受控执行器 + 逐项强制读数，见 I85；**编译期那一档**见 I87 —— 两个后端的 `compile` 都走 `run_compile`，阶段级上限链 `Conductor` → 后端 → `exec_guard` 第一次有消费端）—— 但它挡的是**跑飞/吃满/失控**，**不是隔离**（同 uid、网络没关、无容器/cgroup/白名单；内存本机设不上）；**候选侧那一半仍缺**（同一 uid ⇒ 权限位拦不住属主）；仍**零命中**的是：GPU watchdog / 设备租约回收 / 网络默认关闭 / 文件系统白名单 / 远端运行布局权限位，以及**候选侧**剩下的 6 处进程内 `exec`（`LocalExecutor.execute`/`benchmark`、`MockGPU._execute_triton_cuda`/`_benchmark_triton_cuda`/`_benchmark_python`、`reference.load_reference_source`；编译期已不在其列）；§22.3 的**两半已收**（2026-10-07，见 I89）：覆盖 `mode` → 声明等级上限 → 入库门第 3 道门 → 报告与「我无法确立的事」，守卫 43 条 + 变异 8 行 0 逃逸（`uncovered_rules` 只进留痕/报告、**不**压级；`promotable` 今天只作门槛） |
 | §23 | 快照/续跑已有；**事件日志 / `sequence` / 幂等键**零命中 |
 

@@ -170,6 +170,8 @@ class SourceSpec:
     #: 新架构算子 (CSA/HCA/MLA…) 没有库对手, 参考只能由任务侧带来 ——
     #: 见 `operator_agent/reference.py` 与 `operator_agent/ops/csa_compress.py`。
     reference_source: Optional[str] = None
+    # Explicit/unresolved operator parameters are not implied by kernel_type.
+    semantic_parameters: dict = field(default_factory=dict)
 
     # 已在项目中实现 / 被 KernelDB 收录的算子类型, 用于 Designer/Verifier 中做合法值范围校验
     _KNOWN_KERNEL_TYPES = frozenset({
@@ -195,6 +197,8 @@ class SourceSpec:
             )
         if not isinstance(self.fused_ops, list):
             errors.append(f"source.fused_ops 必须是 list, 实际 {type(self.fused_ops).__name__}")
+        if not isinstance(self.semantic_parameters, dict):
+            errors.append("source.semantic_parameters 必须是映射")
         if not isinstance(self.complexity, TaskComplexity):
             errors.append(f"source.complexity 必须是 TaskComplexity 枚举")
         return errors
@@ -301,11 +305,15 @@ class ConstraintSpec:
     #: §20: independent L2 inputs; never used as L3 performance cases.
     #: Accepts a CorrectnessSuite or its JSON-native content_dict() representation.
     correctness_suite: Optional[Any] = None
+    # None keeps legacy behavior. New formal entry points require a trusted profile.
+    correctness_profile: Optional[str] = None
 
     def validate(self) -> list[str]:
         errors = []
         if not isinstance(self.precision, Precision):
             errors.append("constraints.precision 必须是 Precision 枚举")
+        if self.correctness_profile is not None and not isinstance(self.correctness_profile, str):
+            errors.append("constraints.correctness_profile 必须是字符串版本或 None")
         if self.correctness_suite is not None:
             try:
                 as_suite(self.correctness_suite)
@@ -436,15 +444,20 @@ class TaskSchema:
         if self.constraints.correctness_suite is not None:
             constraints_dict["correctness_suite"] = as_suite(
                 self.constraints.correctness_suite).content_dict()
+        if self.constraints.correctness_profile is not None:
+            constraints_dict["correctness_profile"] = self.constraints.correctness_profile
+        source_dict = {
+            "framework": self.source.framework,
+            "kernel_type": self.source.kernel_type,
+            "fused_ops": self.source.fused_ops,
+            "complexity": self.source.complexity.value,
+        }
+        if self.source.semantic_parameters:
+            source_dict["semantic_parameters"] = dict(self.source.semantic_parameters)
         return {
             "task_id": self.task_id,
             "task_type": self.task_type.value,
-            "source": {
-                "framework": self.source.framework,
-                "kernel_type": self.source.kernel_type,
-                "fused_ops": self.source.fused_ops,
-                "complexity": self.source.complexity.value,
-            },
+            "source": source_dict,
             "target": target_dict,
             "constraints": constraints_dict,
         }
