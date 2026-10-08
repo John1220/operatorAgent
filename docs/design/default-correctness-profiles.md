@@ -53,7 +53,10 @@ rank、dtype、共享轴关系，不能把不一致 K、weight/bias、自定义 
 ### 不支持就 unknown，不退回无 suite 的旧路径
 
 - fp16 LayerNorm：本机 Torch 2.8 CPU 的单列参考对一个数学上应为零的输出给出约
-  `-2.38419e-5` 残差，超出本任务 1e-5 绝对项。未标定前本 profile 明确拒绝该组合；
+  `-2.38419e-5` 残差，超出本任务 1e-5 绝对项。2026-10-08 已完成
+  [独立 CPU/H20 标定](fp16-layernorm-calibration.md)：同一 Torch 2.14 中仍有 6 组
+  CPU/CUDA 差异触发原门限；关闭浮点融合的固定 Triton 候选在 H20 32 组通过，
+  但参考身份/精度语义尚未冻结，v1 仍明确拒绝该组合，不自动启用；
   **未放宽容差、删除单列样本、替换参考或把失败改成通过**。
 - bf16/int8、attention/conv、自定义名称、融合、外挂参考、其他框架/源文件：没有可信
   内建配置就保留 requirement marker，前置返回 L2 unknown。

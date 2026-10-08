@@ -23,7 +23,9 @@ def default_policy(kernel_type, dtype, version=PROFILE_VERSION):
     if dtype not in ("fp16", "fp32"):
         raise BenchCaseError(f"默认正确性配置不支持 dtype={dtype!r}，不伪造转换")
     if kernel_type == "layernorm" and dtype == "fp16":
-        raise BenchCaseError("fp16 LayerNorm 的单列参考数值语义尚未标定，默认 profile 暂不支持")
+        raise BenchCaseError("fp16 LayerNorm 标定发现 CPU/CUDA 参考存在门限级差异；"
+                             "参考身份/精度语义尚未冻结，默认 profile 暂不支持"
+                             "（见 docs/design/fp16-layernorm-calibration.md）")
     if kernel_type == "matmul":
         # 'large'=100 at K=4 => 40,000: finite in fp16. This is an explicit
         # sampling subdomain, NOT a promise to cover all reduction lengths.
