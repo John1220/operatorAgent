@@ -48,6 +48,7 @@ from .exec_guard import (MODE_COMPILE, STATUS_CRASHED, Limits, candidate_error,
 from .hardware_caps import detect_hardware_caps
 from .measurement import (TRANSPORT_ANSWERED, TRANSPORT_KEY, safe_error_text,
                           transport_outcome)
+from .remote_input_fidelity import encode_json_inputs, InputFidelityError
 
 
 # 按执行目标串行化 execute/benchmark, 防止并发任务共用同一 GPU 互相污染 benchmark
@@ -773,9 +774,13 @@ class SSHExecutor(Backend):
             # (半途失败只会「新依赖 + 旧 runner」, 不会「新 runner + 缺依赖」)
             (repo_root / "remote_scripts" / "gpu_claim.py",
              f"{remote_dir}/gpu_claim.py"),
-            (repo_root / "remote_scripts" / self._runner_script,
-             self.remote_runner_path),
         ]
+        if self.platform == "nvidia":
+            # Exact L2 JSON/storage codecs are shared sources, before their consumer.
+            files.extend((repo_root / "operator_agent" / name, f"{remote_dir}/{name}")
+                         for name in ("input_fidelity.py", "remote_input_fidelity.py"))
+        files.append((repo_root / "remote_scripts" / self._runner_script,
+                      self.remote_runner_path))
         if self.platform == "nvidia":
             # 常驻服务排在 runner **之后**: 它 import run_kernel 并调 `run_action`, 所以
             # 半途失败时必须是「新 runner + 无服务端」(一次性路径照跑), 不能反过来
@@ -1089,16 +1094,29 @@ class SSHExecutor(Backend):
         查内建表。空串 = 保持旧行为。
         """
         try:
+            # L2 must verify these values/layouts, not generated lookalikes. Keep
+            # the legacy shape/seed protocol for L3 and unsupported XPU runners.
+            wire_inputs = (encode_json_inputs(inputs) if self.platform == "nvidia"
+                           else self._serialize_inputs(inputs))
             if not self._deployed:
                 self.deploy()
             return self._ssh_exec_json({
                 "action": "verify", "code": kernel_code,
-                "inputs": self._serialize_inputs(inputs), "kernel_type": kernel_type,
+                "inputs": wire_inputs, "kernel_type": kernel_type,
                 "max_error": max_error, "precision": precision,
                 "reference_source": reference_source or "",
             })
+        except InputFidelityError as e:
+            return {"success": False, "error": str(e), "input_fidelity_error": str(e)}
         except Exception as e:
             return _transport_failure(e)   # 带「有没有听到回答」那一格 (见 _transport_failure)
+
+    def correctness_input_support(self, kernel_code: str, layout: str) -> tuple:
+        if self.platform != "nvidia":
+            return False, "XPU runner 尚未接通原值/storage 回读协议"
+        if layout not in ("contiguous", "strided", "broadcast"):
+            return False, "未知 layout，不能声明输入保真"
+        return True, "NVIDIA L2 原值/storage 协议；须核实际 Torch 回读，readonly/负 stride 不支持"
 
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,
@@ -1554,6 +1572,9 @@ class RemoteExecutor(Backend):
         与 `name` 一样会触发延迟初始化。
         """
         return self.backend.capabilities
+
+    def correctness_input_support(self, kernel_code: str, layout: str) -> tuple:
+        return self.backend.correctness_input_support(kernel_code, layout)
 
     @property
     def selected_gpu(self) -> Optional[int]:

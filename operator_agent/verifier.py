@@ -106,7 +106,7 @@ _REMOTE_L2_METRIC_KEYS = (
     # 误差**形态** (设计 §8.2): 「哪错了」的下一问是「该怎么修」。它由远端用**同一份**
     # `tolerance` 规则算出来 (与本地路径对称), 控制端只是把它带过来 —— 忘了放进这张
     # 白名单, 真机路径上它就会静默消失 (本地用例照样全绿, 那正是最坏的一种缺法)。
-    "error_shape",
+    "error_shape", "reference_nonfinite", "reference_error", "output_digest",
 )
 
 # 常见 GPU 硬件 **dense 规格峰值** (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
@@ -846,9 +846,25 @@ class Verifier:
             if expected_inputs is not None:
                 fidelity_metrics = check_readback(expected_inputs, remote_verify.get("input_fidelity"))
                 if fidelity_metrics["input_fidelity_verified"] is not True:
+                    if remote_verify.get("input_fidelity_error"):
+                        fidelity_metrics["input_fidelity_reason"] = remote_verify["input_fidelity_error"]
                     return VerificationResult(
                         VerificationLevel.L2_FUNCTION, False,
                         message=fidelity_metrics["input_fidelity_reason"], metrics=fidelity_metrics)
+                if Cap.REAL_DEVICE in self._caps:
+                    # A real-device capability claim cannot turn a CPU fallback
+                    # into accelerator correctness. Device facts come from the
+                    # same actual tensors that supplied layout/value readback.
+                    devices = remote_verify["input_fidelity"].get("tensor_devices")
+                    names = {k for k, v in expected_inputs.items() if v.get("kind") != "scalar"}
+                    accelerator_types = {"cuda", "xpu", "npu", "mps", "hpu", "privateuseone"}
+                    if (not names or not isinstance(devices, dict) or set(devices) != names
+                            or any(type(d) is not str or d.split(":", 1)[0] not in accelerator_types
+                                   for d in devices.values()) or len(set(devices.values())) != 1):
+                        reason = "后端声明真实设备，但实际输入的同一加速设备回读证据未确立（不接受 CPU 回退）"
+                        fidelity_metrics["correctness_execution_error"] = reason
+                        return VerificationResult(VerificationLevel.L2_FUNCTION, False,
+                                                  message=reason, metrics=fidelity_metrics)
             if not remote_verify.get("success", False):
                 # ``success=False`` 也可能是数值误差超标；保留远端的精确诊断。
                 if "max_error" in remote_verify:
@@ -861,8 +877,8 @@ class Verifier:
                                  + (f", 形态={_shape}" if _shape else
                                     ", 形态未能确立")),
                         error_log=remote_verify.get("error", ""),
-                        metrics={k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
-                                 if k in remote_verify},
+                        metrics={**{k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
+                                    if k in remote_verify}, **fidelity_metrics},
                     )
                 if remote_verify.get("output_shape") and remote_verify.get("expected_shape"):
                     return VerificationResult(
@@ -870,6 +886,7 @@ class Verifier:
                         message=(f"输出形状不匹配: {remote_verify['output_shape']} vs "
                                  f"{remote_verify['expected_shape']}"),
                         error_log=remote_verify.get("error", ""),
+                        metrics=fidelity_metrics,
                     )
                 # message 只带首行, 全文放 error_log (见 failure_pair)
                 head, full = failure_pair(remote_verify.get("error", ""))
@@ -881,6 +898,9 @@ class Verifier:
                 fail_metrics = ({TRANSPORT_KEY: remote_verify[TRANSPORT_KEY]}
                                 if TRANSPORT_KEY in remote_verify else {})
                 fail_metrics.update(lib_fallback_metrics(remote_error=full or head))
+                fail_metrics.update(fidelity_metrics)
+                if remote_verify.get("reference_error"):
+                    fail_metrics["reference_error"] = remote_verify["reference_error"]
                 return VerificationResult(
                     level=VerificationLevel.L2_FUNCTION, passed=False,
                     message=f"远程执行失败: {head}",
@@ -892,8 +912,8 @@ class Verifier:
                 level=VerificationLevel.L2_FUNCTION, passed=True,
                 message=(f"远程全量比对通过 ({remote_verify.get('compared_elements', 0)} 元素), "
                          f"最大误差={remote_verify.get('max_error', 0):.2e}"),
-                metrics={k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
-                         if k in remote_verify},
+                metrics={**{k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS
+                            if k in remote_verify}, **fidelity_metrics},
             )
 
         # 没有远端紧凑比对协议: 在执行侧跑一遍, 由 Verifier 自己比对参考输出。
@@ -902,6 +922,8 @@ class Verifier:
             fidelity_metrics = check_readback(
                 expected_inputs, (getattr(result, "metrics", None) or {}).get("input_fidelity"))
             if fidelity_metrics["input_fidelity_verified"] is not True:
+                if (getattr(result, "metrics", None) or {}).get("input_fidelity_error"):
+                    fidelity_metrics["input_fidelity_reason"] = result.metrics["input_fidelity_error"]
                 return VerificationResult(
                     VerificationLevel.L2_FUNCTION, False,
                     message=fidelity_metrics["input_fidelity_reason"], metrics=fidelity_metrics)

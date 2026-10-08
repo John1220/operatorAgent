@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from .anticheat import CheatDetectedError, lib_fallback_metrics, shield_torch
 from .backend_caps import Backend, Cap
 from .input_fidelity import InputFidelityError
+from .remote_input_fidelity import to_torch_inputs, torch_input_readback
 from .exec_guard import (MODE_COMPILE, MODE_RUN, STATUS_CRASHED, GuardRefusal,
                          Limits, candidate_error, limits_for, refusal_from,
                          run_candidate, run_compile)
@@ -114,7 +115,11 @@ class MockGPU(Backend):
 
     def correctness_input_support(self, kernel_code: str, layout: str) -> tuple:
         if _detect_triton(kernel_code):
-            return False, "Triton 路径转换 dtype/contiguous，尚未确立套件输入保真"
+            if not (self._triton_available and _has_cuda()):
+                return False, "Triton 没有真实 CUDA 执行设备，模拟路径无候选输入回读"
+            if layout not in ("contiguous", "strided", "broadcast"):
+                return False, "未知 layout，不能声明输入保真"
+            return True, "真实 CUDA storage/view 协议；须核 Torch 回读，readonly/负 stride 不支持"
         if layout not in ("contiguous", "strided", "broadcast"):
             return False, "未知 layout，不能声明输入保真"
         return True, "Python storage/view 协议保留值、dtype、stride 和 offset；须核执行侧回读"
@@ -283,6 +288,11 @@ class MockGPU(Backend):
                 # 反作弊命中**不许**静默降级到 NumPy 参考 —— 那正是 lib_fallback
                 # 要拦的「正确率被库实现抬高」(spine-review P1-4)
                 raise
+            except InputFidelityError as e:
+                result.success = False
+                result.error = str(e)
+                result.metrics["input_fidelity_error"] = str(e)
+                return result
             except Exception as e:
                 # CUDA 执行失败, 回退到 NumPy 参考实现
                 result.device = "cuda (fallback)"
@@ -303,15 +313,11 @@ class MockGPU(Backend):
 
         # 反作弊: 执行期间屏蔽 torch 原生算子回退
         try:
+            torch_inputs = to_torch_inputs(inputs, device)
+            result.metrics["input_fidelity"] = torch_input_readback(torch_inputs)
             with shield_torch():
                 exec(kernel_code, ns)
                 kernel_func = ns["kernel"]
-
-                # 转换输入到 CUDA
-                torch_inputs = {
-                    k: torch.from_numpy(np.asarray(v)).to(device).contiguous()
-                    for k, v in inputs.items()
-                }
 
                 # Warmup
                 for _ in range(3):

@@ -169,6 +169,10 @@ def verdict_of(result) -> tuple:
     m = result.metrics
     if "input_fidelity_verified" in m and m["input_fidelity_verified"] is not True:
         return "unknown", m.get("input_fidelity_reason", "输入保真无法确立")
+    if m.get("reference_error"):
+        return "unknown", m["reference_error"]
+    if m.get("correctness_execution_error"):
+        return "unknown", m["correctness_execution_error"]
     if m.get("reference_nonfinite", 0):
         return "unknown", "参考含 NaN/Inf，不能确立全部输出正确"
     if "max_error" not in m and result.passed:

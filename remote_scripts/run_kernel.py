@@ -14,7 +14,8 @@ Actions:
   tolerance.py - L2 数值门的容差表与判定式 (单一事实来源, 见该模块 docstring)。
   anticheat.py - 运行时屏蔽 shield_torch, 与控制端 static_audit 共用同一份禁用清单。
   gpu_claim.py - 跨进程的同卡占用声明 (CHECKLOG I68): import 本文件时写入、退出拆除。
-  前两者由 SSHExecutor.deploy() 从 operator_agent/ 推送; gpu_claim.py 与本文件同在
+  input_fidelity.py / remote_input_fidelity.py - 原值/storage 传输及实际 Torch 回读。
+  Python 共享依赖由 SSHExecutor.deploy() 从 operator_agent/ 推送; gpu_claim.py 与本文件同在
   remote_scripts/ 下, 部署与仓库内直跑都在同一目录, 直接 import 即可。
 """
 
@@ -31,10 +32,14 @@ if _HERE not in sys.path:
 try:
     import tolerance
     from anticheat import shield_torch
+    from remote_input_fidelity import (JSON_PROTOCOL, InputFidelityError,
+        decode_json_inputs, to_torch_inputs, torch_input_readback, torch_output_digest)
 except ImportError:          # 仓库内直接运行: 模块还在 operator_agent/ 下
     sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "operator_agent"))
     import tolerance
     from anticheat import shield_torch
+    from remote_input_fidelity import (JSON_PROTOCOL, InputFidelityError,
+        decode_json_inputs, to_torch_inputs, torch_input_readback, torch_output_digest)
 
 import gpu_claim  # 同目录 (部署后 = 工作目录; 仓库内 = remote_scripts/)
 
@@ -387,6 +392,8 @@ def _deserialize_inputs(inputs: dict) -> dict:
     `repeats=8` 变成 `0`。带标量参数的候选核因此在真机上验的是另一个算子 (而 L2
     会照样给出通过/不通过)。标量按值直传才与上面第三条「原样透传」的承诺一致。
     """
+    if "protocol" in inputs:
+        return decode_json_inputs(inputs)  # unknown versions fail closed
     if inputs.get("_generate"):
         out = {}
         for k, spec in inputs["specs"].items():
@@ -461,7 +468,8 @@ def _reference_torch(kernel_type: str, inputs: dict):
     import torch.nn.functional as F
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    values = {k: torch.from_numpy(np.asarray(v)).to(device) for k, v in inputs.items()}
+    values = {k: (torch.from_numpy(np.array(v, copy=True)).to(device)
+                  if isinstance(v, np.ndarray) else v) for k, v in inputs.items()}
     kind = (kernel_type or "").lower()
     if ("matmul" in kind or "gemm" in kind) and {"A", "B"} <= values.keys():
         return lambda: values["A"] @ values["B"], "pytorch_eager"
@@ -584,30 +592,38 @@ def _error_shape_torch(bad, *, n_bad: int, total: int, has_nonfinite: bool):
 def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
               precision: str = "", reference_source: str = "") -> dict:
     """Run candidate and reference on one device; return only verification summary."""
+    evidence = {}
     try:
         import torch
         real_inputs = _deserialize_inputs(inputs)
+        exact_inputs = inputs.get("protocol") == JSON_PROTOCOL
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if exact_inputs:
+            if _detect_language(code) == "triton" and device.type != "cuda":
+                raise InputFidelityError("Triton 候选没有 CUDA 执行设备，不模拟为通过")
+            candidate_inputs = to_torch_inputs(real_inputs, device)
+            # Actual device tensors, before any candidate/reference source exec.
+            evidence["input_fidelity"] = torch_input_readback(candidate_inputs)
         reference, reference_type = _load_reference_from_source(reference_source, real_inputs)
+        if exact_inputs and reference_source and reference is None:
+            reason = f"声明的 reference_source 未能建立: {reference_type}"
+            return {"success": False, "error": reason, "reference_error": reason, **evidence}
         if reference is None:
             reference, reference_type = _reference_torch(kernel_type, real_inputs)
         if reference is None:
-            return {"success": False, "error": f"No remote reference for {kernel_type}"}
+            reason = f"No remote reference for {kernel_type}"
+            return {"success": False, "error": reason, "reference_error": reason, **evidence}
 
         module = _load_module(code)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        candidate_inputs = {}
-        for k, v in real_inputs.items():
-            if isinstance(v, np.ndarray):
-                candidate_inputs[k] = torch.from_numpy(v).to(device).contiguous()
-            else:
-                # 标量 / 布尔等非数组参数 (如 causal=False) 原样透传
-                candidate_inputs[k] = v
-        # Convert candidate inputs to target precision when needed
-        if (precision or "").lower() == "fp16":
-            candidate_inputs = {
-                k: (v.to(torch.float16) if isinstance(v, torch.Tensor) and v.is_floating_point() else v)
-                for k, v in candidate_inputs.items()
-            }
+        if not exact_inputs:
+            candidate_inputs = {k: (torch.from_numpy(v).to(device).contiguous()
+                if isinstance(v, np.ndarray) else v) for k, v in real_inputs.items()}
+            # Legacy callers keep their precision semantics. Exact L2 transports
+            # the declared dtype; precision selects tolerances, not input casts.
+            if (precision or "").lower() == "fp16":
+                candidate_inputs = {k: (v.to(torch.float16)
+                    if isinstance(v, torch.Tensor) and v.is_floating_point() else v)
+                    for k, v in candidate_inputs.items()}
         # 运行时反作弊: 屏蔽只包住候选那一次调用。参考实现 (_reference_torch)
         # 恰恰要合法地调用 torch.matmul / F.softmax, 把 with 套在外面会连它一起打死。
         # 候选先跑、参考后跑这个顺序本身也是一道防护 (参考还没算出来, 候选无从
@@ -618,9 +634,11 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             expected = reference()
         if not isinstance(actual, torch.Tensor):
             actual = torch.as_tensor(actual, device=device)
+        if exact_inputs:
+            evidence["output_digest"] = torch_output_digest(actual)
         if list(actual.shape) != list(expected.shape):
             return {"success": False, "error": "output shape mismatch",
-                    "output_shape": list(actual.shape), "expected_shape": list(expected.shape)}
+                    "output_shape": list(actual.shape), "expected_shape": list(expected.shape), **evidence}
         actual_f = actual.detach().to(torch.float32)
         expected_f = expected.detach().to(torch.float32)
 
@@ -635,16 +653,19 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
         atol, rtol, rho = tolerance.effective_atol(precision, max_error)
         abs_error = (actual_f - expected_f).abs()
         total = int(abs_error.numel())
+        comparable = torch.isfinite(expected_f)
+        n_compared = int(comparable.sum().item())
+        n_ref_nonfinite = total - n_compared
         if total:
             # EPS=1e-8 而不是原先的 clamp_min(1e-12): 后者会让近零参考点上的
             # rel_err 再放大 4 个数量级。
             rel_error = abs_error / (expected_f.abs() + tolerance.EPS)
             # AND: 只有同时超绝对阈值和相对阈值才算坏点。这是不误杀合法 fp16
             # 累加核的关键 —— 那种核在近零参考处的 rel_err 可达 2.1e4。
-            bad = (abs_error > atol) & (rel_error > rtol)
+            bad = (abs_error > atol) & (rel_error > rtol) & comparable
             n_bad = int(bad.sum().item())
-            max_abs_error = float(abs_error.max().item())
-            max_rel_error = float(rel_error.max().item())
+            max_abs_error = float(abs_error[comparable].max().item()) if n_compared else 0.0
+            max_rel_error = float(rel_error[comparable].max().item()) if n_compared else 0.0
             has_nonfinite = bool((~torch.isfinite(actual_f)).any().item())
             # 第一个坏元素: 展平下标 + 两侧取值 (LeetCUDA book_check 同款)。
             # 展平下标够 Fixer 定位坏 tile; 两侧取值分得清 scale 错 vs 局部炸。
@@ -660,7 +681,7 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             n_bad, max_abs_error, max_rel_error, has_nonfinite = 0, 0.0, 0.0, False
             first_bad_index = first_bad_actual = first_bad_expected = None
 
-        passed, matched_ratio = tolerance.evaluate(n_bad, total, has_nonfinite, rho)
+        passed, matched_ratio = tolerance.evaluate(n_bad, n_compared, has_nonfinite, rho)
 
         # 误差**形态** (设计 §8.2): 与本地路径 (verifier._error_shape_of) 用**同一份规则**
         # (`tolerance.classify_error_shape`), 这里只做 torch 侧的归约。
@@ -686,8 +707,9 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             "success": passed,
             "reference_type": reference_type,
             "output_shape": list(actual.shape),
-            "compared_elements": total,
-            "coverage": 1.0,
+            "compared_elements": n_compared,
+            "coverage": n_compared / total if total else 1.0,
+            "reference_nonfinite": n_ref_nonfinite,
             "max_error": max_abs_error,
             "max_rel_error": max_rel_error,
             "matched_ratio": matched_ratio,
@@ -703,9 +725,12 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             "error_shape": error_shape,
             "error": reason,
             "device": str(device),
+            **evidence,
         }
+    except InputFidelityError as e:
+        return {"success": False, "error": str(e), "input_fidelity_error": str(e), **evidence}
     except Exception as e:
-        return {"success": False, "error": f"Remote verification error: {type(e).__name__}: {e}"}
+        return {"success": False, "error": f"Remote verification error: {type(e).__name__}: {e}", **evidence}
 
 
 def _execute_triton(code: str, real_inputs: dict) -> dict:

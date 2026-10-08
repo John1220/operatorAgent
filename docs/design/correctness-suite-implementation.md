@@ -1,7 +1,8 @@
-# CorrectnessSuite：实现与边界（含本地输入保真）
+# CorrectnessSuite：实现与边界（含本地与 NVIDIA L2 输入保真）
 
 日期：2026-10-08。对应主设计 §20；实现状态以测试为准，不宣称 §20 全部完成。
 本地输入保真协议见 [input-fidelity-protocol](input-fidelity-protocol.md)。
+NVIDIA L2 / Torch 协议和真机验收边界见 [remote-input-fidelity-protocol](remote-input-fidelity-protocol.md)。
 
 ## 接入路径
 
@@ -69,10 +70,11 @@ MockGPU 的 **Python 数值 ndarray** 路径能保留输入值、dtype、strides
 1. **复杂 backing 来源**：本地普通数值 ndarray 的 storage/view 传输已接通；
    ndarray subclass、object dtype、stride_tricks 的未知 backing 来源等仍拒绝，不猜指针。
    回读证据缺失或不一致时仍是 unknown，不能只靠后端声明或正确的输出数值放行。
-2. **远端套件**：SSH 重建输入值，HTTP/其他提供方尚未声明套件输入保真。
-   `Backend.correctness_input_support(source, layout)` 默认拒绝作肯定声明；未接协议前套件无法通过。
-3. **Triton 路径**：dtype/contiguous 转换及无 CUDA 时的模拟回退不足以证明原候选的套件正确性，
-   因而不沿用 Python 路径的肯定声明。
+2. **远端套件**：NVIDIA SSH L2 原值/storage 协议及真实 Torch 回读已接通，离线测试通过；
+   GPU 真机验收尚未完成，XPU/HTTP 未接通。`Backend.correctness_input_support` 默认拒绝，
+   肯定声明也必须核本次执行证据。L3 的旧生成协议不在本片改造范围。
+3. **Triton 路径**：本地真实 CUDA 与 NVIDIA runner 使用 Torch storage/view 回读；
+   readonly/负 stride 不能表达，仍 unknown；无 CUDA 的模拟参考仍不能证明原候选正确性。
 4. backward / sanitizer / racecheck / aliasing / in-place / 指定非 fp32 累加精度，
    若写进 `required_checks`，当前全部 unknown。没有执行器，不补假通过。
 5. 没有自动推导每类边界的生成器，也没有“每类边界各一”的覆盖 lint。
@@ -87,7 +89,7 @@ MockGPU 的 **Python 数值 ndarray** 路径能保留输入值、dtype、strides
 套件不进契约 hash（3 条红）、先转 float32 再算输出指纹（1 条红）；4/4 被测试拒绝。
 这不是完整变异覆盖率，只是对四处承重门的负向检查。
 
-最终回归：全量 `2662 passed`；Golden compare 串行运行 `PASS 4 / REVIEW 0 / FAIL 0`。
+第一阶段回归：全量 `2662 passed`；Golden compare 串行运行 `PASS 4 / REVIEW 0 / FAIL 0`。
 
 `tests/test_correctness_suite.py`：契约往返/篡改拒绝、同 shape 不同 dtype、输入可复算、
 shape/尾块/dtype/零值特化错核止步 L2、确定性失败、缺参考/部分非有限/能力缺口、
@@ -96,5 +98,6 @@ unknown 不污染教训、L2 报告、Conductor 候选选择和产物落盘。
 本地第二阶段守卫：`tests/test_input_fidelity.py`（fork/subprocess、值与布局回读、
 正确/错误 stride 和 broadcast 核对照）；原有布局缺口测试改成“缺回读证据仍 unknown”。
 
-下一阶段将协议接到远端/Triton 执行侧，再补自动边界生成和覆盖 lint；
-不能把本地的证据当成 GPU runner 的证据。
+第三阶段守卫：`tests/test_remote_input_fidelity.py`，原值 JSON、独立部署 runner、Torch
+实际对象回读、确定性和 L2→L3 对照；真实 CUDA/Triton 用例需要相应设备，否则明确 skip。
+下一阶段先补 GPU 真机验收，再补自动边界生成和覆盖 lint；不能把 CPU 协议测试当成 GPU 证据。

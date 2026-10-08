@@ -594,10 +594,12 @@ def _correctness_lines(artifact: Any) -> List[str]:
             out += ["", f"- Case `{cell(row.get('case_id'))}` 输入保真: "
                     f"{_tri(m.get('input_fidelity_verified'))}（执行侧 kernel 调用前回读）"]
             for name, spec in sorted(observed.items()):
+                device = receipt.get("tensor_devices", {}).get(name)
                 out.append(f"  - `{cell(name)}`: dtype={spec.get('dtype', spec.get('type'))}, "
                            f"shape={spec.get('shape')}, strides={spec.get('strides')}, "
                            f"offset={spec.get('offset')}, writeable={spec.get('writeable')}, "
-                           f"value_hash=`{str(spec.get('value_digest', ''))[:12]}`")
+                           f"value_hash=`{str(spec.get('value_digest', ''))[:12]}`"
+                           + (f", device={cell(device)}" if device is not None else ""))
         if c.get("reason"):
             out.append(f"- 无法确立: {c['reason']}")
         out.append("")

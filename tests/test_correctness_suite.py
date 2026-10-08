@@ -213,10 +213,16 @@ def test_partial_nonfinite_reference_is_unknown(monkeypatch):
 
 def test_remote_input_regeneration_cannot_silently_claim_value_coverage():
     from operator_agent.remote_executor import SSHExecutor
-    # No connection needed: input support defaults to unknown before remote work.
-    backend = object.__new__(SSHExecutor)
-    supported, reason = backend.correctness_input_support(GOOD, "contiguous")
-    assert supported is False and "保真" in reason
+    backend = SSHExecutor(host="offline")
+    backend._deployed = True
+    # A capability claim cannot substitute for runtime evidence from old runners.
+    backend._ssh_exec_json = Mock(return_value={"success": True, "max_error": 0,
+        "coverage": 1.0, "compared_elements": 64})
+    assert backend.correctness_input_support(GOOD, "contiguous")[0] is True
+    result = Verifier(backend)._verify_function(GOOD, case().materialize(), None,
+                                               task(CorrectnessSuite((case(),))))
+    assert result.metrics["correctness"]["verdict"] == "unknown"
+    assert result.metrics["input_fidelity_verified"] is None
 
 
 @pytest.mark.parametrize("check", ["backward", "sanitizer", "racecheck", "aliasing", "inplace", "accum_fp16"])

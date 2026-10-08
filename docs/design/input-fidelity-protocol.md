@@ -79,7 +79,8 @@ dtype/shape/strides/offset/只读属性及值指纹。完整预期/回读和 sto
   缺证据冒充已验证、改成候选执行后才回读。分别触发 4、5、1、1 项失败。
   这是四个关键负例的验收，不是完整变异覆盖率声明。
 
-尚未接通 SSH/HTTP/Triton/CUDA 输入传输；这些路径不能因本地实现已完成而自动声明保真。
+本地第二阶段不涉及 SSH/HTTP/Triton/CUDA；同日后续的 NVIDIA L2 / Torch 实现见
+[远端输入保真](remote-input-fidelity-protocol.md)，真机验收仍单列，不由本地结果代替。
 GPU 上实际 tensor 的 stride、dtype、storage_offset 必须由 GPU runner 自己回报。
 backward、aliasing/in-place 语义、sanitizer、GPU launch 路径检查仍是独立欠账。
 本协议不解决同 uid 文件篡改、恶意反射修改子进程报告、pickle 的安全性或 OS 隔离。
