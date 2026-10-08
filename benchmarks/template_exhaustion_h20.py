@@ -14,7 +14,7 @@ fire 过；§13.5 收敛出口同理。这一跑回答三件事：
 做法: smem 上界压到 32 KiB 把空间缩到 **12 点**（1×1×2×3×2 —— 缩格是
 `param_space()` 的真实机制, 不是旁路）; min_speedup=0.5（实测点位 0.32~0.37x
 必不过 ⇒ 循环只能靠设计的出口停）; max_rounds=18（12 轮探完 + 余量）;
-heartbeat_interval 关掉（隔离观测变量 —— 心跳自身的真机观测另开一片）。
+heartbeat_interval 调大（隔离观测变量 —— 心跳自身的真机观测另开一片；仅 harness 可放宽）。
 不经 LLM（chat 被调即炸: 升级门评估点是纯判据, 若它调 LLM 那本身就是读数）。
 
 跑法: python3 benchmarks/template_exhaustion_h20.py [--rounds 18]
@@ -27,6 +27,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from operator_agent._harness_controls import enable_for_harness
+enable_for_harness()
 os.environ.setdefault("OPERATOR_AGENT_KERNEL_DB", "off")
 os.environ.setdefault("OPERATOR_AGENT_FAILURE_DB", "off")
 os.environ.setdefault("OPERATOR_AGENT_LOG_KEEP", "100")

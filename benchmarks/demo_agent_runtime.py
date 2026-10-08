@@ -39,6 +39,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from operator_agent._harness_controls import enable_for_harness
+enable_for_harness()
 
 import numpy as np  # noqa: E402
 

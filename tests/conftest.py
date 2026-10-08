@@ -15,14 +15,20 @@
    mock_gpu 跑出来的单元测试现场 —— 「历史语料」这个概念在仓库里原本不成立
    (docs/research/43 第三节)。
 
-对策: 测试期内把目录指到 tmp (`OPERATOR_AGENT_LOG_DIR` / `OPERATOR_AGENT_OUTPUT_DIR`),
-或干脆关掉 (`OPERATOR_AGENT_KERNEL_DB` / `OPERATOR_AGENT_FAILURE_DB` = off)。
-真实运行不受影响 —— 不设变量时行为与从前一致。
+对策: 测试期内把目录指到 tmp (`OPERATOR_AGENT_LOG_DIR` / `OPERATOR_AGENT_OUTPUT_DIR`)，
+或由本文件启用进程内 harness 控制后关闭经验库 (`OPERATOR_AGENT_KERNEL_DB` /
+`OPERATOR_AGENT_FAILURE_DB` = off)。真实运行不能仅靠环境变量关闭这些副作用。
 """
 import os
 import tempfile
 
 import pytest
+
+from operator_agent._harness_controls import enable_for_harness
+
+# Side-effect suppression and oversized heartbeat values are harness-only controls;
+# they are enabled by this process-local hook, never by an environment variable.
+enable_for_harness()
 
 # 整个测试会话共享临时目录; 用 env 而不是 monkeypatch, 因为它们必须在任何 Conductor /
 # ArtifactStore 被构造之前就生效。

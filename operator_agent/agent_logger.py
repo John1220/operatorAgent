@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import Optional
 from contextlib import contextmanager
 
+from ._harness_controls import enabled as harness_controls_enabled
+
 
 class TeeWriter:
     """同时写入原始 stdout 和日志文件的分流器"""
@@ -87,19 +89,19 @@ def capture_execution(
         # 日志文件名: 20260802_153000_matmul_nvidia_gpu_ab12cd34.log
     """
     # 确定日志目录
-    # OPERATOR_AGENT_LOG_DIR 覆盖默认位置; 取 off/none/空 则完全不落文件 (只透传输出)。
-    # 这条是为「跑测试不得改动仓库状态」而加的: Conductor.run 无条件走这里, 于是每个
-    # 单元测试都会往 logs/ 写一个文件, 并且顺带触发下面的自动清理 —— 真实跑出来的
-    # 现场会被测试批次轮掉。受害对象是 docs/research/35 第九节的 C1 重测方案: 它挑的
-    # 素材就是「logs/ 里真实修 3 轮仍失败的 case」, 而那些文件已经没了 (2026-09-26 核实:
-    # 现存 11 个日志全部带 `LLM: <MagicMock ...>` 头)。
+    # OPERATOR_AGENT_LOG_DIR 允许重定向到另一处，但不能由普通环境变量关闭审计。
+    # off/none/0/false 只有测试或 benchmark harness 通过进程内控制显式启用时才生效。
     env_dir = os.environ.get("OPERATOR_AGENT_LOG_DIR", "").strip()
     if not log_dir and env_dir:
         log_dir = env_dir
     if log_dir and log_dir.lower() in ("off", "none", "0", "false"):
-        # 不建目录、不开文件: 只透传输出 (sys.stdout 原样不动即是透传)。
-        yield None
-        return
+        if not harness_controls_enabled():
+            # 安全默认值：忽略环境变量的关闭请求，回到默认日志目录。
+            log_dir = None
+        else:
+            # harness 侧的副作用隔离，不是生产运行开关。
+            yield None
+            return
     if log_dir:
         log_dir = Path(log_dir)
     else:

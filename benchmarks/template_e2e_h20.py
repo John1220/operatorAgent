@@ -31,6 +31,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from operator_agent._harness_controls import enable_for_harness
+enable_for_harness()
 # 驱动跑的现场不进语料 (与 template_matmul_replay 同款理由: 语料是「跨运行的记忆」,
 # 驱动现场不是要沉淀的实验); 日志保留数抬高 (conftest 记过的事故: keep=10 会把真实
 # 实验现场轮掉 —— 这里是真机跑, 现场要留着)。

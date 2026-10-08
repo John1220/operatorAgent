@@ -45,6 +45,11 @@ from typing import Any, Callable, Optional
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO_ROOT)
 
+# Golden 是独立运行的 harness；显式打开仅限 harness 的隔离开关，避免
+# `jsonl_path="off"` 在生产默认值收紧后落到仓库持久化路径。
+from operator_agent._harness_controls import enable_for_harness
+enable_for_harness()
+
 from operator_agent import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision, DSLEnum,

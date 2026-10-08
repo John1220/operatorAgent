@@ -30,6 +30,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from operator_agent._harness_controls import enable_for_harness
+enable_for_harness()
 os.environ.setdefault("OPERATOR_AGENT_KERNEL_DB", "off")
 os.environ.setdefault("OPERATOR_AGENT_FAILURE_DB", "off")
 os.environ.setdefault("OPERATOR_AGENT_LOG_KEEP", "100")

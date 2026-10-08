@@ -62,6 +62,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from operator_agent._harness_controls import enable_for_harness
+enable_for_harness()
 # 「跑测试/探针不得改动仓库状态」的三条逃生门 (§3.5 硬伤二记过它们的账): 这一跑要的是
 # **干净两臂**, 而失败库与长期记忆会跨臂串味 —— 第一臂写进去的案例会出现在第二臂的
 # prompt 里, 那就不是「只差一个开关」了。显式传 `jsonl_path="off"` 是主保险, 这两条 env

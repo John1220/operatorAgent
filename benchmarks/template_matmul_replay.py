@@ -13,6 +13,8 @@
 import json, os, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from operator_agent._harness_controls import enable_for_harness
+enable_for_harness()
 os.environ.setdefault("OPERATOR_AGENT_KERNEL_DB", "off")
 os.environ.setdefault("OPERATOR_AGENT_FAILURE_DB", "off")
 

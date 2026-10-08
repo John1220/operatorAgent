@@ -14,6 +14,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from ._harness_controls import enabled as harness_controls_enabled
 from .kernel_templates import SOFTMAX_TRITON
 from .schemas import UnifiedSketch
 
@@ -236,13 +238,17 @@ class KernelDatabase:
 
         `output/` 已在 .gitignore 里 —— 语料是**这台机器**测出来的东西, 不进仓库
         (换一张卡, 里面的 score 就不成立了, 见 doc 42 的达成率口径)。
-        值为 off/none/0/false 时整个关闭 (单元测试用它来保持仓库无副作用)。
+        值为 off/none/0/false 时只有 harness 进程内显式启用控制才关闭；普通环境变量
+        只能重定向路径，不能关闭审计持久化。
         """
         p = jsonl_path or os.environ.get("OPERATOR_AGENT_KERNEL_DB", "").strip()
         if not p:
             p = str(Path(__file__).resolve().parent.parent / "output" / "kernel_db.jsonl")
         if p.lower() in _DISABLED:
-            return None
+            if harness_controls_enabled():
+                return None
+            # 环境变量只能重定向，不能关闭持久化；关闭只允许 harness 进程内显式启用。
+            p = str(Path(__file__).resolve().parent.parent / "output" / "kernel_db.jsonl")
         return Path(p)
 
     # ---- 事件日志 ----
@@ -766,7 +772,10 @@ class FailureDatabase:
         if not p:
             p = str(Path(__file__).resolve().parent.parent / "output" / "failure_db.jsonl")
         if str(p).lower() in _DISABLED:
-            return None
+            if harness_controls_enabled():
+                return None
+            # 环境变量只能重定向，不能关闭持久化；关闭只允许 harness 进程内显式启用。
+            p = str(Path(__file__).resolve().parent.parent / "output" / "failure_db.jsonl")
         return Path(p)
 
     @staticmethod
@@ -776,10 +785,13 @@ class FailureDatabase:
         3 来自 AdaExplore: `--knowledge_1_threshold` 出厂默认 3, 且论文 §3.3 写的是
         「只保留频率超过阈值 O 的规则, 实践中取 3」(✅ 两处都读过原文与配置文件)。
         ⚠️ 它是**一篇论文调出来的常数**, 没有任何消融实验说明 3 比 2 或 5 好; 本项目
-        也没有样本去验。所以它可被 env 覆盖, 设为 0/1 等于关掉这道门。
+        也没有样本去验。普通环境变量不能把它调成 0/1；只有 harness 侧显式控制可做消融。
         """
-        raw = recurrence_gate if recurrence_gate is not None else \
-            os.environ.get("OPERATOR_AGENT_FAILURE_GATE", "").strip()
+        raw = recurrence_gate
+        if raw is None and harness_controls_enabled():
+            raw = os.environ.get("OPERATOR_AGENT_FAILURE_GATE", "").strip()
+        if raw is None:
+            raw = ""
         if raw == "" or raw is None:
             return 3
         try:

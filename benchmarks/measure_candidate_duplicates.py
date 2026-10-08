@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from operator_agent._harness_controls import enable_for_harness
+enable_for_harness()
 
 # 语料与日志都不该被一次测量写进仓库
 os.environ.setdefault("OPERATOR_AGENT_KERNEL_DB", "off")

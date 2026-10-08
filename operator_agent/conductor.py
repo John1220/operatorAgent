@@ -73,6 +73,12 @@ from .agent_runtime import (
     ask_unavailable_reason, candidate_path,
 )
 from .failure_route import classify as classify_failure
+from ._harness_controls import enabled as harness_controls_enabled
+
+
+# 生产运行必须在有限步长内重新校准量具；超大值只允许测试/benchmark
+# harness 通过进程内控制打开，不能由任务字段或环境变量关闭心跳。
+MAX_HEARTBEAT_INTERVAL = 100
 
 
 class Router:
@@ -474,6 +480,10 @@ class Conductor:
         if not isinstance(heartbeat_interval, int) or isinstance(heartbeat_interval, bool) \
                 or heartbeat_interval <= 0:
             raise ValueError(f"heartbeat_interval 必须为正整数: {heartbeat_interval!r}")
+        if heartbeat_interval > MAX_HEARTBEAT_INTERVAL and not harness_controls_enabled():
+            raise ValueError(
+                f"heartbeat_interval 不能超过 {MAX_HEARTBEAT_INTERVAL}: "
+                f"{heartbeat_interval!r}（仅 harness 可显式放宽）")
         self.heartbeat_interval = heartbeat_interval
         #: §10.3 的 ε。抽签值本身是 (seed, 轮次) 的纯函数, 不用随机数发生器 —— 于是
         #: ε-greedy 与「跑完能离线复算」不冲突 (见 `selection` 模块注释)。
