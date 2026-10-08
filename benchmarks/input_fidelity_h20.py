@@ -1,6 +1,7 @@
 """Small real NVIDIA L2 acceptance, NOT a performance benchmark.
 
 Run: python3 benchmarks/input_fidelity_h20.py [--gpu 2]
+     python3 benchmarks/input_fidelity_h20.py --boundaries [--gpu 2]
 Uses the existing remote runtime without syncing/installing dependencies; pushes
 the production runner's shared sources to a private random scratch directory.
 Full evidence is private under output/, never committed with host/user paths.
@@ -23,7 +24,9 @@ import numpy as np  # noqa: E402
 
 from benchmarks._scratch import unmatchable  # noqa: E402
 from operator_agent import (CorrectnessCase, CorrectnessSuite, ConstraintSpec,  # noqa: E402
-                            SourceSpec, TargetSpec, TaskSchema, Verifier)
+                            SourceSpec, TargetSpec, TaskSchema, Verifier,
+                            BoundaryAxis, BoundaryPolicy, TensorAxes)
+from operator_agent.correctness import as_suite  # noqa: E402
 from operator_agent.bench_cases import BenchmarkCase, TensorSpec  # noqa: E402
 from operator_agent.contract import freeze_from_task  # noqa: E402
 from operator_agent.input_fidelity import describe_inputs  # noqa: E402
@@ -86,6 +89,23 @@ def trials():
         ("good-after-negatives", GOOD, small, aligned, "passed", ""),
         ("good-one-shot", GOOD, small, aligned, "passed", ""),
     ]
+
+
+def boundary_trials():
+    """Extra real L2 witnesses from a trusted declaration, never candidate BLOCKs."""
+    policy = BoundaryPolicy((BoundaryAxis("rows", 1, 9, 8, 8),
+                             BoundaryAxis("cols", 1, 33, 8, 32)),
+        (TensorAxes("X", ("rows", "cols")),), dtypes=("fp16", "fp32"), seed=17)
+    raw = {"coverage_policy": policy.content_dict()}  # Exercise production deferred expansion.
+    expanded = as_suite(raw)
+    dense_target = next(c.case_id for c in expanded.cases if c.layout == "strided"
+                        and c.inputs.tensors[0].dtype == "fp32")
+    tail_target = next(c.case_id for c in expanded.cases if c.inputs.tensors[0].shape == (8, 31)
+                      and c.inputs.tensors[0].dtype == "fp32" and c.pattern == "random" and c.layout == "contiguous")
+    inputs = case("aligned", (8, 8)).materialize()
+    return [("good-auto-boundaries", GOOD, raw, inputs, "passed", ""),
+            ("bad-dense-auto-boundaries", BAD_DENSE, raw, inputs, "failed", dense_target),
+            ("bad-tail-auto-boundaries", BAD_TAIL, raw, inputs, "failed", tail_target)]
 
 
 def shell_path(path):
@@ -293,15 +313,21 @@ def run(args):
     try:
         environment = backend.prepare(args.gpu)
         layout.write_for(ROLE_HARNESS, "harness/environment.json", dumps(environment))
-        for name, code, suite, inputs, expected, target in trials():
+        specs = trials() + boundary_trials() if getattr(args, "boundaries", False) else trials()
+        for name, code, declaration, inputs, expected, target in specs:
             if name == "good-one-shot":
                 backend.close()
                 backend._persistent = False
                 info = backend._ssh_exec_json({"action": "gpu_info"})
                 if info.get("selected_gpu") != backend._gpu_pin or info.get("device") != "cuda":
                     raise RuntimeError("one-shot runner selected a different device")
+            if name == "good-auto-boundaries":
+                # Keep added trials in a pinned persistent session, not one-shot
+                # startup for every generated L2 case.
+                backend._persistent = True
+            suite = as_suite(declaration)
             task = TaskSchema(source=SourceSpec(kernel_type="relu"), target=TargetSpec(dsl="triton"),
-                              constraints=ConstraintSpec(correctness_suite=suite))
+                              constraints=ConstraintSpec(correctness_suite=declaration))
             layout.write_for(ROLE_HARNESS, f"contract/{name}.json", dumps(freeze_from_task(task).as_dict()))
             layout.write_for(ROLE_CANDIDATE, f"candidate/{name}.py", code)
             before = describe_inputs(inputs)
@@ -316,6 +342,12 @@ def run(args):
                 row = results[-1].metrics.get("correctness", {}).get("cases", [{}])[0]
                 if "确定性失败" not in row.get("reason", ""):
                     errors.append("did not exercise raw-output determinism gate")
+            if suite.coverage_policy is not None:
+                c = results[-1].metrics.get("correctness", {})
+                if c.get("coverage_lint", {}).get("status") != "passed":
+                    errors.append("declared boundary coverage was not proven before actual L2")
+                if c.get("suite_hash") != suite.digest():
+                    errors.append("executed suite identity differs from frozen boundary suite")
             record = dict(name=name, expected=expected, accepted=not errors, errors=errors,
                 l3_attempts=verifier.l3_attempts, primary_inputs=before,
                 results=[dict(dataclasses.asdict(r), level=r.level.value) for r in results],
@@ -349,4 +381,5 @@ if __name__ == "__main__":
     parser.add_argument("--host", default=None, help="SSH alias (default: backend configuration)")
     parser.add_argument("--gpu", type=int, default=None, help="physical GPU; refuses busy/low-memory cards")
     parser.add_argument("--output", default=str(ROOT / "output" / "input_fidelity_h20"))
+    parser.add_argument("--boundaries", action="store_true", help="also verify generated suites and bad stride/tail kernels")
     sys.exit(run(parser.parse_args()))

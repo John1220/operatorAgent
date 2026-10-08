@@ -3,6 +3,7 @@
 日期：2026-10-08。对应主设计 §20；实现状态以测试为准，不宣称 §20 全部完成。
 本地输入保真协议见 [input-fidelity-protocol](input-fidelity-protocol.md)。
 NVIDIA L2 / Torch 协议和真机验收边界见 [remote-input-fidelity-protocol](remote-input-fidelity-protocol.md)。
+自动边界声明、固定生成规则与覆盖门禁见 [correctness-boundary-generation](correctness-boundary-generation.md)。
 
 ## 接入路径
 
@@ -16,7 +17,8 @@ NVIDIA L2 / Torch 协议和真机验收边界见 [remote-input-fidelity-protocol
 ## 数据模型
 
 - `CorrectnessCase(case_id, inputs, pattern, layout)`：`inputs` 复用 `BenchmarkCase` / `TensorSpec`。
-- `CorrectnessSuite(cases, deterministic=True, required_checks=())`：冻结对象，也接受 JSON 声明。
+- `CorrectnessSuite(cases, deterministic=True, required_checks=(), coverage_policy=None)`：冻结对象，也接受 JSON 声明。
+- 可选 `coverage_policy` 描述可信合法轴域/绑定及覆盖要求；仅给 policy 时自动展开，手工 cases 不自动补齐。
 - `case_id` 唯一；同 shape 的不同 dtype、seed、值分布或布局不去重。
 - 套件内容、输入形状/dtype/seed、值模式、布局、确定性要求和额外检查全部进契约 hash。
 - 值模式：random / zeros / constant（1）/ large（100）/ small（1e-4）/ nan / inf。
@@ -78,9 +80,9 @@ MockGPU 的 **Python 数值 ndarray** 路径能保留输入值、dtype、strides
    readonly/负 stride 不能表达，仍 unknown；无 CUDA 的模拟参考仍不能证明原候选正确性。
 4. backward / sanitizer / racecheck / aliasing / in-place / 指定非 fp32 累加精度，
    若写进 `required_checks`，当前全部 unknown。没有执行器，不补假通过。
-5. 没有自动推导每类边界的生成器，也没有“每类边界各一”的覆盖 lint。
-   shape 仍由调用方明确声明；未声明 CorrectnessSuite 的旧任务仍走原 L2，
-   **本轮没有把全部旧调用方迁移成强制套件模式**。
+5. 显式合法轴域的有限边界生成与覆盖 lint 已落；不自动推断任意算子的合法域，
+   不证明所有 shape/值/布局组合。未声明 coverage_policy 的套件保持原行为，
+   报告明确“未声明覆盖规则”；**未把全部旧调用方迁移成强制套件/覆盖模式**。
 6. 两次独立执行的指纹一致不是任意次数、同进程连续 launch 的确定性证明。
    完整 launch/fallback 探针仍依赖已有静态/运行时盾，未新增 GPU launch 审计器。
 
@@ -104,4 +106,10 @@ unknown 不污染教训、L2 报告、Conductor 候选选择和产物落盘。
 第四阶段：`benchmarks/input_fidelity_h20.py` 使用既有运行时和隔离 runner，在 H20 GPU 2 上
 完成 11/11 预期验收（5 passed、4 failed、2 unknown），保留 38 份真实 cuda:0 回读；常驻和
 一次性 SSH 均覆盖，L3 尝试为零，清理已确认。离线驱动守卫与真机证据分开记录，
-详见协议文档。下一阶段补自动边界生成和覆盖 lint；完整 §20 仍未完成。
+详见协议文档。
+
+第五阶段：`correctness_boundaries.py` 的 BoundaryPolicy → 任务/契约自动展开 → 冻结与
+Verifier/Conductor 预检查 → L2/报告已接通。覆盖不足保持 unknown/HOLD，候选不编译、
+不走 L3。H20 新增 26 个自动 case / 42 项规则，正确 ReLU 通过、错 stride/尾块核被拒；
+含原协议项的真机验收 14/14 符合预期。规则/样本全部进 hash，旧 suite hash 不变；
+生成域须由可信 harness 声明。完整 §20 仍未完成，详见生成文档的范围与运行编号。

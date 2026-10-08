@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from benchmarks.input_fidelity_h20 import (AcceptanceSSH, GOOD, L2OnlyVerifier,
-    assess, case, gpu_evidence, select_gpu, shell_path, trials, validate_scratch)
+    assess, boundary_trials, case, gpu_evidence, select_gpu, shell_path, trials, validate_scratch)
+from operator_agent.correctness import as_suite
+from operator_agent.correctness_boundaries import lint_coverage
 from operator_agent.anticheat import static_audit
 from operator_agent.schemas import VerificationLevel as Level, VerificationResult as Result
 
@@ -110,6 +112,23 @@ def test_trial_inputs_really_include_tail_offset_zero_stride_fp16_and_readonly()
     for _, source, _, _, _, _ in specs.values():
         compile(source, "acceptance", "exec")
         assert not static_audit(source, dsl="triton")
+
+
+def test_extra_boundary_trials_are_deferred_generated_and_have_real_target_witnesses():
+    specs = boundary_trials()
+    assert len(specs) == 3
+    for name, code, raw, inputs, expected, target in specs:
+        assert "cases" not in raw
+        suite = as_suite(raw)
+        assert lint_coverage(suite)["status"] == "passed"
+        assert {t.dtype for c in suite.cases for t in c.inputs.tensors} == {"fp16", "fp32"}
+        assert static_audit(code, dsl="triton") == []
+        if "dense" in name:
+            c = next(c for c in suite.cases if c.case_id == target)
+            assert c.layout == "strided" and c.inputs.tensors[0].dtype == "fp32"
+        if "tail" in name:
+            c = next(c for c in suite.cases if c.case_id == target)
+            assert c.inputs.tensors[0].shape == (8, 31) and c.pattern == "random"
 
 
 @pytest.mark.parametrize("path", ["/tmp", "/tmp/other-random123", "/tmp/opag-fidelity-fixed",

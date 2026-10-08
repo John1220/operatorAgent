@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from typing import Mapping
+from dataclasses import dataclass, replace
+from typing import Any, Mapping, Optional
 
 from .bench_cases import BenchmarkCase, BenchCaseError
 
@@ -106,6 +106,8 @@ class CorrectnessSuite:
     cases: tuple
     deterministic: bool = True
     required_checks: tuple = ()
+    # Optional trusted finite-domain recipe. Absent => legacy suite/hash unchanged.
+    coverage_policy: Optional[Any] = None
 
     def validate(self) -> list:
         errors = []
@@ -127,12 +129,22 @@ class CorrectnessSuite:
             errors.append("correctness required_checks 必须是 tuple")
         if any(c not in EXTRA_CHECKS for c in self.required_checks):
             errors.append("correctness required_checks 有未知检查项")
+        if self.coverage_policy is not None:
+            from .correctness_boundaries import as_policy
+            try:
+                as_policy(self.coverage_policy)
+            except (ValueError, TypeError) as exc:
+                errors.append(f"correctness coverage_policy: {exc}")
         return errors
 
     def content_dict(self) -> dict:
-        return {"cases": [c.content_dict() for c in sorted(self.cases, key=lambda c: c.case_id)],
+        result = {"cases": [c.content_dict() for c in sorted(self.cases, key=lambda c: c.case_id)],
                 "deterministic": self.deterministic,
                 "required_checks": sorted(set(self.required_checks))}
+        if self.coverage_policy is not None:
+            from .correctness_boundaries import as_policy
+            result["coverage_policy"] = as_policy(self.coverage_policy).content_dict()
+        return result
 
     def digest(self) -> str:
         return hashlib.sha256(json.dumps(self.content_dict(), sort_keys=True,
@@ -142,14 +154,25 @@ class CorrectnessSuite:
     def from_dict(payload) -> "CorrectnessSuite":
         if not isinstance(payload, Mapping):
             raise BenchCaseError("CorrectnessSuite 必须是映射")
-        if set(payload) - {"cases", "deterministic", "required_checks"}:
+        if set(payload) - {"cases", "deterministic", "required_checks", "coverage_policy"}:
             raise BenchCaseError("CorrectnessSuite 有未知字段（不忽略拼写错误）")
         cases = payload.get("cases")
         checks = payload.get("required_checks", ())
+        policy = None
+        generated = False
+        if "coverage_policy" in payload:
+            from .correctness_boundaries import as_policy, generate_correctness_suite
+            policy = as_policy(payload["coverage_policy"])
+            # Omitted cases = explicit automatic generation. Empty/null cases is
+            # still an invalid manual declaration, never silently repaired.
+            if "cases" not in payload:
+                cases = generate_correctness_suite(policy).cases
+                generated = True
         if not isinstance(cases, (list, tuple)) or not isinstance(checks, (list, tuple)):
             raise BenchCaseError("correctness cases/required_checks 必须是序列")
-        suite = CorrectnessSuite(tuple(CorrectnessCase.from_dict(c) for c in cases),
-                                 payload.get("deterministic", True), tuple(checks))
+        parsed = tuple(cases) if generated else tuple(CorrectnessCase.from_dict(c) for c in cases)
+        suite = CorrectnessSuite(parsed,
+                                 payload.get("deterministic", True), tuple(checks), policy)
         errors = suite.validate()
         if errors:
             raise BenchCaseError("; ".join(errors))
@@ -161,6 +184,9 @@ def as_suite(value) -> CorrectnessSuite:
     errors = suite.validate()
     if errors:
         raise BenchCaseError("; ".join(errors))
+    if suite.coverage_policy is not None:
+        from .correctness_boundaries import as_policy
+        suite = replace(suite, coverage_policy=as_policy(suite.coverage_policy))
     return suite
 
 

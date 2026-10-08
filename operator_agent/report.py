@@ -585,6 +585,19 @@ def _correctness_lines(artifact: Any) -> List[str]:
             out.append("| " + " | ".join(cell(v) for v in (
                 row.get("case_id"), f"{row.get('pattern', '-')} / {row.get('layout', '-')}",
                 row.get("verdict"), row.get("reason"))) + " |")
+        coverage = c.get("coverage_lint")
+        if isinstance(coverage, dict):
+            out += ["", f"- 边界覆盖 lint: **{coverage.get('status', 'unknown')}** "
+                    f"（{coverage.get('witnessed_rule_count', 0)}/{coverage.get('required_rule_count', '?')} 项规则有声明见证）",
+                    f"- 覆盖范围: {coverage.get('scope', '未确立')}；不是数值正确或 GPU 执行证据。"]
+            for rule in coverage.get("missing", ()):
+                out.append(f"  - 缺项: `{cell(rule)}`")
+            for error in coverage.get("errors", ()):
+                out.append(f"  - 声明/预算错误: {cell(error)}")
+            for rule, reason in sorted(coverage.get("inapplicable", {}).items()):
+                out.append(f"  - 不适用: `{cell(rule)}` — {cell(reason)}")
+        else:
+            out += ["", "- 边界覆盖 lint: **未声明规则**（套件通过不证明边界类别齐全）。"]
         for row in c.get("cases", ()):
             m = row.get("metrics", {})
             receipt = m.get("input_fidelity", {})

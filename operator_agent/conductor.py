@@ -1140,6 +1140,15 @@ class Conductor:
         resume_from: Optional[str] = None,
     ) -> KernelArtifact:
         """实际执行逻辑 (被 execute 的日志上下文包裹)"""
+        # The trusted harness must have a complete declared boundary suite before
+        # any routing, LLM generation, environment provisioning or GPU work. Keep
+        # this as L2 unknown, not a candidate bug eligible for Fixer/corpus lessons.
+        # Pure trusted declaration check, not a new optional method required of
+        # injected/scripted verifiers (legacy users need not implement it).
+        preflight = Verifier.correctness_preflight(task)
+        if preflight is not None:
+            return KernelArtifact(task_id=task.task_id, language=task.target.dsl,
+                                  verification_results=[preflight])
         # §3.4 起**契约也拥有输入**（I94）: 调用方传数组（`dict` 或 `list[dict]`），或者
         # **什么都不传** —— 那时输入由契约的 `cases` 逐个 `materialize()` 造出来。
         # §6.2 条款 2「候选须在**全部**形状上通过」: 调用方可以传**多组**输入

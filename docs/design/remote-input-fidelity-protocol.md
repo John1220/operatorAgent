@@ -155,4 +155,6 @@ Golden compare **PASS 4 / REVIEW 0 / FAIL 0 / SKIP 0**，基线、容忍窗口�
 **范围仍有限**：这是小张量 ReLU 的 NVIDIA L2 传输/实际 view/确定性/门禁验收，不等于所有
 算子、共享 storage 的 aliasing 语义、backward、累加精度或完整 §20 的真机验收；也没有新增
 GPU launch/fallback 审计、独占租约或 OS 隔离。只读 broadcast 仍不支持，可写零 stride 不可
-替代它。下一阶段补自动边界生成与覆盖 lint；XPU/HTTP 和 L3 原值保真仍未迁移。
+替代它。同日第五阶段已补显式合法轴域的有限生成与覆盖 lint，并在 H20 上实测；
+见 [自动边界生成](correctness-boundary-generation.md) 的独立运行编号和有限范围。
+XPU/HTTP 和 L3 原值保真仍未迁移。

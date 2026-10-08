@@ -374,6 +374,11 @@ def freeze(kernel_type: str,
     if correctness_suite is not None:
         try:
             correctness_suite = as_suite(correctness_suite)
+            if correctness_suite.coverage_policy is not None:
+                from .correctness_boundaries import lint_coverage
+                coverage = lint_coverage(correctness_suite)
+                if coverage["status"] != "passed":
+                    errs.append("correctness 边界覆盖不足/无效: " + "; ".join(coverage["errors"] + coverage["missing"]))
             if dtype_semantics.deterministic and not correctness_suite.deterministic:
                 errs.append("数值语义要求确定性，但 CorrectnessSuite 关闭了确定性检查")
         except (BenchCaseError, TypeError, ValueError) as exc:

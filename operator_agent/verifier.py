@@ -20,6 +20,7 @@ from .schemas import (
 from .anticheat import static_audit
 from .contract import case_key
 from .correctness import as_suite, verdict_of
+from .correctness_boundaries import has_boundary_policy, lint_coverage
 from .bench_cases import BenchCaseError
 from .input_fidelity import InputFidelityError, describe_inputs, check_readback
 from .source_lang import classify
@@ -345,6 +346,10 @@ class Verifier:
         """
         results = []
 
+        preflight = self.correctness_preflight(task)
+        if preflight is not None:
+            return [preflight]  # Harness gap, not a compile/candidate failure.
+
         l1 = self._verify_compile(kernel_code, task.target.dsl,
                                   input_key_sets(test_inputs))
         results.append(l1)
@@ -522,6 +527,35 @@ class Verifier:
                                       message=f"编译失败: {head}", error_log=full,
                                       metrics=metrics)
 
+    @staticmethod
+    def correctness_preflight(task: TaskSchema) -> Optional[VerificationResult]:
+        """Declared boundary gaps stop before compile, GPU probe or candidate exec.
+
+        Legacy suites have no policy and keep their old gate/hash. In particular,
+        not declaring a policy must not be reported as passing coverage lint.
+        """
+        raw = task.constraints.correctness_suite
+        if not has_boundary_policy(raw):
+            return None
+        suite = None
+        try:
+            suite = as_suite(raw)
+            coverage = lint_coverage(suite)
+        except (ValueError, TypeError) as exc:
+            coverage = {"status": "invalid", "missing": [], "errors": [str(exc)],
+                        "scope": "生成/声明未确立，未执行候选"}
+        if coverage["status"] == "passed":
+            return None
+        reason = "边界生成/覆盖 lint 无法确立: " + "; ".join(coverage["errors"] + coverage["missing"])
+        correctness = {"verdict": "unknown", "reason": reason, "coverage_lint": coverage,
+                       "scope": coverage["scope"], "cases": []}
+        if suite is not None:
+            correctness.update(suite_hash=suite.digest(), declared_cases=len(suite.cases),
+                cases=[{"case_id": c.case_id, "verdict": "not_run", "reason": "覆盖预检查未通过"}
+                       for c in suite.cases])
+        return VerificationResult(VerificationLevel.L2_FUNCTION, False,
+                                  message=reason, metrics={"correctness": correctness})
+
     def _verify_function(self, kernel_code: str, test_inputs, expected_output, task: TaskSchema) -> VerificationResult:
         """Suite checks are part of L2, before candidate selection or L3.
 
@@ -531,6 +565,9 @@ class Verifier:
         raw = task.constraints.correctness_suite
         if raw is None:
             return self._verify_primary_function(kernel_code, test_inputs, expected_output, task)
+        preflight = self.correctness_preflight(task)
+        if preflight is not None:
+            return preflight
         try:
             suite = as_suite(raw)
         except (ValueError, TypeError) as exc:
@@ -612,6 +649,8 @@ class Verifier:
             "primary_inputs": primary.metrics.get("input_fidelity_readings", []),
             "scope": "仅证明声明的套件；未声明的形状/语义不算覆盖",
         }
+        if suite.coverage_policy is not None:
+            primary.metrics["correctness"]["coverage_lint"] = lint_coverage(suite)
         problems = [f"{r['case_id']}: {r['reason']}" for r in rows if r["verdict"] != "passed"]
         if state != "passed":
             primary.metrics["correctness"]["reason"] = (
