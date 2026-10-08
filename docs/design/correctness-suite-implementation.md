@@ -71,7 +71,8 @@ MockGPU 的 **Python 数值 ndarray** 路径能保留输入值、dtype、strides
    ndarray subclass、object dtype、stride_tricks 的未知 backing 来源等仍拒绝，不猜指针。
    回读证据缺失或不一致时仍是 unknown，不能只靠后端声明或正确的输出数值放行。
 2. **远端套件**：NVIDIA SSH L2 原值/storage 协议及真实 Torch 回读已接通，离线测试通过；
-   GPU 真机验收尚未完成，XPU/HTTP 未接通。`Backend.correctness_input_support` 默认拒绝，
+   H20 小规模 ReLU L2 真机正反验收已完成（见协议文档的运行编号），不等于所有算子验收；
+   XPU/HTTP 未接通。`Backend.correctness_input_support` 默认拒绝，
    肯定声明也必须核本次执行证据。L3 的旧生成协议不在本片改造范围。
 3. **Triton 路径**：本地真实 CUDA 与 NVIDIA runner 使用 Torch storage/view 回读；
    readonly/负 stride 不能表达，仍 unknown；无 CUDA 的模拟参考仍不能证明原候选正确性。
@@ -100,4 +101,7 @@ unknown 不污染教训、L2 报告、Conductor 候选选择和产物落盘。
 
 第三阶段守卫：`tests/test_remote_input_fidelity.py`，原值 JSON、独立部署 runner、Torch
 实际对象回读、确定性和 L2→L3 对照；真实 CUDA/Triton 用例需要相应设备，否则明确 skip。
-下一阶段先补 GPU 真机验收，再补自动边界生成和覆盖 lint；不能把 CPU 协议测试当成 GPU 证据。
+第四阶段：`benchmarks/input_fidelity_h20.py` 使用既有运行时和隔离 runner，在 H20 GPU 2 上
+完成 11/11 预期验收（5 passed、4 failed、2 unknown），保留 38 份真实 cuda:0 回读；常驻和
+一次性 SSH 均覆盖，L3 尝试为零，清理已确认。离线驱动守卫与真机证据分开记录，
+详见协议文档。下一阶段补自动边界生成和覆盖 lint；完整 §20 仍未完成。

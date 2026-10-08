@@ -100,5 +100,59 @@ readonly 拒绝、真实连续化/证据篡改拦截、完整输出指纹、非�
   错误参考当错核而非 unknown（2）、CPU 回退冒充真实设备（1）。
   这是七个关键门禁负例，不是完整变异覆盖率声明。
 
-本机只有 CPU：真实 CUDA/Triton 用例显式 skip，不以 CPU 测试替代真机。
-下一验收应在真实 NVIDIA 执行侧运行该用例并留设备与回读证据，然后补自动边界生成/覆盖 lint。
+本机只有 CPU：上述 pytest 中的真实 CUDA/Triton 用例仍显式 skip，不以 CPU 测试替代真机。
+
+### 同日第四阶段：H20 小规模 L2 真机验收
+
+可复跑入口：`python3 benchmarks/input_fidelity_h20.py --gpu 2`（SSH 别名默认走后端配置）。
+不传 `--gpu` 时，从实时快照选择利用率 ≤5%、空闲显存 ≥1 GiB 的卡；指定卡若忙则拒绝启动。
+选择不构成独占租约，不能拿这份验收作性能读数。
+
+- 复用已有 Python/Torch/Triton 运行时：探测用 `uv run --no-sync`，执行直接使用探测到的
+  Python，不安装或同步依赖。生产 runner 的八份共享源码推到随机私有目录（0700），
+  执行前核完整 SHA-256；不覆盖正常部署，也不删共享缓存。
+- 走 `Verifier.verify` → `SSHExecutor.verify_function` → 生产 `run_verify`，同时覆盖常驻
+  会话和一次性 SSH。正例明确停于 L2；负例调用完整 verify 检查 L2 硬门禁。
+  驱动计数任何 L3 尝试，并禁止远端 execute/benchmark；不伪造通过的性能结果。
+- 角色目录中保存冻结套件契约、候选源码、调用方预期描述、完整 JSON 请求/回执、
+  实际 storage/值/设备哈希、确定性重复回执和报告。产物位于 ignored `output/`；
+  真实用户名、工作目录和 SSH 配置不写入本设计文档。
+
+2026-10-08 实测（不是 CPU 模拟）：NVIDIA H20，物理 GPU **2**，进程内 CUDA_VISIBLE_DEVICES
+映射后的实际输入设备 **cuda:0**；Torch **2.14.0+cu130**，Triton **3.8.0**。
+
+| 验收项 | 实际 L2 结论 |
+|---|---|
+| 正确核：8×8 对齐、7×9 尾块、fp32 正 stride、3×5 fp16 正 stride、零/常数/大/小值 | passed；8 个声明 case 均有两次真实回读及相同完整输出指纹 |
+| 正确核：调用方非零 offset + 正 stride、可写零 stride | passed；实际 Torch view 对账，控制端输入不变 |
+| 忽略 stride 的错核 | 对齐主输入通过；stride case failed，最大误差 2.0261 |
+| 忽略尾块的错核（load/store 均保持 mask，不制造越界访问） | 对齐主输入通过；尾块 case failed，最大误差 1.7960 |
+| 写坏输入的错核 | 主输入 failed，误差 2.0261；exec 前回读仍保真，独立参考和控制端未被污染 |
+| 添加约 1e-10 随机噪声的核 | 两次数值比较均通过；完整原始输出指纹不同，确定性 failed |
+| `np.broadcast_to` 只读输入、负 stride 输入 | 明确转换拒绝，unknown；不转连续副本，不伪造回读 |
+| 负例后再次运行好核、一次性 SSH 运行好核 | passed；实际设备和重复回读仍成立 |
+
+最终 **11/11 验收符合预期**：5 项 passed、4 项 failed、2 项 unknown（后两类是预期的拒绝，
+不是“11 个正确性套件都通过”）。40 次 verify 请求，其中 38 次返回真实 Torch 输入回读，
+设备均为 cuda:0；另两次为明确的布局拒绝。11 次编译请求；全部条目 L3 尝试 **0**，
+远端 benchmark 请求 **0**。shutdown 后读回进程静默，再删除本次私有目录并确认不存在。
+
+完整私有产物编号：`input-fidelity-h20-20261008T072630175656Z-16651-1`，位于
+`output/input_fidelity_h20/<编号>/report/summary.json`（exit 0，accepted=true）。
+首轮 `input-fidelity-h20-20261008T072342592309Z-15697-1`（exit 2）也保留：生产门禁结果
+全部正确，但驱动错误地要求主输入误差为零，误报了亚容差随机噪声负例。修正驱动为读取
+实际比较通过/回读证据后完整复跑；**未修改生产容差、基线或门禁**，两轮清理均已确认。
+
+离线驱动守卫 `tests/test_input_fidelity_h20_acceptance.py` 覆盖缺设备/回读/重复/指纹、
+跳过声明 case、非预期 unknown、禁止性能/安装动作、空闲选卡及活进程存在时拒绝删除目录。
+本地落盘失败也不能跳过远端清理；拆除先于最终证据写入，有专门守卫。
+这些合成回执测试只标定驱动，真机证据来自上述独立运行产物。
+
+本阶段回归：新增驱动守卫 **26 passed**；与共享 scratch 守卫合跑 **44 passed**；
+最终完整测试 **2777 passed / 1 skipped**（skip 仍是控制端无 CUDA 的用例）。
+Golden compare **PASS 4 / REVIEW 0 / FAIL 0 / SKIP 0**，基线、容忍窗口及生产计时路径未改。
+
+**范围仍有限**：这是小张量 ReLU 的 NVIDIA L2 传输/实际 view/确定性/门禁验收，不等于所有
+算子、共享 storage 的 aliasing 语义、backward、累加精度或完整 §20 的真机验收；也没有新增
+GPU launch/fallback 审计、独占租约或 OS 隔离。只读 broadcast 仍不支持，可写零 stride 不可
+替代它。下一阶段补自动边界生成与覆盖 lint；XPU/HTTP 和 L3 原值保真仍未迁移。
