@@ -383,12 +383,25 @@ hardware_presets:
 > Conductor 无条件走落盘路径，所以**跑一次测试就会往仓库里灌一批产物、并顺带把真实实验
 > 现场轮掉**。单元测试靠它们保持仓库无副作用。
 
+> ⚠️ **`kernel_db=None` 不等于「没有经验库」**。`Conductor.__init__` 写的是
+> `kernel_db if kernel_db is not None else KernelDatabase()`（`conductor.py`），
+> 所以传 `None` 拿到的是**默认那个真库**；`KernelDatabase(jsonl_path=None)` 同理，
+> 会落回 `<repo>/output/kernel_db.jsonl`。实测：
+>
+> ```text
+> KernelDatabase(jsonl_path="off")._jsonl   -> None                                  # 真的关掉
+> KernelDatabase(jsonl_path=None)._jsonl    -> <repo>/output/kernel_db.jsonl         # 默认库
+> ```
+>
+> 想「这一趟不读也不写语料」，**设环境变量**，别传 `None`。这条与 doc 69 里
+> 「`KernelDatabase(jsonl_path=None)` 不是『无库』，而是『用默认库』」是同一条。
+
 ### 4.3 Conductor 参数
 
 ```python
 Conductor(
     backend=None,                # 验证后端（MockGPU 或 RemoteExecutor）
-    kernel_db=None,              # 算子知识库
+    kernel_db=None,              # 算子知识库 —— ⚠️ None = 用**默认那个库**, 不是空库 (见 4.2 的 ⚠️)
     llm=None,                    # LLM 客户端
     prompt_manager=None,         # Prompt 管理器
     max_optimize_rounds=3,       # 最大优化轮次

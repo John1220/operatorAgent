@@ -1703,6 +1703,7 @@ docs/design/autonomous-operator-agent-design.md                    ← 规范（
 docs/status/autonomous-operator-agent-status.md                    ← 当前实现与真机状态
 docs/design/autonomous-operator-agent-optimization-directions.md   ← 优化方向、波次与迁移
 docs/research/                                                     ← 外部证据、实验记录、CHECKLOG
+README.md                                                          ← 路由：新人第一眼，上面几份的分工与入口
 ```
 
 ### 25.2 设计正文不许出现的内容

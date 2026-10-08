@@ -6,7 +6,9 @@
 # ⚠️ 当前代码库中没有任何模块读取 config.yaml (全仓无 `import yaml`)。
 #    改这个文件不会有任何效果。真正生效的配置面是三处:
 #      1. operator_agent/remote_executor.py  SSHExecutor.__init__ 的默认值
-#      2. test_nvidia_*.py / test_kunlunxin_matmul.py  build_llm() 与 ssh_config()
+#      2. test_nvidia_matmul.py / test_nvidia_attention.py / test_nvidia_layernorm.py
+#         —— 这三个驱动里各自的 build_llm() 与 ssh_config()
+#         (根目录现在只有这三个 test_nvidia_*.py; 旧的 test_kunlunxin_matmul.py 已不在仓库里)
 #      3. 环境变量 REMOTE_SSH_HOST/PORT/USER/KEY、REMOTE_WORK_DIR、LLM_BASE_URL、LLM_API_KEY
 #    本文件保留为这些默认值的可读索引；修改环境时请三处同步，勿只改这里。
 
