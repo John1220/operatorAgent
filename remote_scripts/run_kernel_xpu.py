@@ -298,8 +298,19 @@ def _precision_refusal(precision: str):
             f"按声明精度喂 fp16 会误杀合法核, 不喂又等于拿 fp32 的成绩充当 fp16")
 
 
-def run_gpu_info() -> dict:
+def _reference_refusal(reference_contract):
+    if reference_contract is not None:
+        reason = "CUDA native LayerNorm reference identity cannot be established on XPU"
+        return {"success": False, "error": reason, "reference_error": reason,
+                "reference_identity_unknown": True}
+    return None
+
+
+def run_gpu_info(reference_contract=None) -> dict:
     """Return GPU hardware info for the selected device."""
+    refusal = _reference_refusal(reference_contract)
+    if refusal:
+        return refusal
     try:
         import torch
         if not torch.cuda.is_available():
@@ -380,7 +391,10 @@ def run_execute(code: str, inputs: dict) -> dict:
 
 
 def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
-               precision: str = "", reference_source: str = "") -> dict:
+               precision: str = "", reference_source: str = "", reference_contract=None) -> dict:
+    refusal = _reference_refusal(reference_contract)
+    if refusal:
+        return refusal
     lang = _detect_language(code)
     if lang == "triton":
         return {"success": False, "error": "Triton not supported on Kunlunxin P800"}
@@ -455,12 +469,16 @@ def _bench_callable(fn, warmup: int, repeat: int, device_is_cuda: bool) -> dict:
             "runs": repeat}
 
 
-def run_benchmark(code: str, inputs: dict, warmup: int = 3, repeat: int = 10) -> dict:
+def run_benchmark(code: str, inputs: dict, warmup: int = 3, repeat: int = 10,
+                  reference_contract=None) -> dict:
     """只测候选, 不测基线 —— 与 run_kernel.py 的同名 action 同口径。
 
     控制端这条 payload 不带 kernel_type, 所以本函数也不能需要它: 拿它去建基线的话,
     收到空 kernel_type 就只剩 "No remote reference for " 这一种结果。
     """
+    refusal = _reference_refusal(reference_contract)
+    if refusal:
+        return refusal
     lang = _detect_language(code)
     if lang == "triton":
         return {"success": False, "error": "Triton not supported on Kunlunxin P800"}
@@ -484,11 +502,14 @@ def run_benchmark(code: str, inputs: dict, warmup: int = 3, repeat: int = 10) ->
 def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                                  warmup: int = 10, repeat: int = 30,
                                  precision: str = "", baseline_priority=None,
-                                 reference_source: str = "") -> dict:
+                                 reference_source: str = "", reference_contract=None) -> dict:
     """候选 vs **一个**基线, 基线由控制端的有序偏好决定。
 
     控制端只排序、远端取第一个能跑的并回报 `baseline_selected` (verifier.baseline_plan)。
     """
+    refusal = _reference_refusal(reference_contract)
+    if refusal:
+        return refusal
     lang = _detect_language(code)
     if lang == "triton":
         return {"success": False, "error": "Triton not supported on Kunlunxin P800"}
@@ -583,24 +604,27 @@ def main():
         sys.exit(1)
     
     dispatch = {
-        "gpu_info": lambda: run_gpu_info(),
+        "gpu_info": lambda: run_gpu_info(args.get("reference_contract")),
         "compile": lambda: run_compile(args.get("code", "")),
         "execute": lambda: run_execute(args.get("code", ""), args.get("inputs", {})),
         "verify": lambda: run_verify(args.get("code", ""), args.get("inputs", {}),
                                      args.get("kernel_type", ""),
                                      args.get("max_error", 1e-3),
                                      precision=args.get("precision", ""),
-                                     reference_source=args.get("reference_source", "")),
+                                     reference_source=args.get("reference_source", ""),
+                                     reference_contract=args.get("reference_contract")),
         "benchmark": lambda: run_benchmark(args.get("code", ""), args.get("inputs", {}),
                                            warmup=args.get("warmup", 3),
-                                           repeat=args.get("repeat", 10)),
+                                           repeat=args.get("repeat", 10),
+                                           reference_contract=args.get("reference_contract")),
         "benchmark_with_baselines": lambda: run_benchmark_with_baselines(
             args.get("code", ""), args.get("inputs", {}),
             args.get("kernel_type", ""),
             warmup=args.get("warmup", 10), repeat=args.get("repeat", 30),
             precision=args.get("precision", ""),
             baseline_priority=args.get("baseline_priority") or None,
-            reference_source=args.get("reference_source", "")),
+            reference_source=args.get("reference_source", ""),
+            reference_contract=args.get("reference_contract")),
     }
     fn = dispatch.get(action)
     if fn is None:

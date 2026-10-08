@@ -210,6 +210,11 @@ def run(args):
         for op, dtype, variant in specs:
             name = f"{op}-{dtype}-{variant}"
             t = IntentParser().parse(f"{op} {dtype} triton nvidia")
+            if (op, dtype, variant) == ("layernorm", "fp16", "unknown"):
+                # This historical acceptance covers v1; v2 has its own driver.
+                t.constraints.correctness_profile = "builtin-l2-v1"
+                t.constraints.correctness_suite = None
+                t.constraints.reference_contract = None
             t.task_id = name
             t.target.required_caps = (Cap.REAL_DEVICE,)
             t.constraints.min_speedup = 0.01  # Test fixture threshold, not a speed claim.

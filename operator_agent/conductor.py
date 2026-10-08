@@ -558,7 +558,7 @@ class Conductor:
     #: 循环出口的词汇表。**每个词都要有写者** —— 多一个没写者的词就是「算了没人读」的副本,
     #: `tests/test_stop_reason.py` 按差集钉这条。
     STOP_REASONS = ("passed", "stagnant", "converged", "fix_error", "l1_l2_failed",
-                    "search_error", "rounds_exhausted", "infra_retry", "transport_unknown_hold",
+                    "search_error", "rounds_exhausted", "infra_retry", "transport_unknown_hold", "reference_identity_hold",
                     # §10.2 的两条预算出口。与 `rounds_exhausted` 分开数: 那个是
                     # 「轮次练够了」, 这两个是「钱花完了」—— 复盘时一个要调轮次上限,
                     # 一个要调预算或缩小任务。
@@ -1047,7 +1047,8 @@ class Conductor:
             )
             l2_runs += sum(1 for r in sel
                            if r.level is VerificationLevel.L2_FUNCTION)
-            if any(not r.passed and r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN for r in sel):
+            if any(not r.passed and (r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN
+                                    or r.metrics.get("reference_identity_unknown")) for r in sel):
                 # The in-flight candidate is unknown, not a loser. Do not try
                 # another finalist / L3 on the same possibly active runner.
                 return cand, sel, True, l2_runs
@@ -1166,6 +1167,13 @@ class Conductor:
         if preflight is not None:
             return KernelArtifact(task_id=task.task_id, language=task.target.dsl,
                                   verification_results=[preflight])
+        if task.constraints.reference_contract is not None:
+            # Freeze/bind BEFORE Router, provisioning, Designer or Coder. A
+            # missing execution identity is a harness hold, never an LLM fix.
+            preflight = self.verifier.reference_preflight(task, start_run=True)
+            if preflight is not None:
+                return KernelArtifact(task_id=task.task_id, language=task.target.dsl,
+                                      verification_results=[preflight])
         test_inputs = input_sets[0]
         backend_name = self.backend.label
         llm_info = f" (LLM: {self.llm})" if self.llm else ""
@@ -2283,6 +2291,10 @@ class Conductor:
         if any(not r.passed and r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN for r in verify_results):
             self._record_stop(state.artifact, round_num, "transport_unknown_hold",
                               "传输结果未知: 不修候选、不重试在飞请求; 先确认 owned runner 静默")
+            return _ROUND_STOP
+        if any(not r.passed and r.metrics.get("reference_identity_unknown") for r in verify_results):
+            self._record_stop(state.artifact, round_num, "reference_identity_hold",
+                              "冻结参考身份未确立/已漂移: 不修候选、不搜索、不计进展、不写失败语料")
             return _ROUND_STOP
 
         # 每轮都算一遍「这一场里各轮的尺是不是同一把」, 但**只在它有话说的时候**打印
@@ -3445,8 +3457,9 @@ class Conductor:
         「本级判不出」那一类在这里直接返回, 不写 —— 理由与那段注释都在函数体里
         (第 2 片: doc 58 §4.2 的判决侧)。
         """
-        if any(r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN for r in failed_results):
-            print("[Conductor] 传输结果未知，未入负样本库")
+        if any(r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN or r.metrics.get("reference_identity_unknown")
+               for r in failed_results):
+            print("[Conductor] 传输/参考身份未知，未入负样本库")
             return
         # 层级必须**排序去重**后再拼: 原先的 "+".join(r.level.value for r in ...) 跟着
         # failed_results 的顺序走, 同一份失败可以写成 "L1+L2" 也可以写成 "L2+L1",

@@ -34,11 +34,12 @@ from operator_agent.remote_executor import (
 REPO = Path(__file__).resolve().parents[1]
 PRODUCTION = sorted((REPO / "operator_agent").glob("*.py"))
 
-#: SSHExecutor(nvidia) 的完整声明。xpu 少一项 GPU_PINNING —— `_pinned_gpu()` 依赖
+#: SSHExecutor(nvidia) 的完整声明。xpu 不声明 GPU_PINNING 或 CUDA REFERENCE_IDENTITY。
+#: `_pinned_gpu()` 依赖
 #: nvidia-smi, 对非 nvidia 平台第一行就 return None, 所以「跨轮固定同一张卡」在那边
 #: 根本不发生; 不声明就是不说谎。
 _SSH_CAPS = {Cap.REAL_DEVICE, Cap.REMOTE_VERIFY, Cap.SAME_DEVICE_BASELINE,
-             Cap.ENV_PROVISION, Cap.DEPLOY, Cap.DEP_ANALYSIS, Cap.GPU_PINNING}
+             Cap.ENV_PROVISION, Cap.DEPLOY, Cap.DEP_ANALYSIS, Cap.GPU_PINNING, Cap.REFERENCE_IDENTITY}
 
 #: MockGPU 的 `get_hardware_info()` 返回写死的规格 (doc 49 §3.3 S8), 所以两种情形下
 #: 都**不该**出现「硬件信息是真探测的」这类能力 —— 词汇表里现在压根没有这一项。
@@ -61,6 +62,7 @@ def _facade(inner: Backend) -> RemoteExecutor:
 #: 所以拿四个占位位置参数去调 `deploy()` 会先炸 TypeError, 而不是抛出我们要的
 #: `CapabilityMissing` —— 那样守卫测到的是签名, 不是能力。
 STUB_CALLS = {
+    "reference_identity": lambda b: b.reference_identity({}),
     "verify_function": lambda b: b.verify_function("code", {}, "matmul", 1e-3),
     "benchmark_with_baselines": lambda b: b.benchmark_with_baselines("code", {}, "matmul"),
     "ensure_environment": lambda b: b.ensure_environment(),
@@ -75,7 +77,7 @@ REGISTRY = {
     "SSHExecutor(nvidia)": ("SSHExecutor", lambda: SSHExecutor(host="h", user="u"), _SSH_CAPS),
     "SSHExecutor(xpu)": ("SSHExecutor",
                          lambda: SSHExecutor(host="h", user="u", platform="xpu"),
-                         _SSH_CAPS - {Cap.GPU_PINNING}),
+                         _SSH_CAPS - {Cap.GPU_PINNING, Cap.REFERENCE_IDENTITY}),
     # 空集是**故意**的: `get_hardware_info()` 无条件编造一整套 A100 量级数字
     # (doc 49 §3.3 S2), 所以连「对面是不是加速卡」都不知道。等 S2 修掉再声明。
     "HTTPExecutor": ("HTTPExecutor", lambda: HTTPExecutor(base_url=""), frozenset()),

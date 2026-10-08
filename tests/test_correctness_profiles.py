@@ -90,6 +90,10 @@ def test_requirement_cannot_fall_back_to_legacy_on_mutation(mutation, tmp_path):
 @pytest.mark.parametrize("op,dtype", [("attention","fp32"),("log_softmax","fp32"),("gemm","fp32"),("conv2d","fp32"),("relu","bf16"),("matmul","int8"),("layernorm","fp16")])
 def test_unsupported_is_unknown_not_an_empty_passing_suite(op, dtype):
     t = task(op, dtype)
+    if (op, dtype) == ("layernorm", "fp16"):
+        t.constraints.correctness_profile = PROFILE_VERSION
+        t.constraints.correctness_suite = None
+        t.constraints.reference_contract = None
     assert t.constraints.correctness_suite is None
     r = Verifier.correctness_preflight(t)
     assert r.metrics["correctness"]["verdict"] == "unknown"

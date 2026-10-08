@@ -12,7 +12,8 @@ from typing import Any, Mapping, Optional
 
 from .bench_cases import BenchmarkCase, BenchCaseError
 
-PATTERNS = ("random", "zeros", "constant", "large", "small", "nan", "inf")
+PATTERNS = ("random", "zeros", "constant", "large", "small", "nan", "inf",
+            "constant_nonbinary", "near_constant", "large_varying", "small_varying", "signed_large")
 LAYOUTS = ("contiguous", "strided", "broadcast")
 EXTRA_CHECKS = ("backward", "sanitizer", "racecheck", "aliasing", "inplace",
                 "accum_fp16", "accum_fp64")
@@ -54,11 +55,21 @@ class CorrectnessCase:
             if self.pattern != "random":
                 if self.pattern in ("nan", "inf") and value.dtype.kind != "f":
                     raise BenchCaseError("NaN/Inf 检查需要浮点输入")
-                fill = {"zeros": 0, "constant": 1, "large": 100,
-                        "small": 1e-4, "nan": np.nan, "inf": np.inf}[self.pattern]
-                value = np.full(value.shape, fill, dtype=value.dtype)
+                sequences = {"near_constant": (1, 1+2**-10, 1-2**-11),
+                             "large_varying": (100, 100.0625, 99.9375),
+                             "small_varying": (0, 1e-4, -1e-4), "signed_large": (100, -100, 0)}
+                if self.pattern in sequences:
+                    if not value.ndim:
+                        raise BenchCaseError("行模式检查需要至少一维输入")
+                    row = np.resize(np.array(sequences[self.pattern], dtype=value.dtype), value.shape[-1])
+                    value = np.broadcast_to(row, value.shape).copy()
+                else:
+                    fill = {"zeros": 0, "constant": 1, "large": 100, "constant_nonbinary": .1,
+                            "small": 1e-4, "nan": np.nan, "inf": np.inf}[self.pattern]
+                    value = np.full(value.shape, fill, dtype=value.dtype)
             if self.layout != "contiguous":
-                if not value.ndim or not value.size or value.shape[-1] <= 1:
+                singleton_rows = self.layout == "strided" and value.ndim == 2 and value.shape[0] > 1
+                if not value.ndim or not value.size or (value.shape[-1] <= 1 and not singleton_rows):
                     raise BenchCaseError("layout 扰动需要非空且最后一维 > 1 的张量")
                 if self.layout == "strided":
                     backing = np.zeros(value.shape[:-1] + (value.shape[-1] * 2,),

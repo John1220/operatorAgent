@@ -24,6 +24,7 @@ import json
 import time
 import os
 import uuid
+import subprocess
 import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +43,12 @@ except ImportError:          # 仓库内直接运行: 模块还在 operator_agen
         decode_json_inputs, to_torch_inputs, torch_input_readback, torch_output_digest)
 
 import gpu_claim  # 同目录 (部署后 = 工作目录; 仓库内 = remote_scripts/)
+try:
+    from reference_contract import ReferenceIdentityError, execution_receipt, validate_gate
+    from builtin_layernorm import native_layernorm
+except ImportError:
+    from operator_agent.reference_contract import ReferenceIdentityError, execution_receipt, validate_gate
+    from operator_agent.builtin_layernorm import native_layernorm
 
 
 # ─── GPU 自动选择 ─────────────────────────────────────────────
@@ -462,7 +469,7 @@ def _load_reference_from_source(source: str, inputs: dict):
     return _call, "reference_source"
 
 
-def _reference_torch(kernel_type: str, inputs: dict):
+def _reference_torch(kernel_type: str, inputs: dict, reference_contract=None):
     """Build the reference on the remote GPU, never on the controller host."""
     import torch
     import torch.nn.functional as F
@@ -471,6 +478,11 @@ def _reference_torch(kernel_type: str, inputs: dict):
     values = {k: (torch.from_numpy(np.array(v, copy=True)).to(device)
                   if isinstance(v, np.ndarray) else v) for k, v in inputs.items()}
     kind = (kernel_type or "").lower()
+    if reference_contract is not None:
+        if (kind != "layernorm" or set(values) != {"X"} or values["X"].dtype != torch.float16
+                or values["X"].ndim != 2 or any(d <= 0 for d in values["X"].shape)):
+            raise ReferenceIdentityError("v2 reference inputs outside declared semantics")
+        return lambda: native_layernorm(values["X"]), "pytorch_eager"
     if ("matmul" in kind or "gemm" in kind) and {"A", "B"} <= values.keys():
         return lambda: values["A"] @ values["B"], "pytorch_eager"
     if "softmax" in kind and "X" in values:
@@ -590,11 +602,16 @@ def _error_shape_torch(bad, *, n_bad: int, total: int, has_nonfinite: bool):
 
 
 def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
-              precision: str = "", reference_source: str = "") -> dict:
+              precision: str = "", reference_source: str = "", reference_contract=None) -> dict:
     """Run candidate and reference on one device; return only verification summary."""
     evidence = {}
     try:
         import torch
+        if reference_contract is not None:
+            validate_gate(reference_contract, precision, max_error, reference_source, kernel_type)
+            evidence["reference_receipt"] = execution_receipt(reference_contract)
+            if inputs.get("protocol") != JSON_PROTOCOL:
+                raise ReferenceIdentityError("v2 requires exact inputs; generated lookalikes forbidden")
         real_inputs = _deserialize_inputs(inputs)
         exact_inputs = inputs.get("protocol") == JSON_PROTOCOL
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -609,7 +626,7 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             reason = f"声明的 reference_source 未能建立: {reference_type}"
             return {"success": False, "error": reason, "reference_error": reason, **evidence}
         if reference is None:
-            reference, reference_type = _reference_torch(kernel_type, real_inputs)
+            reference, reference_type = _reference_torch(kernel_type, real_inputs, reference_contract)
         if reference is None:
             reason = f"No remote reference for {kernel_type}"
             return {"success": False, "error": reason, "reference_error": reason, **evidence}
@@ -630,6 +647,14 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
         # 回收它的显存), 见 docs/research/12 第四节。
         with shield_torch(), torch.no_grad():
             actual = module.kernel(**candidate_inputs)
+        if reference_contract is not None:
+            evidence["reference_receipt"] = execution_receipt(reference_contract)
+            if (not isinstance(actual, torch.Tensor) or actual.dtype != torch.float16
+                    or actual.device != candidate_inputs["X"].device):
+                reason = "v2 候选必须返回同一 CUDA 设备的 fp16 输出"
+                return dict(success=False, error=reason, candidate_semantics_error=reason,
+                            output_dtype=str(getattr(actual, "dtype", "unknown")), **evidence)
+            evidence["output_dtype"] = str(actual.dtype)
         with torch.no_grad():
             expected = reference()
         if not isinstance(actual, torch.Tensor):
@@ -727,6 +752,8 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             "device": str(device),
             **evidence,
         }
+    except ReferenceIdentityError as e:
+        return dict(success=False, error=str(e), reference_error=str(e), reference_identity_unknown=True, **evidence)
     except InputFidelityError as e:
         return {"success": False, "error": str(e), "input_fidelity_error": str(e), **evidence}
     except Exception as e:
@@ -1272,19 +1299,25 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                                  warmup: int = 10, repeat: int = 30,
                                  precision: str = "",
                                  baseline_priority=None,
-                                 reference_source: str = "") -> dict:
+                                 reference_source: str = "", reference_contract=None) -> dict:
     """Time the candidate against exactly one baseline, interleaved, on device.
 
     `baseline_priority` is the control side's ordered preference; the first
     baseline that actually runs is the only one measured. Ordering matters:
     it encodes which comparison is fair (fp16 candidate vs cuBLAS fp16, etc).
     """
+    evidence = {}
     try:
         import torch
+        if reference_contract is not None:
+            validate_gate(reference_contract, precision, 1e-5, reference_source, kernel_type)
+            evidence["reference_receipt"] = execution_receipt(reference_contract)
+            if inputs.get("protocol") != JSON_PROTOCOL or baseline_priority not in (None, [], ["pytorch_eager"]):
+                raise ReferenceIdentityError("v2 exact inputs / fixed eager baseline required; fallback forbidden")
         real_inputs = _deserialize_inputs(inputs)
         reference, reference_type = _load_reference_from_source(reference_source, real_inputs)
         if reference is None:
-            reference, reference_type = _reference_torch(kernel_type, real_inputs)
+            reference, reference_type = _reference_torch(kernel_type, real_inputs, reference_contract)
         if reference is None:
             return {"success": False, "error": f"No remote reference for {kernel_type}"}
         module = _load_module(code)
@@ -1302,6 +1335,9 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                 k: (v.to(torch.float16) if isinstance(v, torch.Tensor) and v.is_floating_point() else v)
                 for k, v in candidate_inputs.items()
             }
+        if reference_contract is not None:
+            candidate_inputs = to_torch_inputs(real_inputs, device)
+            evidence["input_fidelity"] = torch_input_readback(candidate_inputs)
         candidate = lambda: module.kernel(**candidate_inputs)
         is_cuda = device.type == "cuda"
         is_matmul = ("matmul" in (kernel_type or "").lower() or
@@ -1313,6 +1349,8 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
         # torch_compile 两份、对 fp16 matmul 要测三份, 而 verifier 永远只用其中一份 ——
         # 白烧 2~3 倍 L3 的 GPU 时间, 而且测得越久, 撞上邻居插队的窗口越长。
         specs = _baseline_specs(reference, candidate_inputs, is_cuda, is_matmul, is_fp16)
+        if reference_contract is not None:
+            specs = {"pytorch_eager": specs["pytorch_eager"]}
         order = [n for n in (baseline_priority or []) if n in specs]
         order += [n for n in specs if n not in order]
         chosen, attempts = None, []
@@ -1333,6 +1371,8 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                     except Exception:
                         pass
         if chosen is None:
+            if reference_contract is not None:
+                raise ReferenceIdentityError("frozen native eager baseline unavailable; no fallback")
             return {"success": False,
                     "error": f"No usable remote baseline for {kernel_type}; "
                              f"attempts={attempts}"}
@@ -1346,6 +1386,8 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
         finally:
             if base_cleanup is not None:
                 base_cleanup()
+        if reference_contract is not None:
+            evidence["reference_receipt"] = execution_receipt(reference_contract)
         elapsed = candidate_stats["median_time_ms"] / 1000
         gflops, bandwidth = _compute_metrics(real_inputs, elapsed)
         return {"success": True, "device": str(device), "candidate": candidate_stats,
@@ -1354,7 +1396,9 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                 "baseline_attempts": attempts,
                 "paired": paired,
                 "reference_type": reference_type,
-                "gflops": round(gflops, 4), "memory_bandwidth_gbs": round(bandwidth, 4)}
+                "gflops": round(gflops, 4), "memory_bandwidth_gbs": round(bandwidth, 4), **evidence}
+    except ReferenceIdentityError as e:
+        return dict(success=False, error=str(e), reference_error=str(e), reference_identity_unknown=True, **evidence)
     except Exception as e:
         return {"success": False, "error": f"Remote benchmark error: {type(e).__name__}: {e}"}
 
@@ -1623,7 +1667,12 @@ def _compute_metrics(real_inputs: dict, elapsed: float) -> tuple:
     return gflops, bandwidth
 
 
-def get_gpu_info() -> dict:
+def get_gpu_info(reference_contract=None) -> dict:
+    if reference_contract is not None:
+        try:
+            return dict(success=True, reference_receipt=execution_receipt(reference_contract))
+        except (ReferenceIdentityError, OSError, RuntimeError, subprocess.SubprocessError) as e:
+            return dict(success=False, error=str(e), reference_error=str(e), reference_identity_unknown=True)
     try:
         import torch
         if torch.cuda.is_available():
@@ -1678,7 +1727,7 @@ def run_action(payload: dict) -> dict:
     action = payload.get("action", "execute")
 
     if action == "gpu_info":
-        result = get_gpu_info()
+        result = get_gpu_info(payload.get("reference_contract"))
     elif action == "compile":
         result = run_compile(payload.get("code", ""))
     elif action == "execute":
@@ -1688,8 +1737,19 @@ def run_action(payload: dict) -> dict:
                             payload.get("kernel_type", ""),
                             float(payload.get("max_error", 1e-5)),
                             precision=payload.get("precision", ""),
-                            reference_source=payload.get("reference_source", ""))
+                            reference_source=payload.get("reference_source", ""),
+                            reference_contract=payload.get("reference_contract"))
     elif action in ("benchmark", "benchmark_with_baselines"):
+        if payload.get("reference_contract") is not None:
+            try:
+                if action != "benchmark_with_baselines":
+                    raise ReferenceIdentityError("v2 requires same-device frozen baseline")
+                if action == "benchmark_with_baselines":
+                    validate_gate(payload.get("reference_contract"), payload.get("precision", ""),
+                                  1e-5, payload.get("reference_source", ""), payload.get("kernel_type", ""))
+                    execution_receipt(payload.get("reference_contract"))
+            except ReferenceIdentityError as exc:
+                return dict(success=False, error=str(exc), reference_error=str(exc), reference_identity_unknown=True)
         # 共享机器: 只在测量前采卡上占用情况 (间隔 1.2 s 采两次, 见 _sample_gpu_idle)。
         # 被其他租户占用会让加速比失真, 把实测占用与两次原始读数随结果返回, 由控制端
         # 标记污染, 而不是静默采信这个数字。
@@ -1709,6 +1769,7 @@ def run_action(payload: dict) -> dict:
                 precision=payload.get("precision", ""),
                 baseline_priority=payload.get("baseline_priority") or None,
                 reference_source=payload.get("reference_source", ""),
+                reference_contract=payload.get("reference_contract"),
             )
         # D2: 窗口之后的时钟/throttle 读数。窗口之前那次由 _sample_gpu_idle 顺路带回,
         # 所以整个 L3 只多付一次 nvidia-smi 调用 (~130 ms), 不是三次。

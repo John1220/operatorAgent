@@ -562,6 +562,7 @@ class SSHExecutor(Backend):
             # `_pinned_gpu()` 对非 nvidia 平台第一行就 return None (它依赖 nvidia-smi),
             # 于是「跨轮固定同一张卡」在那个平台上根本不发生 —— 不声明就是不说谎
             caps.add(Cap.GPU_PINNING)
+            caps.add(Cap.REFERENCE_IDENTITY)
         return frozenset(caps)
 
     def _ssh_target(self) -> str:
@@ -957,6 +958,8 @@ class SSHExecutor(Backend):
                          for name in ("input_fidelity.py", "remote_input_fidelity.py"))
             files.append((repo_root / "remote_scripts" / "session_control.py",
                           f"{remote_dir}/session_control.py"))
+            files.extend((repo_root / "operator_agent" / name, f"{remote_dir}/{name}")
+                         for name in ("builtin_layernorm.py", "reference_contract.py"))
         files.append((repo_root / "remote_scripts" / self._runner_script,
                       self.remote_runner_path))
         if self.platform == "nvidia":
@@ -1267,7 +1270,7 @@ class SSHExecutor(Backend):
 
     def verify_function(self, kernel_code: str, inputs: dict, kernel_type: str,
                         max_error: float, precision: str = "",
-                        reference_source: str = "") -> dict:
+                        reference_source: str = "", reference_contract=None) -> dict:
         """Compare candidate/reference on the remote GPU and return a compact summary.
 
         `reference_source` 非空时, 远端用它做参考 (新架构算子), 不再按 kernel_type
@@ -1285,6 +1288,7 @@ class SSHExecutor(Backend):
                 "inputs": wire_inputs, "kernel_type": kernel_type,
                 "max_error": max_error, "precision": precision,
                 "reference_source": reference_source or "",
+                **({"reference_contract": reference_contract} if reference_contract is not None else {}),
             })
         except InputFidelityError as e:
             return {"success": False, "error": str(e), "input_fidelity_error": str(e)}
@@ -1298,11 +1302,20 @@ class SSHExecutor(Backend):
             return False, "未知 layout，不能声明输入保真"
         return True, "NVIDIA L2 原值/storage 协议；须核实际 Torch 回读，readonly/负 stride 不支持"
 
+    def reference_identity(self, reference_contract):
+        self.require(Cap.REFERENCE_IDENTITY)
+        try:
+            if not self._deployed:
+                self.deploy()
+            return self._ssh_exec_json({"action": "gpu_info", "reference_contract": reference_contract})
+        except Exception as exc:
+            return _transport_failure(exc)
+
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,
                                  repeat: int = 30, precision: str = "",
                                  baseline_priority=None,
-                                 reference_source: str = "") -> dict:
+                                 reference_source: str = "", reference_contract=None) -> dict:
         """Time candidate vs one interleaved baseline on the same remote device.
 
         `baseline_priority` 是控制端的有序偏好, 远端只测第一个能跑的基线 —— 谁公平
@@ -1314,10 +1327,12 @@ class SSHExecutor(Backend):
                 self.deploy()
             return self._ssh_exec_json({
                 "action": "benchmark_with_baselines", "code": kernel_code,
-                "inputs": self._serialize_inputs(inputs), "kernel_type": kernel_type,
+                "inputs": (encode_json_inputs(inputs) if reference_contract is not None
+                           else self._serialize_inputs(inputs)), "kernel_type": kernel_type,
                 "warmup": warmup, "repeat": repeat, "precision": precision,
                 "baseline_priority": list(baseline_priority or []),
                 "reference_source": reference_source or "",
+                **({"reference_contract": reference_contract} if reference_contract is not None else {}),
             })
         except Exception as e:
             return _transport_failure(e)   # 带「有没有听到回答」那一格 (见 _transport_failure)
@@ -1811,7 +1826,7 @@ class RemoteExecutor(Backend):
 
     def verify_function(self, kernel_code: str, inputs: dict, kernel_type: str,
                         max_error: float, precision: str = "",
-                        reference_source: str = "") -> Optional[dict]:
+                        reference_source: str = "", reference_contract=None) -> Optional[dict]:
         """远端紧凑比对协议。**只转发, 不判断内层有没有这个方法**
 
         旧写法是 `fn = getattr(self.backend, "verify_function", None); return fn(...) if fn else None`,
@@ -1822,19 +1837,25 @@ class RemoteExecutor(Backend):
         with _get_exec_lock(self._lock_key()):
             return self.backend.verify_function(kernel_code, inputs, kernel_type, max_error,
                                                 precision=precision,
-                                                reference_source=reference_source)
+                                                reference_source=reference_source,
+                                                **({"reference_contract": reference_contract} if reference_contract is not None else {}))
+
+    def reference_identity(self, reference_contract):
+        with _get_exec_lock(self._lock_key()):
+            return self.backend.reference_identity(reference_contract)
 
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,
                                  repeat: int = 30, precision: str = "",
                                  baseline_priority=None,
-                                 reference_source: str = "") -> Optional[dict]:
+                                 reference_source: str = "", reference_contract=None) -> Optional[dict]:
         """同机同卡基准协议。同上: 只转发"""
         with _get_exec_lock(self._lock_key()):
             return self.backend.benchmark_with_baselines(
                 kernel_code, inputs, kernel_type, warmup, repeat,
                 precision=precision, baseline_priority=baseline_priority,
-                reference_source=reference_source)
+                reference_source=reference_source,
+                **({"reference_contract": reference_contract} if reference_contract is not None else {}))
 
     def analyze_dependencies(self, kernel_code: str) -> list:
         """解析源码里缺失的 import (L1 编译失败后的按需补装要用)

@@ -47,6 +47,7 @@ class Cap(str, Enum):
     SIMULATED_PERF = "simulated_perf"
     #: `verify_function`: 候选与参考在**同一台设备**上比对, 只回摘要
     REMOTE_VERIFY = "remote_verify"
+    REFERENCE_IDENTITY = "reference_identity"
     #: `benchmark_with_baselines`: 候选与基线在同一张卡上交错计时
     SAME_DEVICE_BASELINE = "same_device_baseline"
     #: `ensure_environment`: 能自检并 provision 自己的运行环境
@@ -68,6 +69,7 @@ class Cap(str, Enum):
 #: 所以这张表同时是**声明**与**实现**的对照表 (守卫会拿它核两边是否一致)。
 OPTIONAL_CAP_METHODS = {
     Cap.REMOTE_VERIFY: "verify_function",
+    Cap.REFERENCE_IDENTITY: "reference_identity",
     Cap.SAME_DEVICE_BASELINE: "benchmark_with_baselines",
     Cap.ENV_PROVISION: "ensure_environment",
     Cap.DEPLOY: "deploy",
@@ -256,10 +258,13 @@ class Backend(ABC):
         ...
 
     # ── 可选能力: 基类上存在, 一调就抛 ─────────────────────────
-    # 这五个存根是本模块的全部意义所在: 有了它们, `hasattr(backend, "deploy")`
+    # 可选存根保证 `hasattr(backend, "deploy")`
     # 恒为真, 于是「用方法存不存在来判断能力」这种写法**再也得不到 False**。
     def verify_function(self, *args, **kwargs):
         raise CapabilityMissing(Cap.REMOTE_VERIFY, self)
+
+    def reference_identity(self, *args, **kwargs):
+        raise CapabilityMissing(Cap.REFERENCE_IDENTITY, self)
 
     def benchmark_with_baselines(self, *args, **kwargs):
         raise CapabilityMissing(Cap.SAME_DEVICE_BASELINE, self)

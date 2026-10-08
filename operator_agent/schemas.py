@@ -307,6 +307,7 @@ class ConstraintSpec:
     correctness_suite: Optional[Any] = None
     # None keeps legacy behavior. New formal entry points require a trusted profile.
     correctness_profile: Optional[str] = None
+    reference_contract: Optional[Any] = None
 
     def validate(self) -> list[str]:
         errors = []
@@ -314,6 +315,12 @@ class ConstraintSpec:
             errors.append("constraints.precision 必须是 Precision 枚举")
         if self.correctness_profile is not None and not isinstance(self.correctness_profile, str):
             errors.append("constraints.correctness_profile 必须是字符串版本或 None")
+        if self.reference_contract is not None:
+            from .reference_contract import as_reference
+            try:
+                as_reference(self.reference_contract)
+            except (ValueError, TypeError) as exc:
+                errors.append(f"constraints.reference_contract: {exc}")
         if self.correctness_suite is not None:
             try:
                 as_suite(self.correctness_suite)
@@ -446,6 +453,9 @@ class TaskSchema:
                 self.constraints.correctness_suite).content_dict()
         if self.constraints.correctness_profile is not None:
             constraints_dict["correctness_profile"] = self.constraints.correctness_profile
+        if self.constraints.reference_contract is not None:
+            from .reference_contract import as_reference
+            constraints_dict["reference_contract"] = as_reference(self.constraints.reference_contract).content_dict()
         source_dict = {
             "framework": self.source.framework,
             "kernel_type": self.source.kernel_type,

@@ -22,7 +22,7 @@ from benchmarks.correctness_profiles_h20 import candidate
 from benchmarks.input_fidelity_h20 import AcceptanceSSH, dumps
 from operator_agent.correctness import as_suite
 from operator_agent.correctness_boundaries import lint_coverage
-from operator_agent.correctness_profiles import default_policy, with_default_correctness
+from operator_agent.correctness_profiles import PROFILE_VERSION, default_policy, with_default_correctness
 from operator_agent.input_fidelity import describe_inputs, check_readback
 from operator_agent.remote_input_fidelity import encode_json_inputs
 from operator_agent.remote_executor import SSHExecutor
@@ -66,7 +66,8 @@ def fixtures():
 
 def reference_task():
     return TaskSchema(source=SourceSpec(kernel_type="layernorm"),
-                      constraints=ConstraintSpec(precision=Precision.FP16))
+                      constraints=ConstraintSpec(precision=Precision.FP16,
+                                                 correctness_profile=PROFILE_VERSION))
 
 
 def assess_measurement(result, inputs, device):

@@ -29,6 +29,7 @@ from typing import Any, Mapping, Optional
 from .bench_cases import (BenchmarkCase, BenchCaseError, TensorSpec,  # noqa: F401
                           case_key, cases_from_shapes, known_layouts)
 from .correctness import CorrectnessSuite, as_suite
+from .reference_contract import ReferenceContract, as_reference, PROFILE_V2, validate_gate
 
 class ContractError(ValueError):
     """契约不可判定 / 哈希不匹配 —— 失败关闭, 不猜"""
@@ -149,6 +150,7 @@ class FrozenContract:
     hash: str = field(default="", compare=False)
     # Appended for positional compatibility; None preserves old payload/hash.
     correctness_profile: Optional[str] = None
+    reference_contract: Optional[ReferenceContract] = None
 
     def content_dict(self) -> dict:
         """参与哈希的内容 (排除 hash 字段本身与 notes 这类说明性文字)。"""
@@ -172,6 +174,8 @@ class FrozenContract:
             d["correctness_suite"] = self.correctness_suite.content_dict()
         if self.correctness_profile is not None:
             d["correctness_profile"] = self.correctness_profile
+        if self.reference_contract is not None:
+            d["reference_contract"] = self.reference_contract.content_dict()
         # §6.2 条款 4：这两项**全部进契约 hash** —— 判据变成可改的常量就等于没有判据。
         # 但**空的声明不进**：空 = 没声明（判据面按「未确立」走），与本片之前冻结的契约
         # 是同一份判据内容 ⇒ 同一个 hash（那样旧载荷还能被 `load_dict` 复盘，而
@@ -355,7 +359,8 @@ def freeze(kernel_type: str,
            max_regression=(),
            case_weights=(),
            aggregate: str = "",
-           cases=(), correctness_suite=None, correctness_profile=None) -> FrozenContract:
+           cases=(), correctness_suite=None, correctness_profile=None,
+           reference_contract=None) -> FrozenContract:
     """CONTRACT_LINT + 冻结。任何 validate 失败都抛 ContractError —— **失败关闭**。
 
     「不可判定就交还给人」(设计 §10.1 REJECT): 这里不猜默认值。缺数值语义的契约
@@ -369,6 +374,16 @@ def freeze(kernel_type: str,
         raise ContractError(f"min_speedup 必须为正数: {min_speedup!r}")
 
     errs = []
+    if reference_contract is not None:
+        try:
+            reference_contract = as_reference(reference_contract)
+            validate_gate(reference_contract, dtype_semantics.dtype, max_error, kernel_type=kernel_type)
+            if (correctness_profile != PROFILE_V2 or baseline.name != "pytorch_eager"
+                    or dtype_semantics.accum != "fp32" or dtype_semantics.tf32
+                    or dtype_semantics.allow_reduced_precision or not dtype_semantics.deterministic):
+                raise ContractError("v2 参考/基线/精度声明不一致")
+        except (ValueError, TypeError) as exc:
+            errs.append(f"reference_contract: {exc}")
     errs += [f"dtype_semantics: {e}" for e in dtype_semantics.validate()]
     errs += [f"baseline: {e}" for e in baseline.validate()]
     errs += [f"shapes: {e}" for e in shapes.validate()]
@@ -390,7 +405,7 @@ def freeze(kernel_type: str,
     if correctness_profile is not None:
         from .correctness_profiles import declaration_check
         profile = declaration_check(kernel_type, dtype_semantics.dtype,
-                                    correctness_profile, correctness_suite)
+                                    correctness_profile, correctness_suite, reference_contract)
         if profile["status"] != "passed":
             errs.append("correctness profile: " + profile.get("reason", "未确立"))
     if errs:
@@ -409,6 +424,7 @@ def freeze(kernel_type: str,
         cases=tuple(sorted(cases or (), key=lambda c: c.key())),
         correctness_suite=correctness_suite,
         correctness_profile=correctness_profile,
+        reference_contract=reference_contract,
         notes=notes,
         # 顺序无语义 ⇒ 规范化成「排序去重」：同一份判据不该有两种 hash（同内容两份拷贝
         # 必须同哈希是契约哈希的第一条要求, 见模块 docstring）。
@@ -430,6 +446,7 @@ def freeze(kernel_type: str,
         cases=c.cases,
         correctness_suite=c.correctness_suite,
         correctness_profile=c.correctness_profile,
+        reference_contract=c.reference_contract,
         required_cases=c.required_cases,
         max_regression=c.max_regression,
         case_weights=c.case_weights,
@@ -480,6 +497,7 @@ def load_dict(payload: Mapping[str, Any]) -> FrozenContract:
                         for d in (payload.get("cases") or ())),
             correctness_suite=payload.get("correctness_suite"),
             correctness_profile=payload.get("correctness_profile"),
+            reference_contract=payload.get("reference_contract"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ContractError(f"无法从载荷重建契约: {exc}") from exc
@@ -515,7 +533,8 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
 
     kt = (getattr(getattr(task, "source", None), "kernel_type", "") or "unknown").strip()
     cons = getattr(task, "constraints", None)
-    if getattr(cons, "correctness_profile", None) is not None:
+    if (getattr(cons, "correctness_profile", None) is not None
+            or getattr(cons, "reference_contract", None) is not None):
         from .correctness_profiles import profile_check
         profile = profile_check(task)
         if profile["status"] != "passed":
@@ -589,4 +608,5 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
         cases=cases,
         correctness_suite=correctness_suite,
         correctness_profile=getattr(cons, "correctness_profile", None),
+        reference_contract=getattr(cons, "reference_contract", None),
     )

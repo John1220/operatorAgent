@@ -50,13 +50,14 @@ rank、dtype、共享轴关系，不能把不一致 K、weight/bias、自定义 
 `TestInputGenerator` 对新 profile 的三个单输入算子统一生成 `X`，支持矩形主输入；
 旧任务的 `input` 命名规则不改。L3 仍使用原主输入，自动 suite 不进入性能 case 账本。
 
-### 不支持就 unknown，不退回无 suite 的旧路径
+### v1 不支持就 unknown，不退回无 suite 的旧路径
 
 - fp16 LayerNorm：本机 Torch 2.8 CPU 的单列参考对一个数学上应为零的输出给出约
   `-2.38419e-5` 残差，超出本任务 1e-5 绝对项。2026-10-08 已完成
   [独立 CPU/H20 标定](fp16-layernorm-calibration.md)：同一 Torch 2.14 中仍有 6 组
   CPU/CUDA 差异触发原门限；关闭浮点融合的固定 Triton 候选在 H20 32 组通过，
-  但参考身份/精度语义尚未冻结，v1 仍明确拒绝该组合，不自动启用；
+  v1 仍明确拒绝该组合。[后续 v2](reference-identity-and-v2-profile.md) 已独立冻结
+  native CUDA 参考身份与精度语义，普通新任务默认采用，旧 v1 不迁移；
   **未放宽容差、删除单列样本、替换参考或把失败改成通过**。
 - bf16/int8、attention/conv、自定义名称、融合、外挂参考、其他框架/源文件：没有可信
   内建配置就保留 requirement marker，前置返回 L2 unknown。

@@ -3,7 +3,7 @@
 doc 53 §7.1 从 DSH 借的是**形状**而不是 hook 系统：`agent/turn-stopping` 是
 「自然停止边界上一个被 await 的串行通知」(`agent-lifecycle.md:59-60`、
 `architecture.md:84`、`interception-extension-points.md:21`)，要继续得显式 `agent.steer()`。
-本仓今天的对应物是 `conductor.py` 优化循环里的 14 处终止出口 (`return _ROUND_STOP`,
+本仓今天的对应物是 `conductor.py` 优化循环里的 15 处终止出口 (`return _ROUND_STOP`,
 散在 _run_round 与它拆出来的 _round_enter_or_stop / _round_close_out 里) + 1 处走满轮次，
 其中 5 处的「为什么」只活在 stdout 的一行 print 上 —— 产物里
 「没练够」「练到顶了」「修坏了」「压根没验过」全部同形 (`all_passed=False` + 一个轮次数)。
@@ -221,7 +221,7 @@ class TestStopReasonIsRecorded(unittest.TestCase):
         # 改成 continue」—— 少一个出口, 两边一起少, 等式照样成立。实测: 把第一个出口
         # (wall_clock_exhausted) 改成 return _ROUND_CONTINUE, 全量 2570 条全绿。
         # 所以个数与对应关系都写死。
-        self.assertEqual(14, len(exits),
+        self.assertEqual(15, len(exits),
                          "终止出口的个数变了 —— 少一个就是某个出口被改成了「继续」")
         self.assertEqual(1, len(delegated),
                          "委派式出口的个数变了 —— 进出口清单的话, 这里也要改")
@@ -239,7 +239,7 @@ class TestStopReasonIsRecorded(unittest.TestCase):
         self.assertEqual(
             ["'wall_clock_exhausted'", "'budget_exhausted'", "'budget_exhausted'",
              "'search_error'", "'budget_exhausted'", "'template_no_candidate'",
-             "'transport_unknown_hold'", "'passed'", "'stagnant'", "'converged'", "'infra_retry'", "'fix_error'",
+             "'transport_unknown_hold'", "'reference_identity_hold'", "'passed'", "'stagnant'", "'converged'", "'infra_retry'", "'fix_error'",
              "'ask_turns_exhausted'", "'l1_l2_failed'"],
             reasons,
             "出口与 reason 的对应关系漂了 —— 这份清单按全轮的三个方法、按行序钉")

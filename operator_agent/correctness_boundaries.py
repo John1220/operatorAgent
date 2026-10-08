@@ -235,8 +235,10 @@ def _budget(case, policy):
     size = sum(math.prod(t.shape) * _ITEMSIZE[t.dtype] * factor for t in case.inputs.tensors)
     if size > policy.max_input_bytes:
         raise BenchCaseError(f"boundary 输入预算不足 ({size} > {policy.max_input_bytes} bytes)，不裁掉边界")
-    if case.layout != "contiguous" and any(t.shape[-1] <= 1 for t in case.inputs.tensors):
-        raise BenchCaseError("声明布局无法实际扰动所有输入的最后一维（需要 > 1）")
+    if case.layout != "contiguous" and any(
+            t.shape[-1] <= 1 and not (case.layout == "strided" and len(t.shape) == 2 and t.shape[0] > 1)
+            for t in case.inputs.tensors):
+        raise BenchCaseError("声明布局无法实际扰动输入（单列 strided 需要多行以建立真实行间隙）")
 
 
 def generate_correctness_suite(policy):

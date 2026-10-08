@@ -22,6 +22,7 @@ from .contract import case_key
 from .correctness import as_suite, verdict_of
 from .correctness_boundaries import has_boundary_policy, lint_coverage
 from .correctness_profiles import profile_check
+from .reference_contract import as_reference, validate_receipt
 from .bench_cases import BenchCaseError
 from .input_fidelity import InputFidelityError, describe_inputs, check_readback
 from .source_lang import classify
@@ -109,6 +110,7 @@ _REMOTE_L2_METRIC_KEYS = (
     # `tolerance` 规则算出来 (与本地路径对称), 控制端只是把它带过来 —— 忘了放进这张
     # 白名单, 真机路径上它就会静默消失 (本地用例照样全绿, 那正是最坏的一种缺法)。
     "error_shape", "reference_nonfinite", "reference_error", "output_digest",
+    "reference_receipt", "output_dtype", "candidate_semantics_error", "reference_identity_unknown",
 )
 
 # 常见 GPU 硬件 **dense 规格峰值** (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
@@ -315,6 +317,7 @@ class Verifier:
         self._baseline_cache: dict = {}
         # 硬件理论峰值缓存 (延迟探测)
         self._theoretical_peak: Optional[dict] = None
+        self._reference_bindings = {}
 
     def verify(
         self,
@@ -350,6 +353,9 @@ class Verifier:
         preflight = self.correctness_preflight(task, test_inputs)
         if preflight is not None:
             return [preflight]  # Harness gap, not a compile/candidate failure.
+        preflight = self.reference_preflight(task)
+        if preflight is not None:
+            return [preflight]
 
         l1 = self._verify_compile(kernel_code, task.target.dsl,
                                   input_key_sets(test_inputs))
@@ -406,6 +412,11 @@ class Verifier:
             preflight = self.correctness_preflight(task, test_inputs)
             if preflight is not None:
                 return [preflight]
+        preflight = self.reference_preflight(task)
+        if preflight is not None:
+            return [preflight]
+        if task.constraints.reference_contract is not None and correctness_verified is not True:
+            return [self._reference_unknown("v2 L3 必须携带已通过的 L2 凭据", VerificationLevel.L3_PERFORMANCE)]
         l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
                                       environment_drift=environment_drift,
                                       heartbeat=heartbeat,
@@ -548,7 +559,9 @@ class Verifier:
         if profile["status"] == "unknown":
             reason = "默认正确性配置无法确立: " + profile["reason"]
             return VerificationResult(VerificationLevel.L2_FUNCTION, False, message=reason,
-                metrics={"correctness": {"verdict": "unknown", "reason": reason,
+                metrics={**({"reference_identity_unknown": True, "reference_error": reason}
+                            if task.constraints.reference_contract is not None else {}),
+                    "correctness": {"verdict": "unknown", "reason": reason,
                     "profile": profile, "scope": profile["scope"], "cases": []}})
         raw = task.constraints.correctness_suite
         if not has_boundary_policy(raw):
@@ -572,6 +585,45 @@ class Verifier:
         return VerificationResult(VerificationLevel.L2_FUNCTION, False,
                                   message=reason, metrics={"correctness": correctness})
 
+    @staticmethod
+    def _reference_unknown(reason, level=VerificationLevel.L2_FUNCTION, payload=None):
+        metrics = dict(reference_identity_unknown=True, reference_error=reason,
+                       correctness={"verdict": "unknown", "reason": reason, "cases": [],
+                                    "scope": "参考身份/精度契约未确立，不执行/不重试候选"})
+        if isinstance(payload, dict) and payload.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+            metrics.update({k: payload[k] for k in
+                (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent") if k in payload})
+        if level == VerificationLevel.L3_PERFORMANCE:
+            metrics.update(measurement_validity="uninformative", correctness_verified=False,
+                           eligibility={k: False for k in ("can_verdict", "can_tune", "can_persist", "can_report", "can_count_progress")})
+        return VerificationResult(level, False, message="参考身份无法确立: " + reason, metrics=metrics)
+
+    def reference_preflight(self, task, *, start_run=False):
+        raw = task.constraints.reference_contract
+        bound = self._reference_bindings.get(task.task_id)
+        if raw is None and bound is None:
+            return None
+        response = None
+        try:
+            from .contract import freeze_from_task
+            from .reference_contract import validate_receipt
+            if raw is None:
+                raise ValueError("冻结后的参考声明被移除，不退回 legacy")
+            contract = freeze_from_task(task)
+            if bound is not None and not start_run and bound != contract.hash:
+                raise ValueError("生成前冻结的契约哈希已漂移")
+            self._reference_bindings[task.task_id] = contract.hash
+            self.backend.require(Cap.REAL_DEVICE, Cap.REMOTE_VERIFY, Cap.SAME_DEVICE_BASELINE,
+                                 Cap.REFERENCE_IDENTITY, Cap.GPU_PINNING)
+            response = self.backend.reference_identity(contract.reference_contract.content_dict())
+            if not isinstance(response, dict) or response.get("success") is not True:
+                raise ValueError(response.get("reference_error", "执行侧参考身份回执缺失")
+                                 if isinstance(response, dict) else "执行侧参考身份回执缺失")
+            validate_receipt(raw, response.get("reference_receipt"))
+        except (ValueError, TypeError, RuntimeError, OSError, CapabilityMissing) as exc:
+            return self._reference_unknown(str(exc), payload=response)
+        return None
+
     def _verify_function(self, kernel_code: str, test_inputs, expected_output, task: TaskSchema) -> VerificationResult:
         """Suite checks are part of L2, before candidate selection or L3.
 
@@ -580,6 +632,9 @@ class Verifier:
         """
         raw = task.constraints.correctness_suite
         preflight = self.correctness_preflight(task, test_inputs)
+        if preflight is not None:
+            return preflight
+        preflight = self.reference_preflight(task)
         if preflight is not None:
             return preflight
         if raw is None:
@@ -649,19 +704,19 @@ class Verifier:
                 row.update(verdict="unknown", reason=f"检查无法执行: {exc}")
             rows.append(row)
             unknown_transport = next((m for m in (row.get("metrics", {}), row.get("repeat_metrics", {}))
-                                      if m.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN), None)
+                                      if m.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN or m.get("reference_identity_unknown")), None)
             if unknown_transport is not None:
                 primary.metrics.update({k: v for k, v in unknown_transport.items()
-                    if k in (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent")})
+                    if k in (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent", "reference_identity_unknown", "reference_error")})
                 rows.extend({"case_id": c.case_id, "verdict": "not_run",
-                             "reason": "传输结果未知，未继续发送套件请求"} for c in ordered_cases[index + 1:])
+                             "reason": "传输/参考身份未知，未继续发送套件请求"} for c in ordered_cases[index + 1:])
                 break
         rows.extend({"case_id": f"check:{check}", "verdict": "unknown",
                      "reason": f"{check} 没有执行协议/证据生产者，不能当成通过"}
                     for check in sorted(set(suite.required_checks)))
         state = ("failed" if any(r["verdict"] == "failed" for r in rows) else
                  "unknown" if any(r["verdict"] != "passed" for r in rows) else "passed")
-        if primary.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+        if primary.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN or primary.metrics.get("reference_identity_unknown"):
             state = "unknown"
         return self._suite_result(primary, suite, rows, state, task)
 
@@ -747,6 +802,7 @@ class Verifier:
         reference_types = set()
         execution_devices = set()
         input_fidelity_readings = []
+        reference_receipts = []
 
         for idx, inputs in enumerate(input_sets):
             # 外部提供的 expected_output 仅对单组输入有效
@@ -763,6 +819,8 @@ class Verifier:
                 print(f"  [Verifier] L2 FAILED: {r.message}")
                 return r
             m = r.metrics
+            if "reference_receipt" in m:
+                reference_receipts.append(m["reference_receipt"])
             if "input_fidelity_verified" in m:
                 input_fidelity_readings.append({k: v for k, v in m.items()
                                                 if k.startswith("input_fidelity")})
@@ -848,6 +906,8 @@ class Verifier:
                 metrics["reference_type"] = ",".join(sorted(reference_types))
             if execution_devices:
                 metrics["device"] = ",".join(sorted(execution_devices))
+            if reference_receipts:
+                metrics["reference_receipts"] = reference_receipts
         else:
             msg = f"功能验证通过 ({len(input_sets)} 组输入, 无参考输出, 仅验证可执行性)"
             metrics = {"num_input_sets": len(input_sets)}
@@ -885,6 +945,10 @@ class Verifier:
         """对单组输入执行功能验证
         metrics 中含 max_error 表示完成了参考比对，否则仅为可执行性验证"""
         max_allowed = task.constraints.max_error
+        if task.constraints.reference_contract is not None or task.task_id in self._reference_bindings:
+            preflight = self.reference_preflight(task)
+            if preflight is not None:
+                return preflight
         expected_inputs = None
         fidelity_metrics = {}
         if task.constraints.correctness_suite is not None:
@@ -904,7 +968,38 @@ class Verifier:
                 kernel_code, inputs, task.source.kernel_type, max_allowed,
                 precision=task.constraints.precision.value,
                 reference_source=task.source.reference_source or "",
+                **({"reference_contract": as_reference(task.constraints.reference_contract).content_dict()}
+                   if task.constraints.reference_contract is not None else {}),
             )
+            if task.constraints.reference_contract is not None:
+                try:
+                    if not isinstance(remote_verify, dict):
+                        raise ValueError("远端参考回执缺失")
+                    if remote_verify.get("reference_error"):
+                        raise ValueError(remote_verify["reference_error"])
+                    validate_receipt(task.constraints.reference_contract, remote_verify.get("reference_receipt"))
+                    if remote_verify.get("success") and remote_verify.get("output_dtype") != "torch.float16":
+                        raise ValueError("fp16 输出精度回读证据缺失")
+                    if "max_error" in remote_verify:
+                        spec = as_reference(task.constraints.reference_contract)
+                        if (remote_verify.get("atol"), remote_verify.get("rtol"),
+                                remote_verify.get("required_matched_ratio")) != (max_allowed, spec.rtol, spec.required_matched_ratio):
+                            raise ValueError("执行侧数值门与冻结契约不一致")
+                    if remote_verify.get("success") is True:
+                        if ("max_error" not in remote_verify or remote_verify.get("coverage") != 1.0
+                                or type(remote_verify.get("compared_elements")) is not int
+                                or remote_verify["compared_elements"] != inputs["X"].size
+                                or remote_verify.get("reference_nonfinite") != 0
+                                or remote_verify.get("matched_ratio") != 1.0
+                                or remote_verify.get("bad_elements") != 0
+                                or any(type(remote_verify.get(k)) not in (int, float)
+                                       or not np.isfinite(remote_verify[k]) or remote_verify[k] < 0
+                                       for k in ("max_error", "max_rel_error"))
+                                or not isinstance(remote_verify.get("output_digest"), str)
+                                or len(remote_verify["output_digest"]) != 64):
+                            raise ValueError("v2 完整数值比对/有限参考/输出摘要证据缺失")
+                except (ValueError, TypeError) as exc:
+                    return self._reference_unknown(str(exc), payload=remote_verify)
             # 声明了 REMOTE_VERIFY 就必须给出载荷。「内层没这个方法」已经由 Backend
             # 基类那个一调就抛的存根拦掉了, 走到这里的 None 只能是「声明了却没数据」——
             # 把它读成「换条路再试试」正是 doc 49 §3.2 B3: 两个意思共用一个值。
@@ -940,6 +1035,10 @@ class Verifier:
                         return VerificationResult(VerificationLevel.L2_FUNCTION, False,
                                                   message=reason, metrics=fidelity_metrics)
             if not remote_verify.get("success", False):
+                if remote_verify.get("candidate_semantics_error"):
+                    return VerificationResult(VerificationLevel.L2_FUNCTION, False,
+                        message=remote_verify["candidate_semantics_error"], metrics={**fidelity_metrics,
+                            **{k: remote_verify[k] for k in _REMOTE_L2_METRIC_KEYS if k in remote_verify}})
                 # ``success=False`` 也可能是数值误差超标；保留远端的精确诊断。
                 if "max_error" in remote_verify:
                     # 形态与本地的 message 一样要进 message (Fixer / 失败语料读它),
@@ -1350,14 +1449,37 @@ class Verifier:
         协议一漂就会比出两种数（这是「一个事实一处生产」在本函数上的样子）。
         """
         remote_bench = None
+        preflight = self.reference_preflight(task)
+        if preflight is not None:
+            held = dict(success=False, error=preflight.message, **preflight.metrics)
+            return held, held
         if Cap.SAME_DEVICE_BASELINE in self._caps:
             remote_bench = self.backend.benchmark_with_baselines(
                 kernel_code, inputs, task.source.kernel_type,
                 precision=task.constraints.precision.value,
-                baseline_priority=baseline_plan(task.source.kernel_type,
-                                                task.constraints.precision.value),
+                baseline_priority=(["pytorch_eager"] if task.constraints.reference_contract is not None else
+                                   baseline_plan(task.source.kernel_type, task.constraints.precision.value)),
                 reference_source=task.source.reference_source or "",
+                **({"reference_contract": as_reference(task.constraints.reference_contract).content_dict()}
+                   if task.constraints.reference_contract is not None else {}),
             )
+            if task.constraints.reference_contract is not None:
+                try:
+                    if not isinstance(remote_bench, dict):
+                        raise ValueError("远端基线参考身份回执缺失")
+                    if remote_bench.get("reference_error"):
+                        raise ValueError(remote_bench["reference_error"])
+                    validate_receipt(task.constraints.reference_contract, remote_bench.get("reference_receipt"))
+                    if remote_bench.get("success") and remote_bench.get("baseline_selected") != "pytorch_eager":
+                        raise ValueError("v2 baseline changed; fallback forbidden")
+                    if remote_bench.get("success"):
+                        fidelity = check_readback(describe_inputs(inputs), remote_bench.get("input_fidelity"))
+                        if fidelity.get("input_fidelity_verified") is not True:
+                            raise ValueError("v2 L3 精确输入回读未确立")
+                except (ValueError, TypeError) as exc:
+                    remote_bench = dict(success=False, error=str(exc), reference_error=str(exc), reference_identity_unknown=True,
+                        **{k: remote_bench[k] for k in (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent")
+                           if isinstance(remote_bench, dict) and k in remote_bench})
         bench = (self.backend.benchmark(kernel_code, inputs, warmup=2, repeat=5)
                  if remote_bench is None else remote_bench)
         return bench, remote_bench
@@ -1377,6 +1499,8 @@ class Verifier:
         if bench.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
             return {"speedup_vs_baseline": None, "reason": "逐 case 传输结果未知",
                     **{k: bench[k] for k in (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent") if k in bench}}
+        if bench.get("reference_identity_unknown"):
+            return dict(speedup_vs_baseline=None, reason=bench.get("reference_error"), reference_identity_unknown=True)
         if remote is not None:
             if not remote.get("success", False):
                 return {"speedup_vs_baseline": None,
@@ -1447,6 +1571,13 @@ class Verifier:
                     if missing and missing not in ledger:
                         ledger[missing] = {"speedup_vs_baseline": None, "reason": "传输结果未知，未继续测量"}
                 break
+            if ledger[key].get("reference_identity_unknown"):
+                metrics.update(reference_identity_unknown=True, reference_error=ledger[key]["reason"])
+                for remaining in input_sets[index + 1:]:
+                    missing = case_key(remaining)
+                    if missing and missing not in ledger:
+                        ledger[missing] = dict(speedup_vs_baseline=None, reason="参考身份未知，未继续测量")
+                break
         if len(ledger) > 1:
             metrics["cases"] = ledger
         return primary
@@ -1478,6 +1609,9 @@ class Verifier:
             return self._unknown_transport_result(VerificationLevel.L3_PERFORMANCE, bench)
 
         if remote_bench is not None and not remote_bench.get("success", False):
+            if remote_bench.get("reference_identity_unknown"):
+                return self._reference_unknown(remote_bench.get("reference_error", "unknown"),
+                    VerificationLevel.L3_PERFORMANCE, remote_bench)
             return VerificationResult(
                 level=VerificationLevel.L3_PERFORMANCE, passed=False,
                 message=f"远程性能测试失败: {remote_bench.get('error', '')}",
@@ -1526,6 +1660,10 @@ class Verifier:
                    "memory_bandwidth_gbs": round(bandwidth, 4),
                    "bound_type": bound, "primary_metric": "speedup_vs_baseline",
                    "backend": str(self.backend)}
+        if "reference_receipt" in bench:
+            metrics["reference_receipt"] = bench["reference_receipt"]
+            metrics["reference_contract_hash"] = as_reference(task.constraints.reference_contract).digest()
+            metrics["frozen_contract_hash"] = self._reference_bindings[task.task_id]
         # 从 benchmark 结果传递额外字段。
         #
         # ⚠️ 必须 bench 优先、candidate 兜底, 两个都要查。远程路径上这两层的分工不同:
@@ -1760,6 +1898,8 @@ class Verifier:
 
                 # 账本先发布（性能判决要读它），判决只算一次、只在这一处（两条路同一份）。
                 _primary = self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
+                if metrics.get("reference_identity_unknown"):
+                    return self._reference_unknown(metrics["reference_error"], VerificationLevel.L3_PERFORMANCE, metrics)
                 if metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
                     return self._unknown_transport_result(VerificationLevel.L3_PERFORMANCE, metrics, metrics)
                 passed = self._apply_performance_verdict(passed, metrics, task, speedup,
@@ -1817,6 +1957,8 @@ class Verifier:
                 heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
             passed = self._refuse_l3_pass(passed, assessment)
             _primary = self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
+            if metrics.get("reference_identity_unknown"):
+                return self._reference_unknown(metrics["reference_error"], VerificationLevel.L3_PERFORMANCE, metrics)
             if metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
                 return self._unknown_transport_result(VerificationLevel.L3_PERFORMANCE, metrics, metrics)
             passed = self._apply_performance_verdict(passed, metrics, task, speedup,
@@ -2518,6 +2660,8 @@ class Verifier:
         · 外挂 `reference_source` —— 不保证它对 float64 输入是多态的, 喂进去可能悄悄换个算法;
         · 整数任务 —— 没有「更高精度的整数」可算。
         """
+        if task.constraints.reference_contract is not None:
+            raise ValueError("v2 native CUDA reference cannot be replaced by a local/CPU oracle")
         from operator_agent.reference import ReferenceSourceError, resolve_reference
         try:
             ext = resolve_reference(task)

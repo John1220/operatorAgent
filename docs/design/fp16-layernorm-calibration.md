@@ -170,6 +170,9 @@ python benchmarks/calibrate_layernorm.py --h20 --host <已有SSH别名>
 
 ## 7. 回归与量具反例
 
+后续实现见 [参考身份与 v2 profile](reference-identity-and-v2-profile.md)。本篇保留
+标定阶段的 v1 准入结论与证据；新版启用不追溯改写这里的历史读数。
+
 - 全量 `python -m pytest tests -q`：**2993 passed / 1 skipped / 2 warnings**。
   skip 为本地 CUDA 不可用；两条 warning 是已有非有限参考 oracle 的诊断样本，仍判 unknown。
 - 新增标定守卫 **27 条通过**；不把离线守卫当作 CUDA 证据。
