@@ -354,6 +354,28 @@ class TestVerifierRefusesSimulatedL3(unittest.TestCase):
         self.assertIn("real_device", r.metrics["measurement_validity_reasons"][0]
                       if r.metrics["measurement_validity_reasons"] else "")
 
+    def test_the_eligibility_published_by_the_closure_point_is_also_all_false(self):
+        """任务要真卡 ⇒ **收口点发布的资格**也必须全 False, 不只是 `passed=False`
+
+        ⚠️ 覆盖缺口 (2026-10-08 变异标定抓到): 上面几条钉的都是 `passed` / `validity`,
+        而「拒绝通过」与「资格不许自称有资格」是两件事 —— 后者才决定这个数能不能进
+        长期记忆 (`metrics["eligibility"]` 正是入库判据读的那一份, I46/I91 那一族)。
+        实测: 把收口点的 `require_real_device=Cap.REAL_DEVICE.value in required` 硬写成
+        `False`, **全量 2582 条一条都不红**; 补上这条之后那条变异变红。
+        """
+        v = _verifier(NOT_REAL, _bench(mode="simulated", device="mock (MockGPU)"))
+        r, _ = _l3(v, _task(required=(Cap.REAL_DEVICE,)))
+        self.assertFalse(r.passed, r.message)
+        elig = r.metrics["eligibility"]
+        self.assertTrue(elig and all(x is False for x in elig.values()),
+                        "收口点没把资格压成全 False: %s" % (elig,))
+        # 触发这条规则的是**喂进收口点的两个输入** (只认这一对): 要求为真、事实为假。
+        # 钉住它们 —— `require_real_device=False` 这种「把要求抹掉」的写法会当场变红
+        # (它不是拒评: "拒评" 是 refused 非空, 这里 observation 照产, 只是资格位不许为真)。
+        ri = r.metrics["observation"]["provenance"]["rule_inputs"]
+        self.assertIs(True, ri["require_real_device"])
+        self.assertIs(False, ri["real_device"])
+
     def test_the_same_numbers_pass_on_a_backend_that_declares_real_device(self):
         """方向对照: 只有换掉能力声明, 其余一字不改
 

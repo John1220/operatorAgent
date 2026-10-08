@@ -1685,6 +1685,48 @@ class Verifier:
 
         # ── Oracle 唯一收口点 (spine-review P0-1 / P0-2 / 设计 §13.4) ──
         # 每个 L3 读数都产一条 Observation: 资格决定它被允许造成什么后果。
+        self._publish_oracle_observation(
+            metrics, assessment, task, cv_exceeded=cv_exceeded,
+            heartbeat=heartbeat, heartbeat_expected=heartbeat_expected,
+            required=required)
+        if assessment.contaminated:
+            metrics["contamination_reason"] = f"测量前 util={gpu_util_pct}%"
+        if assessment.reasons:
+            msg += (f"  ⚠️ 测量有效性={assessment.validity.value}: "
+                    + "; ".join(assessment.reasons))
+        if assessment.l3_pass_is_refused:
+            # 成因由 `assessment` 自己点名 (与判据同处一个类, 按同一分支顺序) ——
+            # 这里只拼接, 不再写一遍判据。原先那句写死了"能力没拿到", 而凭据这条
+            # 新增成因会印出「缺 —」: 判定对了、说的是另一件事 (I46 那一族)。
+            _refusal_causes = "; ".join(assessment.l3_pass_refusal_causes)
+            msg += ("  ⛔ 本轮 L3 不记为通过: "
+                    + (_refusal_causes or "「通过」没有指称对象"))
+        return msg, assessment
+
+    # 算子类型 -> bound 分类 (决定优化时关注的参考指标)
+    _COMPUTE_BOUND_OPS = ("matmul", "gemm", "conv", "attention", "einsum")
+    _MEMORY_BOUND_OPS = ("softmax", "layernorm", "layer_norm", "batchnorm",
+                         "batch_norm", "relu", "gelu", "sigmoid", "add",
+                         "dropout", "norm", "elementwise")
+
+    def _publish_oracle_observation(self, metrics, assessment, task, *,
+                                    cv_exceeded, heartbeat, heartbeat_expected,
+                                    required) -> None:
+        """§13.4 的 Oracle **唯一收口点** —— 每个 L3 读数都产一条 Observation。
+
+        为什么值得独立成方法 (而不是继续留在 `_assess_measurement` 里): 这一段是
+        spine-review P0-1 / P0-2 那条「唯一收口点」纪律的落点, 而它的**接口恰好就是
+        那句纪律本身** —— 一切读数从 `metrics` 里取 (已经发布进产物的那一份), 不回头
+        问调用方的局部量: `_assess_measurement` 是**另一个**方法, 拿不到
+        `verify_l3_only` 的参数, 用局部量在这里根本看不见 (而 `observation_error`
+        会把它吞成一行日志 —— 那条注释就写在下面那段实参里)。所以传进来的只有两件事:
+        「这次判定」(`assessment` 与它上游的 `cv_exceeded`) 与「心跳窗」
+        (`heartbeat` / `heartbeat_expected` / `required`)。
+
+        契约: 写 `metrics["observation"]` 与 `metrics["eligibility"]`; 收口点
+        **没跑成**时保留调用方刚写下的 fail-closed 全 False —— 发布的档位必须是收口点的
+        答案, 不是 `assess()` 自己算的那一份 (真机 §14-8 就是两份推导并存的后果)。
+        """
         try:
             from .contract import freeze_from_task
             from .oracle import evaluate as oracle_evaluate
@@ -1783,25 +1825,6 @@ class Verifier:
                             obs.provenance.get("heartbeat_reasons") or [])
         except Exception as exc:  # noqa: BLE001 — 观测失败不挡主流程, 但要留痕
             metrics["observation_error"] = f"{type(exc).__name__}: {exc}"
-        if assessment.contaminated:
-            metrics["contamination_reason"] = f"测量前 util={gpu_util_pct}%"
-        if assessment.reasons:
-            msg += (f"  ⚠️ 测量有效性={assessment.validity.value}: "
-                    + "; ".join(assessment.reasons))
-        if assessment.l3_pass_is_refused:
-            # 成因由 `assessment` 自己点名 (与判据同处一个类, 按同一分支顺序) ——
-            # 这里只拼接, 不再写一遍判据。原先那句写死了"能力没拿到", 而凭据这条
-            # 新增成因会印出「缺 —」: 判定对了、说的是另一件事 (I46 那一族)。
-            _refusal_causes = "; ".join(assessment.l3_pass_refusal_causes)
-            msg += ("  ⛔ 本轮 L3 不记为通过: "
-                    + (_refusal_causes or "「通过」没有指称对象"))
-        return msg, assessment
-
-    # 算子类型 -> bound 分类 (决定优化时关注的参考指标)
-    _COMPUTE_BOUND_OPS = ("matmul", "gemm", "conv", "attention", "einsum")
-    _MEMORY_BOUND_OPS = ("softmax", "layernorm", "layer_norm", "batchnorm",
-                         "batch_norm", "relu", "gelu", "sigmoid", "add",
-                         "dropout", "norm", "elementwise")
 
     @classmethod
     def _bound_type(cls, kernel_type: str) -> str:
