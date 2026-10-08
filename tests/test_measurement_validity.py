@@ -510,11 +510,8 @@ class LaunchDominatedGPU(MockGPU):
 
     - 计时: 非远程后端下 L3 的 `kernel_min_ms` 取自 `benchmark()` 的
       median/min/avg, 改这几个键就能把 launch_dominance 推到指定档位。
-    - gflops: 非远程后端下 L3 从 `execute(...).gflops` 取值。MockGPU 的 execute
-      是真计时, 逐轮会抖 (实测同一核 16.03 / 16.07), 而 `current > best` 的判定
-      对这种抖动毫无抵抗 —— 第 3 轮会被读成「改善」并重置停滞计数, 让下面那条
-      反向保护用例失效。抖动正是本模块要隔离的东西, 不能拿它当测试激励, 所以钉成
-      常量: 两个用例之间唯一的变量就只剩测量有效性。
+    - gflops: L3 从这批 benchmark 读数取值，不再用另一次冷执行覆盖。
+      钉成常量，避免真实计时抖动重置停滞计数；两个用例唯一的变量是测量有效性。
     """
 
     def __init__(self, candidate_ms=NET_MS_LAYERNORM_SMALL, gflops=16.0):
@@ -532,6 +529,7 @@ class LaunchDominatedGPU(MockGPU):
         result = super().benchmark(kernel_code, inputs, warmup, repeat)
         for key in ("min_time_ms", "median_time_ms", "avg_time_ms", "max_time_ms"):
             result[key] = self._candidate_ms
+        result["gflops"] = self._gflops
         return result
 
     def execute(self, kernel_code, inputs):

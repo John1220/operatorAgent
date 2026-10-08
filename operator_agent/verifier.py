@@ -1205,10 +1205,18 @@ class Verifier:
             exec_time = candidate.get("avg_time_ms", bench.get("avg_time_ms", 0))
             bandwidth = bench.get("memory_bandwidth_gbs", 0)
         else:
-            exec_result = self.backend.execute(kernel_code, bench_inputs)
-            actual_gflops = exec_result.gflops
+            # 本地 benchmark 也拥有这一批预热后的吞吐/带宽读数。不能拿另一次
+            # 冷执行（尤其是受控子进程的首次 BLAS 调用）去覆盖它们，否则报告的
+            # 延迟与 GFLOPS 属于两次不同实验，Golden 会把冷启动误报成性能回归。
+            # 老后端没发布这些字段时才保留 execute 的兼容回退；0 是有效读数。
+            exec_result = None
+            if "gflops" not in bench or "memory_bandwidth_gbs" not in bench:
+                exec_result = self.backend.execute(kernel_code, bench_inputs)
+            actual_gflops = (bench["gflops"] if "gflops" in bench
+                             else exec_result.gflops)
             exec_time = bench["avg_time_ms"]
-            bandwidth = exec_result.memory_bandwidth_gbs
+            bandwidth = (bench["memory_bandwidth_gbs"] if "memory_bandwidth_gbs" in bench
+                         else exec_result.memory_bandwidth_gbs)
 
         candidate_metrics = bench.get("candidate", {}) if remote_bench is not None else bench
         kernel_min_ms = candidate_metrics.get("median_time_ms") or candidate_metrics.get("min_time_ms") or exec_time
@@ -2273,30 +2281,52 @@ class Verifier:
                 return ex / np.sum(ex, axis=-1, keepdims=True)
             return _softmax, "numpy_reference"
 
+        # 不对 Tensor/ndarray 求真值；缺输入先判 None，不能把 np.asarray(None)
+        # 得到的标量 NaN 当作有效输入。X 显式缺失时才回退 input。
+        x_value = inputs.get("X")
+        if x_value is None:
+            x_value = inputs.get("input")
+        if x_value is None:
+            return None, None
+        x_np = np.asarray(x_value, dtype=dtype_np)
+
         # 更多算子: 优先 torch 原生 (与 eager 对齐)
         if torch_available:
-            x_np = np.asarray(inputs.get("X") or inputs.get("input"), dtype=dtype_np)
-            if x_np is not None:
-                x = torch.from_numpy(x_np).to(dtype_torch)
-                if "relu" in kernel_type:
-                    return lambda: torch.relu(x), "pytorch_eager"
-                if "sigmoid" in kernel_type:
-                    return lambda: torch.sigmoid(x), "pytorch_eager"
-                if "gelu" in kernel_type:
-                    return lambda: torch.nn.functional.gelu(x), "pytorch_eager"
-                if "layernorm" in kernel_type or "layer_norm" in kernel_type:
-                    w_np = np.asarray(inputs.get("weight"), dtype=dtype_np) if inputs.get("weight") is not None else None
-                    b_np = np.asarray(inputs.get("bias"), dtype=dtype_np) if inputs.get("bias") is not None else None
-                    if w_np is not None and b_np is not None:
-                        w = torch.from_numpy(w_np).to(dtype_torch)
-                        b = torch.from_numpy(b_np).to(dtype_torch)
-                        return lambda: torch.nn.functional.layer_norm(x, x.shape[-1:], w, b), "pytorch_eager"
-                    return lambda: torch.nn.functional.layer_norm(x, x.shape[-1:]), "pytorch_eager"
-                if "batchnorm" in kernel_type or "batch_norm" in kernel_type:
-                    return lambda: torch.nn.functional.batch_norm(
-                        x, torch.ones(x.shape[-1]), torch.zeros(x.shape[-1]),
-                        training=True), "pytorch_eager"
-
+            x = torch.from_numpy(x_np).to(dtype_torch)
+            if "relu" in kernel_type:
+                return lambda: torch.relu(x), "pytorch_eager"
+            if "sigmoid" in kernel_type:
+                return lambda: torch.sigmoid(x), "pytorch_eager"
+            if "gelu" in kernel_type:
+                return lambda: torch.nn.functional.gelu(x), "pytorch_eager"
+            if "layernorm" in kernel_type or "layer_norm" in kernel_type:
+                w_np = np.asarray(inputs.get("weight"), dtype=dtype_np) if inputs.get("weight") is not None else None
+                b_np = np.asarray(inputs.get("bias"), dtype=dtype_np) if inputs.get("bias") is not None else None
+                if w_np is not None and b_np is not None:
+                    w = torch.from_numpy(w_np).to(dtype_torch)
+                    b = torch.from_numpy(b_np).to(dtype_torch)
+                    return lambda: torch.nn.functional.layer_norm(x, x.shape[-1:], w, b), "pytorch_eager"
+                return lambda: torch.nn.functional.layer_norm(x, x.shape[-1:]), "pytorch_eager"
+            if "batchnorm" in kernel_type or "batch_norm" in kernel_type:
+                return lambda: torch.nn.functional.batch_norm(
+                    x, torch.ones(x.shape[-1]), torch.zeros(x.shape[-1]),
+                    training=True), "pytorch_eager"
+        # 离线 Golden 只要求 NumPy；torch 未安装时也必须真正校验这两种
+        # 算子的结果，而不是以「无参考，仅可执行」代替正确性。
+        if not torch_available:
+            if "relu" in kernel_type:
+                return lambda: np.maximum(x_np, 0), "numpy_reference"
+            if "layernorm" in kernel_type or "layer_norm" in kernel_type:
+                def _layernorm():
+                    mu = np.mean(x_np, axis=-1, keepdims=True)
+                    var = np.var(x_np, axis=-1, keepdims=True)
+                    result = (x_np - mu) / np.sqrt(var + 1e-5)
+                    if inputs.get("weight") is not None:
+                        result = result * np.asarray(inputs["weight"], dtype=dtype_np)
+                    if inputs.get("bias") is not None:
+                        result = result + np.asarray(inputs["bias"], dtype=dtype_np)
+                    return result
+                return _layernorm, "numpy_reference"
         return None, None
 
     def _generate_reference(self, task: TaskSchema, inputs: dict,

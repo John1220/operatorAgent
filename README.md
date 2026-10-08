@@ -128,6 +128,10 @@ python3 benchmarks/demo_spine_local.py      # 零依赖：看脊柱判定（会�
 python3 benchmarks/smoke_spine_h20.py       # 真机版（要 GPU + ~/.ssh/config 别名）
 ```
 
+Golden 的 CPU 对照保留真实计时：matmul 比较 GFLOPS，零 GFLOPS 的内存算子比较平均延迟。
+`compare` 默认将 mock 产物/日志写到临时目录并关闭经验库持久化，不污染真实运行现场；
+旧失败基线或缺失的延迟仍返回 `REVIEW`（exit 2），不会自动刷新 registry 或放宽门槛。
+
 ## 版本与依赖
 
 - Python >= 3.9

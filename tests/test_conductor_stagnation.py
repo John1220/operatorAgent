@@ -74,12 +74,9 @@ class ScriptedLLM:
 class ScriptedGflopsGPU(MockGPU):
     """按轮次注入 gflops (可选再注入带宽), 其余行为 (compile/run/计时) 全部沿用 MockGPU
 
-    注入点是 `execute()` 而不是 `benchmark()`: 非远程后端下 Verifier 的 L3 从
-    `backend.execute(...).gflops` 与 `.memory_bandwidth_gbs` 取值 (verifier.py:444-446),
-    `benchmark()` 返回的 gflops 只用于远程分支。
-    每轮的调用序是 L2 execute → L3 benchmark → L3 execute, 所以用 benchmark
-    的调用次数当轮次指针: 只有 L3 那次 execute 会读到本轮的脚本值 (L2 不消费
-    gflops, 读到上一轮的无妨)。
+    注入点是 `benchmark()`：L3 的延迟、GFLOPS 和带宽属于同一批预热后
+    样本，不能被另一次冷执行覆盖。每次 benchmark 代表一轮，返回该轮的脚本值；
+    L2 的 execute 仍然真跑候选，正确性判据不变。
     """
 
     def __init__(self, gflops_seq, bandwidth_seq=None, dispersion=None):
@@ -96,6 +93,9 @@ class ScriptedGflopsGPU(MockGPU):
             # MockGPU 不报离散度, 而 Verifier 会把它搬进 metrics 并据此定档
             result["dispersion_iqr_over_median"] = self._dispersion
         self._round = len(self.observed)
+        result["gflops"] = self._gflops_for_round()
+        if self._bw_seq is not None:
+            result["memory_bandwidth_gbs"] = self._seq_at(self._bw_seq)
         self.observed.append(self._gflops_for_round())
         return result
 

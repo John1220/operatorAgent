@@ -22,7 +22,7 @@ Golden 回归 Harness (#3 号 Harness)
 设计原则:
   * 默认全部跑 MockGPU，不依赖真 GPU/SSH/LLM（LLM 用 MockLLM 注入"已知能通过的代码"作为输出），
     这样 CI 在本地/无网环境也能跑；需要真 GPU case 可 enable_gpu=True 单独加。
-  * baseline 存**相对 repo 根**的 artifact_dir + 验证通过/GFLOPS。⚠️ 那个目录在 `output/`
+  * baseline 存相对 repo 根的 artifact_dir + 验证通过/GFLOPS/延迟（旧格式仍可读）。⚠️ 那个目录在 `output/`
     下、是 gitignore 的，所以它**不是**「权威代码副本」—— 旧版本地绝对路径曾让整份
     registry 只能活在这台机上 (见 doc 54)。
   * compare 的判据是**正交事实各自上报**（`FACTS`），状态由事实推出；「一致地失败」
@@ -37,6 +37,7 @@ import json
 import os
 import sys
 import time
+import tempfile
 from dataclasses import dataclass, asdict, field
 from typing import Any, Callable, Optional
 
@@ -86,7 +87,7 @@ FACTS = (
     "perf_drift_up",           # 上行超出容忍窗口: 不是回归, 但那个期望值必须被人重新签认
     "baseline_was_failing",    # 两边都失败 ⇒ 这一例检测不了任何东西 (死仪器)
     "fixed_since_baseline",    # baseline 坏 → 当前好: 期望过期了
-    "no_perf_reference",       # 这一例没有可用的性能读数 (gflops 为 0 或不判性能)
+    "no_perf_reference",       # 没有 GFLOPS/延迟或不判性能
 )
 
 #: 状态词。`REVIEW` 与 `FAIL` 分开是因为它们要求的动作不同：
@@ -95,7 +96,7 @@ FACTS = (
 STATUSES = ("PASS", "REVIEW", "FAIL", "SKIP")
 
 
-# ─── Mock 代码库: 保证 MockGPU 能稳定通过 L1/L2, 且给出稳定的 "伪 GFLOPS" 数字 ──
+# ─── Mock 代码库: 保证 MockGPU 能稳定通过 L1/L2, 性能仍是本机 CPU 实测，不是伪造的 GPU 数字 ──
 
 PYTHON_VALID_MATMUL = """\
 import numpy as np
@@ -155,6 +156,7 @@ class BaselineRecord:
     l2_passed: bool = False
     l3_passed: bool = False
     gflops: float = 0.0
+    latency_ms: Optional[float] = None            # 内存算子没有 GFLOPS，比较实测平均延迟
     speedup_vs_baseline: float = 0.0
     llm_total_tokens: int = 0
     llm_cost_usd: float = 0.0
@@ -168,7 +170,10 @@ class CompareReport:
     facts: tuple = ()             # 命中的独立事实 (FACTS 里的词), 可为多只
     baseline_gflops: float = 0.0
     current_gflops: float = 0.0
-    delta_ratio: float = 0.0      # (current - baseline) / baseline
+    delta_ratio: float = 0.0      # 吞吐收益：GFLOPS cur/bl-1 或延迟 bl/cur-1
+    metric: str = "gflops"
+    baseline_latency_ms: Optional[float] = None
+    current_latency_ms: Optional[float] = None
     baseline_all_passed: Optional[bool] = None
     current_all_passed: Optional[bool] = None
 
@@ -248,7 +253,7 @@ def _case_relu_mock_python() -> GoldenCase:
     def build_task():
         return TaskSchema(
             task_type=TaskType.OPERATOR_GENERATION,
-            source=SourceSpec(kernel_type="elementwise", complexity=TaskComplexity.LOW),
+            source=SourceSpec(kernel_type="relu", complexity=TaskComplexity.LOW),
             target=TargetSpec(hardware="mock_gpu", dsl=DSLEnum.PYTHON.value),
             constraints=ConstraintSpec(precision=Precision.FP32, min_speedup=0.5),
         )
@@ -385,8 +390,8 @@ class GoldenRegressionHarness:
 
         conductor = Conductor(
             backend=MockGPU(),
-            kernel_db=KernelDatabase(),
-            failure_db=FailureDatabase(),
+            kernel_db=KernelDatabase(jsonl_path="off"),
+            failure_db=FailureDatabase(jsonl_path="off"),
             llm=llm,
             max_optimize_rounds=1,   # golden 回归只跑 1 轮, 测"当前 Agent 首过能力"
         )
@@ -394,6 +399,7 @@ class GoldenRegressionHarness:
 
         l1_passed = l2_passed = l3_passed = False
         gflops = 0.0
+        latency_ms = None
         speedup = 0.0
         for r in artifact.verification_results:
             from operator_agent.schemas import VerificationLevel as VL
@@ -404,6 +410,7 @@ class GoldenRegressionHarness:
             elif r.level == VL.L3_PERFORMANCE:
                 l3_passed = r.passed
                 gflops = float(r.metrics.get("gflops") or 0.0)
+                latency_ms = r.metrics.get("avg_time_ms")
                 speedup = float(r.metrics.get("speedup_vs_baseline") or 0.0)
 
         cost = (artifact.metadata or {}).get("llm_cost", {}) or {}
@@ -418,6 +425,7 @@ class GoldenRegressionHarness:
             l2_passed=l2_passed,
             l3_passed=l3_passed,
             gflops=gflops,
+            latency_ms=latency_ms,
             speedup_vs_baseline=speedup,
             llm_total_tokens=int(cost.get("total_tokens") or 0),
             llm_cost_usd=float(cost.get("total_cost_usd") or 0.0),
@@ -491,6 +499,8 @@ class GoldenRegressionHarness:
             reports.append(CompareReport(
                 case_id=case.case_id, status=status, reason=reason, facts=facts,
                 baseline_gflops=bl.gflops, current_gflops=cur.gflops, delta_ratio=dr,
+                metric=("latency_ms" if bl.gflops <= 0 and bl.latency_ms else "gflops"),
+                baseline_latency_ms=bl.latency_ms, current_latency_ms=cur.latency_ms,
                 baseline_all_passed=bl.all_passed, current_all_passed=cur.all_passed,
             ))
 
@@ -503,13 +513,17 @@ class GoldenRegressionHarness:
     def _print_report(reports: list[CompareReport]) -> None:
         w = max(16, max((len(r.case_id) for r in reports), default=10))
         print(f"\n{'='*(w + 56)}")
-        print(f"  {'Case':<{w}}  {'Status':<6}  {'BL GFLOPS':>9}  {'Cur GFLOPS':>9}  {'Δ%':>7}  Reason")
+        print(f"  {'Case':<{w}}  {'Status':<6}  {'Metric':<10}  {'Baseline':>9}  {'Current':>9}  {'Δ%':>7}  Reason")
         print(f"{'-'*(w + 56)}")
         for r in reports:
-            bl = f"{r.baseline_gflops:.2f}" if r.baseline_gflops else "-"
-            cu = f"{r.current_gflops:.2f}" if r.current_gflops else "-"
+            if r.metric == "latency_ms":
+                bl = f"{r.baseline_latency_ms:.6f}" if r.baseline_latency_ms else "-"
+                cu = f"{r.current_latency_ms:.6f}" if r.current_latency_ms else "-"
+            else:
+                bl = f"{r.baseline_gflops:.2f}" if r.baseline_gflops else "-"
+                cu = f"{r.current_gflops:.2f}" if r.current_gflops else "-"
             dr = f"{r.delta_ratio*100:+.1f}%" if r.delta_ratio else "-"
-            print(f"  {r.case_id:<{w}}  {r.status:<6}  {bl:>9}  {cu:>9}  {dr:>7}  {r.reason}")
+            print(f"  {r.case_id:<{w}}  {r.status:<6}  {r.metric:<10}  {bl:>9}  {cu:>9}  {dr:>7}  {r.reason}")
         print(f"{'='*(w + 56)}")
         n = {s: sum(1 for r in reports if r.status == s) for s in STATUSES}
         print(f"汇总: PASS {n['PASS']} / REVIEW {n['REVIEW']} / FAIL {n['FAIL']} "
@@ -557,20 +571,31 @@ def _compare_one(bl: BaselineRecord, cur: BaselineRecord, tolerance: float,
         if not strict_l3:
             facts.append("no_perf_reference")
             notes.append("lenient 模式: 本例不判性能")
-        elif bl.gflops <= 0:
-            facts.append("no_perf_reference")
-            notes.append(f"baseline GFLOPS={bl.gflops} 不是可用分母 ⇒ 性能轴无从比较 "
-                         f"(当前读数 {cur.gflops})")
         else:
-            dr = (cur.gflops - bl.gflops) / bl.gflops
-            if cur.gflops < bl.gflops * (1.0 - tolerance):
-                facts.append("perf_regression")
-                notes.append(f"性能回归: {bl.gflops:.2f}→{cur.gflops:.2f} ({dr*100:+.1f}%), "
-                             f"超出容忍 -{tolerance*100:.0f}%")
-            elif dr > tolerance:
-                facts.append("perf_drift_up")
-                notes.append(f"性能上漂: {bl.gflops:.2f}→{cur.gflops:.2f} ({dr*100:+.1f}%): "
-                             f"不是回归, 但这个期望值已不代表任何被测物, 要人签认后刷新")
+            # 吞吐算子保留 GFLOPS 比较；内存算子不能伪造 FLOP 数，只能比较
+            # 同种统计量的实测延迟。旧 registry 没存延迟 ⇒ 仍是 REVIEW，不代填。
+            metric_note = None
+            if bl.gflops > 0:
+                dr = (cur.gflops - bl.gflops) / bl.gflops
+                metric_note = f"{bl.gflops:.2f}→{cur.gflops:.2f} GFLOPS"
+            elif (bl.latency_ms is not None and bl.latency_ms > 0
+                  and cur.latency_ms is not None and cur.latency_ms > 0):
+                # 延迟越小越好；转成吞吐方向的收益，保留原有 ±20% 判据。
+                dr = bl.latency_ms / cur.latency_ms - 1.0
+                metric_note = f"{bl.latency_ms:.6f}→{cur.latency_ms:.6f} ms"
+            else:
+                facts.append("no_perf_reference")
+                notes.append(f"baseline GFLOPS={bl.gflops} 或延迟不是可用分母 ⇒ 性能轴无从比较 "
+                             f"(当前 GFLOPS={cur.gflops}, latency_ms={cur.latency_ms})")
+            if metric_note is not None:
+                if dr < -tolerance:
+                    facts.append("perf_regression")
+                    notes.append(f"性能回归: {metric_note} ({dr*100:+.1f}%), "
+                                 f"超出容忍 -{tolerance*100:.0f}%")
+                elif dr > tolerance:
+                    facts.append("perf_drift_up")
+                    notes.append(f"性能上漂: {metric_note} ({dr*100:+.1f}%): "
+                                 f"不是回归, 但这个期望值已不代表任何被测物, 要人签认后刷新")
 
     if {"functional_regression", "perf_regression"} & set(facts):
         status = "FAIL"
@@ -611,6 +636,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                        help="宽松模式: 只判功能回归, 不判 L3 性能回归")
 
     args = ap.parse_args(argv)
+    # standalone CLI 不经过 tests/conftest.py，必须自己隔离 mock 产物。
+    # 保留用户显式给的落点；不自动清理，失败现场和 baseline 出处可复查。
+    if args.cmd == "compare" and (not os.environ.get("OPERATOR_AGENT_OUTPUT_DIR")
+                               or not os.environ.get("OPERATOR_AGENT_LOG_DIR")):
+        root = tempfile.mkdtemp(prefix="operator_agent_golden_")
+        for name, dirname in (("OPERATOR_AGENT_OUTPUT_DIR", "output"),
+                              ("OPERATOR_AGENT_LOG_DIR", "logs")):
+            if not os.environ.get(name):
+                os.environ[name] = os.path.join(root, dirname)
+        print(f"[Golden] 临时运行目录: {root}")
     harness = GoldenRegressionHarness()
 
     if args.cmd == "list":

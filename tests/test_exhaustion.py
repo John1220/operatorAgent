@@ -145,9 +145,9 @@ def _flat_template_backend():
     from tests.test_template_queue import _TemplateBackend
 
     class _FlatTemplateBackend(_TemplateBackend):
-        def execute(self, kernel_code, inputs):
-            result = super().execute(kernel_code, inputs)
-            result.gflops = 10.0        # 平: 每轮都不改善
+        def benchmark(self, kernel_code, inputs, warmup=3, repeat=10):
+            result = super().benchmark(kernel_code, inputs, warmup, repeat)
+            result["gflops"] = 10.0        # 平: 每轮都不改善
             return result
 
     return _FlatTemplateBackend()
@@ -156,9 +156,9 @@ def _flat_template_backend():
 class _FlatGflopsGPU(MockGPU):
     """代码型 + 平读数: 候选按需产生 ⇒ 覆盖无法确立"""
 
-    def execute(self, kernel_code, inputs):
-        result = super().execute(kernel_code, inputs)
-        result.gflops = 10.0
+    def benchmark(self, kernel_code, inputs, warmup=3, repeat=10):
+        result = super().benchmark(kernel_code, inputs, warmup, repeat)
+        result["gflops"] = 10.0
         return result
 
 
