@@ -13,6 +13,7 @@ import time
 # 聚合口径的词表与契约**共用一份常量**（只有一个来源, 免得任务侧与契约侧漂成两个
 # 词表）。`contract` 不 import 本模块 ⇒ 无环（见那边的模块 docstring）。
 from .contract import CASE_AGGREGATES, BenchCaseError, BenchmarkCase
+from .correctness import as_suite
 from .backend_caps import Cap
 
 
@@ -297,11 +298,19 @@ class ConstraintSpec:
     #: "shape":[…], "dtype":…}, …]}, …)`（JSON 原生 —— 任务要能落盘、能过传输）。与 `shapes`
     #: 同时声明时两处必须对得上（派生 key 集合一致），否则**拒绝冻结**（两个真相来源会漂）。
     cases: tuple = ()
+    #: §20: independent L2 inputs; never used as L3 performance cases.
+    #: Accepts a CorrectnessSuite or its JSON-native content_dict() representation.
+    correctness_suite: Optional[Any] = None
 
     def validate(self) -> list[str]:
         errors = []
         if not isinstance(self.precision, Precision):
             errors.append("constraints.precision 必须是 Precision 枚举")
+        if self.correctness_suite is not None:
+            try:
+                as_suite(self.correctness_suite)
+            except (ValueError, TypeError) as exc:
+                errors.append(f"constraints.correctness_suite: {exc}")
         if not isinstance(self.min_speedup, (int, float)) or isinstance(self.min_speedup, bool):
             errors.append(f"constraints.min_speedup 必须是数值, 实际 {type(self.min_speedup).__name__}")
         elif self.min_speedup < 0:
@@ -424,6 +433,9 @@ class TaskSchema:
         if self.constraints.cases:
             constraints_dict["cases"] = [_as_case(c).to_dict()
                                          for c in self.constraints.cases]
+        if self.constraints.correctness_suite is not None:
+            constraints_dict["correctness_suite"] = as_suite(
+                self.constraints.correctness_suite).content_dict()
         return {
             "task_id": self.task_id,
             "task_type": self.task_type.value,

@@ -111,6 +111,13 @@ class MockGPU(Backend):
     def label(self) -> str:
         return self.name
 
+    def correctness_input_support(self, kernel_code: str, layout: str) -> tuple:
+        if _detect_triton(kernel_code):
+            return False, "Triton 路径转换 dtype/contiguous，尚未确立套件输入保真"
+        if layout != "contiguous":
+            return False, "Python 子进程 pickle 不保留 stride/broadcast 视图"
+        return True, "Python 子进程 pickle 保留 contiguous 张量的值与 dtype"
+
     def _check_triton(self) -> bool:
         """检查 Triton 是否可用"""
         try:

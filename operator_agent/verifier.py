@@ -10,6 +10,8 @@ L3: 性能验证 (性能达到预期加速比) + Roofline 分析
 
 import time
 import dataclasses
+import copy
+import hashlib
 import numpy as np
 from typing import Mapping, Optional
 from .schemas import (
@@ -17,6 +19,8 @@ from .schemas import (
 )
 from .anticheat import static_audit
 from .contract import case_key
+from .correctness import as_suite, verdict_of
+from .bench_cases import BenchCaseError
 from .source_lang import classify
 
 
@@ -506,6 +510,104 @@ class Verifier:
                                       metrics=metrics)
 
     def _verify_function(self, kernel_code: str, test_inputs, expected_output, task: TaskSchema) -> VerificationResult:
+        """Suite checks are part of L2, before candidate selection or L3.
+
+        Caller inputs cannot replace declared checks. Suite arrays stay local to
+        this method, so performance ledgers/weights retain their original cases.
+        """
+        raw = task.constraints.correctness_suite
+        if raw is None:
+            return self._verify_primary_function(kernel_code, test_inputs, expected_output, task)
+        try:
+            suite = as_suite(raw)
+        except (ValueError, TypeError) as exc:
+            return VerificationResult(
+                level=VerificationLevel.L2_FUNCTION, passed=False,
+                message=f"CorrectnessSuite 无法确立: 声明无效: {exc}",
+                metrics={"correctness": {"verdict": "unknown", "reason": str(exc)}})
+
+        try:
+            primary = self._verify_primary_function(kernel_code, test_inputs, expected_output, task)
+        except (ValueError, CapabilityMissing) as exc:
+            primary = VerificationResult(
+                level=VerificationLevel.L2_FUNCTION, passed=False,
+                message=f"正确性检查无法执行: {exc}",
+                metrics={"correctness_primary_verdict": "unknown"})
+        rows = []
+        primary_state = primary.metrics.get("correctness_primary_verdict")
+        if primary_state is None:
+            primary_state = verdict_of(primary)[0]
+        if primary_state != "passed":
+            rows = [{"case_id": c.case_id, "verdict": "not_run",
+                     "reason": "调用方输入/静态守卫未通过，未运行套件"} for c in suite.cases]
+            return self._suite_result(primary, suite, rows, primary_state)
+
+        for case in sorted(suite.cases, key=lambda c: c.case_id):
+            row = {"case_id": case.case_id, "shape_key": case.inputs.key(),
+                   "pattern": case.pattern, "layout": case.layout,
+                   "dtypes": {t.name: t.dtype for t in case.inputs.tensors}}
+            supported, reason = self.backend.correctness_input_support(kernel_code, case.layout)
+            if not supported:
+                rows.append(dict(row, verdict="unknown", reason=reason))
+                continue
+            dtypes = {t.dtype for t in case.inputs.tensors}
+            if len(dtypes) != 1 or not dtypes <= {"fp16", "fp32"}:
+                rows.append(dict(row, verdict="unknown",
+                                 reason="当前执行协议仅确立同精度 fp16/fp32 输入；不降级 dtype"))
+                continue
+            case_task = copy.deepcopy(task)
+            case_task.constraints.precision = Precision(next(iter(dtypes)))
+            try:
+                inputs = case.materialize()
+                r = self._verify_single_set(kernel_code, inputs, None, case_task)
+                state, reason = verdict_of(r)
+                row.update(verdict=state, reason=reason, metrics=dict(r.metrics))
+                if state == "passed" and suite.deterministic:
+                    # Re-materialize: a candidate must not mutate its first input
+                    # and thereby change the object used in the repeat check.
+                    repeat = self._verify_single_set(kernel_code, case.materialize(), None, case_task)
+                    repeated_state, repeated_reason = verdict_of(repeat)
+                    first_hash = r.metrics.get("output_digest")
+                    second_hash = repeat.metrics.get("output_digest")
+                    row["repeat_metrics"] = dict(repeat.metrics)
+                    if repeated_state != "passed":
+                        row.update(verdict=repeated_state, reason=f"重复检查: {repeated_reason}")
+                    elif not first_hash or not second_hash:
+                        row.update(verdict="unknown", reason="未返回完整输出指纹，确定性无法确立")
+                    elif first_hash != second_hash:
+                        row.update(verdict="failed", reason="同输入两次执行输出不同（确定性失败）")
+                    else:
+                        row["determinism"] = "passed"
+            except (BenchCaseError, ValueError, CapabilityMissing) as exc:
+                row.update(verdict="unknown", reason=f"检查无法执行: {exc}")
+            rows.append(row)
+        rows.extend({"case_id": f"check:{check}", "verdict": "unknown",
+                     "reason": f"{check} 没有执行协议/证据生产者，不能当成通过"}
+                    for check in sorted(set(suite.required_checks)))
+        state = ("failed" if any(r["verdict"] == "failed" for r in rows) else
+                 "unknown" if any(r["verdict"] != "passed" for r in rows) else "passed")
+        return self._suite_result(primary, suite, rows, state)
+
+    @staticmethod
+    def _suite_result(primary, suite, rows, state):
+        primary_passed = primary.passed
+        primary.passed = state == "passed"
+        primary.metrics["correctness"] = {
+            "verdict": state, "suite_hash": suite.digest(),
+            "declared_cases": len(suite.cases), "deterministic": suite.deterministic,
+            "cases": rows,
+            "scope": "仅证明声明的套件；未声明的形状/语义不算覆盖",
+        }
+        problems = [f"{r['case_id']}: {r['reason']}" for r in rows if r["verdict"] != "passed"]
+        if state != "passed":
+            primary.metrics["correctness"]["reason"] = (
+                "; ".join(problems) if primary_passed else primary.message)
+        primary.message += (f"; CorrectnessSuite {state} ({len(suite.cases)} case)"
+                            + (" —— " + "; ".join(problems) if problems else ""))
+        print(f"  [Verifier] CorrectnessSuite {state}: {primary.message}")
+        return primary
+
+    def _verify_primary_function(self, kernel_code: str, test_inputs, expected_output, task: TaskSchema) -> VerificationResult:
         print("  [Verifier] L2: 功能验证...")
 
         # 反作弊静态审计: 执行前先检查是否存在原生算子回退调用。
@@ -530,6 +632,12 @@ class Verifier:
             # 「查不了」必须说出来 (CHECKLOG I65): 空的违规列表在这里**不表示**没有违规。
             # 不拦这一轮 (守卫不是判据, 判据是它的适用性 —— 由资格层收口), 但不许静默。
             print(f"  [Verifier] L2 反作弊静态审计**不适用**: {audit.lang.reason}")
+            if task.constraints.correctness_suite is not None:
+                return VerificationResult(
+                    level=VerificationLevel.L2_FUNCTION, passed=False,
+                    message=f"静态守卫不适用，正确性无法确立: {audit.lang.reason}",
+                    metrics={**_l1_guard_metrics(audit.lang),
+                             "correctness_primary_verdict": "unknown"})
 
         # 支持单组输入 (dict) 或多组输入套件 (list[dict])
         input_sets = test_inputs if isinstance(test_inputs, list) else [test_inputs]
@@ -561,6 +669,12 @@ class Verifier:
             # 外部提供的 expected_output 仅对单组输入有效
             single_expected = expected_output if len(input_sets) == 1 else None
             r = self._verify_single_set(kernel_code, inputs, single_expected, task)
+            if task.constraints.correctness_suite is not None:
+                state, reason = verdict_of(r)
+                if state != "passed":
+                    r.passed = False
+                    r.message = reason
+                    r.metrics["correctness_primary_verdict"] = state
             if not r.passed:
                 r.message = f"[输入集 {idx + 1}/{len(input_sets)}] {r.message}"
                 print(f"  [Verifier] L2 FAILED: {r.message}")
@@ -899,6 +1013,13 @@ class Verifier:
             "coverage": (n_compared / size) if size else 1.0,
             "reference_nonfinite": n_ref_nonfinite,
         }
+        if task.constraints.correctness_suite is not None:
+            # Hash the actual dtype/shape/bytes before float32 comparison casting.
+            arr = np.asarray(actual)
+            digest = hashlib.sha256()
+            digest.update(str((arr.dtype.str, arr.shape)).encode())
+            digest.update(arr.tobytes(order="C"))
+            metrics["output_digest"] = digest.hexdigest()
         # 高精度参考 (float64) 那把尺的读数。**不参与判定**，只跟着上报 —— 理由与阈值来源
         # 写在 `tolerance.error_ratio` 的注释里 (一句话: 那三个阈是别人语料上的数)。
         metrics.update(self._oracle_reading(task, inputs, actual_f, expected))

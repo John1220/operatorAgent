@@ -36,5 +36,6 @@ from .artifact_store import ArtifactStore
 from .agent_logger import capture_execution, get_logger, get_latest_logs, read_log
 from .agents import DesignerAgent, CoderAgent, SearchAgent
 from .verifier import Verifier
+from .correctness import CorrectnessCase, CorrectnessSuite
 from .conductor import Conductor, Router
 from .intent_parser import IntentParser, TestInputGenerator

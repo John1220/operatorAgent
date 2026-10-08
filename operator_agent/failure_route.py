@@ -137,6 +137,11 @@ def classify(verify_results: Iterable,
         return Route(ROUTE_HOLD, "silent", False, False, False,
                      "全部通过: 无需动作")
 
+    if any((getattr(r, "metrics", {}) or {}).get("correctness", {}).get("verdict")
+           == "unknown" for r in failed):
+        return Route(ROUTE_HOLD, "silent", False, False, False,
+                     "CorrectnessSuite 无法确立: 不修候选、不沉淀错误教训")
+
     levels = {getattr(getattr(r, "level", None), "value", str(getattr(r, "level", "")))
               for r in failed}
     texts = " | ".join((getattr(r, "error_log", "") or getattr(r, "message", "") or "")

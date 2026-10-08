@@ -208,7 +208,8 @@ def _correctness_credential(results) -> Optional[bool]:
           if getattr(getattr(r, "level", None), "name", "") == "L2_FUNCTION"]
     if not l2:
         return None
-    return all(bool(r.passed) for r in l2)
+    from .correctness import credential
+    return credential(l2)
 
 
 def _round_axes(l3_result, test_inputs) -> dict:
@@ -3220,7 +3221,8 @@ class Conductor:
         l2 = [r for r in (getattr(artifact, "verification_results", None) or [])
               if str(getattr(getattr(r, "level", None), "value",
                              getattr(r, "level", ""))).lower() == "l2"]
-        return (all(bool(r.passed) for r in l2) if l2 else None)
+        from .correctness import credential
+        return credential(l2)
 
     def _resolve_input_sets(self, task, test_inputs):
         """本次要评**哪些 case**、输入从哪来 —— 契约拥有输入 or 调用方给（I94）

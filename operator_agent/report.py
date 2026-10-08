@@ -269,6 +269,16 @@ def collect_unable(*, artifact: Any, observations: Optional[Sequence[dict]] = No
     for d in docs:
         u.extend_metrics(d)
 
+    for r in getattr(artifact, "verification_results", ()) or ():
+        c = (getattr(r, "metrics", {}) or {}).get("correctness", {})
+        if c.get("verdict") == "unknown":
+            unknown = [row for row in c.get("cases", ()) if row.get("verdict") == "unknown"]
+            for row in unknown:
+                u.add(f"正确性检查 {row.get('case_id')} 无法确立", row.get("reason", ""),
+                      kind="other", evidence=f"suite_hash={c.get('suite_hash')}")
+            if not unknown:
+                u.add("CorrectnessSuite 无法确立", c.get("reason", r.message), kind="other")
+
     # 2. 逐项前置 (核不过就是条目; 全过则成为空清单的依据)
     checks = _preconditions(artifact)
     for _name, ok, _evidence, item in checks:
@@ -543,6 +553,7 @@ def build_report(*, artifact: Any, task: Any = None,
     lines += _claim_level_lines(m)
     lines += _best_known_good(artifact, m)
     lines += _evidence_chain(artifact)
+    lines += _correctness_lines(artifact)
     u = collect_unable(artifact=artifact, observations=observations,
                        refusals=refusals, unable=unable)
     lines += ["## 3. 我无法确立的事", "",
@@ -552,6 +563,31 @@ def build_report(*, artifact: Any, task: Any = None,
               ""]
     lines += _collect_time(artifact)
     return "\n".join(lines)
+
+
+def _correctness_lines(artifact: Any) -> List[str]:
+    """L2 evidence is not in benchmark_data, especially when L3 was blocked."""
+    out = []
+    for r in getattr(artifact, "verification_results", ()) or ():
+        c = (getattr(r, "metrics", {}) or {}).get("correctness")
+        if not isinstance(c, dict):
+            continue
+        out += ["### CorrectnessSuite (§20)", "",
+                f"- 结论: **{c.get('verdict', 'unknown')}**",
+                f"- 套件哈希: `{c.get('suite_hash', '未确立')}`",
+                f"- 范围: {c.get('scope', '声明无效或没有覆盖证据')}", "",
+                "| Case | 值 / 布局 | 结论 | 证据 / 原因 |",
+                "|---|---|---|---|"]
+        for row in c.get("cases", ()):
+            def cell(value):
+                return str(value).replace("|", "\\|").replace("\n", " ")
+            out.append("| " + " | ".join(cell(v) for v in (
+                row.get("case_id"), f"{row.get('pattern', '-')} / {row.get('layout', '-')}",
+                row.get("verdict"), row.get("reason"))) + " |")
+        if c.get("reason"):
+            out.append(f"- 无法确立: {c['reason']}")
+        out.append("")
+    return out
 
 
 def write_report(artifact_dir: Any, *, artifact: Any, task: Any = None,

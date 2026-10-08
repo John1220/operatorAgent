@@ -60,6 +60,18 @@
 | §22.2 执行隔离（本地半片） | `operator_agent/exec_guard.py`（两个公开入口：`run_candidate` 跑候选 / `run_compile` **只编译**）+ `operator_agent/mock_gpu.py`（`_execute_python` 与 `compile`→`_compile_in_guard`）+ `operator_agent/remote_executor.py::LocalExecutor.compile`（**编译那一档两个后端都接了**，语义逐字不变） | ⚠️ | `tests/test_exec_guard.py`（43 条，含 `TestCompileMode` 8 条 + 「只减不增」的进程内 exec 账本 2 条）+ `tests/test_exec_compile_guard.py`（14 条：契约 / 阶段级上限链 / `compile_status` 发布面 / 语料探针归属）+ `tests/test_demo_exec_guard.py`（5 条）+ `benchmarks/demo_exec_guard.py`（零 GPU / 零 LLM / 不联网，四个场景）+ `benchmarks/mut_specs/exec_guard.py`（14 行，自查 14/14 拦住、0 逃逸）+ `benchmarks/mut_specs/compile_guard.py`（**13 行：行为 11/11 + 结构 2/2，0 逃逸**，2026-10-06 串行跑） | **只落了「跑飞/吃满/失控」那一半，不是沙箱**（[CHECKLOG I85](../research/CHECKLOG.md)）：五档状态 `ok`/`timeout`/`limit_exceeded`/`crashed`/`cheat`，强制项逐项报 `enforced` / `not_enforced`（设不上就如实报 + 原始 errno，不许读成「没超限」）。**真拦得住的**：CPU（SIGXCPU rc=-24）/ 单文件大小（Errno 27，文件停在边界字节，**没有** SIGXFSZ）/ 进程数（`EAGAIN`，且是 **per-UID**，不许读成「这个进程可以有 N 个子进程」）/ 超时杀**整个进程组**（孙进程零残留，正常返回也收尾）。**设不上的**：`RLIMIT_AS`/`DATA`/`RSS` 在本机（macOS）内核 `EINVAL`/`EPERM`（libc 直调复现）⇒ 内存这一档只能报 `not_enforced`，本机做不了活体内存看门狗。**顺带修掉一条真缺陷**：产物经 pickle 文件回传，`RLIMIT_FSIZE` 同时管它 ⇒ 第一版 8MB/64MB 把 LeetCUDA 那些**合法**的 64MB 产物截断成 `UnpicklingError`（看着像候选坏了，实际是两个上限打架）⇒ 默认 512MB/256MB + 构造期不变量 `artifact_bytes <= file_size_bytes`。**2026-10-06 新增：编译那一档也进了受控子进程**（[CHECKLOG I87](../research/CHECKLOG.md)）—— 第 5 张词表 `MODES`、`run_compile`（只 `exec` 不跑核）、契约逐字不变、异常跨进程重建带 `exc_type` 与 `syntax_fields`（行号列号不丢）、第三档 `GuardRefusal` → `compile_status=compile_<status>`；§22.2 的**阶段级上限第一次有消费端**（`Conductor(execution_limits=, compile_limits=)` → 后端 → `exec_guard`，默认值唯一出处 `limits_for`）。**不许声称**：不是敌意候选的沙箱（同 uid、**网络没关**、无容器/cgroup、无文件系统白名单）；无 GPU watchdog；无设备租约回收；远端 runner 侧零覆盖；**L1 成功那一趟的逐项强制读数没有发布面**（后端 `compile` 只回 `bool`）⇒「设不上的项如实报」今天只在失败那一支成立；账本里仍有 6 处**候选侧**进程内 `exec`（`LocalExecutor.execute`/`benchmark`、`MockGPU._execute_triton_cuda`/`_benchmark_triton_cuda`/`_benchmark_python`、`reference.load_reference_source`，`tests/test_exec_guard.py` 的 `EXPECTED` 表逐处登记）；编译档默认值 30s/60s 是**暂定、真机未实测**。**变异标定**：`exec_guard.py` 14 行 → **14/14（0 逃逸）**，复跑时把 M12 从结构分母升为行为证人、并修掉 M2 证人的**余量**缺陷（只等 1.3s 而孙进程要「起解释器 + 1.0s」才落盘 ⇒ 机器忙时被读成逃逸）（[I85](../research/CHECKLOG.md)）；`compile_guard.py` 13 行 → 11/11 + 2/2（[I87](../research/CHECKLOG.md)） |
 | §23 断点恢复 | 快照原子性 + 追加日志 | ⚠️ | `tests/test_stage1_acceptance.py::Acceptance5_*`、`tests/test_resume_integrity.py`、`tests/test_persistent_session.py` | 快照写一半不损坏、追加日志跨重启存活已验证；**无事件日志 / sequence / 幂等键**（§23 已补规范） |
 
+### 2026-10-08：CorrectnessSuite 第一阶段
+
+`operator_agent/correctness.py` + 契约/任务声明 + L2/候选选择硬门禁 + L2 报告读者已接通；
+守卫：`tests/test_correctness_suite.py`（含 Conductor 正反端到端、产物落盘）。套件的全部内容
+进 hash；原始输入不能替代套件，同 shape 的不同 dtype/值/seed 不合并；正确性套件不污染
+L3 工作负载。unknown 保持三态并走 HOLD，不当错核沉淀教训。
+
+**边界**：当前能确立的是 MockGPU Python contiguous 路径；stride/broadcast 控制端可构造，
+但 pickle 不保留视图，因而执行结果 unknown。远端/Triton 输入保真协议、自动边界覆盖 lint、
+梯度/累加精度/aliasing/sanitizer 仍未完成；旧任务未声明套件时仍走原 L2，**§20 未全部收口**。
+详细接口及下一阶段见 [CorrectnessSuite 实现边界](../design/correctness-suite-implementation.md)。
+
 ## 二、Stage 实施顺序上的缺件
 
 | 缺的东西 | 现在的真实状态 | 后果 |
@@ -147,7 +159,7 @@
 | §9.4 | `PartitionKey` 已有；`ToolchainKey` / `MeasurementProtocolKey` 零命中 |
 | §13.5 | 器件峰值出口不存在（`peak_measured` 无量具） |
 | §14-9 | 比较器已落、**两臂真机未跑** ⇒ "审计有收益"仍不许声称 |
-| §20 | 门禁与凭据已落；`CorrectnessSuite` 进契约、特化/空转探针（`no_op`/`perturb` 零命中）未落 |
+| §20 | 门禁与凭据已落；2026-10-08 `CorrectnessSuite` 进契约、L2/候选选择/报告已接通（见上文第一阶段）；仍欠执行侧值/布局保真、自动边界覆盖 lint、梯度/累加精度/aliasing/sanitizer 和 GPU launch 探针；旧任务尚未强制声明套件 |
 | §22 | §22.1 的 **harness 侧一半已落**（七格 + 权限位 + 唯一写入口，见 I82），且 **2026-10-07 起有生产调用点**：三个真机驱动经 `new_run_root` 建根、过门的候选真的落进 `candidate/`（见 I88）—— 但只搬了候选源码这一件，`report`/`measurements`/`kernel_db` 未进布局；§22.2 的**本地半片已落**（运行期的受控执行器 + 逐项强制读数，见 I85；**编译期那一档**见 I87 —— 两个后端的 `compile` 都走 `run_compile`，阶段级上限链 `Conductor` → 后端 → `exec_guard` 第一次有消费端）—— 但它挡的是**跑飞/吃满/失控**，**不是隔离**（同 uid、网络没关、无容器/cgroup/白名单；内存本机设不上）；**候选侧那一半仍缺**（同一 uid ⇒ 权限位拦不住属主）；仍**零命中**的是：GPU watchdog / 设备租约回收 / 网络默认关闭 / 文件系统白名单 / 远端运行布局权限位，以及**候选侧**剩下的 6 处进程内 `exec`（`LocalExecutor.execute`/`benchmark`、`MockGPU._execute_triton_cuda`/`_benchmark_triton_cuda`/`_benchmark_python`、`reference.load_reference_source`；编译期已不在其列）；§22.3 的**两半已收**（2026-10-07，见 I89）：覆盖 `mode` → 声明等级上限 → 入库门第 3 道门 → 报告与「我无法确立的事」，守卫 43 条 + 变异 8 行 0 逃逸（`uncovered_rules` 只进留痕/报告、**不**压级；`promotable` 今天只作门槛） |
 | §23 | 快照/续跑已有；**事件日志 / `sequence` / 幂等键**零命中 |
 
@@ -155,7 +167,7 @@
 
 ```
 §3.3 扩展后的 OperatorContract      §6.2 统计协议（成对差值+CI；条款 2/3/4 与目标函数已落，见 I92–I94）
-§11.3 多卡能力最小闭环               §20.1/§20.3 CorrectnessSuite / 探针
+§11.3 多卡能力最小闭环               §20.1/§20.3 套件的后端输入保真 / 覆盖 lint / GPU 探针
 §22.2 进程与资源隔离的**其余几项**（GPU watchdog / 设备租约回收 / 网络默认关闭 / 文件系统白名单）  §23.1 append-only 事件日志
 §24 记忆治理（MemoryEntry / TTL / 撤销）
 ```

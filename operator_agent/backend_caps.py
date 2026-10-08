@@ -131,6 +131,15 @@ class Backend(ABC):
     def capabilities(self) -> frozenset:
         """本后端**真实**具备的 `Cap` 集合。声明得比实际多, 就是 3.3 那类静默降级"""
 
+    def correctness_input_support(self, kernel_code: str, layout: str) -> tuple:
+        """Whether L2 preserves suite values/layout in candidate execution.
+
+        Default unknown: FULL_OUTPUT_TENSOR does not prove input fidelity. SSH
+        regenerates values; JSON/pickle may erase strides. Providers must declare
+        support for the actual source execution path, not just their hardware.
+        """
+        return False, "后端未声明正确性输入的值/布局保真传输"
+
     @property
     def label(self) -> str:
         """日志与异常里用的名字

@@ -28,6 +28,7 @@ from typing import Any, Mapping, Optional
 # 名字 ⇒ verifier / conductor / tests 的老调用点一字不动；定义搬家的理由见 I94）。
 from .bench_cases import (BenchmarkCase, BenchCaseError, TensorSpec,  # noqa: F401
                           case_key, cases_from_shapes, known_layouts)
+from .correctness import CorrectnessSuite, as_suite
 
 class ContractError(ValueError):
     """契约不可判定 / 哈希不匹配 —— 失败关闭, 不猜"""
@@ -131,6 +132,7 @@ class FrozenContract:
     #: 数组），且 `required_cases` / `max_regression` / `case_weights` 的 key 必须都指向这些
     #: case（CONTRACT_LINT 收紧）。进 hash：**评的是什么输入**也是判据的一部分。
     cases: tuple = ()
+    correctness_suite: Optional[CorrectnessSuite] = None
     #: §6.2 条款 2/4：必须参与判决的 case（`case_key` 字符串，缺一不可）。
     #: 空 tuple = **契约没声明**（老契约）⇒ 判据按「未确立」处理，不是「都通过了」。
     required_cases: tuple = ()
@@ -164,6 +166,8 @@ class FrozenContract:
         # case 在身份上分不开 ⇒ CONTRACT_LINT 直接拒绝（见 `_lint_cases`）。
         if self.cases:
             d["cases"] = [c.content_dict() for c in self.cases]
+        if self.correctness_suite is not None:
+            d["correctness_suite"] = self.correctness_suite.content_dict()
         # §6.2 条款 4：这两项**全部进契约 hash** —— 判据变成可改的常量就等于没有判据。
         # 但**空的声明不进**：空 = 没声明（判据面按「未确立」走），与本片之前冻结的契约
         # 是同一份判据内容 ⇒ 同一个 hash（那样旧载荷还能被 `load_dict` 复盘，而
@@ -347,7 +351,7 @@ def freeze(kernel_type: str,
            max_regression=(),
            case_weights=(),
            aggregate: str = "",
-           cases=()) -> FrozenContract:
+           cases=(), correctness_suite=None) -> FrozenContract:
     """CONTRACT_LINT + 冻结。任何 validate 失败都抛 ContractError —— **失败关闭**。
 
     「不可判定就交还给人」(设计 §10.1 REJECT): 这里不猜默认值。缺数值语义的契约
@@ -367,6 +371,13 @@ def freeze(kernel_type: str,
     errs += _lint_case_declarations(required_cases, max_regression,
                                     case_weights, aggregate)
     errs += _lint_cases(cases, required_cases, max_regression, case_weights)
+    if correctness_suite is not None:
+        try:
+            correctness_suite = as_suite(correctness_suite)
+            if dtype_semantics.deterministic and not correctness_suite.deterministic:
+                errs.append("数值语义要求确定性，但 CorrectnessSuite 关闭了确定性检查")
+        except (BenchCaseError, TypeError, ValueError) as exc:
+            errs.append(f"correctness_suite: {exc}")
     if errs:
         raise ContractError("契约不可判定: " + "; ".join(errs))
 
@@ -381,6 +392,7 @@ def freeze(kernel_type: str,
         required_caps=tuple(sorted(required_caps or ())),
         # 顺序无语义 ⇒ 按**身份**排序（同「同内容两份拷贝必须同哈希」那条要求）。
         cases=tuple(sorted(cases or (), key=lambda c: c.key())),
+        correctness_suite=correctness_suite,
         notes=notes,
         # 顺序无语义 ⇒ 规范化成「排序去重」：同一份判据不该有两种 hash（同内容两份拷贝
         # 必须同哈希是契约哈希的第一条要求, 见模块 docstring）。
@@ -400,6 +412,7 @@ def freeze(kernel_type: str,
         target_metric=c.target_metric,
         required_caps=c.required_caps,
         cases=c.cases,
+        correctness_suite=c.correctness_suite,
         required_cases=c.required_cases,
         max_regression=c.max_regression,
         case_weights=c.case_weights,
@@ -448,6 +461,7 @@ def load_dict(payload: Mapping[str, Any]) -> FrozenContract:
             # 具体输入（老载荷没有这个键 ⇒ 空 = 没声明，输入由调用方给）
             cases=tuple(BenchmarkCase.from_dict(d)
                         for d in (payload.get("cases") or ())),
+            correctness_suite=payload.get("correctness_suite"),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ContractError(f"无法从载荷重建契约: {exc}") from exc
@@ -483,6 +497,12 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
 
     kt = (getattr(getattr(task, "source", None), "kernel_type", "") or "unknown").strip()
     cons = getattr(task, "constraints", None)
+    correctness_suite = getattr(cons, "correctness_suite", None)
+    if correctness_suite is not None:
+        try:
+            correctness_suite = as_suite(correctness_suite)
+        except (ValueError, TypeError) as exc:
+            raise ContractError(f"任务声明的 correctness_suite 无效: {exc}") from exc
     prec = getattr(cons, "precision", None)
     dtype_s = dtype or (getattr(prec, "value", None) or "fp32")
     max_error = float(getattr(cons, "max_error", 1e-4) or 1e-4)
@@ -526,8 +546,10 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
         required_cases = tuple(c.key() for c in cases)
     return freeze(
         kernel_type=kt,
-        dtype_semantics=DTypeSemantics(dtype=dtype_s, tf32=tf32,
-                                       accum="fp32" if dtype_s in ("fp32", "fp16") else "fp32"),
+        dtype_semantics=DTypeSemantics(
+            dtype=dtype_s, tf32=tf32, accum="fp32",
+            deterministic=(correctness_suite.deterministic
+                           if correctness_suite is not None else True)),
         baseline=BaselineDef(name=baseline_name, same_device=True,
                              same_window=True, same_dtype_semantics=True),
         shapes=ShapeDist(entries=shape_entries),
@@ -542,4 +564,5 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
         case_weights=_weight_pairs(getattr(cons, "case_weights", None)),
         aggregate=str(getattr(cons, "aggregate", "") or ""),
         cases=cases,
+        correctness_suite=correctness_suite,
     )
