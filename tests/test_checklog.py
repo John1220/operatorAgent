@@ -27,6 +27,26 @@ def _entries(text: str) -> list:
     return out
 
 
+def _order_problems(text: str) -> list:
+    """索引表里**每个编号空间内部**必须按编号升序（立条纪律第 5 条）。
+
+    跨类别不要求升序: C/I/M/P/S/H 是各自的编号空间, 混排在同一张表里。
+    为什么要有这条: 2026-10-08 实测 —— I93/I94/I95 三行被按**倒序**追加在 I 段尾部
+    （正文那条「按注册倒序」的纪律被误用到了索引上）, 而当时本文件 7 条守卫**全绿**:
+    纪律只写在文件里、没有断言。规则保护的是「按编号找条目的读者」, 所以钉在这里。
+    """
+    body = text.split("## 索引")[-1]
+    out, last = [], {}
+    for cat, num in re.findall(r"^\|\s*([CIMPSH])(\d+)\s*\|", body, re.M):
+        n = int(num)
+        if cat in last and n < last[cat]:
+            out.append("%s%d 排在 %s%d 之后" % (cat, n, cat, last[cat]))
+        last[cat] = max(n, last.get(cat, n))
+    return out
+
+
+
+
 class TestChecklogStructure(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -85,6 +105,23 @@ class TestChecklogStructure(unittest.TestCase):
         """使用约定必须写明「不回写冻结源」—— 否则后人会去改上游文档"""
         self.assertIn("不回写", self.text)
         self.assertIn("冻结源", self.text)
+
+    def test_index_rows_are_ascending_within_each_id_space(self):
+        """「索引表按编号升序」以前只写在文件里（第 5 条纪律），没有守卫"""
+        self.assertEqual([], _order_problems(self.text),
+                         "索引表里同一个编号空间的条目没有按编号升序")
+
+    def test_the_order_guard_is_not_a_noop(self):
+        """反向标定: 把 I 的索引行倒序排回去, 守卫必须变红 —— 这是真发生过的形状"""
+        body = self.text.split("## 索引")[-1]
+        rows = re.findall(r"(?m)^\|\s*I\d+\s*\|.*$", body)
+        self.assertGreaterEqual(len(rows), 3, "I 的索引行太少, 标定没有意义")
+        scrambled = body.replace("\n".join(rows), "\n".join(reversed(rows)), 1)
+        self.assertNotEqual(body, scrambled, "倒序替换没生效")
+        self.assertNotEqual(
+            [], _order_problems(self.text.replace(body, scrambled, 1)),
+            "把索引行倒序排回去守卫却没红 ⇒ 它是空跑")
+
 
 
 if __name__ == "__main__":
