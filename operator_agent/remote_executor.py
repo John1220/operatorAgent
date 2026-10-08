@@ -35,6 +35,10 @@ import queue
 import collections
 import hashlib
 import re
+import secrets
+import selectors
+import time
+import math
 import urllib.request
 import urllib.error
 from dataclasses import dataclass, field
@@ -80,8 +84,12 @@ def _transport_outcome_of(exc) -> str:
 
 def _transport_failure(exc) -> dict:
     """三个「返回 dict」的远程出口共用的失败载荷形状"""
-    return {"success": False, "error": safe_error_text(exc),
-            TRANSPORT_KEY: _transport_outcome_of(exc)}
+    result = {"success": False, "error": safe_error_text(exc),
+              TRANSPORT_KEY: _transport_outcome_of(exc)}
+    if getattr(exc, "session_state", None):
+        result.update(session_state=exc.session_state, session_phase=exc.session_phase,
+                      request_id=exc.request_id, bytes_sent=exc.bytes_sent)
+    return result
 
 
 @dataclass
@@ -176,28 +184,34 @@ class HardwareProbeFailed(RuntimeError):
 class SessionError(RuntimeError):
     """常驻会话上的一次调用没有拿到可归因的回答。
 
-    `session_state` 是三态之一, 而不是一个笼统的「失败」—— 这正是常驻会话相对
+    `session_state` 区分超时、EOF、错位和失效恢复阻断，而不是一个笼统的「失败」——
+    这正是常驻会话相对
     「每次新起进程」多出来的那一格 (doc 60 §二点名: 一次性路径把「超时」与「跑完了但
     输出不对」折成同一个 `success=False`):
 
-    - `"timeout"` —— 没回显, 而进程还活着。**这一次请求的世界未知**: 它可能还在算,
-      也可能已经把结果丢了。按「未知」处理, 不许当成失败 (失败是可归因的)。
-    - `"eof"` —— 流结束了, 远端进程死了。也没跑完。
+    - `"timeout"` —— 全程截止时间到；phase 区分 lock/serialize/send/response。
+      没有完整回答时，远端是否执行/完成仍未知，不能当候选数值失败。
+    - `"eof"` —— 本地通道结束，不保证远端 runner 已退出。
     - `"desync"` —— 回显的 id 不是这一次发的。流已经错位, 之后每一格都不可信。
+    - `"broken"` —— 不许复用/重建旧会话；先独立确认 owned runner 静默。
 
     继承 `RuntimeError` 是有意的: 文件里有三处 `except RuntimeError` 靠类型走探测分支,
     换类型会静默改掉它们的行为 (同 `_ssh_exec` 把 rc 挂在异常上而不是换类型的理由)。
     """
 
-    def __init__(self, state: str, detail: str):
+    def __init__(self, state: str, detail: str, *, phase: str = "", request_id=None,
+                 bytes_sent: int = 0):
         self.session_state = state
-        super().__init__(f"常驻会话 [{state}]: {detail}")
+        self.session_phase = phase
+        self.request_id = request_id
+        self.bytes_sent = bytes_sent
+        super().__init__(f"常驻会话 [{state}]: {safe_error_text(detail)}")
 
 
 class _RemoteSession:
     """一条 SSH 连接 + 一个常驻远端进程, 行分隔 JSON 请求/响应。
 
-    三个必须的附件, 少一个就会以「难查」的方式坏掉:
+    四个必须的附件, 少一个就会以「难查」的方式坏掉:
 
     1. **读线程**: `stdout.readline()` 上没法带超时, 而一个卡住的远端会让整个控制端
        一起卡住。读线程把行推进队列, 调用侧用 `queue.get(timeout=...)` 拿。
@@ -205,11 +219,13 @@ class _RemoteSession:
        print 上** —— 表现成「测量突然全部超时」, 与真正的慢完全同形。
     3. **id 回显校验**: 不校验就只能按「收到一行 JSON」当回答, 于是错位之后每一条
        都是错答案。
+    4. **发送截止时间**: 非阻塞管道写入，锁/编码/发送/等待共用 monotonic deadline；
+       序列化线程只产字节，超时后的迟到结果绝不能写入流。
     """
 
     _EOF = object()
 
-    def __init__(self, argv: list, timeout: float, label: str):
+    def __init__(self, argv: list, timeout: float, label: str, *, owner_token=None):
         self.argv = argv
         self.timeout = timeout
         self.label = label
@@ -224,16 +240,25 @@ class _RemoteSession:
         # 靠调用方守纪律 —— `RemoteExecutor` 那层有 per-host 锁, 但直接用 `SSHExecutor`
         # 的人没有 (本轮的测量脚本就是直接用的)。
         self._lock = threading.Lock()
+        self.owner_token = owner_token
+        self.identity = None
+        self._bytes_sent = 0
+        self._readers = []
 
     # ── 生命周期 ────────────────────────────────────────────────
     def start(self) -> None:
         self._proc = subprocess.Popen(
             self.argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, bufsize=1,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
         )
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        # Never use buffered TextIO.write/flush here: a full pipe can block both
+        # call() and close(). Only nonblocking os.write owns this descriptor.
+        os.set_blocking(self._proc.stdin.fileno(), False)
         self.state = "ready"
+        for target in (self._read_stdout, self._drain_stderr):
+            thread = threading.Thread(target=target, daemon=True)
+            self._readers.append(thread)
+            thread.start()
 
     def _read_stdout(self) -> None:
         try:
@@ -248,7 +273,10 @@ class _RemoteSession:
                     # 真错位会以「id 对不上」的形式出现 (下面), 那一条才判死。
                     self._noise_tail.append(line[:200])
                     continue
-                if isinstance(obj, dict) and "result" in obj:
+                if isinstance(obj, dict) and "session_identity" in obj and self.owner_token:
+                    if self.identity is None:
+                        self.identity = obj["session_identity"]
+                elif isinstance(obj, dict) and "result" in obj:
                     self._queue.put(obj)
                 else:
                     self._noise_tail.append(line[:200])
@@ -269,42 +297,118 @@ class _RemoteSession:
         return self.state == "ready" and self._proc is not None \
             and self._proc.poll() is None
 
-    def close(self, grace: float = 5.0) -> None:
-        """先请求干净退出, 再等, 再杀 —— 顺序不能反。
+    def close(self, grace: float = 5.0) -> dict:
+        """Bounded local teardown. Local SSH exit is NOT remote quiescence.
 
-        只杀本地 `ssh` **不保证**远端进程跟着停 (那条纪律见 `benchmarks/_scratch.py`):
-        真正让远端退出的是 stdin 的 EOF —— 服务端 `for line in sys.stdin` 会在**当前
-        在飞的请求跑完后**看到它并退出。所以先 `shutdown`、再关 stdin、再等。
+        A broken stream may contain a partial JSON line: never append shutdown
+        to it. Remote ownership cleanup belongs to SSHExecutor's control channel.
         """
-        self.state = "broken"
-        if self._proc is None:
-            return
+        deadline = time.monotonic() + max(0.0, grace)
+        proc = self._proc
+        ack = False
+        if proc is None:
+            self.state = "broken"
+            return {"local_quiescent": True, "shutdown_ack": False}
+        acquired = self._lock.acquire(timeout=max(0.0, min(grace * .2, .2)))
         try:
-            if self._proc.poll() is None and self._proc.stdin:
-                self._proc.stdin.write(json.dumps({"id": "bye", "action": "shutdown"}) + "\n")
-                self._proc.stdin.flush()
-        except Exception:
-            pass
-        try:
-            if self._proc.stdin:
-                self._proc.stdin.close()            # EOF: 远端下一轮循环就会退出
-        except Exception:
-            pass
-        try:
-            self._proc.wait(timeout=grace)
-        except Exception:
-            self._proc.terminate()
+            if acquired and self.alive:
+                try:
+                    ack = self._call_locked({"action": "shutdown"},
+                        deadline=min(deadline, time.monotonic() + max(0.001, grace * .2))).get("shutdown") is True
+                except Exception:
+                    pass
+            self.state = "broken"
+            if proc.stdin:
+                proc.stdin.close()   # No buffered writes exist, so no blocking flush.
+        finally:
+            if acquired:
+                self._lock.release()
+        for action in (None, proc.terminate, proc.kill):
+            if proc.poll() is not None:
+                break
+            if action:
+                try:
+                    action()
+                except ProcessLookupError:
+                    pass
+            remaining = max(0.0, deadline - time.monotonic())
             try:
-                self._proc.wait(timeout=grace)
-            except Exception:
-                self._proc.kill()
+                proc.wait(timeout=remaining if action == proc.kill else remaining * .5)
+            except subprocess.TimeoutExpired:
+                continue
+        for thread, stream in zip(self._readers, (proc.stdout, proc.stderr)):
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if not thread.is_alive():
+                stream.close()
+        return {"local_quiescent": proc.poll() is not None, "shutdown_ack": ack}
 
     # ── 一次调用 ────────────────────────────────────────────────
     def call(self, payload: dict, timeout: Optional[float] = None) -> dict:
-        with self._lock:
-            return self._call_locked(payload, timeout)
+        budget = self.timeout if timeout is None else timeout
+        if not isinstance(budget, (int, float)) or not math.isfinite(budget) or budget <= 0:
+            raise ValueError("RPC timeout must be finite and positive")
+        deadline = time.monotonic() + budget
+        if not self._lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            # This request was not sent; do not poison the request holding the lock.
+            raise SessionError("timeout", "等待会话锁超时; 本请求未发送", phase="lock")
+        try:
+            return self._call_locked(payload, deadline=deadline)
+        finally:
+            self._lock.release()
 
-    def _call_locked(self, payload: dict, timeout: Optional[float] = None) -> dict:
+    def _remaining(self, deadline, phase):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            self.state = "broken"
+            self.state_detail = f"请求 {self._next_id} 全程截止时间已到 (phase={phase}, bytes_sent={self._bytes_sent})"
+            raise SessionError("timeout", self.state_detail, phase=phase,
+                               request_id=self._next_id, bytes_sent=self._bytes_sent)
+        return left
+
+    def _encode(self, req, deadline):
+        # A slow encoder must not hold the controller past its deadline. The
+        # daemon only produces bytes; even a late completion cannot touch stdin.
+        done = queue.Queue(maxsize=1)
+        def encode():
+            try:
+                done.put((True, (json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8")))
+            except Exception as exc:
+                done.put((False, exc))
+        threading.Thread(target=encode, daemon=True, name="rpc-json-encode").start()
+        while True:
+            if self.state != "ready":
+                raise SessionError("eof", "序列化期间会话已关闭", phase="serialize", request_id=self._next_id)
+            try:
+                ok, value = done.get(timeout=min(.1, self._remaining(deadline, "serialize")))
+                break
+            except queue.Empty:
+                self._remaining(deadline, "serialize")
+        self._remaining(deadline, "serialize")
+        if not ok:
+            raise value
+        return value
+
+    def _send(self, data, deadline):
+        fd = self._proc.stdin.fileno()
+        with selectors.DefaultSelector() as selector:
+            selector.register(fd, selectors.EVENT_WRITE)
+            view = memoryview(data)
+            while self._bytes_sent < len(view):
+                left = self._remaining(deadline, "send")
+                if self.state != "ready":
+                    raise SessionError("eof", "发送期间会话已关闭", phase="send")
+                if not selector.select(timeout=min(left, .1)):
+                    continue
+                try:
+                    n = os.write(fd, view[self._bytes_sent:self._bytes_sent + 65536])
+                except BlockingIOError:
+                    continue
+                if n <= 0:
+                    raise BrokenPipeError("zero-byte pipe write")
+                self._bytes_sent += n
+        self._remaining(deadline, "send")
+
+    def _call_locked(self, payload: dict, *, deadline: float) -> dict:
         if not self.alive:
             raise SessionError("eof", f"会话不可用 (state={self.state} {self.state_detail}); "
                                       f"stderr 末尾: {list(self._stderr_tail)[-5:]}")
@@ -312,30 +416,39 @@ class _RemoteSession:
         req_id = self._next_id
         req = dict(payload)
         req["id"] = req_id
+        self._bytes_sent = 0
+        data = self._encode(req, deadline)
         try:
-            self._proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")  # type: ignore
-            self._proc.stdin.flush()                                            # type: ignore
+            self._send(data, deadline)
+        except SessionError:
+            raise
         except Exception as e:
             self.state = "broken"
             self.state_detail = f"写请求失败: {type(e).__name__}: {e}"
-            raise SessionError("eof", self.state_detail)
+            raise SessionError("eof", self.state_detail, phase="send", request_id=req_id,
+                               bytes_sent=self._bytes_sent) from e
         try:
-            obj = self._queue.get(timeout=timeout or self.timeout)
+            obj = self._queue.get(timeout=self._remaining(deadline, "response"))
         except queue.Empty:
             # 没回显而进程还活着: 世界未知。**不能**当失败 —— 失败可归因, 这个不行。
-            self.state = "broken"
-            self.state_detail = f"请求 {req_id} 超时 ({timeout or self.timeout}s)"
-            raise SessionError("timeout", self.state_detail)
+            self._remaining(deadline, "response")
+        self._remaining(deadline, "response")
         if obj is self._EOF:
             self.state = "broken"
             self.state_detail = f"请求 {req_id} 收到 EOF"
             raise SessionError("eof", f"{self.state_detail}; stderr 末尾: "
-                                      f"{list(self._stderr_tail)[-5:]}")
-        if obj.get("id") != req_id:
+                                      f"{list(self._stderr_tail)[-5:]}", phase="response",
+                               request_id=req_id, bytes_sent=self._bytes_sent)
+        if type(obj.get("id")) is not int or obj.get("id") != req_id:
             self.state = "broken"
             self.state_detail = f"回显 id={obj.get('id')!r} 但发的是 {req_id}"
-            raise SessionError("desync", self.state_detail)
-        return obj.get("result") or {}
+            raise SessionError("desync", self.state_detail, phase="response",
+                               request_id=req_id, bytes_sent=self._bytes_sent)
+        if not isinstance(obj.get("result"), dict):
+            self.state = "broken"
+            self.state_detail = f"请求 {req_id} 回显 result 不是 JSON 对象"
+            raise SessionError("desync", self.state_detail, phase="response", request_id=req_id)
+        return obj["result"]
 
 
 class SSHExecutor(Backend):
@@ -421,6 +534,9 @@ class SSHExecutor(Backend):
         # 只有毫秒级 (doc 62)。开着它省的是这笔固定开销, 一次性的那条路一行没动。
         self._persistent = persistent
         self._session: Optional[_RemoteSession] = None
+        self._pending_session: Optional[_RemoteSession] = None
+        self._session_init_lock = threading.Lock()
+        self.last_session_cleanup = None
         self._session_atexit_registered = False
         #: 会话钉住的那张卡 (握手时读数; 一次性路径下恒为 None)
         self.session_gpu: Optional[int] = None
@@ -615,42 +731,102 @@ class SSHExecutor(Backend):
         return self._build_ssh_base() + [remote_cmd]
 
     def _start_session(self) -> _RemoteSession:
+        if not self._session_init_lock.acquire(timeout=self.timeout):
+            raise SessionError("timeout", "等待会话启动锁超时", phase="startup")
+        try:
+            return self._start_session_locked()
+        finally:
+            self._session_init_lock.release()
+
+    def _start_session_locked(self) -> _RemoteSession:
+        if self._pending_session is not None:
+            raise SessionError("broken", "旧会话尚未确认远端静默; 禁止新建/重试", phase="recovery")
         if self._session is not None and self._session.alive:
             return self._session
+        if self._session is not None:
+            raise SessionError("broken", "会话已失效; 先 close 并确认远端静默，禁止自动重试",
+                               phase="recovery")
         if not self._deployed:
             self.deploy()               # 服务端脚本必须先到远端
         gpu = self._pinned_gpu()
-        env = f"OPERATOR_AGENT_GPU={gpu} " if gpu is not None else ""
+        token = secrets.token_hex(16)
+        env = f"OPERATOR_AGENT_SESSION_TOKEN={token} "
+        env += f"OPERATOR_AGENT_GPU={gpu} " if gpu is not None else ""
         # `-u` 不是可选项: 行协议上任何缓冲都会表现成「第一次调用就超时」。
         remote_cmd = (f"cd {self.work_dir} && {env}"
                       f"~/.local/bin/uv run python -u {self._session_server_path()}")
         sess = _RemoteSession(self._session_argv(remote_cmd),
-                              timeout=self.timeout, label=self.name)
+                              timeout=self.timeout, label=self.name, owner_token=token)
         sess.start()
+        self._session = sess  # Own the process even if the handshake fails.
+        if not self._session_atexit_registered:
+            atexit.register(self.close)
+            self._session_atexit_registered = True
         # 握手: 确认服务端真的起来了, 并把它**钉住的那张卡**记下来。选卡发生在 runner
         # import 时 (它在那儿设 CUDA_VISIBLE_DEVICES), 所以一次会话固定在同一张卡上 ——
         # 对可比性是好事, 但「固定在哪张」必须是个读数, 不能是推断。
-        hello = sess.call({"action": "ping"})
-        if not hello.get("pong"):
-            sess.close(grace=2.0)
-            raise SessionError("eof", f"服务端没有应答握手: {hello!r}")
+        try:
+            hello = sess.call({"action": "ping"})
+            if not hello.get("pong"):
+                raise SessionError("eof", f"服务端没有应答握手: {hello!r}")
+        except BaseException:
+            self._session, self._pending_session = None, sess
+            sess.close(grace=.2)
+            raise
         self.session_gpu = hello.get("selected_gpu")
         self._session = sess
-        if not self._session_atexit_registered:
-            # 退出时收干净。只杀本地 ssh **不保证**远端进程停, 所以 close() 的顺序是
-            # 先发 shutdown、再关 stdin (EOF 才是远端真正退出的信号)、再等、最后才杀。
-            atexit.register(self.close)
-            self._session_atexit_registered = True
         return sess
 
     def _session_call(self, payload: dict) -> dict:
         return self._start_session().call(payload)
 
-    def close(self) -> None:
-        """收掉常驻会话 (幂等)。没开会话时是空操作。"""
-        sess, self._session = self._session, None
-        if sess is not None:
-            sess.close()
+    def _cleanup_session_owner(self, sess, grace):
+        if not sess.identity:
+            return {"quiescent": False, "reason": "runner identity unavailable; no remote signal sent"}
+        control = str(PurePosixPath(self.remote_runner_path).parent / "session_control.py")
+        cmd = (f"cd {self.work_dir} && ~/.local/bin/uv run --no-sync python {control} "
+               f"--identity {shlex.quote(json.dumps(sess.identity))} "
+               f"--token {shlex.quote(sess.owner_token)} --grace {max(.01, grace * .5)}")
+        try:
+            proc = subprocess.run(self._session_argv(cmd), capture_output=True,
+                                  text=True, timeout=grace)
+            if proc.returncode != 0:
+                return {"quiescent": False, "reason": "ownership control command failed"}
+            result = json.loads(proc.stdout)
+            if not isinstance(result, dict) or type(result.get("quiescent")) is not bool:
+                raise ValueError("invalid ownership cleanup response")
+            return result
+        except Exception as exc:
+            # Never expose control argv (session token / connection secrets).
+            return {"quiescent": False, "reason": f"ownership control failed: {type(exc).__name__}"}
+
+    def close(self, grace: float = 10.0) -> dict:
+        """Bounded local + independently verified owned-remote teardown.
+
+        Failed cleanup is latched: a later close may retry ONLY lifecycle control,
+        never the uncertain GPU request. No identity => no broad kill / no proof.
+        """
+        deadline = time.monotonic() + max(0.0, grace)
+        if not self._session_init_lock.acquire(timeout=max(0.0, grace)):
+            return {"quiescent": False, "reason": "session startup still in progress"}
+        try:
+            sess = self._session or self._pending_session
+            if sess is None:
+                return self.last_session_cleanup or {"quiescent": True, "session_created": False}
+            self._session, self._pending_session = None, sess
+            self.session_gpu = None
+            local = sess.close(grace=max(0.0, (deadline - time.monotonic()) * .25))
+            remaining = deadline - time.monotonic()
+            remote = (self._cleanup_session_owner(sess, remaining) if remaining > 0
+                      else {"quiescent": False, "reason": "cleanup deadline reached"})
+            result = {**local, "remote": remote,
+                      "quiescent": local["local_quiescent"] is True and remote.get("quiescent") is True}
+            self.last_session_cleanup = result
+            if result["quiescent"] is True:
+                self._pending_session = None
+            return result
+        finally:
+            self._session_init_lock.release()
 
     def _setup_uv_env(self) -> bool:
         """在远程工作目录下自动配置 uv 环境 (nvidia)，或使用厂商预装 conda 环境 (其他平台)"""
@@ -779,6 +955,8 @@ class SSHExecutor(Backend):
             # Exact L2 JSON/storage codecs are shared sources, before their consumer.
             files.extend((repo_root / "operator_agent" / name, f"{remote_dir}/{name}")
                          for name in ("input_fidelity.py", "remote_input_fidelity.py"))
+            files.append((repo_root / "remote_scripts" / "session_control.py",
+                          f"{remote_dir}/session_control.py"))
         files.append((repo_root / "remote_scripts" / self._runner_script,
                       self.remote_runner_path))
         if self.platform == "nvidia":
@@ -1041,6 +1219,8 @@ class SSHExecutor(Backend):
             if not result.get("success", False):
                 raise SyntaxError(result.get("error", "Remote compile failed"))
             return True
+        except SessionError:
+            raise  # Not a candidate SyntaxError; preserve unknown transport state.
         except Exception as e:
             raise SyntaxError(f"Remote compile error via SSH: {e}")
 

@@ -220,6 +220,7 @@ SSH_TRANSPORT_EXIT_CODE = 255
 #: 只列「**确定**没听到回答」的那一族。方向刻意保守: 误报一次 unknown 只是多问一句,
 #: 漏报一次是把「这张卡可能已经跑过一遍」擦掉 —— 而 #102 第 2/3 片要拿它做幂等清点。
 _NO_RESPONSE_EXCEPTIONS: tuple = (
+    "SessionError",           # timeout/EOF/desync/broken resident RPC: no attributable response
     "TimeoutExpired",         # `subprocess.run(timeout=…)` 打的正是这一格
     "timeout",                # socket.timeout (py3.10+ 起是 TimeoutError 的别名)
     "TimeoutError",

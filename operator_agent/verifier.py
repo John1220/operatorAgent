@@ -54,7 +54,7 @@ from .interface_contract import check_kernel_interface, input_key_sets
 from . import tolerance
 from . import measurement
 from .measurement import (GATE_PARAM_KEYS, PERF_CRITERION_ABSOLUTE_GFLOPS,
-                          PERF_CRITERION_SPEEDUP, TRANSPORT_KEY, aggregate_l2_readings,
+                          PERF_CRITERION_SPEEDUP, TRANSPORT_KEY, TRANSPORT_UNKNOWN, aggregate_l2_readings,
                           aggregate_note, single_ruler, transport_outcome_of_result)
 from .hardware_caps import (
     detect_hardware_caps, device_key_of, measured_peak_record,
@@ -513,6 +513,11 @@ class Verifier:
             # 否则 Fixer prompt 里同一份全文会出现两遍
             head, full = failure_pair(e)
             metrics = dict(_guard_metrics)
+            if getattr(e, "session_state", None):
+                metrics.update({TRANSPORT_KEY: TRANSPORT_UNKNOWN,
+                                "session_state": e.session_state,
+                                "session_phase": getattr(e, "session_phase", ""),
+                                "compile_status": "transport_unknown"})
             # §22.2 的执行器**拦下**候选（编译超时 / 撞上限 / 盾命中 / 起不来）与「候选
             # 自己编译失败」必须在产物里分得开 —— 前者是本层新出现的一档（进程内 exec
             # 既没有墙钟也没有上限，它根本不会有），不写出来就成了「无名编译失败」。
@@ -603,7 +608,8 @@ class Verifier:
                      "reason": "调用方输入/静态守卫未通过，未运行套件"} for c in suite.cases]
             return self._suite_result(primary, suite, rows, primary_state, task)
 
-        for case in sorted(suite.cases, key=lambda c: c.case_id):
+        ordered_cases = sorted(suite.cases, key=lambda c: c.case_id)
+        for index, case in enumerate(ordered_cases):
             row = {"case_id": case.case_id, "shape_key": case.inputs.key(),
                    "pattern": case.pattern, "layout": case.layout,
                    "dtypes": {t.name: t.dtype for t in case.inputs.tensors}}
@@ -642,11 +648,21 @@ class Verifier:
             except (BenchCaseError, ValueError, CapabilityMissing) as exc:
                 row.update(verdict="unknown", reason=f"检查无法执行: {exc}")
             rows.append(row)
+            unknown_transport = next((m for m in (row.get("metrics", {}), row.get("repeat_metrics", {}))
+                                      if m.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN), None)
+            if unknown_transport is not None:
+                primary.metrics.update({k: v for k, v in unknown_transport.items()
+                    if k in (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent")})
+                rows.extend({"case_id": c.case_id, "verdict": "not_run",
+                             "reason": "传输结果未知，未继续发送套件请求"} for c in ordered_cases[index + 1:])
+                break
         rows.extend({"case_id": f"check:{check}", "verdict": "unknown",
                      "reason": f"{check} 没有执行协议/证据生产者，不能当成通过"}
                     for check in sorted(set(suite.required_checks)))
         state = ("failed" if any(r["verdict"] == "failed" for r in rows) else
                  "unknown" if any(r["verdict"] != "passed" for r in rows) else "passed")
+        if primary.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+            state = "unknown"
         return self._suite_result(primary, suite, rows, state, task)
 
     @staticmethod
@@ -895,6 +911,12 @@ class Verifier:
             if remote_verify is None:
                 raise CapabilityMissing(Cap.REMOTE_VERIFY, self.backend,
                                         "verify_function 声明可用但返回了 None")
+            if remote_verify.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+                return VerificationResult(VerificationLevel.L2_FUNCTION, False,
+                    message="远程传输结果未知: " + remote_verify.get("error", ""),
+                    metrics={k: remote_verify[k] for k in
+                             (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent")
+                             if k in remote_verify})
             if expected_inputs is not None:
                 fidelity_metrics = check_readback(expected_inputs, remote_verify.get("input_fidelity"))
                 if fidelity_metrics["input_fidelity_verified"] is not True:
@@ -970,6 +992,10 @@ class Verifier:
 
         # 没有远端紧凑比对协议: 在执行侧跑一遍, 由 Verifier 自己比对参考输出。
         result = self.backend.execute(kernel_code, inputs)
+        if not result.success and transport_outcome_of_result(result) == TRANSPORT_UNKNOWN:
+            return VerificationResult(VerificationLevel.L2_FUNCTION, False,
+                message="远程传输结果未知: " + result.error,
+                metrics={TRANSPORT_KEY: TRANSPORT_UNKNOWN})
         if expected_inputs is not None:
             fidelity_metrics = check_readback(
                 expected_inputs, (getattr(result, "metrics", None) or {}).get("input_fidelity"))
@@ -1348,6 +1374,9 @@ class Verifier:
             bench, remote = self._bench_case(kernel_code, inputs, task)
         except Exception as exc:  # noqa: BLE001 —— 账本不许把 L3 打成异常
             return {"speedup_vs_baseline": None, "reason": f"逐 case 测量抛异常: {exc}"}
+        if bench.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+            return {"speedup_vs_baseline": None, "reason": "逐 case 传输结果未知",
+                    **{k: bench[k] for k in (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent") if k in bench}}
         if remote is not None:
             if not remote.get("success", False):
                 return {"speedup_vs_baseline": None,
@@ -1405,14 +1434,29 @@ class Verifier:
         if first:
             ledger[first] = {"speedup_vs_baseline": metrics.get("speedup_vs_baseline"),
                              "basis": "主 case: 本次 L3 那个读数（未重复测）"}
-        for inputs in input_sets[1:]:
+        for index, inputs in enumerate(input_sets[1:], start=1):
             key = case_key(inputs)
             if not key or key in ledger:
                 continue
             ledger[key] = self._measure_case_speedup(kernel_code, inputs, task)
+            if ledger[key].get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+                metrics.update({k: v for k, v in ledger[key].items() if k in
+                                (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent")})
+                for remaining in input_sets[index + 1:]:
+                    missing = case_key(remaining)
+                    if missing and missing not in ledger:
+                        ledger[missing] = {"speedup_vs_baseline": None, "reason": "传输结果未知，未继续测量"}
+                break
         if len(ledger) > 1:
             metrics["cases"] = ledger
         return primary
+
+    @staticmethod
+    def _unknown_transport_result(level, payload, metrics=None):
+        diagnostic = {k: payload[k] for k in
+                      (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent") if k in payload}
+        return VerificationResult(level, False, message="传输结果未知: " + payload.get("error", ""),
+                                  metrics={**(metrics or {}), **diagnostic})
 
     def _verify_performance(self, kernel_code: str, test_inputs, target_gflops: float,
                             task: TaskSchema,
@@ -1429,6 +1473,9 @@ class Verifier:
         # （`_publish_case_ledger` / `_measure_case_speedup`）也走同一条路: 两处协议
         # 一漂（repeat / 远端优先 / 基线选择）就会在同一张表里比出两种数。
         bench, remote_bench = self._bench_case(kernel_code, bench_inputs, task)
+
+        if bench.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+            return self._unknown_transport_result(VerificationLevel.L3_PERFORMANCE, bench)
 
         if remote_bench is not None and not remote_bench.get("success", False):
             return VerificationResult(
@@ -1713,6 +1760,8 @@ class Verifier:
 
                 # 账本先发布（性能判决要读它），判决只算一次、只在这一处（两条路同一份）。
                 _primary = self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
+                if metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+                    return self._unknown_transport_result(VerificationLevel.L3_PERFORMANCE, metrics, metrics)
                 passed = self._apply_performance_verdict(passed, metrics, task, speedup,
                                                          primary_key=_primary)
                 print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
@@ -1768,6 +1817,8 @@ class Verifier:
                 heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
             passed = self._refuse_l3_pass(passed, assessment)
             _primary = self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
+            if metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+                return self._unknown_transport_result(VerificationLevel.L3_PERFORMANCE, metrics, metrics)
             passed = self._apply_performance_verdict(passed, metrics, task, speedup,
                                                      primary_key=_primary)
             print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")

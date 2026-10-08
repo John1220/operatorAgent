@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Iterable, Optional
 
 from . import tolerance
+from .measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
 
 
 # 五路动作 (§8 表的「策略」列)
@@ -136,6 +137,11 @@ def classify(verify_results: Iterable,
     if not failed:
         return Route(ROUTE_HOLD, "silent", False, False, False,
                      "全部通过: 无需动作")
+
+    if any((getattr(r, "metrics", {}) or {}).get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN
+           for r in failed):
+        return Route(ROUTE_HOLD, "infra", False, False, False,
+                     "传输结果未知: 不修候选、不重试在飞请求; 先确认 owned runner 静默")
 
     if any((getattr(r, "metrics", {}) or {}).get("correctness", {}).get("verdict")
            == "unknown" for r in failed):

@@ -42,11 +42,21 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-# 与一次性路径共用同一份分派 —— 抄第二套 if 链的代价是两边慢慢漂开。
-import run_kernel  # noqa: E402
-
 # 协议行只能写进真 stdout；处理期间 sys.stdout 会被临时换成 stderr
 _REAL_STDOUT = sys.stdout
+
+# Publish lifecycle identity BEFORE expensive Torch imports / CUDA startup.
+# A failed handshake must still leave enough evidence to clean up our runner.
+from session_control import TOKEN_ENV, runner_identity  # noqa: E402
+if os.environ.get(TOKEN_ENV):
+    try:
+        _REAL_STDOUT.write(json.dumps({"session_identity": runner_identity(__file__)}) + "\n")
+        _REAL_STDOUT.flush()
+    except OSError:
+        pass  # Non-Linux: no /proc identity; client must not claim remote cleanup.
+
+# Same dispatch as the one-shot runner, never a second kernel action table.
+import run_kernel  # noqa: E402
 
 
 def _write(obj: dict) -> None:

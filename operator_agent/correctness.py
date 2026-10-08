@@ -193,6 +193,10 @@ def as_suite(value) -> CorrectnessSuite:
 def verdict_of(result) -> tuple:
     """Strict suite verdict from reported facts; a partial comparison is unknown."""
     m = result.metrics
+    # Lazy import: schemas -> correctness -> measurement -> schemas is a cycle.
+    from .measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
+    if m.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+        return "unknown", "传输结果未知; 未拿到可归因回答，不能判候选数值失败"
     if "input_fidelity_verified" in m and m["input_fidelity_verified"] is not True:
         return "unknown", m.get("input_fidelity_reason", "输入保真无法确立")
     if m.get("reference_error"):

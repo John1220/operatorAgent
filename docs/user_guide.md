@@ -404,6 +404,18 @@ hardware_presets:
 > 想「这一趟不读也不写语料」，**设环境变量**，别传 `None`。这条与 doc 69 里
 > 「`KernelDatabase(jsonl_path=None)` 不是『无库』，而是『用默认库』」是同一条。
 
+#### 常驻 SSH RPC 的超时与关闭
+
+`SSHExecutor(persistent=True, timeout=60)` 显式启用常驻会话（默认关闭）。每次 RPC 的
+锁等待、JSON 编码、发送与等响应共用一条截止时间；不含 payload 构造/部署/启动握手。
+超时/EOF/错位是 `transport_outcome=outcome_unknown`，不当候选数值失败；Conductor 停止
+后续候选/性能请求并 HOLD，不自动重试。失效会话不能自动新建。
+
+调用者在 `finally` 中执行 `backend.close(grace=10)`，检查返回的 `quiescent is True`。
+本地 SSH 退出不等于远端停止；Linux 控制通道须校验本次 PID/UID/出生时间/脚本/token，
+只清理本次 owned runner。未确认时不重试、不删隔离现场，可再次 close 重试生命周期控制。
+不要用通用 `pkill`。细则与复跑见 [SSH RPC 截止时间与清理](design/ssh-rpc-deadline-and-cleanup.md)。
+
 ### 4.3 Conductor 参数
 
 ```python

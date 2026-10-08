@@ -55,7 +55,7 @@ from .measurement import (BAND_SPEC_DRIFT, BAND_UNEXPLAINED, LINEAGE_BAND_KEY,
                           LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
                           PERF_GATE_PARAM_KEYS, REFERENCE_CEILING_PCT,
                           RULER_LABEL_CORRECTNESS,
-                          RULER_LABEL_PERFORMANCE, TRANSPORT_KEY, Verdict,
+                          RULER_LABEL_PERFORMANCE, TRANSPORT_KEY, TRANSPORT_UNKNOWN, Verdict,
                           Validity, band_note, binding_attainment,
                           cross_round_band, cross_round_ruler,
                           correctness_verified_levels, l2_ruler_reading,
@@ -558,7 +558,7 @@ class Conductor:
     #: 循环出口的词汇表。**每个词都要有写者** —— 多一个没写者的词就是「算了没人读」的副本,
     #: `tests/test_stop_reason.py` 按差集钉这条。
     STOP_REASONS = ("passed", "stagnant", "converged", "fix_error", "l1_l2_failed",
-                    "search_error", "rounds_exhausted", "infra_retry",
+                    "search_error", "rounds_exhausted", "infra_retry", "transport_unknown_hold",
                     # §10.2 的两条预算出口。与 `rounds_exhausted` 分开数: 那个是
                     # 「轮次练够了」, 这两个是「钱花完了」—— 复盘时一个要调轮次上限,
                     # 一个要调预算或缩小任务。
@@ -1047,6 +1047,10 @@ class Conductor:
             )
             l2_runs += sum(1 for r in sel
                            if r.level is VerificationLevel.L2_FUNCTION)
+            if any(not r.passed and r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN for r in sel):
+                # The in-flight candidate is unknown, not a loser. Do not try
+                # another finalist / L3 on the same possibly active runner.
+                return cand, sel, True, l2_runs
             if cand == current_code:
                 # 默认候选的结果留一份给「全败」出口复用 (就是喂 Fixer 的失败证据)
                 default_results = sel
@@ -1475,7 +1479,7 @@ class Conductor:
 
         for round_num in range(state.start_round, self.max_optimize_rounds + 1):
             # 一轮的全部流程在 _run_round 里 (循环体那 1128 行搬过去了)。返回
-            # _ROUND_STOP = 这一轮命中了某个退出出口, 即原来的 13 处 break。
+            # _ROUND_STOP = 这一轮命中了某个退出出口（含传输 unknown HOLD）。
             if self._run_round(state, round_num, expected_output=expected_output,
                                hw_info=hw_info, _mem_caps=_mem_caps,
                                max_stagnant_rounds=max_stagnant_rounds,
@@ -2273,6 +2277,13 @@ class Conductor:
         # 取会依赖「中间没有第二次 append」, 那个前提将来被人破坏时不会响, 只会把
         # 带宽记到别人的轮上。
         _round_rec = state.artifact.iteration_history[-1]
+
+        # Applies to L1/L2 AND L3: unknown benchmark execution is not a slow
+        # candidate. Stop before tuning, stagnation, another finalist or learning.
+        if any(not r.passed and r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN for r in verify_results):
+            self._record_stop(state.artifact, round_num, "transport_unknown_hold",
+                              "传输结果未知: 不修候选、不重试在飞请求; 先确认 owned runner 静默")
+            return _ROUND_STOP
 
         # 每轮都算一遍「这一场里各轮的尺是不是同一把」, 但**只在它有话说的时候**打印
         # (与上面 [Novelty] 同一个姿势)。一致时不占日志: 「各轮同尺」是这片要守的
@@ -3434,6 +3445,9 @@ class Conductor:
         「本级判不出」那一类在这里直接返回, 不写 —— 理由与那段注释都在函数体里
         (第 2 片: doc 58 §4.2 的判决侧)。
         """
+        if any(r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN for r in failed_results):
+            print("[Conductor] 传输结果未知，未入负样本库")
+            return
         # 层级必须**排序去重**后再拼: 原先的 "+".join(r.level.value for r in ...) 跟着
         # failed_results 的顺序走, 同一份失败可以写成 "L1+L2" 也可以写成 "L2+L1",
         # 于是签名碎成两个桶 —— 而复发门要数的就是同一个桶里的任务数 (fixer 那边

@@ -109,6 +109,21 @@ H20 真跑 Conductor/L2/L3/确认/报告 **26/26 预期验收**（7 passed、16 
 PASS 4 / REVIEW 0 / FAIL 0 / SKIP 0；6/6 关键变异被捕获。未改基线/容忍窗口。
 细则与早先大载荷传输等待/后续定点清理见 [默认正确性配置](../design/default-correctness-profiles.md)。
 
+**同日第七阶段：常驻 SSH RPC 全程截止时间与 owned-runner 清理已接通**。
+锁/JSON 编码/非阻塞发送/等待响应共用 monotonic deadline；坏流不追加 shutdown，不复用/
+自动新建。独立控制通道以 UID、出生时间、精确脚本参数、随机 token 校验 pidfd，只清理
+本次 runner 并读回退出。未确立静默则锁定恢复、保留 scratch；握手失败仍保留早期身份。
+传输 unknown 穿过 L1/L2/suite/L3、多 case 账本、决赛选择和 Conductor HOLD，不修候选、
+不继续请求、不进负样本库。新增守卫 48 项，7/7 关键变异被捕获。
+最终全量 `pytest tests -q`：**2966 passed / 1 skipped / 2 条已知非有限参考 warning**；
+之后串行 Golden：**PASS 4 / REVIEW 0 / FAIL 0 / SKIP 0**。未改基线、容忍窗口或性能计时。
+H20 最终复验 **6/6**：1 MiB / 16 MiB 真实 CUDA 全量原值验证、三种停读/迟到 SSH 对照
+约 0.5 s 超时、精确终止并确认退出、清理后新会话正确性验证；GPU 7 / 实际 cuda:0，
+运行编号 `rpc-deadline-h20-20261008T104105209963Z-95218-1`，scratch 删除已确认。
+未安装依赖、未跑性能基准。**不覆盖** payload 构造/部署/握手统一 deadline、硬 CPU 编码
+取消、任意子孙进程/GPU watchdog、HTTP/XPU 或敌意候选隔离。
+细则、忙卡安全拒绝与首轮变异证人修正见 [SSH RPC 截止时间与清理](../design/ssh-rpc-deadline-and-cleanup.md)。
+
 **边界**：未知 backing 来源/object/subclass 不猜；完整算子/语义 GPU 验收、
 任意合法域/全部边界组合、梯度/累加精度/aliasing 语义/sanitizer
 仍未完成；旧任务未声明套件时仍走原 L2，**§20 未全部收口**。
@@ -201,7 +216,7 @@ PASS 4 / REVIEW 0 / FAIL 0 / SKIP 0；6/6 关键变异被捕获。未改基线/�
 | §9.4 | `PartitionKey` 已有；`ToolchainKey` / `MeasurementProtocolKey` 零命中 |
 | §13.5 | 器件峰值出口不存在（`peak_measured` 无量具） |
 | §14-9 | 比较器已落、**两臂真机未跑** ⇒ "审计有收益"仍不许声称 |
-| §20 | 门禁与凭据、suite/有限边界 lint/输入保真已落；2026-10-08 新 IntentParser 任务默认声明首批内建 profile，H20 多算子 Conductor/L2/L3/确认/报告 26/26 预期验收，坏核不产生 L3/正向持久化（运行编号见上文）；仍欠任意合法域/全部组合、完整语义/参数、fp16 LayerNorm 标定、XPU/HTTP、readonly/负 stride GPU 语义、梯度/累加精度/aliasing/sanitizer/GPU launch 探针及大载荷写入截止时间；旧直接构造任务未强制迁移，小张量好核未获入库资格 |
+| §20 | 门禁与凭据、suite/有限边界 lint/输入保真已落；2026-10-08 新 IntentParser 任务默认声明首批内建 profile，H20 多算子 Conductor/L2/L3/确认/报告 26/26 预期验收，坏核不产生 L3/正向持久化（运行编号见上文）；仍欠任意合法域/全部组合、完整语义/参数、fp16 LayerNorm 标定、XPU/HTTP、readonly/负 stride GPU 语义、梯度/累加精度/aliasing/sanitizer/GPU launch 探针；常驻 SSH 发送截止时间与 owned-runner 清理已有独立守卫/真机验收（见第七阶段）；旧直接构造任务未强制迁移，小张量好核未获入库资格 |
 | §22 | §22.1 的 **harness 侧一半已落**（七格 + 权限位 + 唯一写入口，见 I82），且 **2026-10-07 起有生产调用点**：三个真机驱动经 `new_run_root` 建根、过门的候选真的落进 `candidate/`（见 I88）—— 但只搬了候选源码这一件，`report`/`measurements`/`kernel_db` 未进布局；§22.2 的**本地半片已落**（运行期的受控执行器 + 逐项强制读数，见 I85；**编译期那一档**见 I87 —— 两个后端的 `compile` 都走 `run_compile`，阶段级上限链 `Conductor` → 后端 → `exec_guard` 第一次有消费端）—— 但它挡的是**跑飞/吃满/失控**，**不是隔离**（同 uid、网络没关、无容器/cgroup/白名单；内存本机设不上）；**候选侧那一半仍缺**（同一 uid ⇒ 权限位拦不住属主）；仍**零命中**的是：GPU watchdog / 设备租约回收 / 网络默认关闭 / 文件系统白名单 / 远端运行布局权限位，以及**候选侧**剩下的 6 处进程内 `exec`（`LocalExecutor.execute`/`benchmark`、`MockGPU._execute_triton_cuda`/`_benchmark_triton_cuda`/`_benchmark_python`、`reference.load_reference_source`；编译期已不在其列）；§22.3 的**两半已收**（2026-10-07，见 I89）：覆盖 `mode` → 声明等级上限 → 入库门第 3 道门 → 报告与「我无法确立的事」，守卫 43 条 + 变异 8 行 0 逃逸（`uncovered_rules` 只进留痕/报告、**不**压级；`promotable` 今天只作门槛） |
 | §23 | 快照/续跑已有；**事件日志 / `sequence` / 幂等键**零命中 |
 

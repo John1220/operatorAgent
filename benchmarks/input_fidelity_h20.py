@@ -145,6 +145,7 @@ class AcceptanceSSH(SSHExecutor):
     def _existing_runtime(self, command):
         if self.runtime:
             command = command.replace("~/.local/bin/uv run python", shlex.quote(self.runtime))
+            command = command.replace("~/.local/bin/uv run --no-sync python", shlex.quote(self.runtime))
         return command
 
     def _ssh_exec(self, remote_cmd, stdin_data=None):
@@ -214,7 +215,9 @@ class AcceptanceSSH(SSHExecutor):
                     sources={Path(p).name: h for p, h in hashes.items()})
 
     def cleanup(self):
-        self.close()
+        lifecycle = self.close()
+        if isinstance(lifecycle, dict) and lifecycle.get("quiescent") is not True:
+            raise RuntimeError(f"owned runner cleanup unconfirmed; scratch retained: {lifecycle}")
         if not self.scratch:
             return {"quiescent": True, "scratch_created": False}
         path = validate_scratch(self.scratch)
@@ -228,6 +231,8 @@ class AcceptanceSSH(SSHExecutor):
             'print(json.dumps(dict(quiescent=True,removed=not os.path.lexists(p))))')
         if result.get("removed") is not True:
             raise RuntimeError("scratch cleanup not confirmed")
+        if isinstance(lifecycle, dict):
+            result["session_cleanup"] = lifecycle
         return result
 
 
