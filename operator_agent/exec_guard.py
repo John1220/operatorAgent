@@ -450,10 +450,19 @@ def main():
         return ns
 
     def _exec_and_call():
+        if "input_protocol" in job:
+            from operator_agent.input_fidelity import decode_inputs, describe_inputs, PROTOCOL
+            runtime_inputs = decode_inputs(job["input_protocol"])
+            # Read the reconstructed tensors BEFORE exec(candidate), not the
+            # declarations and not values that the candidate may have mutated.
+            result["metrics"]["input_fidelity"] = {
+                "protocol": PROTOCOL, "observed": describe_inputs(runtime_inputs)}
+        else:
+            runtime_inputs = job["inputs"]
         ns = _exec_only()
         kernel = ns["kernel"]
         t0 = time.perf_counter()
-        out = kernel(**job["inputs"])
+        out = kernel(**runtime_inputs)
         return out, (time.perf_counter() - t0) * 1000.0
 
     def _compile_only():
@@ -841,12 +850,16 @@ def run_candidate(
     python: Optional[str] = None,
     grace_ms: int = 200,
     executor: str = EXECUTOR_AUTO,
+    preserve_inputs: bool = False,
 ) -> GuardResult:
     """在受控子进程里跑一段候选代码，返回 `GuardResult`。
 
     Args:
         code:   候选源码（`kernel(**inputs)` 是入口，与今天同一个约定）
         inputs: 传给 `kernel` 的关键字参数（需要可 pickle —— 子进程要拿到它）
+        preserve_inputs: use the bounded NumPy storage/view protocol and return
+            pre-candidate input readback. MockGPU Python always requests this;
+            the default retains compatibility for generic guard callers.
         limits: `Limits`；`None` = 用默认（有限但宽松）
         scratch_dir: 子进程的 cwd 与临时文件落点。`None` = 每次新建临时目录并在结束时删掉。
             传了就**不删**（调用方要自己看候选写了什么时用得上）
@@ -866,7 +879,8 @@ def run_candidate(
     return _run_guarded(code, inputs, mode=MODE_RUN, imports={}, limits=limits,
                         scratch_dir=scratch_dir, shield=shield,
                         keep_scratch=keep_scratch, python=python,
-                        grace_ms=grace_ms, executor=executor)
+                        grace_ms=grace_ms, executor=executor,
+                        preserve_inputs=preserve_inputs)
 
 
 def run_compile(
@@ -918,6 +932,7 @@ def _run_guarded(
     python: Optional[str],
     grace_ms: int,
     executor: str,
+    preserve_inputs: bool = False,
 ) -> GuardResult:
     """两种模式**共用**的那一段：起子进程 / 等或杀 / 读产物 / 分类 / 逐项读数。
 
@@ -927,6 +942,11 @@ def _run_guarded(
     if mode not in MODES:
         raise ValueError(f"mode 必须是 {MODES} 之一: {mode!r}")
     limits = limits_for(mode, limits)
+    # Encode before creating scratch files; invalid input leaves no leaked workdir.
+    packet = None
+    if preserve_inputs:
+        from .input_fidelity import encode_inputs
+        packet = encode_inputs(inputs)
     created = scratch_dir is None
     workdir = scratch_dir or tempfile.mkdtemp(prefix="exec-guard-")
     os.makedirs(workdir, exist_ok=True)
@@ -938,6 +958,9 @@ def _run_guarded(
            "mode": mode, "imports": dict(imports or {}),
            "result_path": result_path, "limits": limits.as_dict(),
            "rlimits": limits.rlimit_requests()}
+    if packet is not None:
+        job.pop("inputs")
+        job["input_protocol"] = packet
     with open(job_path, "wb") as fh:
         pickle.dump(job, fh, protocol=4)
 

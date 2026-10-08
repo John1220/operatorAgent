@@ -15,6 +15,7 @@ from typing import Callable, Optional
 from dataclasses import dataclass, field
 from .anticheat import CheatDetectedError, lib_fallback_metrics, shield_torch
 from .backend_caps import Backend, Cap
+from .input_fidelity import InputFidelityError
 from .exec_guard import (MODE_COMPILE, MODE_RUN, STATUS_CRASHED, GuardRefusal,
                          Limits, candidate_error, limits_for, refusal_from,
                          run_candidate, run_compile)
@@ -114,9 +115,9 @@ class MockGPU(Backend):
     def correctness_input_support(self, kernel_code: str, layout: str) -> tuple:
         if _detect_triton(kernel_code):
             return False, "Triton 路径转换 dtype/contiguous，尚未确立套件输入保真"
-        if layout != "contiguous":
-            return False, "Python 子进程 pickle 不保留 stride/broadcast 视图"
-        return True, "Python 子进程 pickle 保留 contiguous 张量的值与 dtype"
+        if layout not in ("contiguous", "strided", "broadcast"):
+            return False, "未知 layout，不能声明输入保真"
+        return True, "Python storage/view 协议保留值、dtype、stride 和 offset；须核执行侧回读"
 
     def _check_triton(self) -> bool:
         """检查 Triton 是否可用"""
@@ -447,8 +448,14 @@ class MockGPU(Backend):
 
         # §22.2 的阶段级上限：这一段是传递链的**消费端**（`self.exec_limits` 来自构造参数，
         # `None` ⇒ `exec_guard` 的运行默认值）。编译那一档用的是另一个默认（见 `compile()`）。
-        guard = run_candidate(kernel_code, inputs,
-                              limits=limits_for(MODE_RUN, self.exec_limits))
+        try:
+            guard = run_candidate(kernel_code, inputs, preserve_inputs=True,
+                                  limits=limits_for(MODE_RUN, self.exec_limits))
+        except InputFidelityError as exc:
+            result.success = False
+            result.error = f"输入保真无法确立: {exc}"
+            result.metrics["input_fidelity_error"] = str(exc)
+            return result
         if not guard.fully_enforced:
             # 「哪一项今天没设上」是一条**读数**，不是报错 —— 读者要能不猜
             result.metrics["exec_guard_not_enforced"] = list(guard.not_enforced)

@@ -167,6 +167,8 @@ def as_suite(value) -> CorrectnessSuite:
 def verdict_of(result) -> tuple:
     """Strict suite verdict from reported facts; a partial comparison is unknown."""
     m = result.metrics
+    if "input_fidelity_verified" in m and m["input_fidelity_verified"] is not True:
+        return "unknown", m.get("input_fidelity_reason", "输入保真无法确立")
     if m.get("reference_nonfinite", 0):
         return "unknown", "参考含 NaN/Inf，不能确立全部输出正确"
     if "max_error" not in m and result.passed:

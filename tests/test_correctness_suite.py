@@ -173,11 +173,19 @@ def test_shape_tail_dtype_value_specialization_cannot_reach_l3(body, suite_case)
 
 
 @pytest.mark.parametrize("layout", ["strided", "broadcast"])
-def test_layout_fidelity_gap_is_unknown_not_success(layout):
+def test_layout_fidelity_gap_is_unknown_not_success(layout, monkeypatch):
+    # A provider declaration is not proof. Strip the runtime receipt to emulate
+    # an old/unsupported transport, even though it returned correct numbers.
+    original = MockGPU.execute
+    def no_receipt(self, code, inputs):
+        result = original(self, code, inputs)
+        result.metrics.pop("input_fidelity", None)
+        return result
+    monkeypatch.setattr(MockGPU, "execute", no_receipt)
     results, verifier = verify(suite=CorrectnessSuite((case(layout=layout),)))
     assert not results[-1].passed
     assert results[-1].metrics["correctness"]["verdict"] == "unknown"
-    assert "pickle" in results[-1].metrics["correctness"]["cases"][0]["reason"]
+    assert "回读证据" in results[-1].metrics["correctness"]["reason"]
     assert _correctness_credential(results) is None
     assert Conductor._l2_verdict(KernelArtifact(verification_results=results)) is None
     assert classify(results).route == ROUTE_HOLD
@@ -229,12 +237,12 @@ def test_nondeterministic_candidate_below_tolerance_is_still_rejected():
 
 
 def test_unknown_report_reads_l2_even_without_benchmark_data():
-    results, _ = verify(suite=CorrectnessSuite((case(layout="strided"),)))
+    results, _ = verify(suite=CorrectnessSuite((case(),), required_checks=("aliasing",)))
     artifact = KernelArtifact(verification_results=results)
     report = build_report(artifact=artifact)
     assert "CorrectnessSuite (§20)" in report
-    assert "unknown" in report and "pickle" in report
-    assert "正确性检查 random 无法确立" in collect_unable(artifact=artifact).render()
+    assert "unknown" in report and "aliasing" in report
+    assert "正确性检查 check:aliasing 无法确立" in collect_unable(artifact=artifact).render()
 
 
 def test_suite_declared_checks_cannot_be_replaced_by_caller_inputs():

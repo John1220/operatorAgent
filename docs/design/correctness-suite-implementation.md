@@ -1,6 +1,7 @@
-# CorrectnessSuite：第一阶段实现与边界
+# CorrectnessSuite：实现与边界（含本地输入保真）
 
 日期：2026-10-08。对应主设计 §20；实现状态以测试为准，不宣称 §20 全部完成。
+本地输入保真协议见 [input-fidelity-protocol](input-fidelity-protocol.md)。
 
 ## 接入路径
 
@@ -58,14 +59,16 @@ unknown 经候选凭据和入库正确性判据保持为 `None`；失败路由�
 
 ## 目前可确立的范围
 
-MockGPU 的 **Python + contiguous** 路径能保留输入值和 dtype，已验证多 shape、
+MockGPU 的 **Python 数值 ndarray** 路径能保留输入值、dtype、strides、offset 和只读属性，
+并由执行侧在候选 exec 前回读；已验证 contiguous / strided / broadcast 输入及多 shape、
 非对齐尾块、tiny/batch=1、fp16/fp32、随机/零/常数/固定大小尺度、两次输出一致性。
 这证明的是声明的有限样本，不是所有 shape、所有语义上的正确性证明。
 
 ## 仍未实现，不能宣称完成
 
-1. **布局传输**：MockGPU Python 通过 pickle 传入子进程，不保留 strided/broadcast 视图。
-   请求这些检查时明确 unknown。不能把控制端的视图当成候选实际见到的视图。
+1. **复杂 backing 来源**：本地普通数值 ndarray 的 storage/view 传输已接通；
+   ndarray subclass、object dtype、stride_tricks 的未知 backing 来源等仍拒绝，不猜指针。
+   回读证据缺失或不一致时仍是 unknown，不能只靠后端声明或正确的输出数值放行。
 2. **远端套件**：SSH 重建输入值，HTTP/其他提供方尚未声明套件输入保真。
    `Backend.correctness_input_support(source, layout)` 默认拒绝作肯定声明；未接协议前套件无法通过。
 3. **Triton 路径**：dtype/contiguous 转换及无 CUDA 时的模拟回退不足以证明原候选的套件正确性，
@@ -90,5 +93,8 @@ MockGPU 的 **Python + contiguous** 路径能保留输入值和 dtype，已验�
 shape/尾块/dtype/零值特化错核止步 L2、确定性失败、缺参考/部分非有限/能力缺口、
 unknown 不污染教训、L2 报告、Conductor 候选选择和产物落盘。
 
-下一阶段应先补**执行侧的输入保真协议**与布局回读证据，再上 stride/broadcast 错核对照；
-否则加再多控制端数组也只是声明覆盖，而不是真正执行覆盖。
+本地第二阶段守卫：`tests/test_input_fidelity.py`（fork/subprocess、值与布局回读、
+正确/错误 stride 和 broadcast 核对照）；原有布局缺口测试改成“缺回读证据仍 unknown”。
+
+下一阶段将协议接到远端/Triton 执行侧，再补自动边界生成和覆盖 lint；
+不能把本地的证据当成 GPU runner 的证据。

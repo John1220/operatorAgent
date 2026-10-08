@@ -21,7 +21,20 @@ from .anticheat import static_audit
 from .contract import case_key
 from .correctness import as_suite, verdict_of
 from .bench_cases import BenchCaseError
+from .input_fidelity import InputFidelityError, describe_inputs, check_readback
 from .source_lang import classify
+
+
+def _reference_array(value, dtype):
+    """Built-in references consume logical values, not storage-indexing tricks.
+
+    torch.from_numpy cannot represent negative strides and warns about readonly
+    views. Copy ONLY on the reference side; candidate inputs stay untouched.
+    """
+    array = np.asarray(value, dtype=dtype)
+    if not array.flags.writeable or any(s < 0 for s in array.strides):
+        array = array.copy(order="K")
+    return array
 
 
 def _l1_guard_metrics(lang) -> dict:
@@ -596,6 +609,7 @@ class Verifier:
             "verdict": state, "suite_hash": suite.digest(),
             "declared_cases": len(suite.cases), "deterministic": suite.deterministic,
             "cases": rows,
+            "primary_inputs": primary.metrics.get("input_fidelity_readings", []),
             "scope": "仅证明声明的套件；未声明的形状/语义不算覆盖",
         }
         problems = [f"{r['case_id']}: {r['reason']}" for r in rows if r["verdict"] != "passed"]
@@ -664,6 +678,7 @@ class Verifier:
         has_reference = False
         reference_types = set()
         execution_devices = set()
+        input_fidelity_readings = []
 
         for idx, inputs in enumerate(input_sets):
             # 外部提供的 expected_output 仅对单组输入有效
@@ -680,6 +695,9 @@ class Verifier:
                 print(f"  [Verifier] L2 FAILED: {r.message}")
                 return r
             m = r.metrics
+            if "input_fidelity_verified" in m:
+                input_fidelity_readings.append({k: v for k, v in m.items()
+                                                if k.startswith("input_fidelity")})
             if "max_error" in m:
                 has_reference = True
                 sets_with_reference.append(m)
@@ -765,6 +783,8 @@ class Verifier:
         else:
             msg = f"功能验证通过 ({len(input_sets)} 组输入, 无参考输出, 仅验证可执行性)"
             metrics = {"num_input_sets": len(input_sets)}
+        if input_fidelity_readings:
+            metrics["input_fidelity_readings"] = input_fidelity_readings
         print(f"  [Verifier] L2 PASSED: {msg}")
         return VerificationResult(
             level=VerificationLevel.L2_FUNCTION, passed=True, message=msg, metrics=metrics,
@@ -797,6 +817,17 @@ class Verifier:
         """对单组输入执行功能验证
         metrics 中含 max_error 表示完成了参考比对，否则仅为可执行性验证"""
         max_allowed = task.constraints.max_error
+        expected_inputs = None
+        fidelity_metrics = {}
+        if task.constraints.correctness_suite is not None:
+            try:
+                expected_inputs = describe_inputs(inputs)
+            except InputFidelityError as exc:
+                return VerificationResult(
+                    VerificationLevel.L2_FUNCTION, False,
+                    message=f"输入保真无法确立: {exc}",
+                    metrics={"input_fidelity_verified": None,
+                             "input_fidelity_reason": str(exc)})
 
         if Cap.REMOTE_VERIFY in self._caps:
             # 候选与 reference 均在远端执行设备上比较，仅返回摘要，
@@ -812,6 +843,12 @@ class Verifier:
             if remote_verify is None:
                 raise CapabilityMissing(Cap.REMOTE_VERIFY, self.backend,
                                         "verify_function 声明可用但返回了 None")
+            if expected_inputs is not None:
+                fidelity_metrics = check_readback(expected_inputs, remote_verify.get("input_fidelity"))
+                if fidelity_metrics["input_fidelity_verified"] is not True:
+                    return VerificationResult(
+                        VerificationLevel.L2_FUNCTION, False,
+                        message=fidelity_metrics["input_fidelity_reason"], metrics=fidelity_metrics)
             if not remote_verify.get("success", False):
                 # ``success=False`` 也可能是数值误差超标；保留远端的精确诊断。
                 if "max_error" in remote_verify:
@@ -861,9 +898,16 @@ class Verifier:
 
         # 没有远端紧凑比对协议: 在执行侧跑一遍, 由 Verifier 自己比对参考输出。
         result = self.backend.execute(kernel_code, inputs)
+        if expected_inputs is not None:
+            fidelity_metrics = check_readback(
+                expected_inputs, (getattr(result, "metrics", None) or {}).get("input_fidelity"))
+            if fidelity_metrics["input_fidelity_verified"] is not True:
+                return VerificationResult(
+                    VerificationLevel.L2_FUNCTION, False,
+                    message=fidelity_metrics["input_fidelity_reason"], metrics=fidelity_metrics)
         if not result.success:
             head, full = failure_pair(result.error)
-            fail_metrics = {TRANSPORT_KEY: transport_outcome_of_result(result)}
+            fail_metrics = {TRANSPORT_KEY: transport_outcome_of_result(result), **fidelity_metrics}
             # lib_fallback 生产者 (spine-review P1-4): 运行时 shield 拦到的库回退
             # 必须搬进 metrics, 否则 eligibility 规则 4 恒 False。
             # 优先抄执行结果里已有的 metrics (mock_gpu 已 harvest 过), 避免二次 take。
@@ -882,7 +926,7 @@ class Verifier:
         if expected_output is None:
             expected_output = self._generate_reference(task, inputs)
         if expected_output is None:
-            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True, message="无参考输出，仅验证可执行性", metrics={"execution_time_ms": result.execution_time_ms})
+            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=True, message="无参考输出，仅验证可执行性", metrics={"execution_time_ms": result.execution_time_ms, **fidelity_metrics})
 
         if Cap.FULL_OUTPUT_TENSOR not in self._caps:
             # execute() 只回样本: 与参考的前缀比对, 并把 coverage 一起报出去 ——
@@ -908,6 +952,7 @@ class Verifier:
             max_error = float(np.abs(sample[ref_ok] - ref_window[ref_ok]).max()) if n_compared else 0.0
             coverage = n_compared / ref_flat.size if ref_flat.size else 1.0
             metrics = {"max_error": max_error, "compared_elements": n_compared,
+                       **fidelity_metrics,
                        "coverage": coverage,
                        "reference_nonfinite": compared - n_compared}
             if n_compared == 0:
@@ -966,7 +1011,7 @@ class Verifier:
         actual = result.output
         expected = np.asarray(expected_output, dtype=np.float32)
         if actual.shape != expected.shape:
-            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"输出形状不匹配: {actual.shape} vs {expected.shape}")
+            return VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False, message=f"输出形状不匹配: {actual.shape} vs {expected.shape}", metrics=fidelity_metrics)
 
         # 数值门禁与真机路径 (remote_scripts/run_kernel.py) 共用 tolerance.py 里的
         # 同一张容差表和同一条判定式: 绝对 + 相对 的 AND 形式, 见该模块 docstring。
@@ -1002,6 +1047,7 @@ class Verifier:
 
         size = int(expected.size)
         metrics = {
+            **fidelity_metrics,
             "max_error": float(abs_error[comparable].max()) if n_compared else 0.0,
             "max_rel_error": float(rel_error[comparable].max()) if n_compared else 0.0,
             "matched_ratio": matched_ratio,
@@ -2382,8 +2428,8 @@ class Verifier:
 
         if ("matmul" in kernel_type or "gemm" in kernel_type) and "A" in inputs and "B" in inputs:
             if torch_available:
-                a = torch.from_numpy(np.asarray(inputs["A"], dtype=dtype_np)).to(dtype_torch)
-                b = torch.from_numpy(np.asarray(inputs["B"], dtype=dtype_np)).to(dtype_torch)
+                a = torch.from_numpy(_reference_array(inputs["A"], dtype_np)).to(dtype_torch)
+                b = torch.from_numpy(_reference_array(inputs["B"], dtype_np)).to(dtype_torch)
                 return lambda: (a @ b), "pytorch_eager"
             a = np.asarray(inputs["A"], dtype=dtype_np)
             b = np.asarray(inputs["B"], dtype=dtype_np)
@@ -2392,7 +2438,7 @@ class Verifier:
         if "softmax" in kernel_type and "X" in inputs:
             if torch_available:
                 import torch.nn.functional as F
-                x = torch.from_numpy(np.asarray(inputs["X"], dtype=dtype_np)).to(dtype_torch)
+                x = torch.from_numpy(_reference_array(inputs["X"], dtype_np)).to(dtype_torch)
                 return lambda: F.softmax(x, dim=-1), "pytorch_eager"
             x = np.asarray(inputs["X"], dtype=dtype_np)
 
@@ -2409,7 +2455,7 @@ class Verifier:
             x_value = inputs.get("input")
         if x_value is None:
             return None, None
-        x_np = np.asarray(x_value, dtype=dtype_np)
+        x_np = _reference_array(x_value, dtype_np)
 
         # 更多算子: 优先 torch 原生 (与 eager 对齐)
         if torch_available:
@@ -2421,8 +2467,8 @@ class Verifier:
             if "gelu" in kernel_type:
                 return lambda: torch.nn.functional.gelu(x), "pytorch_eager"
             if "layernorm" in kernel_type or "layer_norm" in kernel_type:
-                w_np = np.asarray(inputs.get("weight"), dtype=dtype_np) if inputs.get("weight") is not None else None
-                b_np = np.asarray(inputs.get("bias"), dtype=dtype_np) if inputs.get("bias") is not None else None
+                w_np = _reference_array(inputs.get("weight"), dtype_np) if inputs.get("weight") is not None else None
+                b_np = _reference_array(inputs.get("bias"), dtype_np) if inputs.get("bias") is not None else None
                 if w_np is not None and b_np is not None:
                     w = torch.from_numpy(w_np).to(dtype_torch)
                     b = torch.from_numpy(b_np).to(dtype_torch)

@@ -567,6 +567,9 @@ def build_report(*, artifact: Any, task: Any = None,
 
 def _correctness_lines(artifact: Any) -> List[str]:
     """L2 evidence is not in benchmark_data, especially when L3 was blocked."""
+    def cell(value):
+        return str(value).replace("|", "\\|").replace("\n", " ")
+
     out = []
     for r in getattr(artifact, "verification_results", ()) or ():
         c = (getattr(r, "metrics", {}) or {}).get("correctness")
@@ -579,11 +582,22 @@ def _correctness_lines(artifact: Any) -> List[str]:
                 "| Case | 值 / 布局 | 结论 | 证据 / 原因 |",
                 "|---|---|---|---|"]
         for row in c.get("cases", ()):
-            def cell(value):
-                return str(value).replace("|", "\\|").replace("\n", " ")
             out.append("| " + " | ".join(cell(v) for v in (
                 row.get("case_id"), f"{row.get('pattern', '-')} / {row.get('layout', '-')}",
                 row.get("verdict"), row.get("reason"))) + " |")
+        for row in c.get("cases", ()):
+            m = row.get("metrics", {})
+            receipt = m.get("input_fidelity", {})
+            observed = receipt.get("observed", {})
+            if not observed:
+                continue
+            out += ["", f"- Case `{cell(row.get('case_id'))}` 输入保真: "
+                    f"{_tri(m.get('input_fidelity_verified'))}（执行侧 kernel 调用前回读）"]
+            for name, spec in sorted(observed.items()):
+                out.append(f"  - `{cell(name)}`: dtype={spec.get('dtype', spec.get('type'))}, "
+                           f"shape={spec.get('shape')}, strides={spec.get('strides')}, "
+                           f"offset={spec.get('offset')}, writeable={spec.get('writeable')}, "
+                           f"value_hash=`{str(spec.get('value_digest', ''))[:12]}`")
         if c.get("reason"):
             out.append(f"- 无法确立: {c['reason']}")
         out.append("")
