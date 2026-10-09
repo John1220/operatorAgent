@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import io
 import re as _RE
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -27,6 +28,13 @@ from operator_agent.schemas import (ConstraintSpec, KernelArtifact, Precision,
                                     TaskType)
 from tests.backend_fakes import fake_backend
 from tests.test_measurement_validity import LaunchDominatedGPU, NET_MS_MATMUL_4096
+
+
+def _disk_db(case):
+    # "Persisted" tests must exercise disk, not the harness's disabled store.
+    tmp = tempfile.TemporaryDirectory()
+    case.addCleanup(tmp.cleanup)
+    return KernelDatabase(str(Path(tmp.name) / "corpus.jsonl"))
 
 
 def _task():
@@ -61,7 +69,7 @@ def _good_metrics(**extra):
 
 class TestSaveToDbGates(unittest.TestCase):
     def setUp(self):
-        self.cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
+        self.cond = Conductor(backend=MockGPU(), kernel_db=_disk_db(self))
 
     def test_a_good_run_without_a_remeasure_does_not_persist(self):
         """**默认配置下这条路走不通** (§3.5 规则 2)
@@ -122,7 +130,7 @@ class TestTheGateHasExactlyOneImplementation(unittest.TestCase):
     """
 
     def setUp(self):
-        self.cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
+        self.cond = Conductor(backend=MockGPU(), kernel_db=_disk_db(self))
 
     def _spy(self, verdict, seen):
         def spy(metrics, remeasure, **kw):
@@ -185,7 +193,7 @@ class TestRemeasureField(unittest.TestCase):
                       "KernelArtifact 缺 remeasure 字段 —— 要求两次确认即全拒")
 
     def test_constructor_with_remeasure_persists(self):
-        cond = Conductor(backend=MockGPU(), kernel_db=KernelDatabase())
+        cond = Conductor(backend=MockGPU(), kernel_db=_disk_db(self))
         art = KernelArtifact(
             kernel_id="k-remeasure",
             code="def kernel(A, B):\n    return A @ B\n",
@@ -427,6 +435,7 @@ class TestRemeasureProducer(unittest.TestCase):
         `_produce_remeasure` 真的跑了一次 L3 这件事由上面那条用例覆盖。
         """
         cond, art = self._produced()
+        cond.kernel_db = _disk_db(self)
         self._stubbed(art)
         art.benchmark_data["contract_hash"] = art.remeasure.contract_hash
         self.assertTrue(cond._save_to_db(art, _task()),

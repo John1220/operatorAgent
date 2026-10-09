@@ -186,3 +186,8 @@ python tests/golden_regression.py compare
 本次 isolated corpus 的 append/fresh replay 也不提供跨进程 exactly-once、崩溃事务或
 跨任务语料可信性承诺。性能结论只覆盖预声明主 workload；32-case suite 证明数值覆盖，
 不证明每个 shape 都加速，尤其不能把 launch-dominated 小 shape 当成性能正例。
+
+后续的本地单写者提交/显式幂等恢复见
+[本地语料持久化提交与恢复](durable-corpus-admission-and-recovery.md)。本页 H20 证据属于
+`9fbc099` 对应的 frozen evaluator；该后续协议改变源码身份，需要重新预检和测量，
+不能直接沿用本页 profile 作为新版验收。

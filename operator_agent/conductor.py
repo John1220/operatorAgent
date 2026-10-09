@@ -3477,7 +3477,8 @@ class Conductor:
             return None
 
     def _claim_level_for(self, artifact: KernelArtifact, task: TaskSchema,
-                         metrics: dict, persisted: bool = False):
+                         metrics: dict, persisted: bool = False,
+                         independent_confirmation: Optional[bool] = None):
         """§4.4 的声明等级：把这次读数手上的证据摊给 `eligibility.claim_level`。
 
         这里**不算等级**（阶梯与覆盖上限都在那一个纯函数里），只摊平三件证据：
@@ -3498,6 +3499,7 @@ class Conductor:
             correctness_verified=self._l2_verdict(artifact),
             coverage_mode=lang.coverage,
             persisted=persisted,
+            independent_confirmation=independent_confirmation,
         )
 
     def _save_to_db(self, artifact: KernelArtifact, task: TaskSchema):
@@ -3518,6 +3520,8 @@ class Conductor:
                                   regression_over_limit, required_cases_ok)
         from .kernel_db import KernelRecord
         from .oracle import admit_to_corpus
+        from . import corpus_admission as admissions
+        from .corpus_journal import CommitResult
 
         metrics = artifact.benchmark_data or {}
         # §4.4 的声明等级：**推导只有一处**（`eligibility.claim_level`），这里只负责把这次
@@ -3556,13 +3560,31 @@ class Conductor:
         # 快照都发生在这个判定**之前**, 所以它只能靠报告这一件产物带走)。
         if artifact.metadata is None:
             artifact.metadata = {}
-        artifact.metadata["corpus_admission"] = {"kept": bool(keep), "reason": str(reason)}
+        commit = None
+        request = None
+        if keep:
+            try:
+                # A bound production observation must prepare durable intent
+                # before its side effect. Missing evidence cannot fall back to
+                # the compatibility legacy-record API.
+                if (metrics.get("run_binding") is not None
+                        or record.compile_info.get("run_binding") is not None):
+                    request = admissions.prepare(artifact.saved_dir, self.kernel_db,
+                        record, metrics, artifact.remeasure, reason)
+                    commit = self.kernel_db.commit(record, request["key"])
+                else:
+                    commit = self.kernel_db.commit(record)
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                commit = CommitResult("failed", reason=f"{type(exc).__name__}: {exc}")
+        persisted = commit is not None and commit.persisted
+        artifact.metadata["corpus_admission"] = admissions.admission_metadata(keep, reason, commit)
         # 入库本身就是 `promotable → persisted` 那一级上升（§4.4），所以入没入库之后
         # 要重算一次等级：产物里记的是**最后**的那个地位，不是入库之前那个。
         # 覆盖上限（`ceiling`）不随 `persisted` 变，所以把同一个键改写成终态不会动到
         # 刚刚那道门读过的数 —— 门已经跑完了。
         if keep:
-            claim = self._claim_level_for(artifact, task, metrics, persisted=True)
+            claim = self._claim_level_for(artifact, task, metrics, persisted=persisted,
+                                         independent_confirmation=True)
         final = claim.as_dict()
         artifact.metadata["claim_level"] = final
         metrics["claim_level"] = final
@@ -3613,12 +3635,24 @@ class Conductor:
             eligibility=metrics.get("eligibility"), claim_record=claim,
             required_cases_ok=rco, regression_over_limit=rol,
             evidence_notes=notes).as_dict()
+        if artifact.saved_dir:
+            try:
+                if request is not None:
+                    admissions.finish(artifact.saved_dir, request, self.kernel_db, commit, final, metrics)
+                else:
+                    admissions.publish(artifact.saved_dir, artifact.metadata["corpus_admission"], final, metrics)
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                # The journal remains authoritative. A crash/publication error
+                # cannot undo its commit; explicit recovery reconciles files.
+                artifact.metadata["corpus_admission"]["publication_error"] = f"{type(exc).__name__}: {exc}"
         if not keep:
             print(f"[KernelDB] 未入库 (只留在本次进程): {reason}")
             self.kernel_db.add(record)
             return False
-        self.kernel_db.promote(record)
-        print(f"[KernelDB] 已入库并落盘: {reason}")
+        if not persisted:
+            print(f"[KernelDB] 未确认落盘: {artifact.metadata['corpus_admission']['reason']}")
+            return False
+        print(f"[KernelDB] 已入库并落盘 ({commit.status}): {reason}")
         return True
 
     def _record_failure(self, task: TaskSchema, failed_results: list[VerificationResult],

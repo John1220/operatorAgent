@@ -115,6 +115,9 @@ class ArtifactStore:
                 ("schema", "run_id", "hash", "contract_hash", "workload_hash")}
         if (artifact.metadata or {}).get("resume_audit") is not None:
             result_data["resume_audit"] = artifact.metadata["resume_audit"]
+        for name in ("corpus_admission", "claim_level"):
+            if (artifact.metadata or {}).get(name) is not None:
+                result_data[name] = artifact.metadata[name]
         result_path = artifact_dir / "result.json"
         result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -256,6 +259,8 @@ class ArtifactStore:
             sketch=sketch,
             verification_results=verification_results,
             benchmark_data=benchmark_data,
+            metadata={k:data[k] for k in ("corpus_admission", "claim_level") if k in data},
+            saved_dir=str(dir_path),
         )
 
     @staticmethod

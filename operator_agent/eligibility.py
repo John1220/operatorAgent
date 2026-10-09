@@ -304,7 +304,7 @@ def claim_level(*,
     | `provisional` | 有 `can_tune` 的读数；但档位不是 `valid`，或正确性没有凭据 |
     | `validated` | 档位 `valid` **且** 正确性有凭据（§20 / 规则 9） |
     | `promotable` | 通过一次独立确认（§10.5-4） |
-    | `persisted` | 入库判据通过（§24.3） |
+    | `persisted` | 入库判据通过，且取得持久化提交回执（§24.3） |
 
     最后**逐级上升不许越级**的保障落在一处：`level = min(阶梯, 覆盖上限)`（§22.3）。
     覆盖不足只**压级**，不改变任何资格位（`can_*` 仍然由 §4.3 的八条规则说了算）——
@@ -315,11 +315,9 @@ def claim_level(*,
       * `correctness_verified=None`（没带凭据）⇒ **不升** `validated`（缺证据不是有效证据）；
       * `coverage_mode=None`（没判过）⇒ 上限按最保守那档（`provisional`）。
 
-    ⚠️ **`promotable` 今天在产物里很少出现**：本仓的「独立确认」与「入库」是**同一步**
-    （`oracle.admit_to_corpus` 的第 3 道门），通过独立确认那一刻就已经入库 ⇒ 直接
-    `persisted`。`promotable` 今天的角色是**门槛**（入库门要求覆盖上限 ≥ 它），
-    等 §24.3 的 promotion policy 从入库里独立出来之后才会成为终态。不许把它读成
-    「今天有一条路径能停在 promotable」。
+    资格通过不等于写盘成功：独立确认通过、但提交失败/结果未知时，终态可以是
+    `promotable`。只有 corpus 的 fsync 与精确事件读回取得成功回执，调用方才可传入
+    `persisted=True`。本函数不做 I/O，也不另算入库资格；上限仍由静态覆盖决定。
     """
     elig = eligibility
     if elig is not None and not isinstance(elig, Eligibility):
@@ -808,5 +806,4 @@ def implementation_decision(*, eligibility=None, claim_record=None,
     return _record(DECISION_INCONCLUSIVE,
                    ["「自定义」的三条证据没有一条被否定、也没有一条被确立 ⇒ "
                     "既上不了 use_custom, 也没有「建议用库」的依据 (门 3)"])
-
 

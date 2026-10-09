@@ -228,6 +228,9 @@ class KernelDatabase:
         self._init_seed_data()
         self.loaded_from_disk = 0
         self.disk_skipped_lines = 0
+        self.disk_duplicate_admissions = 0
+        self.persistence_error = ""
+        self._durable_ids = set()
         self.retrievals_this_run = 0
         if self._jsonl is not None:
             self.replay()
@@ -253,16 +256,42 @@ class KernelDatabase:
 
     # ---- 事件日志 ----
 
-    def _append_event(self, event: dict) -> None:
+    @property
+    def corpus_path(self):
+        return str(self._jsonl.absolute()) if self._jsonl is not None else None
+
+    def _append_event(self, event: dict) -> bool:
         if self._jsonl is None:
-            return
+            return False
+        from . import corpus_journal as journal
         try:
-            self._jsonl.parent.mkdir(parents=True, exist_ok=True)
-            with self._jsonl.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(event, ensure_ascii=False) + "\n")
-        except OSError:
-            # 写不进日志不该让一次真跑失败: 语料是副产品, 产物才是主品。
-            pass
+            with journal.locked_file(self._jsonl, create=True) as f:
+                current = journal.scan(f)
+                if current.errors:
+                    raise ValueError("corpus corrupt: " + "; ".join(current.errors))
+                journal.append(f, event, tail=current.tail)
+                journal.fence(f, self._jsonl)
+            self.persistence_error = ""
+            return True
+        except (OSError, ValueError, TypeError) as exc:
+            self.persistence_error = f"{type(exc).__name__}: {exc}"
+            return False
+
+    def _install_scan(self, scan):
+        records = {}
+        skipped = scan.skipped
+        for kid, raw in scan.records.items():
+            try:
+                records[kid] = KernelRecord.from_dict(raw)
+            except (TypeError, KeyError):
+                skipped += 1
+        for kid in self._durable_ids - set(records):
+            self._records.pop(kid, None)
+        self._records.update(records)
+        self._durable_ids = set(records)
+        self.disk_skipped_lines = skipped
+        self.disk_duplicate_admissions = scan.duplicates
+        self.loaded_from_disk = scan.loaded
 
     def replay(self) -> int:
         """重放事件日志, 返回从磁盘读回的记录数 (不含 seed)
@@ -272,35 +301,19 @@ class KernelDatabase:
         if self._jsonl is None or not self._jsonl.exists():
             self.disk_skipped_lines = 0
             return 0
-        loaded = 0
-        skipped = 0
-        with self._jsonl.open(encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    skipped += 1
-                    continue
-                kind = ev.get("event")
-                if kind == "kernel":
-                    try:
-                        rec = KernelRecord.from_dict(ev["record"])
-                    except (KeyError, TypeError):
-                        skipped += 1
-                        continue
-                    self._records[rec.kernel_id] = rec
-                    loaded += 1
-                elif kind == "retrieved":
-                    for kid in ev.get("ids", []):
-                        r = self._records.get(kid)
-                        if r is not None:
-                            r.retrieved_count += 1
-        self.disk_skipped_lines = skipped
-        self.loaded_from_disk = loaded
-        return loaded
+        from . import corpus_journal as journal
+        try:
+            with journal.locked_file(self._jsonl) as f:
+                scan = journal.scan(f)
+                # Establish durability now before publishing a previously lost
+                # receipt's complete event. Incomplete tails are never loaded.
+                journal.fence(f, self._jsonl)
+            self._install_scan(scan)
+            self.persistence_error = "; ".join(scan.errors)
+            return self.loaded_from_disk
+        except (OSError, ValueError, TypeError) as exc:
+            self.persistence_error = f"{type(exc).__name__}: {exc}"
+            return 0
 
     def summary(self) -> str:
         """给人在每次运行的日志里读的一句 —— 没有这一句, 「载入了历史」就是看不见的"""
@@ -320,7 +333,8 @@ class KernelDatabase:
         return (f"{len(self._records)} 条记录 = seed {n_seed} + 历史 {mine} "
                 f"(从 {self._jsonl.name} 重放 {self.loaded_from_disk} 条"
                 f"{f', 跳过坏行 {self.disk_skipped_lines}' if self.disk_skipped_lines else ''}"
-                f"); 曾被检索 {used} 条; 历史部分测量档位 {tier_text}")
+                f"); 曾被检索 {used} 条; 历史部分测量档位 {tier_text}"
+                f"{'; 持久化异常: ' + self.persistence_error if self.persistence_error else ''}")
 
     def note_retrievals(self, ids: list) -> None:
         if not ids:
@@ -331,7 +345,8 @@ class KernelDatabase:
         self.retrievals_this_run += len(ids)
         if not self._persist_retrievals:
             return
-        self._append_event({"event": "retrieved", "ids": list(ids), "at": time.time()})
+        if not self._append_event({"event": "retrieved", "ids": list(ids), "at": time.time()}):
+            return
         for kid in ids:
             r = self._records.get(kid)
             if r is not None:
@@ -539,14 +554,29 @@ class KernelDatabase:
         更相似的存档成员被更优者替换, 见 docs/research/43 第二节)。这里的键更简单,
         所以只保留「同一个核的更好测量才替换」这一种情况。
         """
-        old = self._records.get(record.kernel_id)
-        if old is not None and record.score <= old.score:
-            return False
-        record.created_at = record.created_at or time.time()
-        self._records[record.kernel_id] = record
-        self._append_event({"event": "kernel", "record": record.to_dict(),
-                            "at": record.created_at})
-        return True
+        # Compatibility API: True means durable, not merely eligible/in memory.
+        return self.commit(record).persisted
+
+    def commit(self, record: KernelRecord, key=None):
+        """Install only after durable receipt; production supplies a paired key.
+
+        Direct legacy callers use a payload-derived key, not a CUDA proof.
+        """
+        from . import corpus_journal as journal
+        try:
+            raw = json.loads(json.dumps(record.to_dict(), allow_nan=False))
+            raw["created_at"] = raw["created_at"] or time.time()
+            if key is None:
+                key = dict(kind="legacy-record", record_hash=journal.record_hash(raw))
+            result, scan = journal.commit(self._jsonl, raw, key)
+            if result.persisted:
+                self._install_scan(scan)
+                record.created_at = scan.admissions[result.admission_id]["record"]["created_at"]
+            self.persistence_error = "" if result.persisted else result.reason
+            return result
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            self.persistence_error = f"{type(exc).__name__}: {exc}"
+            return journal.CommitResult("failed", reason=self.persistence_error)
 
     def get(self, kernel_id: str) -> Optional[KernelRecord]:
         return self._records.get(kernel_id)
