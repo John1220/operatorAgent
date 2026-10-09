@@ -201,6 +201,11 @@ seal 篡改、重算 intent 摘要、日志尾部隔离、重复事件与旧完�
 文件系统/设备诚实实现 fsync，不承诺 NFS、失真的设备缓存或恶意 owner 下的事务保证。
 
 **本轮未执行新 H20 性能验收。** 入库源码及 ArtifactStore 已加入 frozen protocol 身份，
-新协议源码改变也会使旧量具 profile 不匹配。上一轮 H20 结果继续属于 `9fbc099` 的
-frozen evaluator；不能把旧 profile/读数当成当前版本的真机验收。下一次真机运行必须
-重新独立预检、生成匹配当前源码的 profile，并完成新主测与确认。
+旧 run 的完整源码身份已与当前版本不匹配。需区分：量具 profile 只绑定计时通道的
+部署源码、设备和 runtime；仅改变控制端入库源码，不一定使同一仪器的旧 profile 校验
+失败，但一定改变 frozen evaluator 身份。上一轮 H20 结果继续属于 `9fbc099`，不能
+据此声明当前版本已验收。下一次验收主动重新独立预检、生成新的 profile，并完成
+当前 frozen evaluator 的新主测与确认，不复用旧读数。
+
+后续在 `c92ed01` 上已完成新的独立预检、H20 主测/确认与真实 seal 入库，以及六次
+新进程重复恢复；见 [持久化入库协议的 H20 验收](durable-corpus-h20-acceptance.md)。
