@@ -73,7 +73,8 @@ def _scalar_from_wire(spec):
     raise InputFidelityError("未知标量类型或字节长度无效")
 
 
-def encode_json_inputs(inputs):
+def json_input_parts(inputs):
+    """One scalar/size authority for inline JSON and session-owned storage."""
     packet = fidelity.encode_inputs(inputs)
     # Scalars are bounded too; floats/nonfinite values use bytes, not lossy JSON.
     import json
@@ -81,15 +82,32 @@ def encode_json_inputs(inputs):
     scalar_bytes = len(json.dumps(scalars, ensure_ascii=True, allow_nan=False).encode())
     if sum(map(len, packet["storages"])) + scalar_bytes > fidelity.MAX_STORAGE_BYTES:
         raise InputFidelityError("JSON 输入超过字节上限")
-    return {"protocol": JSON_PROTOCOL, "storages": [base64.b64encode(b).decode("ascii")
-            for b in packet["storages"]], "tensors": packet["tensors"], "scalars": scalars}
+    return {"protocol": JSON_PROTOCOL, "tensors": packet["tensors"], "scalars": scalars}, packet["storages"]
+
+
+def encode_json_inputs(inputs):
+    metadata, storages = json_input_parts(inputs)
+    return dict(metadata, storages=[base64.b64encode(b).decode("ascii") for b in storages])
+
+
+class ResolvedJSONInputs(dict):
+    """In-process server carrier, impossible to construct via JSON fields alone.
+
+    Cached immutable bytes avoid remote re-base64/decoding. The same size,
+    scalar and view decoder still runs; each invocation gets fresh mutable roots.
+    """
+    def __init__(self, metadata, storages):
+        super().__init__(metadata, protocol=JSON_PROTOCOL)
+        self.raw_storages = tuple(storages)
 
 
 def decode_json_inputs(payload):
     import json
     if not isinstance(payload, dict) or payload.get("protocol") != JSON_PROTOCOL:
         raise InputFidelityError("未知 JSON 输入保真协议")
-    scalars, storages = payload.get("scalars"), payload.get("storages")
+    scalars = payload.get("scalars")
+    resolved = isinstance(payload, ResolvedJSONInputs)
+    storages = list(payload.raw_storages) if resolved else payload.get("storages")
     if not isinstance(scalars, dict) or not isinstance(storages, list):
         raise InputFidelityError("JSON 输入载荷无效")
     remaining = fidelity.MAX_STORAGE_BYTES - len(json.dumps(
@@ -98,7 +116,12 @@ def decode_json_inputs(payload):
         raise InputFidelityError("JSON 标量超过字节上限")
     decoded = []
     for data in storages:
-        raw = _unbase64(data, remaining)
+        if resolved:
+            if type(data) is not bytes or len(data) > remaining:
+                raise InputFidelityError("cached storage 类型或字节上限无效")
+            raw = data
+        else:
+            raw = _unbase64(data, remaining)
         decoded.append(raw)
         remaining -= len(raw)
     return fidelity.decode_inputs({"protocol": fidelity.PROTOCOL, "storages": decoded,

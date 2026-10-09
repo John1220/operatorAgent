@@ -111,6 +111,7 @@ _REMOTE_L2_METRIC_KEYS = (
     # 白名单, 真机路径上它就会静默消失 (本地用例照样全绿, 那正是最坏的一种缺法)。
     "error_shape", "reference_nonfinite", "reference_error", "output_digest",
     "reference_receipt", "output_dtype", "candidate_semantics_error", "reference_identity_unknown",
+    "input_transfer",
 )
 
 # 常见 GPU 硬件 **dense 规格峰值** (FP32/TF32/FP16/BF16 Tensor Core + 显存带宽)
@@ -1651,6 +1652,7 @@ class Verifier:
         bound = roofline["bound_type"]  # 替代原有的名字匹配 bound
 
         metrics = {"avg_time_ms": exec_time, "min_time_ms": kernel_min_ms,
+                   **({"input_transfer": bench["input_transfer"]} if "input_transfer" in bench else {}),
                    "gflops": round(actual_gflops, 4),
                    # 编译产物的事实 (§10.3 条件 2 的真源): **runner 报了才带上** ——
                    # 三态, 不许在这里补默认值 (缺失 ≠ 0 ≠ 没有上限)。控制侧此前是手写

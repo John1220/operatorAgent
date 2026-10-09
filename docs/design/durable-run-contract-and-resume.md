@@ -2,6 +2,9 @@
 
 日期：2026-10-08；验收更新：2026-10-09。接续 `reference-identity-and-v2-profile.md`。
 
+后续实现：[session-owned 大输入分块传输与缓存](session-owned-input-cache.md)。
+下文大输入 timeout 是改造前的验收记录，保留失败证据，不改写为成功。
+
 ## 1. 修的是什么
 
 之前参考身份只在 Verifier 内存中按 task_id 绑定。重新启动进程后，恢复快照会
@@ -200,8 +203,12 @@ verification.json、sealed snapshot 和完整运行日志仍保留。
 这项 harness 修复不冒充成功的大 workload 真机复测。
 原始结果位于 `output/durable_profile_h20/durable-profile-h20-20261009T015239243495Z-14094-1/`。
 
-**当前结论：durable identity/resume 已验收；可信正向 L3/实际 corpus admission 尚未确立。**
-下一步先解决大输入重复 JSON/SSH 传输：内容摘要绑定的 session-owned 输入缓存/分块传输，
+**本节改造前结论：durable identity/resume 已验收；可信正向 L3/实际 corpus admission 尚未确立。**
+当时下一步先解决大输入重复 JSON/SSH 传输：内容摘要绑定的 session-owned 输入缓存/分块传输，
 仍要求执行侧完整 readback 并保持 alias/stride/offset，保留端到端截止与 owned cleanup。
 之后再做大 workload 的 L1/完整 L2/主测/独立确认/真实入库；不是放宽地板或用缺证据的
 表观速度替代性能验收。
+
+2026-10-09 后续：[session-owned 输入缓存](session-owned-input-cache.md) 已完成实现，
+128 MiB 主输入已跑通完整数值 suite、主测、确认；两轮仍因 launch 占比约 19.7%
+处于 degraded，原 admission 门继续拒绝入库。传输阻塞已解除，但可信正向入库尚未确立。

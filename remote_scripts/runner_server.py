@@ -57,6 +57,9 @@ if os.environ.get(TOKEN_ENV):
 
 # Same dispatch as the one-shot runner, never a second kernel action table.
 import run_kernel  # noqa: E402
+from session_inputs import SessionInputs, PROTOCOL as INPUT_CACHE_PROTOCOL  # noqa: E402
+
+_INPUTS = SessionInputs()
 
 
 def _write(obj: dict) -> None:
@@ -90,7 +93,32 @@ def _serve_one(line: str) -> bool:
     if action == "ping":
         # 报出钉住的卡 —— 会话把它固定下来了，客户端该知道是哪一张
         _reply(req_id, {"success": True, "pong": True, "pid": os.getpid(),
+                        "input_cache": _INPUTS.advertisement(),
                         "selected_gpu": run_kernel._SELECTED_GPU_ID})
+        return True
+
+    # Session-only control actions, never additions to run_kernel's device table.
+    proof = None
+    try:
+        if action == "input_begin":
+            _reply(req_id, _INPUTS.begin(req.get("session_id"), req.get("manifest")))
+            return True
+        if action == "input_chunk":
+            _reply(req_id, _INPUTS.chunk(req.get("session_id"), req.get("manifest_hash"),
+                req.get("storage_hash"), req.get("offset"), req.get("data"), req.get("encoding")))
+            return True
+        if action == "input_commit":
+            _reply(req_id, _INPUTS.commit(req.get("session_id"), req.get("manifest_hash")))
+            return True
+        inputs = req.get("inputs")
+        if isinstance(inputs, dict) and inputs.get("protocol") == INPUT_CACHE_PROTOCOL:
+            if action not in {"verify", "benchmark_with_baselines"}:
+                raise ValueError("session inputs unsupported for this action")
+            req["inputs"], proof = _INPUTS.resolve(inputs)
+    except Exception as exc:  # Input preparation never becomes candidate failure.
+        _INPUTS.abort()
+        _reply(req_id, {"success": False, "input_identity_unknown": True,
+                        "error": "session input unknown: " + str(exc)})
         return True
 
     saved = sys.stdout
@@ -105,17 +133,22 @@ def _serve_one(line: str) -> bool:
 
     if not isinstance(result, dict):
         result = {"success": False, "error": f"run_action 返回了非载荷: {result!r}"}
+    if proof is not None:
+        result["input_transfer"] = proof
     _reply(req_id, result)
     return True
 
 
 def main() -> int:
-    for line in sys.stdin:            # EOF = 父进程关掉了 stdin
-        line = line.strip()
-        if not line:
-            continue
-        if not _serve_one(line):
-            break
+    try:
+        for line in sys.stdin:            # EOF = 父进程关掉了 stdin
+            line = line.strip()
+            if not line:
+                continue
+            if not _serve_one(line):
+                break
+    finally:
+        _INPUTS.close()
     return 0
 
 

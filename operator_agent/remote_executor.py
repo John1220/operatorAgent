@@ -25,6 +25,8 @@
 """
 
 import os
+import base64
+import zlib
 import atexit
 import json
 import shlex
@@ -53,6 +55,8 @@ from .hardware_caps import detect_hardware_caps
 from .measurement import (TRANSPORT_ANSWERED, TRANSPORT_KEY, safe_error_text,
                           transport_outcome)
 from .remote_input_fidelity import encode_json_inputs, InputFidelityError
+from .session_inputs import (PreparedInputs, prepare_inputs, PROTOCOL as INPUT_CACHE_PROTOCOL,
+                             CHUNK_BYTES, manifest_body, SessionInputError)
 
 
 # 按执行目标串行化 execute/benchmark, 防止并发任务共用同一 GPU 互相污染 benchmark
@@ -244,6 +248,7 @@ class _RemoteSession:
         self.identity = None
         self._bytes_sent = 0
         self._readers = []
+        self.input_cache = None
 
     # ── 生命周期 ────────────────────────────────────────────────
     def start(self) -> None:
@@ -308,6 +313,7 @@ class _RemoteSession:
         ack = False
         if proc is None:
             self.state = "broken"
+            self.input_cache = None
             return {"local_quiescent": True, "shutdown_ack": False}
         acquired = self._lock.acquire(timeout=max(0.0, min(grace * .2, .2)))
         try:
@@ -318,6 +324,7 @@ class _RemoteSession:
                 except Exception:
                     pass
             self.state = "broken"
+            self.input_cache = None
             if proc.stdin:
                 proc.stdin.close()   # No buffered writes exist, so no blocking flush.
         finally:
@@ -352,6 +359,9 @@ class _RemoteSession:
             # This request was not sent; do not poison the request holding the lock.
             raise SessionError("timeout", "等待会话锁超时; 本请求未发送", phase="lock")
         try:
+            prepared = payload.get("inputs")
+            if isinstance(prepared, PreparedInputs):
+                return self._call_with_inputs(payload, prepared, deadline)
             return self._call_locked(payload, deadline=deadline)
         finally:
             self._lock.release()
@@ -448,7 +458,99 @@ class _RemoteSession:
             self.state = "broken"
             self.state_detail = f"请求 {req_id} 回显 result 不是 JSON 对象"
             raise SessionError("desync", self.state_detail, phase="response", request_id=req_id)
-        return obj["result"]
+        result = obj["result"]
+        if payload.get("action") == "ping":
+            self.input_cache = result.get("input_cache")
+        return result
+
+    def _input_unknown(self, detail):
+        self.state = "broken"
+        raise SessionError("broken", detail, phase="input_cache", request_id=self._next_id,
+                           bytes_sent=self._bytes_sent)
+
+    def _call_with_inputs(self, payload, prepared, deadline):
+        """Upload + candidate RPC share one lock/deadline; never retry chunks.
+
+        Missing/invalid cache receipts poison the stream just like missing RPC
+        attribution. No fallback to generated inputs or giant inline payloads.
+        """
+        self._remaining(deadline, "input_cache")
+        if self.input_cache is None:
+            self._call_locked({"action": "ping"}, deadline=deadline)
+        info = self.input_cache
+        if (not isinstance(info, dict) or info.get("protocol") != INPUT_CACHE_PROTOCOL
+                or type(info.get("session_id")) is not str or len(info["session_id"]) != 32
+                or any(c not in "0123456789abcdef" for c in info["session_id"])
+                or info.get("chunk_bytes") != CHUNK_BYTES
+                or info.get("chunk_encodings") != ["raw", "zlib"]):
+            self._input_unknown("input cache handshake absent/incompatible")
+        session_id = info["session_id"]
+        manifest = dict(prepared)
+        try:
+            manifest_body(manifest)
+        except (SessionInputError, ValueError, TypeError) as exc:
+            self._input_unknown("invalid input descriptor: " + type(exc).__name__)
+        sha = manifest["hash"]
+        if (len(manifest["storages"]) != len(prepared.raw_storages)
+                or any(type(raw) is not bytes or len(raw) != ref["bytes"]
+                    or hashlib.sha256(raw).hexdigest() != ref["sha256"]
+                    for ref, raw in zip(manifest["storages"], prepared.raw_storages))):
+            self._input_unknown("prepared storage changed before upload")
+
+        def receipt(request):
+            self._remaining(deadline, "input_cache")
+            result = self._call_locked(request, deadline=deadline)
+            if (result.get("success") is not True or result.get("session_id") != session_id
+                    or result.get("manifest_hash") != sha):
+                self._input_unknown("input cache acknowledgement absent/mismatched")
+            return result
+
+        begin = receipt({"action": "input_begin", "session_id": session_id, "manifest": manifest})
+        missing = begin.get("missing")
+        raw_by_sha = {ref["sha256"]: raw for ref, raw in zip(manifest["storages"], prepared.raw_storages)}
+        expected_sizes = {ref["sha256"]: ref["bytes"] for ref in manifest["storages"]}
+        if not isinstance(missing, list):
+            self._input_unknown("input cache missing-list absent")
+        seen, uploaded, chunks, wire_bytes = set(), 0, 0, 0
+        encodings = {"raw": 0, "zlib": 0}
+        for ref in missing:
+            if (not isinstance(ref, dict) or set(ref) != {"sha256", "bytes"}
+                    or type(ref["sha256"]) is not str or ref["sha256"] in seen
+                    or ref["sha256"] not in expected_sizes
+                    or type(ref["bytes"]) is not int or ref["bytes"] != expected_sizes[ref["sha256"]]):
+                self._input_unknown("input cache requested unknown/duplicate storage")
+            storage_hash = ref["sha256"]
+            seen.add(storage_hash)
+            raw = raw_by_sha[storage_hash]
+            for offset in range(0, len(raw), CHUNK_BYTES):
+                self._remaining(deadline, "input_cache")
+                block = raw[offset:offset + CHUNK_BYTES]
+                compressed = zlib.compress(block, level=1)
+                encoding = "zlib" if len(compressed) < len(block) else "raw"
+                encoded = compressed if encoding == "zlib" else block
+                ack = receipt({"action": "input_chunk", "session_id": session_id,
+                    "manifest_hash": sha, "storage_hash": storage_hash, "offset": offset,
+                    "encoding": encoding, "data": base64.b64encode(encoded).decode("ascii")})
+                if ack.get("storage_hash") != storage_hash or type(ack.get("next_offset")) is not int or ack["next_offset"] != offset + len(block):
+                    self._input_unknown("input chunk offset/digest acknowledgement mismatch")
+                uploaded += len(block)
+                chunks += 1
+                wire_bytes += self._bytes_sent  # Actual complete JSON request bytes, not estimated.
+                encodings[encoding] += 1
+        receipt({"action": "input_commit", "session_id": session_id, "manifest_hash": sha})
+        self._remaining(deadline, "input_cache")
+        result = self._call_locked(dict(payload, inputs=dict(manifest, session_id=session_id)), deadline=deadline)
+        proof = result.get("input_transfer")
+        if (result.get("input_identity_unknown") or not isinstance(proof, dict)
+                or proof.get("protocol") != INPUT_CACHE_PROTOCOL or proof.get("session_id") != session_id
+                or proof.get("manifest_hash") != sha or proof.get("content_verified") is not True
+                or type(proof.get("storage_count")) is not int or proof["storage_count"] != len(manifest["storages"])
+                or type(proof.get("storage_bytes")) is not int or proof["storage_bytes"] != sum(r["bytes"] for r in manifest["storages"])):
+            self._input_unknown("candidate RPC input reference absent/mismatched")
+        result["input_transfer"] = dict(proof, uploaded_bytes=uploaded, uploaded_chunks=chunks,
+            uploaded_wire_bytes=wire_bytes, chunk_encodings=encodings,
+            reused_storages=len(expected_sizes) - len(seen))
+        return result
 
 
 class SSHExecutor(Backend):
@@ -781,6 +883,9 @@ class SSHExecutor(Backend):
     def _session_call(self, payload: dict) -> dict:
         return self._start_session().call(payload)
 
+    def _exact_inputs(self, inputs):
+        return prepare_inputs(inputs) if self._persistent and self.platform == "nvidia" else encode_json_inputs(inputs)
+
     def _cleanup_session_owner(self, sess, grace):
         if not sess.identity:
             return {"quiescent": False, "reason": "runner identity unavailable; no remote signal sent"}
@@ -955,7 +1060,7 @@ class SSHExecutor(Backend):
         if self.platform == "nvidia":
             # Exact L2 JSON/storage codecs are shared sources, before their consumer.
             files.extend((repo_root / "operator_agent" / name, f"{remote_dir}/{name}")
-                         for name in ("input_fidelity.py", "remote_input_fidelity.py"))
+                         for name in ("input_fidelity.py", "remote_input_fidelity.py", "session_inputs.py"))
             files.append((repo_root / "remote_scripts" / "session_control.py",
                           f"{remote_dir}/session_control.py"))
             files.extend((repo_root / "operator_agent" / name, f"{remote_dir}/{name}")
@@ -1279,7 +1384,7 @@ class SSHExecutor(Backend):
         try:
             # L2 must verify these values/layouts, not generated lookalikes. Keep
             # the legacy shape/seed protocol for L3 and unsupported XPU runners.
-            wire_inputs = (encode_json_inputs(inputs) if self.platform == "nvidia"
+            wire_inputs = (self._exact_inputs(inputs) if self.platform == "nvidia"
                            else self._serialize_inputs(inputs))
             if not self._deployed:
                 self.deploy()
@@ -1327,7 +1432,7 @@ class SSHExecutor(Backend):
                 self.deploy()
             return self._ssh_exec_json({
                 "action": "benchmark_with_baselines", "code": kernel_code,
-                "inputs": (encode_json_inputs(inputs) if reference_contract is not None
+                "inputs": (self._exact_inputs(inputs) if reference_contract is not None
                            else self._serialize_inputs(inputs)), "kernel_type": kernel_type,
                 "warmup": warmup, "repeat": repeat, "precision": precision,
                 "baseline_priority": list(baseline_priority or []),

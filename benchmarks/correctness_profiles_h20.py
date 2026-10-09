@@ -148,7 +148,7 @@ def compact_trace(trace):
     for item in trace:
         request = dict(item["request"])
         inputs = request.get("inputs")
-        if isinstance(inputs, dict) and "storages" in inputs:
+        if isinstance(inputs, dict) and "storages" in inputs and all(isinstance(s, str) for s in inputs["storages"]):
             request["inputs"] = {**inputs, "storages": [dict(encoded_bytes=len(s),
                 encoded_sha256=hashlib.sha256(s.encode("ascii")).hexdigest()) for s in inputs["storages"]]}
         rows.append({**item, "request": request})
