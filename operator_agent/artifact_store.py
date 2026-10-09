@@ -42,6 +42,13 @@ class ArtifactStore:
         artifact_dir = self.output_dir / kernel_type / hardware / dir_name
         artifact_dir.mkdir(parents=True, exist_ok=True)
 
+        # Immutable run sidecars must precede the final checkpoint. No blanket
+        # metadata serialization: this is a registered, independently checked key.
+        binding = (artifact.metadata or {}).get("run_binding")
+        if binding is not None:
+            from .run_contract import write
+            write(artifact_dir, binding)
+
         ext = self._lang_ext(language)
 
         # 1. 保存代码文件
@@ -103,6 +110,11 @@ class ArtifactStore:
         _stop = (artifact.metadata or {}).get("stop")
         if _stop:
             result_data["stop"] = _stop
+        if binding is not None:
+            result_data["run_binding"] = {k: binding["manifest"][k] for k in
+                ("schema", "run_id", "hash", "contract_hash", "workload_hash")}
+        if (artifact.metadata or {}).get("resume_audit") is not None:
+            result_data["resume_audit"] = artifact.metadata["resume_audit"]
         result_path = artifact_dir / "result.json"
         result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
 

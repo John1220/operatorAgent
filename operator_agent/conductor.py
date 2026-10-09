@@ -74,6 +74,7 @@ from .agent_runtime import (
 )
 from .failure_route import classify as classify_failure
 from ._harness_controls import enabled as harness_controls_enabled
+from . import run_contract
 
 
 # 生产运行必须在有限步长内重新校准量具；超大值只允许测试/benchmark
@@ -554,6 +555,9 @@ class Conductor:
         # 本次运行的环境指纹与漂移比较结果 (由 `_execute_inner` 填)。初值给空指纹:
         # `_flush_snapshot` 也可以在 `execute()` 之外被调到 (单测直接调它), 不该 AttributeError。
         self._environment: dict = {"fingerprint": {}, "drift": None}
+        self._run_binding = None
+        self._run_binding_dir = None
+        self._resume_candidate_once = False
 
     #: 循环出口的词汇表。**每个词都要有写者** —— 多一个没写者的词就是「算了没人读」的副本,
     #: `tests/test_stop_reason.py` 按差集钉这条。
@@ -1040,11 +1044,15 @@ class Conductor:
         default_results = None
         l2_runs = 0
         for i, cand in enumerate(finalists):
+            if self._run_binding is not None:
+                self._check_run_binding(task, input_sets)
             sel = self.verifier.verify(
                 cand, task=task, test_inputs=input_sets,
                 expected_output=expected_output,
                 stop_after=VerificationLevel.L2_FUNCTION,
             )
+            if self._run_binding is not None:
+                self._check_run_binding(task, input_sets)
             l2_runs += sum(1 for r in sel
                            if r.level is VerificationLevel.L2_FUNCTION)
             if any(not r.passed and (r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN
@@ -1103,6 +1111,11 @@ class Conductor:
         # 与水位线同一个理由: 一个 Conductor 实例可以跑多个任务, 落盘与打印的必须是
         # **本次**那一份, 不是「这个进程到现在为止」。
         self._reference_hold_rounds = 0
+        self._run_binding = None
+        self._run_binding_dir = None
+        self._resume_candidate_once = False
+        self._resume_status = None
+        self._environment = {"fingerprint": {}, "drift": None}
         # §10.2 的账本同理: 「这次运行花了多少次真值测量」跨任务累计会让第二个任务
         # 少花钱。起始时刻一起在这里取 —— 墙钟预算量的是**这一次运行**。
         self._budget = BudgetLedger(self.budget_plan)
@@ -1131,10 +1144,34 @@ class Conductor:
             operator=operator_name,
             hardware=hardware_name,
         ) as self._log_path:
-            return self._execute_inner(
-                task, test_inputs, expected_output, target_gflops,
-                resume_from=resume_from,
-            )
+            try:
+                return self._execute_inner(
+                    task, test_inputs, expected_output, target_gflops,
+                    resume_from=resume_from,
+                )
+            except run_contract.RunBindingError as exc:
+                return self._run_identity_hold(task, str(exc))
+
+    def _run_identity_hold(self, task, reason):
+        """Fail closed without generation, Fixer, remeasure or corpus writes."""
+        print(f"[Conductor] 冻结运行身份 unknown/HOLD: {reason}; 不从头重跑")
+        result = VerificationResult(level=VerificationLevel.L2_FUNCTION, passed=False,
+            message="冻结运行身份 unknown/HOLD: " + reason,
+            metrics={"run_identity_unknown": True, "correctness": {"verdict": "unknown"},
+                     "eligibility": {k: False for k in
+                         ("can_verdict", "can_tune", "can_persist", "can_report", "can_count_progress")}})
+        artifact = KernelArtifact(task_id=task.task_id, language=task.target.dsl,
+                                  verification_results=[result])
+        artifact.resume_status = self._resume_status
+        artifact.environment_fingerprint = self._environment.get("fingerprint")
+        artifact.environment_drift = self._environment.get("drift")
+        # A HOLD report is not a resumable checkpoint and never overwrites its
+        # source. Failure to write the report is explicit, not a restart.
+        try:
+            artifact.saved_dir = str(self.store.save(artifact, task))
+        except (OSError, ValueError, TypeError) as exc:
+            artifact.metadata = {"hold_report_error": type(exc).__name__}
+        return artifact
 
     def _execute_inner(
         self,
@@ -1167,6 +1204,50 @@ class Conductor:
         if preflight is not None:
             return KernelArtifact(task_id=task.task_id, language=task.target.dsl,
                                   verification_results=[preflight])
+        self._run_inputs = input_sets
+        try:
+            self._run_controls = {
+                "target_gflops": float(target_gflops),
+                "heartbeat_interval": self.heartbeat_interval,
+                "expected_output": (run_contract.describe_inputs({"expected": expected_output})
+                                    if expected_output is not None else None),
+            }
+        except (ValueError, TypeError) as exc:
+            raise run_contract.RunBindingError("unbound expected output/control: " + type(exc).__name__) from exc
+        snap_path, snap_scan = self._resolve_snapshot_path(resume_from)
+        resume_status = {"requested": bool(resume_from), "status": "not_requested",
+                         "root": snap_scan["root"], "candidates": snap_scan["candidates"],
+                         "unreadable": snap_scan["unreadable"]}
+        self._resume_status = resume_status
+        snap = None
+        if resume_from:
+            if snap_scan["unreadable"] and not os.path.exists(resume_from):
+                resume_status["status"] = "ambiguous_lookup"
+                raise run_contract.RunBindingError("task_id 检索含不可读记录，请指定明确的快照路径")
+            if not snap_path:
+                resume_status["status"] = "no_snapshot"
+                raise run_contract.RunBindingError("没有 task_id 匹配的完整快照")
+            resume_status["path"] = os.path.basename(snap_path)
+            try:
+                # Keep parse failures distinguishable from integrity failures.
+                raw = self._load_snapshot(snap_path)
+            except (OSError, ValueError, TypeError) as exc:
+                resume_status.update(status="unreadable_snapshot", reason=type(exc).__name__,
+                    size_bytes=os.path.getsize(snap_path) if os.path.exists(snap_path) else None)
+                raise run_contract.RunBindingError("快照加载失败: " + type(exc).__name__) from exc
+            if raw.get("task_id") != task.task_id:
+                resume_status.update(status="task_mismatch", snapshot_task_id=raw.get("task_id"))
+                raise run_contract.RunBindingError("快照 task_id 与当前任务不一致")
+            try:
+                snap, self._run_binding = run_contract.load_checkpoint(
+                    snap_path, task, input_sets, self._run_controls)
+            except run_contract.RunBindingError:
+                resume_status["status"] = "identity_mismatch"
+                raise
+            if snap["round_done"] >= self.max_optimize_rounds:
+                resume_status["status"] = "no_remaining_rounds"
+                raise run_contract.RunBindingError("没有剩余轮次；旧通过结果不能重新晋级")
+            self._run_binding_dir = str(Path(snap_path).parent)
         if task.constraints.reference_contract is not None:
             # Freeze/bind BEFORE Router, provisioning, Designer or Coder. A
             # missing execution identity is a harness hold, never an LLM fix.
@@ -1216,10 +1297,6 @@ class Conductor:
             )
             return artifact
 
-        # Step 1: 路由决策 (多特征: 复杂度/融合算子/DSL 能力/历史命中)
-        route = self.router.route(task, self.kernel_db)
-        print(f"\n[Router] 路由决策: {route.value}")
-
         # Step 1.5: 远程环境前置自检 (缺依赖自动配置/列出清单)
         # 能力判断而不是 `hasattr`: 可选方法在 Backend 基类上恒存在 (一调就抛),
         # 于是 hasattr 恒为真 —— 那正是 doc 49 §3.2 那一类静默 no-op 的温床。
@@ -1260,6 +1337,9 @@ class Conductor:
         # label 带模板后缀, 而换模板壳是**候选来源**变化, 不是执行环境变化 —— 拿 label
         # 进指纹会让每个新组合后端首跑都被判「环境漂移」(degraded, can_persist=False)。
         fingerprint = fingerprint_of(hw_info, self.backend.fingerprint_label)
+        for key in ("selected_gpu", "driver_version", "cuda_version", "gpu_uuid"):
+            if key in hw_info:
+                fingerprint[key] = hw_info[key]
         # 挂在实例上而不是加到 `_flush_snapshot` 的 12 个形参里: 它在一次运行内是常量,
         # 而 `_flush_snapshot` 有 7 个调用点 (与 `capture_execution` 写 `self._log_path`
         # 同一种「本次运行的上下文」)。`execute()` 不是可重入的。
@@ -1267,12 +1347,37 @@ class Conductor:
         if fingerprint:
             print(f"  环境指纹: {fingerprint}")
 
+        try:
+            if self._run_binding is None:
+                self._run_binding = run_contract.create(task, input_sets, fingerprint,
+                                                       self._run_controls)
+                # UUID avoids task_id / seconds collisions; contract is durable
+                # before routing, retrieval persistence or any agent generation.
+                self._run_binding_dir = str(self.store.output_dir /
+                    (task.source.kernel_type or "operator") / (task.target.hardware or "unknown") /
+                    ("snap_" + self._run_binding["manifest"]["run_id"]))
+            else:
+                drift = compare_fingerprints(fingerprint,
+                    self._run_binding["manifest"]["environment"], "断点续跑的快照")
+                self._environment["drift"] = drift.as_dict()
+            run_contract.check_current(self._run_binding, task, input_sets, fingerprint,
+                                       self._run_controls)
+            run_contract.write(self._run_binding_dir, self._run_binding)
+        except (OSError, ValueError, TypeError) as exc:
+            if resume_from:
+                resume_status["status"] = "identity_mismatch"
+            raise run_contract.RunBindingError(str(exc)) from exc
+
+        route = self.router.route(task, self.kernel_db)
+        print(f"\n[Router] 路由决策: {route.value}")
+
         # ── 可复现性 Harness: 初始化优化循环的可变状态 ──
         # Step 2: Designer 生成 Sketch (非续跑时才调用 LLM)
         artifact = KernelArtifact(
             task_id=task.task_id,
             language=task.target.dsl,  # python | triton | ...
         )
+        artifact.metadata = {"run_binding": self._run_binding}
         all_verification_results = []
         current_sketch = None
         current_code = ""
@@ -1299,72 +1404,34 @@ class Conductor:
         current_recipes_text: str = ""         # 当前轮次注入 Coder 的配方文本
         plan = None                            # 当前轮次的优化计划
         start_round: int = 1                   # 从第 1 轮开始 (续跑时会调整)
-        snapshot_target_dir: Optional[str] = None  # 快照写入目录 (由 ArtifactStore 确定, 或 resume_from)
+        snapshot_target_dir: Optional[str] = self._run_binding_dir
 
-        # ── 可复现性 Harness: 若提供 resume_from 则加载快照恢复状态 ──
-        snap_path, snap_scan = self._resolve_snapshot_path(resume_from)
-        snap_fingerprint: Optional[dict] = None
-        # 续跑的结局要是一条**能落盘的账**, 不是一行 print。「请求了续跑但没续上」与
-        # 「压根没请求」在 stdout 消失之后长得一样, 而代价差着好几轮 LLM 与 GPU。
-        # (2026-09-29 实测: 一份写到一半崩的快照让一次续跑从 1 次 LLM 调用变成 4 次。)
-        resume_status = {"requested": bool(resume_from), "status": "not_requested",
-                         "root": snap_scan["root"], "candidates": snap_scan["candidates"],
-                         "unreadable": snap_scan["unreadable"]}
-        if resume_from:
-            if not snap_path:
-                # 「找不到」与「找到但读不动」分开写: 前者是缺证据, 后者是有一条坏记录在那儿,
-                # 处置方式完全不同 (前者可以问用户要目录, 后者该去查是谁把文件写坏的)。
-                resume_status["status"] = "no_snapshot"
-                print(f"\n[Conductor] ⚠️ 请求续跑 (resume_from={resume_from}), 但在 {snap_scan['root']} "
-                      f"下没有 task_id 匹配的完整快照 (候选 {snap_scan['candidates']} 个, "
-                      f"其中 {snap_scan['unreadable']} 个读不动) —— 本次从头开始")
-            else:
-                resume_status["path"] = os.path.basename(snap_path)
-                try:
-                    snap = self._load_snapshot(snap_path)
-                except Exception as e:
-                    # 只存异常类名与文件大小: `str(e)` 可能带路径, 而 result.json 会被搬走
-                    resume_status.update(status="unreadable_snapshot",
-                                         reason=type(e).__name__,
-                                         size_bytes=os.path.getsize(snap_path)
-                                         if os.path.exists(snap_path) else None)
-                    print(f"\n[Conductor] ⚠️ 快照加载失败，改为从头开始: "
-                          f"{type(e).__name__}: {e}")
-                    snap = None
-                if snap:
-                    # 基本一致性校验 (task id 必须匹配)
-                    if snap.get("task_id") and snap["task_id"] != task.task_id:
-                        resume_status["status"] = "task_mismatch"
-                        resume_status["snapshot_task_id"] = snap["task_id"]
-                        print(f"[Conductor] ⚠️ 快照 task_id={snap['task_id']} 与当前 task.task_id={task.task_id} 不一致，"
-                              f"视为快照无效，从头开始。")
-                    else:
-                        (start_round, current_sketch, current_code,
-                         pending_fix, artifact.iteration_history,
-                         best_gflops, rounds_without_improvement,
-                         optimization_history, applied_recipes, disabled_recipes,
-                         all_verification_results) = self._restore_state_from_snapshot(snap, task)
-                        # 已验证祖先不在快照的字段里, 但**可以从血缘的最后一条重建**
-                        # (`levels_passed` 每轮都存了, 而快照的 `current_code` 就是那一轮那份)。
-                        # 重建不出来时是 None ⇒ 续跑后的第一次修复退回今天的形状, 不猜祖先。
-                        verified_parent = verified_parent_from(
-                            artifact.iteration_history, current_code)
-                        if verified_parent is not None:
-                            verified_parent_round = int(
-                                (artifact.iteration_history[-1] or {}).get("round") or 0)
-                        # 快照目录就是续跑写入目录
-                        snapshot_target_dir = os.path.dirname(snap_path)
-                        snap_fingerprint = snap.get("environment_fingerprint") or None
-                        resume_status.update(status="resumed",
-                                             round_restored=start_round - 1,
-                                             dir_name=os.path.basename(
-                                                 os.path.dirname(snap_path)))
-                        print(f"\n[Conductor] 🔄 断点续跑: 已恢复到完成 {start_round-1} 轮, "
-                              f"best_gflops={best_gflops:.2f}, 当前从轮次 {start_round} 开始")
-                        if pending_fix:
-                            print(f"  有 pending_fix ({len(pending_fix)} chars), 下一轮直接用修复代码")
-                        if current_sketch:
-                            artifact.sketch = current_sketch
+        # File consistency has already been checked before any backend work.
+        snap_fingerprint = None
+        if snap is not None:
+            (start_round, current_sketch, current_code,
+             pending_fix, old_history, old_best, old_stagnation,
+             old_optimization, old_applied, old_disabled,
+             old_results) = self._restore_state_from_snapshot(snap, task)
+            if not (pending_fix or current_code):
+                resume_status["status"] = "identity_mismatch"
+                raise run_contract.RunBindingError("恢复状态没有候选，不允许自动重新生成")
+            # Old observations are audit data, not today's tuning/promote
+            # credentials. Fresh L1/L2/L3 is mandatory even for the same source.
+            artifact.metadata["resume_audit"] = {
+                "round_done": snap["round_done"], "best_gflops": old_best,
+                "iteration_history": old_history,
+                "verification_results": snap["verification_results"],
+                "evidence_scope": "previous_process_audit_only",
+            }
+            pending_fix = pending_fix or current_code
+            self._resume_candidate_once = True
+            snap_fingerprint = snap.get("environment_fingerprint")
+            resume_status.update(status="resumed", round_restored=start_round - 1,
+                dir_name=os.path.basename(os.path.dirname(snap_path)),
+                evidence="fresh_verification_required")
+            print(f"[Conductor] 断点续跑: 恢复候选，轮次 {start_round}; 旧验证仅作审计")
+            artifact.sketch = current_sketch
         artifact.resume_status = resume_status
 
         # ── 环境漂移自检 (doc 49 §3.5 第 1 处) ────────────────────────────────
@@ -1811,6 +1878,8 @@ class Conductor:
         # ── §10.2 的两道预算门在最前面 (位置是判据的一部分), 见 _round_enter_or_stop ──
         if self._round_enter_or_stop(state, round_num) is _ROUND_STOP:
             return _ROUND_STOP
+        if self._run_binding is not None:
+            self._check_run_binding(state.task, state.input_sets)
 
         # ── §12 模板型后端: 本轮的候选来自**参数空间**, 不走 LLM/Coder ──
         # 位置与预算门同级 (轮次最前面): 候选的**来源**决定这一轮怎么花钱, 所以
@@ -1847,7 +1916,7 @@ class Conductor:
         # 记录被擦成 None (产物里每一轮都是 `selection: null`, 用例红了才发现)。
         _round_selection = None
         _draw = explore_draw(state._selection_seed, round_num)
-        if _space is not None:
+        if _space is not None and not self._resume_candidate_once:
             # §10.3 的选择: 候选 = 参数空间的点。`allowed` 是「还有计划格子的相位」
             # (分相预算) —— 它**约束**这一轮是探索还是精修, 于是 55%/30% 那个计划
             # 真的体现在花的钱上, 而不只是一行注释。
@@ -1936,6 +2005,9 @@ class Conductor:
             _model_envelope = self._pending_action_envelope
             self._pending_action_envelope = None
             action = "fix"
+            if self._resume_candidate_once:
+                action = "resume"
+                self._resume_candidate_once = False
             print(f"\n[Conductor] 使用 Fixer 修复后的代码重新验证...")
         elif template_choice is not None:
             # §12: 模板候选的源码**来自实例化器**, 不经 LLM/Coder (§12 的
@@ -1982,6 +2054,10 @@ class Conductor:
                 optimization_recipes=current_recipes_text,
                 test_inputs=state.test_inputs,
             )
+            # Multi-finalist selection runs real L1/L2 before the main
+            # verification block; it must not bypass this generation gate.
+            if self._run_binding is not None:
+                self._check_run_binding(state.task, state.input_sets)
 
             # ---- P1-1 候选选择: compile-gate 只定了决赛名单, 真机 L1+L2 定胜负 ----
             # 必须紧跟本轮流水的 coder.run 读名单: `last_finalists` 跨轮残留,
@@ -2096,6 +2172,8 @@ class Conductor:
         # 与 §10.2 的墙钟预算同一个货币 (同一个进程、同一个 `time.monotonic()`),
         # 于是「这一轮把秒换成数字花了多少」与预算拦人的口径是同一个。它不是卡上时间。
         _meas_started = time.monotonic()
+        if self._run_binding is not None:
+            self._check_run_binding(state.task, state.input_sets)
         if not _action_verdict.accepted:
             # 上一段已经把 `verify_results` 设成那条拒绝结果 —— 这里**不许**再碰
             # 后端 (心跳也不跑: 这一轮没有任何「把时间换成数字」的动作)。
@@ -2138,6 +2216,9 @@ class Conductor:
                     heartbeat_expected=heartbeat_expected,
                 )
         state.all_verification_results = verify_results
+        if self._run_binding is not None:
+            self._check_run_binding(state.task, state.input_sets)
+            self._bind_results(verify_results, state.current_code)
 
         # P1-1 成本记账 (续): 非选择路径的 L2 次数直接从这一轮的验证结果里数 ——
         # L2 挂了就早退没有 L3, 所以「结果里有没有 L2」就是「L2 跑没跑」。
@@ -2817,7 +2898,7 @@ class Conductor:
             ) if state.artifact.iteration_history else 0,
             current_sketch=state.current_sketch,
             current_code=state.current_code,
-            pending_fix=None,  # 循环结束就没有 pending 了
+            pending_fix=state.pending_fix,  # Last-round repair is still resumable.
             iteration_history=state.artifact.iteration_history,
             best_gflops=state.best_gflops,
             rounds_without_improvement=state.rounds_without_improvement,
@@ -2839,6 +2920,8 @@ class Conductor:
             # 生产者与消费者 (下面 `_save_to_db` 里那道门) 成对存在, 所以无条件要求不是
             # 「一律拒」: 先补一次独立重测, 再由判据读它。
             self._produce_remeasure(state.artifact, state.task, state.input_sets, state.target_gflops)
+            if self._run_binding is not None:
+                self._check_run_binding(state.task, state.input_sets)
             self._save_to_db(state.artifact, state.task)
 
         # ── 报告产物 (设计 §17 第 3 条) ──
@@ -2965,6 +3048,26 @@ class Conductor:
 
     SNAPSHOT_NAME = "execution_snapshot.json"
 
+    def _check_run_binding(self, task, inputs):
+        try:
+            run_contract.check_current(self._run_binding, task, inputs,
+                                       self._environment["fingerprint"], self._run_controls)
+            run_contract.write(self._run_binding_dir, self._run_binding)
+        except (OSError, ValueError, TypeError) as exc:
+            raise run_contract.RunBindingError(str(exc)) from exc
+
+    def _bind_results(self, results, code):
+        m = self._run_binding["manifest"]
+        import uuid
+        verification_id = uuid.uuid4().hex
+        for result in results:
+            result.metrics["run_binding"] = {"run_id": m["run_id"],
+                "manifest_hash": m["hash"], "contract_hash": m["contract_hash"],
+                "workload_hash": m["workload_hash"],
+                "protocol_hash": run_contract.digest(m["measurement_protocol"]),
+                "candidate_hash": run_contract.code_hash(code),
+                "verification_id": verification_id}
+
     def _resolve_snapshot_path(self, resume_from: Optional[str]) -> tuple:
         """把 `resume_from` (快照文件 / artifact 目录 / task_id) 解析成快照路径。
 
@@ -3004,7 +3107,11 @@ class Conductor:
             if not isinstance(data, dict) or data.get("task_id") != resume_from:
                 continue
             scan["candidates"] += 1
-            key = (int(data.get("round_done") or 0), path.stat().st_mtime)
+            try:
+                key = (int(data.get("round_done") or 0), path.stat().st_mtime)
+            except (OSError, ValueError, TypeError):
+                scan["unreadable"] += 1
+                continue
             if best_key is None or key > best_key:
                 best_key, best_path = key, str(path)
         return best_path, scan
@@ -3099,6 +3206,13 @@ class Conductor:
         try:
             os.makedirs(target_dir, exist_ok=True)
             path = os.path.join(target_dir, "execution_snapshot.json")
+            if self._run_binding is not None:
+                self._check_run_binding(task, self._run_inputs)
+                run_contract.write(target_dir, self._run_binding)
+                snap = run_contract.audit_value(snap)
+                run_contract.seal(snap, self._run_binding)
+                run_contract.atomic_json(path, snap)
+                return target_dir
             # **先写临时文件再 `os.replace`**。原先是 `open(path,"w")` 直接覆写: 那个 open
             # 当场把文件截成 0 字节, 于是一次崩溃/磁盘满就留下一份截断 JSON, 而下一次的
             # 读取侧把「读不出」当成「没有快照」从头重跑 (真机量测: 一次续跑从 1 次 LLM
@@ -3114,6 +3228,8 @@ class Conductor:
                     os.remove(tmp)
             return target_dir
         except Exception as e:
+            if self._run_binding is not None:
+                raise run_contract.RunBindingError("checkpoint write failed: " + type(e).__name__) from e
             # 快照写入失败绝不能打断主任务 — Harness 是旁路
             print(f"  [Snapshot] ⚠️ 快照写入失败, 忽略: {type(e).__name__}: {e}")
             return artifact_dir
@@ -3122,6 +3238,8 @@ class Conductor:
     def _load_snapshot(path: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("snapshot must be a JSON object")
         if data.get("schema_version") != 1:
             raise ValueError(f"不支持的 snapshot schema_version={data.get('schema_version')}")
         return data
@@ -3187,6 +3305,13 @@ class Conductor:
         `independent=True` 声称的只是前者。
         """
         from .confirm import ConfirmRecord
+        if self._run_binding is not None:
+            self._check_run_binding(task, input_sets)
+            for result in artifact.verification_results:
+                receipt = result.metrics.get("run_binding") or {}
+                if (receipt.get("candidate_hash") != run_contract.code_hash(artifact.code)
+                        or receipt.get("manifest_hash") != self._run_binding["manifest"]["hash"]):
+                    raise run_contract.RunBindingError("confirmation candidate/evidence mismatch")
         metrics_1 = artifact.benchmark_data or {}
         # 重测也是一条 L3 读数, 所以同样过尺子检查 —— 否则「决定永久记忆的那一次测量」
         # 恰好是唯一没被检查过的那一次。到期就用本层的判据 (不额外计数: 循环已结束,
@@ -3205,15 +3330,22 @@ class Conductor:
                 # 它比任何别的读数都更需要说清"这份核验过正确性", 而不是靠它当初
                 # 为什么会被记下来这个上下文。
                 correctness_verified=_correctness_credential(artifact.verification_results))
+            if self._run_binding is not None:
+                self._check_run_binding(task, input_sets)
+                self._bind_results(results, artifact.code)
             # §10.2 的「最后 10% 不可挪用」: 这一次重测花的是**预留**那一格。记账放在
             # 调用之后 (它已经花了机时), 而且花的是 confirm —— 非 confirm 的开销碰不到它。
             self._budget.oracle_spend("confirm")
             second = results[0] if results else None
+        except run_contract.RunBindingError:
+            raise
         except Exception as exc:  # noqa: BLE001 — 重测没跑成也是一种结论, 不许静默补 True
             second = None
             print(f"[Confirm] 重测没跑成: {type(exc).__name__}: {exc}")
         m2 = ((getattr(second, "metrics", None) or {}) if second is not None else {})
         obs2 = m2.get("observation") or {}
+        if self._run_binding is not None and second is not None:
+            artifact.metadata["remeasure_binding"] = m2.get("run_binding")
         # `ok` 的含义是「这次重测本身是一条可用读数」, 不是「它赢了基线」—— 后者由
         # `confirm_persist` 的 speedup 门槛判, 两件事混在一个布尔里就无从诊断。
         # 尺子坏了的窗口里的读数**不能当确认**: 与 `admit_to_corpus` 对「该窗口内所有
@@ -3241,6 +3373,15 @@ class Conductor:
             # 这个字段就是能证明它的东西 (见 `confirm_persist` 的同一性判据)。
             contract_hash=str(m2.get("contract_hash") or ""),
         )
+        if self._run_binding is not None:
+            from dataclasses import asdict
+            try:
+                run_contract.atomic_json(Path(artifact.saved_dir) / "confirmation.json",
+                    run_contract.audit_value({"first_binding": metrics_1.get("run_binding"),
+                        "second_binding": m2.get("run_binding"),
+                        "confirmation": asdict(artifact.remeasure), "second_metrics": m2}))
+            except (OSError, ValueError, TypeError) as exc:
+                raise run_contract.RunBindingError("confirmation evidence write failed: " + type(exc).__name__) from exc
         first = metrics_1.get("speedup_vs_baseline")
         print(f"[Confirm] 独立重测: "
               f"首次 {first if first is not None else 'n/a'}x → "

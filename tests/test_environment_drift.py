@@ -457,15 +457,16 @@ class TestConductorPersistsAndCompares(unittest.TestCase):
             resumed, out = _run_conductor(_VersionedMockGPU(torch_version="2.15.0"),
                                           task, d, rounds=2,
                                           resume_from=first.saved_dir)
-            self.assertIn("断点续跑", out)
+            self.assertIn("unknown/HOLD", out)
             self.assertTrue(resumed.environment_drift["drifted"])
             self.assertIn("断点续跑的快照", resumed.environment_drift["previous_from"])
             self.assertIn("torch_version", " ".join(resumed.environment_drift["changed"]))
-            self.assertEqual(Validity.DEGRADED.value,
-                             resumed.benchmark_data["measurement_validity"])
+            self.assertTrue(resumed.verification_results[0].metrics["run_identity_unknown"])
+            self.assertEqual("identity_mismatch", resumed.resume_status["status"])
+            self.assertFalse(resumed.benchmark_data)
 
-    def test_a_snapshot_without_a_fingerprint_falls_back_to_the_artifact_store(self):
-        """旧快照没这个键 ⇒ 回落到产物库, 而不是把「无从比较」读成「没漂移」"""
+    def test_a_snapshot_without_a_fingerprint_holds_without_store_fallback(self):
+        """缺恢复证据不能借另一条产物的指纹补齐。"""
         with tempfile.TemporaryDirectory() as d:
             task = _task("oldsnap", min_speedup=5.0)
             first, _ = _run_conductor(_VersionedMockGPU(), task, d, rounds=1)
@@ -476,10 +477,10 @@ class TestConductorPersistsAndCompares(unittest.TestCase):
             snap_path.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
             resumed, out = _run_conductor(_VersionedMockGPU(), task, d, rounds=2,
                                           resume_from=first.saved_dir)
-            self.assertNotIn("断点续跑的快照", resumed.environment_drift["previous_from"])
-            self.assertTrue(resumed.environment_drift["comparable"])
-            self.assertFalse(resumed.environment_drift["drifted"])
-            self.assertIn("上一次运行的产物", out)
+            self.assertTrue(resumed.verification_results[0].metrics["run_identity_unknown"])
+            self.assertEqual("identity_mismatch", resumed.resume_status["status"])
+            self.assertIsNone(resumed.environment_drift)
+            self.assertNotIn("上一次运行的产物", out)
 
 
 if __name__ == "__main__":

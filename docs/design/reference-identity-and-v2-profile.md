@@ -3,6 +3,10 @@
 日期：2026-10-08。接续 [独立标定](fp16-layernorm-calibration.md)。
 这是窄范围 profile 的准入闭环，不代表全域正确性、全部设备支持或性能收益。
 
+后续实现：[持久化冻结契约与恢复校验](durable-run-contract-and-resume.md)。
+下文第 4、7 节保留当时提交范围/验收记录；当前生产已新增 contract.json、run manifest、
+sealed snapshot 和失败关闭 resume，旧验证结果不再直接作为恢复后的晋级证据。
+
 ## 1. 决策与兼容性
 
 量尺选择：**与指定 CUDA native PyTorch 的数值行为一致**，不是用数学零值、

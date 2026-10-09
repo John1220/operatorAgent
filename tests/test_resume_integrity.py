@@ -143,12 +143,13 @@ class TestTornCheckpointIsNeverInvisible(unittest.TestCase):
                              f"只该存异常类名 (str(e) 可能带路径): {status}")
             self.assertEqual(head_bytes, status.get("size_bytes"),
                              "落盘字节数就是那次崩溃的形状, 不存它等于没证据")
-            self.assertIn("从头", out)
+            self.assertIn("不从头重跑", out)
             # 从产物里读回来: 单测读内存对象看不见落盘边界 (doc 49 §7.9 那条教训)
             result = json.loads((Path(resumed.saved_dir) / "result.json")
                                 .read_text(encoding="utf-8"))
             self.assertEqual("unreadable_snapshot", result["resume"]["status"])
-            self.assertGreater(calls, 1, "没续上就是从第 1 轮重跑, 这条断言钉住代价可见")
+            self.assertEqual(calls, 0, "无效恢复必须 HOLD，不能默默从头烧 LLM")
+            self.assertTrue(resumed.verification_results[0].metrics["run_identity_unknown"])
 
     def test_truncation_at_every_boundary_is_either_whole_or_loud(self):
         """属性式扫描: 任何截断长度上, 要么完整恢复, 要么显式判定读不动
