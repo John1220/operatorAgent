@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Union
+from .eligibility import decision_speedup
 from .schemas import (
     TaskSchema, RouteType, VerificationLevel, VerificationResult,
     UnifiedSketch, KernelArtifact,
@@ -1715,7 +1716,7 @@ class Conductor:
                           cost_s=_measure_s if l3_result is not None else None)
             perf_data = {
                 "gflops": l3_result.metrics.get("gflops", 0),
-                "speedup": l3_result.metrics.get("speedup_vs_baseline", 0),
+                "speedup": (decision_speedup(l3_result.metrics) or 0),
                 "target_speedup": state.task.constraints.min_speedup,
                 "bound_type": l3_result.metrics.get("bound_type", "unknown"),
                 "avg_time_ms": l3_result.metrics.get("avg_time_ms", 0),
@@ -2306,7 +2307,7 @@ class Conductor:
             "gflops": l3_result.metrics.get("gflops") if l3_result else None,
             # 加速比同理: `benchmark_data` 只有最后一轮的, 而「逐轮到底有没有在变快」
             # 这个问句需要每一轮的读数
-            "speedup": (l3_result.metrics.get("speedup_vs_baseline")
+            "speedup": (decision_speedup(l3_result.metrics)
                         if l3_result else None),
             # 档位进血缘是为了让「有多少轮的读数有资格驱动闭环」可以离线统计,
             # 而不必重跑一遍才知道那次循环是不是全程都在盲跑
@@ -2533,7 +2534,7 @@ class Conductor:
                     _perm["stagnation_counted"] = True
             else:
                 # gflops 不可用: 用速度比或时间判断
-                speedup = l3_result.metrics.get("speedup_vs_baseline", 0)
+                speedup = (decision_speedup(l3_result.metrics) or 0)
                 # 首轮同样无基线可比, 不禁用配方 (与上面 gflops 分支同理)
                 if round_num < 2 or (speedup > 0 and speedup < 1.0):
                     # 无 gflops 参考时禁用配方等于拿噪声做永久决策，跳过避免死锁
@@ -2953,6 +2954,13 @@ class Conductor:
             if self._run_binding is not None:
                 self._check_run_binding(state.task, state.input_sets)
             self._save_to_db(state.artifact, state.task)
+        elif state.artifact.benchmark_data:
+            self._publish_decision(state.artifact, state.task)
+            from .corpus_admission import publish
+            state.artifact.metadata["corpus_admission"] = dict(kept=False, status="not_qualified",
+                reason="L3 workload/correctness gate did not pass")
+            publish(state.artifact.saved_dir, state.artifact.metadata["corpus_admission"],
+                    state.artifact.benchmark_data["claim_level"], state.artifact.benchmark_data)
 
         # ── 报告产物 (设计 §17 第 3 条) ──
         # 位置是刻意的: **必须在 `store.save()` 与 `_save_to_db()` 之后**。前者给出产物
@@ -3393,9 +3401,12 @@ class Conductor:
             reason = "重测不可用: " + ", ".join(bits)
         else:
             reason = str(getattr(second, "message", "") or "")
+        from .workload import confirmation_evidence
         artifact.remeasure = ConfirmRecord(
             ok=usable,
-            speedup=m2.get("speedup_vs_baseline"),
+            speedup=decision_speedup(m2),
+            performance_basis=(m2.get("performance_verdict") or {}).get("basis", ""),
+            workload_evidence=confirmation_evidence(m2),
             validity=str(m2.get("measurement_validity") or ""),
             reason=reason,
             independent=True,
@@ -3412,7 +3423,7 @@ class Conductor:
                         "confirmation": asdict(artifact.remeasure), "second_metrics": m2}))
             except (OSError, ValueError, TypeError) as exc:
                 raise run_contract.RunBindingError("confirmation evidence write failed: " + type(exc).__name__) from exc
-        first = metrics_1.get("speedup_vs_baseline")
+        first = decision_speedup(metrics_1)
         print(f"[Confirm] 独立重测: "
               f"首次 {first if first is not None else 'n/a'}x → "
               f"重测 {artifact.remeasure.speedup if artifact.remeasure.speedup is not None else 'n/a'}x "
@@ -3515,9 +3526,6 @@ class Conductor:
         「三级验证都点了通过」, 而缺口 1 的真机数据证明那个通过可以是被 launch 地板
         或邻居抢占造出来的 (doc 31/32/33)。一次侥幸读数不能变成永久真理。
         """
-        from .contract import freeze_from_task
-        from .eligibility import (aggregate_speedup, case_speedups, implementation_decision,
-                                  regression_over_limit, required_cases_ok)
         from .kernel_db import KernelRecord
         from .oracle import admit_to_corpus
         from . import corpus_admission as admissions
@@ -3552,7 +3560,7 @@ class Conductor:
             performance=metrics.get("gflops", 0),
             tags=[task.source.kernel_type, "verified", f"v{artifact.sketch.version if artifact.sketch else 1}"],
             compile_info=artifact.compile_info,
-            score=float(metrics.get("speedup_vs_baseline") or 0.0),
+            score=float(decision_speedup(metrics) or 0.0),
             measurement_validity=str(metrics.get("measurement_validity") or ""),
         )
         # 「有没有进语料 + 为什么」以前只 print 一次就没了, 于是同一份产物里
@@ -3588,6 +3596,38 @@ class Conductor:
         final = claim.as_dict()
         artifact.metadata["claim_level"] = final
         metrics["claim_level"] = final
+        self._publish_decision(artifact, task, claim)
+        if artifact.saved_dir:
+            try:
+                if request is not None:
+                    admissions.finish(artifact.saved_dir, request, self.kernel_db, commit, final, metrics)
+                else:
+                    admissions.publish(artifact.saved_dir, artifact.metadata["corpus_admission"], final, metrics)
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                # The journal remains authoritative. A crash/publication error
+                # cannot undo its commit; explicit recovery reconciles files.
+                artifact.metadata["corpus_admission"]["publication_error"] = f"{type(exc).__name__}: {exc}"
+        if not keep:
+            print(f"[KernelDB] 未入库 (只留在本次进程): {reason}")
+            self.kernel_db.add(record)
+            return False
+        if not persisted:
+            print(f"[KernelDB] 未确认落盘: {artifact.metadata['corpus_admission']['reason']}")
+            return False
+        print(f"[KernelDB] 已入库并落盘 ({commit.status}): {reason}")
+        return True
+
+    def _publish_decision(self, artifact, task, claim=None):
+        from .contract import freeze_from_task
+        from .eligibility import (aggregate_speedup, case_speedups, implementation_decision,
+                                  regression_over_limit, required_cases_ok)
+        metrics = artifact.benchmark_data or {}
+        if not metrics:
+            return
+        claim = claim or self._claim_level_for(artifact, task, metrics)
+        if "claim_level" not in metrics:
+            metrics["claim_level"] = claim.as_dict()
+            artifact.metadata["claim_level"] = claim.as_dict()
         # §6.2 条款 2/3 的两条证据：**逐 run 可判**（I92 之前恒 `None` —— 契约里既没有
         # `required_cases` 也没有 `max_regression`，也没有「本次评了哪一条 case」的账）。
         # 契约从**同一个任务**重新冻结（哈希不一致就不拿新判据去判旧读数），两条证据由
@@ -3631,29 +3671,20 @@ class Conductor:
             notes = tuple(rco_why) + tuple(rol_why)
         # §17.1 的实现裁决：推导只有一处（`eligibility.implementation_decision`），这里只把
         # 这次运行手上**有**的证据摊进去（见 CHECKLOG I91 / I92）。
+        verdict = metrics.get("performance_verdict") or {}
+        performance_ok = verdict.get("passed") is True if verdict else None
+        if contract.case_weights or contract.aggregate:
+            from .confirm import confirm_metrics
+            confirmed, confirmation_reason = confirm_metrics(metrics, artifact.remeasure,
+                min_speedup=float(task.constraints.min_speedup if task.constraints.min_speedup is not None else 1.0))
+            performance_ok = ((metrics.get("performance_verdict") or {}).get("passed") is True
+                              and confirmed)
+            if not confirmed:
+                notes += (confirmation_reason,)
         metrics["implementation_decision"] = implementation_decision(
             eligibility=metrics.get("eligibility"), claim_record=claim,
             required_cases_ok=rco, regression_over_limit=rol,
-            evidence_notes=notes).as_dict()
-        if artifact.saved_dir:
-            try:
-                if request is not None:
-                    admissions.finish(artifact.saved_dir, request, self.kernel_db, commit, final, metrics)
-                else:
-                    admissions.publish(artifact.saved_dir, artifact.metadata["corpus_admission"], final, metrics)
-            except (OSError, ValueError, TypeError, KeyError) as exc:
-                # The journal remains authoritative. A crash/publication error
-                # cannot undo its commit; explicit recovery reconciles files.
-                artifact.metadata["corpus_admission"]["publication_error"] = f"{type(exc).__name__}: {exc}"
-        if not keep:
-            print(f"[KernelDB] 未入库 (只留在本次进程): {reason}")
-            self.kernel_db.add(record)
-            return False
-        if not persisted:
-            print(f"[KernelDB] 未确认落盘: {artifact.metadata['corpus_admission']['reason']}")
-            return False
-        print(f"[KernelDB] 已入库并落盘 ({commit.status}): {reason}")
-        return True
+            evidence_notes=notes, performance_ok=performance_ok).as_dict()
 
     def _record_failure(self, task: TaskSchema, failed_results: list[VerificationResult],
                         fix_note: str, fixed: bool):

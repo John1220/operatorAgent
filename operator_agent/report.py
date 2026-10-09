@@ -432,8 +432,8 @@ def _objective_lines(m: Dict[str, Any]) -> List[str]:
     """§6.2 的**目标函数**（权重 + 聚合口径 + 那个数）—— **声明了才印**
 
     缺键 ⇒ 不印（同 `_claim_level_lines` / `_implementation_decision_lines`）：印一个默认
-    聚合会让「没声明」读成「等权几何平均」。这个数是**数据**不是门槛（准入今天仍看主
-    case 的加速比），所以那条边界必须和数一起印 —— 读的人默认会把它当门槛。
+    聚合会让「没声明」读成「等权几何平均」。按实际 performance_verdict 的 basis
+    描述本次口径，不把旧单 case 记录追溯升级成 workload 决策。
     """
     obj = _get(m, "objective", None)
     if not isinstance(obj, dict):
@@ -444,7 +444,9 @@ def _objective_lines(m: Dict[str, Any]) -> List[str]:
            f"({obj.get('evaluated_cases', 0)}/{obj.get('weighted_cases', 0)} 条 case 有权重)"]
     for reason in (obj.get("reason") or []):
         out.append(f"  - {reason}")
-    if value is not None:
+    if value is not None and (m.get("performance_verdict") or {}).get("basis") == "objective":
+        out.append("  - 这是本次性能门槛、独立确认与入库 score 的 workload 口径；主 case 仅为诊断。")
+    elif value is not None:
         out.append("  - ⚠️ 这个数今天**不进门槛**: 准入仍看主 case 的加速比 "
                    "(§16 反模式「用单形状的加速比作为成功标准」未收口, 见 CHECKLOG I93)")
     return out

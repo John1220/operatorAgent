@@ -44,10 +44,10 @@ from tests.backend_fakes import DeclaredFakeBackend
 
 CASE_A = "A=16x16|B=16x16"
 CASE_B = "A=32x32|B=32x32"
-BASELINE_MS = 0.020
+BASELINE_MS = 0.400
 #: 逐 case 的候选时间: 16x16 比基线快 2 倍, 32x32 慢一倍 (0.5x)。**确定性**载荷,
 #: 所以判决的算术可以手算复核 (不是「跑出来是多少就是多少」)。
-CANDIDATE_MS = {16: 0.010, 32: 0.040}
+CANDIDATE_MS = {16: 0.200, 32: 0.800}
 MIN_SPEEDUP = 1.5
 
 CODE = "def kernel(A, B):\n    return A @ B\n"
@@ -337,8 +337,8 @@ class TestOneProducerPerFact(unittest.TestCase):
     def test_the_gate_applies_the_verdict_in_one_method(self):
         ve = self._src("operator_agent/verifier.py")
         self.assertEqual(1, ve.count("def _apply_performance_verdict("))
-        self.assertEqual(2, ve.count("self._apply_performance_verdict("),
-                         "两条有加速比读数的出口（远端 / 本机有参考实现）各一次")
+        self.assertEqual(3, ve.count("self._apply_performance_verdict("),
+                         "远端、本机、有声明目标却缺基线的拒绝出口")
 
     def test_the_primary_speedup_is_no_longer_the_success_criterion(self):
         ve = self._src("operator_agent/verifier.py")

@@ -354,7 +354,7 @@ class TestThroughARealRun(unittest.TestCase):
         txt = (Path(art.saved_dir) / REPORT_NAME).read_text(encoding="utf-8")
         self.assertIn("目标函数 (§6.2)", txt)
         self.assertIn("weighted_geomean", txt)
-        self.assertIn("不进门槛", txt, "读数会被当成门槛 ⇒ 这条边界必须与数一起印")
+        self.assertIn("独立确认与入库 score", txt, "声明的目标函数贯穿性能门、确认和入库")
 
 
 class TestOneProducerPerFact(unittest.TestCase):
@@ -370,8 +370,8 @@ class TestOneProducerPerFact(unittest.TestCase):
                          "两条有主 case 读数的出口: 远端 / 本机有参考实现")
         self.assertEqual(1, v.count("def _bench_case("),
                          "主 case 与账本必须共用同一对调用（协议漂了就会比出两种数）")
-        self.assertEqual(2, v.count("self._bench_case("),
-                         "两个调用点: 主 case 一次、逐 case 账本一次 —— 不许绕过它自己写")
+        self.assertEqual(1, v.count("self._bench_case("),
+                         "所有 case 都进入同一 L3 方法，不能另写简化测量路")
 
     def test_the_aggregate_has_one_derivation(self):
         self.assertEqual(1, self._src("operator_agent/eligibility.py")

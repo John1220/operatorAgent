@@ -495,6 +495,12 @@ def case_speedups(metrics, case_key_hint=None, speedup_hint=None) -> dict:
                 continue
             value = (entry.get("speedup_vs_baseline")
                      if isinstance(entry, Mapping) else entry)
+            # New ledgers retain raw diagnostics even when that case cannot
+            # support a verdict. Never feed such a number into the objective.
+            if isinstance(entry, Mapping) and "eligibility" in entry:
+                mask = entry.get("eligibility") or {}
+                if not isinstance(mask, Mapping) or mask.get("can_verdict") is not True:
+                    value = None
             out[str(case)] = None if value is None else value
         if out:
             return out
@@ -512,6 +518,19 @@ def case_speedups(metrics, case_key_hint=None, speedup_hint=None) -> dict:
 
 PERF_BASIS_OBJECTIVE = "objective"
 PERF_BASIS_PRIMARY_CASE = "primary_case"
+
+
+def decision_speedup(metrics):
+    """The declared objective is the comparison unit; keep primary diagnostics.
+
+    An objective receipt with missing/invalid value cannot fall back to the
+    primary case. Old single-case callers retain their existing semantics.
+    """
+    verdict = metrics.get("performance_verdict") or {}
+    value = (verdict.get("value") if verdict.get("basis") == PERF_BASIS_OBJECTIVE
+             else metrics.get("speedup_vs_baseline"))
+    return (float(value) if isinstance(value, (int, float))
+            and not isinstance(value, bool) and math.isfinite(value) else None)
 
 
 def performance_verdict(min_speedup: float, *, aggregate: str = "",
@@ -542,6 +561,10 @@ def performance_verdict(min_speedup: float, *, aggregate: str = "",
     """
     declared = bool(case_weights) or bool(aggregate)
     if not declared:
+        if regression_over_limit_value is True:
+            return False, PERF_BASIS_PRIMARY_CASE, "逐 case 硬回退越限 ⇒ 不通过", primary_speedup
+        if max_regression and regression_over_limit_value is None:
+            return False, PERF_BASIS_PRIMARY_CASE, "已声明回退上限但判据未确立 ⇒ 不通过", primary_speedup
         value = None if primary_speedup is None else float(primary_speedup)
         passed = float(primary_speedup or 0.0) >= float(min_speedup)
         mark = ">=" if passed else "<"
@@ -568,7 +591,7 @@ def performance_verdict(min_speedup: float, *, aggregate: str = "",
     why = (f"目标函数 {aggregate} = {value:.4g} "
            f"{'>=' if passed else '<'} 门槛 {float(min_speedup):.4g}")
     if regression_over_limit_value is None and max_regression:
-        why += "; ⚠️ 回退判据本次未确立（有声明过的 case 没量到）"
+        return False, PERF_BASIS_OBJECTIVE, why + "; 回退判据未确立 ⇒ 不通过", value
     return passed, PERF_BASIS_OBJECTIVE, why, value
 
 def regression_over_limit(max_regression, speedups,
@@ -608,6 +631,8 @@ def regression_over_limit(max_regression, speedups,
             limits[str(key)] = float(value)
         except (TypeError, ValueError):
             return None, (f"max_regression[{key!r}] 不是数值: {value!r} ⇒ 未确立",)
+        if isinstance(value, bool) or not math.isfinite(limits[str(key)]):
+            return None, (f"max_regression[{key!r}] 非有限数/布尔 ⇒ 未确立",)
     if target_metric != "speedup_vs_baseline":
         return None, (f"目标指标是 {target_metric} ⇒ 今天只有 speedup_vs_baseline 口径的"
                       f"回退判据 ⇒ 未确立",)
@@ -617,7 +642,8 @@ def regression_over_limit(max_regression, speedups,
     for case in limits:
         try:
             value = speedups.get(case)
-            measured[case] = None if value is None else float(value)
+            measured[case] = (None if value is None or isinstance(value, bool)
+                              or not math.isfinite(float(value)) else float(value))
         except (TypeError, ValueError):
             measured[case] = None
     unmeasured = sorted(c for c in limits if measured.get(c) is None)
@@ -656,10 +682,8 @@ def aggregate_speedup(case_weights, speedups, aggregate,
       * 目标指标不是 `speedup_vs_baseline` ⇒ `None`（同 `regression_over_limit`:
         吞吐/延迟的聚合要另一套换算, 今天不存在）。
 
-    ⚠️ **今天这个数是「数据」不是「门槛」**: 候选准入仍由主 case 的
-    `speedup_vs_baseline >= min_speedup` 判（§16 反模式「用单形状的加速比作为成功
-    标准」还没收口 —— 见 CHECKLOG I93 的仍欠那一条）。把它直接接进门槛会让
-    「没声明权重的调用方」整片失守, 那是另一种自锁。
+    有显式目标声明时，performance_verdict 把它用于门槛，decision_speedup 把同一口径
+    用于确认和入库。没有声明的老任务仍走显式标注的 primary_case，不补等权目标。
     """
     if not case_weights:
         return None, ("契约没有声明 case_weights ⇒ 目标函数没有权重 ⇒ 未确立",)
@@ -685,13 +709,16 @@ def aggregate_speedup(case_weights, speedups, aggregate,
             weights[str(key)] = float(value)
         except (TypeError, ValueError):
             return None, (f"case_weights[{key!r}] 不是数值: {value!r} ⇒ 未确立",)
+        if isinstance(value, bool) or not math.isfinite(weights[str(key)]) or weights[str(key)] < 0:
+            return None, (f"case_weights[{key!r}] 非法权重 ⇒ 未确立",)
     if not isinstance(speedups, Mapping):
         speedups = {}
     measured: dict = {}
     for case in weights:
         try:
             value = speedups.get(case)
-            measured[case] = None if value is None else float(value)
+            measured[case] = (None if value is None or isinstance(value, bool)
+                              or not math.isfinite(float(value)) else float(value))
         except (TypeError, ValueError):
             measured[case] = None
     unmeasured = sorted(c for c in weights if measured.get(c) is None)
@@ -701,7 +728,7 @@ def aggregate_speedup(case_weights, speedups, aggregate,
         return None, (f"契约给了 case {unmeasured} 的权重, 但本次没有它们的加速比"
                       f" ⇒ 未确立{tail}",)
     total = sum(weights.values())
-    if total <= 0:
+    if not math.isfinite(total) or total <= 0:
         return None, (f"case_weights 的权重之和是 {total:g} ⇒ 聚合没有分母 ⇒ 未确立",)
     if aggregate == CASE_AGGREGATE_WORST_CASE:
         worst = min(measured[c] for c in weights)
@@ -718,7 +745,7 @@ def aggregate_speedup(case_weights, speedups, aggregate,
 def implementation_decision(*, eligibility=None, claim_record=None,
                             required_cases_ok: Optional[bool] = None,
                             regression_over_limit: Optional[bool] = None,
-                            evidence_notes=(),
+                            evidence_notes=(), performance_ok: Optional[bool] = None,
                             ) -> DecisionRecord:
     """按 §17.1 推导实现裁决（纯函数；**裁决的唯一推导处**）。
 
@@ -782,6 +809,8 @@ def implementation_decision(*, eligibility=None, claim_record=None,
                         f"⇒ 判不了 (门 0)"])
 
     blockers: list = []
+    if performance_ok is False:
+        blockers.append("声明的 workload 性能目标/独立确认未通过 ⇒ 不能建议 use_custom")
     if not at_least(level, CLAIM_VALIDATED):
         blockers.append("声明等级 " + (f"{level} < {CLAIM_VALIDATED}" if level
                                    else "缺失（没有 §4.4 的记录）") + " (门 1)")
@@ -806,4 +835,3 @@ def implementation_decision(*, eligibility=None, claim_record=None,
     return _record(DECISION_INCONCLUSIVE,
                    ["「自定义」的三条证据没有一条被否定、也没有一条被确立 ⇒ "
                     "既上不了 use_custom, 也没有「建议用库」的依据 (门 3)"])
-

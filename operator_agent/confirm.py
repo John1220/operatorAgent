@@ -31,6 +31,24 @@ class ConfirmRecord:
     #: 断言各量一次 —— 那不是确认。空串 = 没带, 由 `confirm_persist` 按「无从证明」处理
     #: (只在首次那头给了哈希时才判, 见那里的说明)。
     contract_hash: str = ""
+    performance_basis: str = ""
+    workload_evidence: dict = field(default_factory=dict)
+
+
+def confirm_metrics(metrics, remeasure, min_speedup=1.0):
+    """One confirmation gate for admission and declared-workload decisions."""
+    from .eligibility import decision_speedup
+    from .workload import confirm_workload
+    if metrics.get("workload_qualification") or (metrics.get("performance_verdict") or {}).get("basis") == "objective":
+        ok, detail = confirm_workload(metrics, getattr(remeasure, "workload_evidence", {}) or {})
+        if not ok:
+            return False, detail
+        if getattr(remeasure, "performance_basis", "") != (metrics.get("performance_verdict") or {}).get("basis"):
+            return False, "workload confirmation basis missing/changed"
+    prov = (metrics.get("observation") or {}).get("provenance") or {}
+    return confirm_persist(decision_speedup(metrics), str(metrics.get("measurement_validity") or ""),
+        remeasure, min_speedup=min_speedup,
+        first_contract_hash=str(prov.get("contract_hash") or metrics.get("contract_hash") or ""))
 
 
 def confirm_persist(first_speedup: float,
@@ -54,7 +72,8 @@ def confirm_persist(first_speedup: float,
         return False, "首次测量 uninformative: 连第一次确认都不够格"
     if not isinstance(first_speedup, (int, float)) or isinstance(first_speedup, bool):
         return False, f"首次没有可用 speedup ({first_speedup!r})"
-    if first_speedup <= min_speedup:
+    import math
+    if not math.isfinite(first_speedup) or first_speedup <= min_speedup:
         return False, f"首次 speedup={first_speedup} 未过门槛 {min_speedup}"
 
     if remeasure is None:
@@ -80,6 +99,8 @@ def confirm_persist(first_speedup: float,
         return False, "重测 uninformative: 不能用坏尺子确认好结论"
     if not isinstance(remeasure.speedup, (int, float)) or isinstance(remeasure.speedup, bool):
         return False, f"重测没有可用 speedup ({remeasure.speedup!r})"
+    if not math.isfinite(remeasure.speedup):
+        return False, "重测 speedup 非有限值"
 
     # 「仍不劣」: 允许退到门槛之上一点点, 不允许掉回门槛下
     # (不需要与首次逐位相等 —— 噪声带内两次读数本来就会漂)

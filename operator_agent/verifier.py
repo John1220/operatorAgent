@@ -1488,54 +1488,25 @@ class Verifier:
                  if remote_bench is None else remote_bench)
         return bench, remote_bench
 
-    def _measure_case_speedup(self, kernel_code: str, inputs: dict, task: TaskSchema) -> dict:
-        """单个**非主** case 的加速比（与主 case 同一对调用、同一个口径）
+    def _measure_case_speedup(self, kernel_code: str, inputs: dict, task: TaskSchema,
+                              **context) -> dict:
+        """Non-primary cases use the exact same L3/Oracle policy as the primary.
 
-        口径与 `_verify_performance` 里那两处逐字对齐: 远端 `baseline_selected` 那条
-        基线 / 本机 `_measure_baseline`（按输入签名缓存）; 分子都是**候选的中位（或
-        最小）耗时**。逐 case 失败**不抛**: 记 `None` + 原因 —— 账本是证据面，不是
-        判决面，它不许把一次 L3 打成异常（三态: 判据面读作「未量到」）。
+        Only recursive ledger publication and the *global* objective verdict
+        are skipped. A failed/unknown case keeps diagnostics, never a made-up 0.
         """
         try:
-            bench, remote = self._bench_case(kernel_code, inputs, task)
-        except Exception as exc:  # noqa: BLE001 —— 账本不许把 L3 打成异常
+            result = self._verify_performance(kernel_code, inputs, 0.0, task,
+                                              _case_measurement=True, **context)
+            row = dict(result.metrics)
+            if "speedup_vs_baseline" not in row:
+                row.update(speedup_vs_baseline=None, reason=result.message)
+            return row
+        except Exception as exc:
             return {"speedup_vs_baseline": None, "reason": f"逐 case 测量抛异常: {exc}"}
-        if bench.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
-            return {"speedup_vs_baseline": None, "reason": "逐 case 传输结果未知",
-                    **{k: bench[k] for k in (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent") if k in bench}}
-        if bench.get("reference_identity_unknown"):
-            return dict(speedup_vs_baseline=None, reason=bench.get("reference_error"), reference_identity_unknown=True)
-        if remote is not None:
-            if not remote.get("success", False):
-                return {"speedup_vs_baseline": None,
-                        "reason": f"远端性能测试失败: {remote.get('error', '')}"}
-            cargo = remote.get("candidate", {}) or {}
-            kernel_min_ms = (cargo.get("median_time_ms") or cargo.get("min_time_ms")
-                             or remote.get("avg_time_ms") or 0)
-            name = remote.get("baseline_selected")
-            base = (remote.get("baselines", {}) or {}).get(name) if name else None
-            if not base:
-                return {"speedup_vs_baseline": None,
-                        "reason": "远端没报 baseline_selected ⇒ 没有基线可比"}
-            base_ms = base.get("median_time_ms", base.get("min_time_ms", 0))
-            speedup = base_ms / kernel_min_ms if kernel_min_ms > 0 else None
-            return {"speedup_vs_baseline": (round(speedup, 4) if speedup else None),
-                    "baseline_type": name, "kernel_min_ms": round(kernel_min_ms, 6)}
-        kernel_min_ms = (bench.get("median_time_ms") or bench.get("min_time_ms")
-                         or bench.get("avg_time_ms") or 0)
-        base = self._measure_baseline(task, inputs)
-        if base is None:
-            return {"speedup_vs_baseline": None,
-                    "reason": "这一组没有参考实现 ⇒ 没有基线可比"}
-        speedup = base["baseline_time_ms"] / kernel_min_ms if kernel_min_ms > 0 else None
-        return {"speedup_vs_baseline": (round(speedup, 4) if speedup else None),
-                "baseline_type": base["baseline_type"],
-                "baseline_time_ms": round(base["baseline_time_ms"], 4),
-                "baseline_reused": bool(base.get("baseline_reused")),
-                "kernel_min_ms": round(kernel_min_ms, 6)}
 
     def _publish_case_ledger(self, metrics: dict, kernel_code: str, test_inputs,
-                             task: TaskSchema) -> Optional[str]:
+                             task: TaskSchema, **context) -> Optional[str]:
         """把**逐 case** 的加速比账本写进这次 L3 的 metrics（`metrics["cases"]`）
 
         §6.2 条款 2/3 的证据面要求「本次评了哪几条 case、各自多少」。在此之前 L3 明
@@ -1557,16 +1528,26 @@ class Verifier:
         first = case_key(input_sets[0])
         primary = str(first) if first else None
         if len(input_sets) < 2:
+            from .contract import freeze_from_task
+            from .workload import apply_qualification
+            try:
+                contract = freeze_from_task(task)
+                if contract.required_cases or contract.case_weights or contract.max_regression:
+                    metrics["cases"] = {primary: copy.deepcopy(metrics)}
+                    apply_qualification(metrics, contract, primary)
+            except Exception as exc:
+                metrics["workload_qualification_error"] = str(exc)
+                metrics["measurement_can_gate"] = False
             return primary
         ledger = {}
         if first:
-            ledger[first] = {"speedup_vs_baseline": metrics.get("speedup_vs_baseline"),
-                             "basis": "主 case: 本次 L3 那个读数（未重复测）"}
+            ledger[first] = copy.deepcopy(metrics)
+            ledger[first]["basis"] = "主 case: 本次 L3 那个读数（未重复测）"
         for index, inputs in enumerate(input_sets[1:], start=1):
             key = case_key(inputs)
             if not key or key in ledger:
                 continue
-            ledger[key] = self._measure_case_speedup(kernel_code, inputs, task)
+            ledger[key] = self._measure_case_speedup(kernel_code, inputs, task, **context)
             if ledger[key].get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
                 metrics.update({k: v for k, v in ledger[key].items() if k in
                                 (TRANSPORT_KEY, "session_state", "session_phase", "request_id", "bytes_sent")})
@@ -1584,6 +1565,17 @@ class Verifier:
                 break
         if len(ledger) > 1:
             metrics["cases"] = ledger
+        from .contract import freeze_from_task
+        from .workload import apply_qualification
+        try:
+            contract = freeze_from_task(task)
+            apply_qualification(metrics, contract, primary)
+        except Exception as exc:
+            # An unfreezable declared workload must not inherit the primary mask.
+            metrics["workload_qualification_error"] = str(exc)
+            from .eligibility import ALL_FALSE
+            metrics["eligibility"] = ALL_FALSE.as_dict()
+            metrics["measurement_can_gate"] = False
         return primary
 
     @staticmethod
@@ -1599,6 +1591,7 @@ class Verifier:
                             heartbeat=None, heartbeat_expected: bool = False,
                             static_guards: Optional[bool] = None,
                             correctness_verified: Optional[bool] = None,
+                            _case_measurement: bool = False,
                             ) -> VerificationResult:
         min_required = task.constraints.min_speedup
         print(f"  [Verifier] L3: 性能验证 (要求加速比 >= {min_required:.2f}x vs baseline)...")
@@ -1904,13 +1897,18 @@ class Verifier:
                     msg += f" (注: 卡与 {others} 个其他进程共享, 瞬时 util={util}%)"
 
                 # 账本先发布（性能判决要读它），判决只算一次、只在这一处（两条路同一份）。
-                _primary = self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
+                _primary = (case_key(bench_inputs) if _case_measurement else
+                    self._publish_case_ledger(metrics, kernel_code, test_inputs, task,
+                        environment_drift=environment_drift, heartbeat=heartbeat,
+                        heartbeat_expected=heartbeat_expected, static_guards=static_guards,
+                        correctness_verified=correctness_verified))
                 if metrics.get("reference_identity_unknown"):
                     return self._reference_unknown(metrics["reference_error"], VerificationLevel.L3_PERFORMANCE, metrics)
                 if metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
                     return self._unknown_transport_result(VerificationLevel.L3_PERFORMANCE, metrics, metrics)
-                passed = self._apply_performance_verdict(passed, metrics, task, speedup,
-                                                         primary_key=_primary)
+                if not _case_measurement:
+                    passed = self._apply_performance_verdict(passed, metrics, task, speedup,
+                                                             primary_key=_primary)
                 print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
                 return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                           passed=passed, message=msg, metrics=metrics)
@@ -1963,13 +1961,18 @@ class Verifier:
                 environment_drift=environment_drift,
                 heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
             passed = self._refuse_l3_pass(passed, assessment)
-            _primary = self._publish_case_ledger(metrics, kernel_code, test_inputs, task)
+            _primary = (case_key(bench_inputs) if _case_measurement else
+                    self._publish_case_ledger(metrics, kernel_code, test_inputs, task,
+                        environment_drift=environment_drift, heartbeat=heartbeat,
+                        heartbeat_expected=heartbeat_expected, static_guards=static_guards,
+                        correctness_verified=correctness_verified))
             if metrics.get("reference_identity_unknown"):
                 return self._reference_unknown(metrics["reference_error"], VerificationLevel.L3_PERFORMANCE, metrics)
             if metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
                 return self._unknown_transport_result(VerificationLevel.L3_PERFORMANCE, metrics, metrics)
-            passed = self._apply_performance_verdict(passed, metrics, task, speedup,
-                                                     primary_key=_primary)
+            if not _case_measurement:
+                passed = self._apply_performance_verdict(passed, metrics, task, speedup,
+                                                         primary_key=_primary)
             print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
             return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                       passed=passed, message=msg, metrics=metrics)
@@ -1992,6 +1995,12 @@ class Verifier:
             environment_drift=environment_drift,
             heartbeat=heartbeat, heartbeat_expected=heartbeat_expected)
         passed = self._refuse_l3_pass(passed, assessment)
+        if not _case_measurement and (task.constraints.case_weights or task.constraints.aggregate
+                                     or task.constraints.max_regression or task.constraints.required_cases):
+            # Declaring a speedup workload cannot silently turn into absolute
+            # GFLOPS success merely because its baseline is unavailable.
+            passed = self._apply_performance_verdict(False, metrics, task, None,
+                                                     primary_key=case_key(bench_inputs))
         print(f"  [Verifier] L3 {'PASSED' if passed else 'FAILED'}: {msg}")
         return VerificationResult(level=VerificationLevel.L3_PERFORMANCE,
                                   passed=passed, message=msg, metrics=metrics)
@@ -2029,9 +2038,11 @@ class Verifier:
             limits = tuple(contract.max_regression)
         else:
             cons = getattr(task, "constraints", None)
-            weights = tuple(getattr(cons, "case_weights", ()) or ())
+            weights = getattr(cons, "case_weights", ()) or ()
+            weights = tuple(weights.items()) if isinstance(weights, Mapping) else tuple(weights)
             aggregate = str(getattr(cons, "aggregate", "") or "")
-            limits = tuple(getattr(cons, "max_regression", ()) or ())
+            limits = getattr(cons, "max_regression", ()) or ()
+            limits = tuple(limits.items()) if isinstance(limits, Mapping) else tuple(limits)
         speedups = case_speedups(metrics, case_key_hint=primary_key,
                                 speedup_hint=primary_speedup)
         # §6.2 条款 3 的判据也在判据层（`regression_over_limit`）—— 这里只传结论。
@@ -2047,10 +2058,19 @@ class Verifier:
             "min_speedup": min_required, "why": why,
             "cases": len(speedups), "regression_over_limit": rol,
             "regression_why": list(rol_why), "contract_frozen": contract is not None,
+            "aggregate": aggregate, "case_weights": dict(weights),
+            "max_regression": dict(limits),
+            "required_cases": list(contract.required_cases) if contract is not None else
+                              list(getattr(getattr(task, "constraints", None), "required_cases", ()) or ()),
         }
         verdict_text = "过" if passed else "不过"
         print(f"  [Verifier] 性能结论 (§16): {basis} ⇒ {verdict_text} —— {why}")
-        return bool(prior) and bool(passed)
+        cons = getattr(task, "constraints", None)
+        declared_scope = any(getattr(cons, k, None) for k in
+                             ("required_cases", "case_weights", "aggregate", "max_regression", "cases", "shapes"))
+        return (bool(prior) and bool(passed)
+                and (not declared_scope
+                     or metrics.get("measurement_can_gate") is True))
 
     @staticmethod
     def _refuse_l3_pass(passed: bool, assessment) -> bool:

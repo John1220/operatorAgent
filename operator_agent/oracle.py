@@ -454,18 +454,8 @@ def admit_to_corpus(metrics: Mapping,
         return True, (f"{why} —— 本次**未要求**两次确认 (requires_remeasure=False): "
                       f"单次读数即可入库, 这不是「两次确认已通过」")
 
-    obs = metrics.get("observation") or {}
-    prov = obs.get("provenance") or {}
-    ok, why2 = confirm_persist(
-        metrics.get("speedup_vs_baseline"),
-        str(metrics.get("measurement_validity") or ""),
-        remeasure,
-        min_speedup=min_speedup,
-        # 两次确认的**前提**是同一条判据。优先取评测器自己盖的那个戳 (它记录的是
-        # 「这条读数在哪条契约下取得」), 没有评测记录时退回 metrics 上的那个 (P0-2 的
-        # 同款理由: 能由记录携带的, 就不要让调用方随手给)。
-        first_contract_hash=str(prov.get("contract_hash")
-                                or metrics.get("contract_hash") or ""))
+    from .confirm import confirm_metrics
+    ok, why2 = confirm_metrics(metrics, remeasure, min_speedup=min_speedup)
     if not ok:
         return False, why2
     return True, f"{why} —— 两次确认: {why2}"

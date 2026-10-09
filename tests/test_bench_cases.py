@@ -365,7 +365,12 @@ class TestThroughARealRun(unittest.TestCase):
         self.assertEqual({"A=16x16|B=16x16", "A=32x32|B=32x32"}, set(m.get("cases") or {}))
         d = m["implementation_decision"]
         self.assertIs(True, d["required_cases_ok"])
-        self.assertEqual("use_custom", d["decision"])
+        # This legacy Mock fixture runs with task min_speedup=0 to exercise
+        # bookkeeping, while FrozenContract normalizes that sentinel to 1.
+        # It is not a matching workload deployment credential. Real matching
+        # objective/use_custom is covered by test_workload_evidence.
+        self.assertEqual("inconclusive", d["decision"])
+        self.assertIn("criterion differs from frozen contract", " ".join(d["reasons"]))
 
     def test_the_objective_is_recomputable_from_the_ledger(self):
         import math

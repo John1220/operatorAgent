@@ -666,7 +666,11 @@ def persist_decision(metrics: dict) -> tuple:
                        "不是这张卡上的成绩, 不能当语料")
     if metrics.get("benchmark_contaminated"):
         return False, "窗口被抢占污染 (util 超阈值)"
-    speedup = metrics.get("speedup_vs_baseline")
+    from .eligibility import decision_speedup
+    speedup = decision_speedup(metrics)
+    verdict = metrics.get("performance_verdict") or {}
+    if verdict.get("basis") == "objective" and verdict.get("passed") is not True:
+        return False, "声明的 workload 目标/回退判据未通过，不能退回主 case 入库"
     # `bool` 显式排除: `isinstance(True, int)` 在 Python 里是真的, 而 `True <= 1.0` 为假,
     # 于是一个被写成 `True` 的 speedup 会被这道门当成「1x 且合格」放过去。schemas 校验
     # `min_speedup` 时同一条规矩 (`schemas.py:257`)。

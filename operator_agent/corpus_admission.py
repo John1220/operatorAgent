@@ -47,10 +47,12 @@ def _evidence(directory, record, metrics, confirmation):
     expected = dict(run_id=manifest["run_id"], manifest_hash=manifest["hash"],
         contract_hash=contract.hash, workload_hash=manifest["workload_hash"],
         protocol_hash=rc.digest(manifest["measurement_protocol"]))
+    from .eligibility import decision_speedup
+    from .workload import confirmation_evidence
     if (any(key[k] != v for k,v in expected.items())
             or cf.get("first_binding") != first or cf.get("confirmation") != confirmation
             or record["compile_info"].get("run_binding") != first
-            or record["score"] != metrics.get("speedup_vs_baseline")
+            or record["score"] != decision_speedup(metrics)
             or record["measurement_validity"] != metrics.get("measurement_validity")
             or metrics.get("contract_hash") != contract.hash):
         raise ValueError("admission candidate/measurement/confirmation drift")
@@ -71,7 +73,11 @@ def _evidence(directory, record, metrics, confirmation):
     sm = cf["second_metrics"]
     if (sm.get("run_binding") != second or sm.get("contract_hash") != contract.hash
             or sm.get("measurement_validity") != confirmation["validity"]
-            or sm.get("speedup_vs_baseline") != confirmation["speedup"]):
+            or decision_speedup(sm) != confirmation["speedup"]
+            or (confirmation.get("performance_basis") and
+                (sm.get("performance_verdict") or {}).get("basis") != confirmation["performance_basis"])
+            or (confirmation.get("workload_evidence") and
+                confirmation_evidence(sm) != confirmation["workload_evidence"])):
         raise ValueError("admission second metrics drift")
     windows = [m.get("arm_windows", {}).get("candidate") for m in (metrics, sm)]
     if any(type(w) is not str or not w for w in windows) or windows[0] == windows[1]:
@@ -99,10 +105,11 @@ def _validate_envelope(envelope, db):
 def prepare(directory, db, record, metrics, confirmation, reason):
     directory = Path(directory)
     raw = record.to_dict()
-    key, hashes, threshold = _evidence(directory, raw, metrics, asdict(confirmation))
+    serialized_confirmation = rc.json_value(asdict(confirmation))
+    key, hashes, threshold = _evidence(directory, raw, metrics, serialized_confirmation)
     request = dict(admission_id=journal.admission_id(key), key=key,
         record=raw, record_hash=journal.record_hash(raw), corpus_path=db.corpus_path,
-        first_metrics=metrics, confirmation=asdict(confirmation),
+        first_metrics=metrics, confirmation=serialized_confirmation,
         evidence_hashes=hashes, min_speedup=threshold, qualification_reason=str(reason))
     # Snapshot mutable live metrics before the claim becomes persisted.
     request = json.loads(json.dumps(request, allow_nan=False))
