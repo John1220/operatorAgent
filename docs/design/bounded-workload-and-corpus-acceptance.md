@@ -1,5 +1,7 @@
 # 有界大 workload 与可信 corpus admission 验收
 
+后续进展：[原生 CUDA 标定心跳与计时协议审计](native-cuda-calibration-and-protocol-audit.md)。
+
 日期：2026-10-09。接续 [session-owned 输入缓存](session-owned-input-cache.md)。
 
 ## 1. 本轮目的
@@ -145,3 +147,6 @@ driver 退出码 1 是这项未完成状态，不是候选算错或 harness 异�
 核对既有 launch 地板的标定方式、当前净执行计时与端到端时间的关系，保留配对负控，
 若要更新标定必须先形成证据与新的 evaluator 身份，不能为了本次过门直接改小数字。
 之后再冻结下一组 workload/口径并做真实正向 admission；原精度、确认与入库门仍不可关闭。
+
+后续闭环见 [版本化 CUDA 量具、独立锚点与真实入库](versioned-cuda-ruler-and-admission.md)。
+这里的旧口径 degraded/未入库事实保留，不以新版本回执覆盖。

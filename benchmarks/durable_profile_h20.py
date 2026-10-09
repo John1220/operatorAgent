@@ -62,6 +62,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--host", default="algorithm-h20")
     p.add_argument("--gpu", type=int)
+    p.add_argument("--cuda-calibration", help="frozen native CUDA audit receipt; enforces native heartbeat every measurement")
+    p.add_argument("--cuda-ruler-profile", help="versioned frozen flush-floor and absolute anchor; new observations only")
     group = p.add_mutually_exclusive_group()
     group.add_argument("--resume-only", action="store_true", help="recheck durable identity/resume only; not performance acceptance")
     group.add_argument("--workload", action="append", choices=["x".join(map(str, shape)) for shape in EXTENDED_WORKLOADS],
@@ -210,6 +212,16 @@ def corpus_readback(path, before, artifact, task, metrics):
 
 def run(args):
     workloads = selected_workloads(args)
+    from operator_agent.cuda_calibration import read_calibration
+    from operator_agent.cuda_ruler_profile import read_profile
+    if getattr(args, "cuda_ruler_profile", None) and getattr(args, "cuda_calibration", None):
+        raise ValueError("select either audit-only calibration or a versioned CUDA ruler profile")
+    profile = read_profile(args.cuda_ruler_profile) if getattr(args, "cuda_ruler_profile", None) else None
+    calibration = read_calibration(args.cuda_calibration) if getattr(args, "cuda_calibration", None) else None
+    if profile:
+        calibration = profile["calibration"]
+    if calibration and args.gpu != calibration["identity"]["selected_gpu"]:
+        raise ValueError("calibrated acceptance requires the frozen physical GPU")
     root = Path(new_run_root(args.output, "durable-profile-h20"))
     root.mkdir(parents=True, exist_ok=False)
     os.environ["OPERATOR_AGENT_LOG_DIR"] = str(root / "logs")
@@ -217,6 +229,16 @@ def run(args):
     records = []
     code = trial_code("unfused-fp32")
     plan = workload_plan(workloads, code)
+    if calibration:
+        plan.pop("hash")
+        plan["cuda_calibration"] = dict(receipt_hash=calibration["hash"],
+            identity_hash=calibration["identity_hash"], heartbeat_interval=1)
+        plan["hash"] = digest(plan)
+    if profile:
+        plan.pop("hash")
+        plan["cuda_ruler_profile"] = dict(hash=profile["hash"], policy=profile["policy"],
+            launch_floor_us=profile["launch_floor_us"], expected_good_ms=profile["expected_good_ms"])
+        plan["hash"] = digest(plan)
     atomic_json(root / "plan.json", plan, readonly=True)
     print("PLAN " + dumps(plan) + "\nRUN_ROOT " + str(root), flush=True)
     db_path = root / "corpus" / "kernel_db.jsonl"
@@ -225,7 +247,10 @@ def run(args):
         c = Conductor(backend=backend,
             kernel_db=KernelDatabase(str(db_path), persist_retrievals=False),
             failure_db=FailureDatabase(str(root / "failures" / "failure_db.jsonl")),
-            max_optimize_rounds=rounds, use_coder_pipeline=False)
+            max_optimize_rounds=rounds, use_coder_pipeline=False,
+            heartbeat_interval=1 if calibration else 5,
+            cuda_ruler_profile_path=args.cuda_ruler_profile if profile else None,
+            cuda_calibration_identity_hash=calibration["identity_hash"] if calibration else "")
         c.store = ArtifactStore(str(root / "artifacts" / name))
         generated = []
         def design(*a, **k):
@@ -268,6 +293,19 @@ def run(args):
                 errors.append("missing actual L3/binding evidence")
             errors.extend(receipt_errors(t.constraints.reference_contract, trace))
             errors.extend(transfer_errors(trace))
+            if calibration:
+                from operator_agent.cuda_calibration import validate_probe
+                probes = [r.get("response", {}) for r in trace
+                          if r["request"]["action"] == "cuda_calibration_probe"]
+                if len(probes) != 2:
+                    errors.append("main/confirmation did not each run an independent native CUDA heartbeat")
+                for probe in probes:
+                    try:
+                        if (validate_probe(probe, mode="heartbeat", selected_gpu=args.gpu) < 2
+                                or probe["identity_hash"] != calibration["identity_hash"]):
+                            errors.append("native CUDA heartbeat failed/frozen identity drift")
+                    except (ValueError, TypeError, KeyError) as exc:
+                        errors.append("native CUDA heartbeat evidence invalid: " + str(exc))
             if admission.get("kept") and l3 is not None:
                 m = l3.metrics
                 if (m.get("measurement_can_gate") is not True
@@ -285,6 +323,15 @@ def run(args):
                 errors.append("positive admission missing L3 evidence")
             elif after != before:
                 errors.append("denied admission nevertheless wrote corpus")
+            if profile and l3 is not None:
+                from operator_agent.cuda_ruler_profile import anchor_reading
+                for probe in probes:
+                    if not anchor_reading(probe, profile)["ok"]:
+                        errors.append("native absolute anchor rejected")
+                if (l3.metrics.get("cuda_ruler_profile", {}).get("hash") != profile["hash"]
+                        or l3.metrics.get("launch_floor_us") != profile["launch_floor_us"]
+                        or not l3.metrics.get("heartbeat", {}).get("heartbeat_absolute_anchor_checked")):
+                    errors.append("L3 did not use the frozen channel-specific ruler/absolute anchor")
             if resume and (generated or (art.resume_status or {}).get("status") != "resumed"
                            or not any(r["request"]["action"] == "compile" for r in trace)):
                 errors.append("resume did not freshly compile/verify without generation")

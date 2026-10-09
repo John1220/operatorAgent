@@ -665,6 +665,8 @@ class SSHExecutor(Backend):
             # 于是「跨轮固定同一张卡」在那个平台上根本不发生 —— 不声明就是不说谎
             caps.add(Cap.GPU_PINNING)
             caps.add(Cap.REFERENCE_IDENTITY)
+            if self._persistent:
+                caps.add(Cap.NATIVE_CUDA_CALIBRATION)
         return frozenset(caps)
 
     def _ssh_target(self) -> str:
@@ -1060,7 +1062,7 @@ class SSHExecutor(Backend):
         if self.platform == "nvidia":
             # Exact L2 JSON/storage codecs are shared sources, before their consumer.
             files.extend((repo_root / "operator_agent" / name, f"{remote_dir}/{name}")
-                         for name in ("input_fidelity.py", "remote_input_fidelity.py", "session_inputs.py"))
+                         for name in ("input_fidelity.py", "remote_input_fidelity.py", "session_inputs.py", "cuda_ruler_profile.py", "cuda_calibration.py"))
             files.append((repo_root / "remote_scripts" / "session_control.py",
                           f"{remote_dir}/session_control.py"))
             files.extend((repo_root / "operator_agent" / name, f"{remote_dir}/{name}")
@@ -1413,6 +1415,19 @@ class SSHExecutor(Backend):
             if not self._deployed:
                 self.deploy()
             return self._ssh_exec_json({"action": "gpu_info", "reference_contract": reference_contract})
+        except Exception as exc:
+            return _transport_failure(exc)
+
+    def calibration_probe(self, mode="heartbeat"):
+        self.require(Cap.NATIVE_CUDA_CALIBRATION)
+        from .cuda_calibration import validate_request, validate_probe
+        validate_request(mode, {"mode": mode})
+        try:
+            if not self._deployed:
+                self.deploy()
+            payload = self._ssh_exec_json({"action": "cuda_calibration_probe", "mode": mode})
+            validate_probe(payload, mode=mode, selected_gpu=self.selected_gpu)
+            return payload
         except Exception as exc:
             return _transport_failure(exc)
 
@@ -1948,6 +1963,10 @@ class RemoteExecutor(Backend):
     def reference_identity(self, reference_contract):
         with _get_exec_lock(self._lock_key()):
             return self.backend.reference_identity(reference_contract)
+
+    def calibration_probe(self, mode="heartbeat"):
+        with _get_exec_lock(self._lock_key()):
+            return self.backend.calibration_probe(mode=mode)
 
     def benchmark_with_baselines(self, kernel_code: str, inputs: dict,
                                  kernel_type: str, warmup: int = 10,

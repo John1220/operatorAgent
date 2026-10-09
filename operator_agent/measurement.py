@@ -1026,6 +1026,7 @@ class MeasurementAssessment:
     #: 绕开 L2 的路径可能带出 `True`。它不是"测得准不准", 而是"这个数有没有指称对象" ——
     #: 所以与 `capability_shortfall` 同族: 拒 `passed` (见 `l3_pass_is_refused`)。
     correctness_unverified: bool = False
+    ruler_identity_error: str = ""
 
     @property
     def can_gate(self) -> bool:
@@ -1059,7 +1060,7 @@ class MeasurementAssessment:
             return True
         # 正确性没凭据 (设计 §14-10 / §20.4) 与出处缺失同族: 一份"我们还没确认它算得对"
         # 的核, 它的速率读数不是测得不准, 而是**没有指称对象** ⇒「通过」不许为 True。
-        if self.correctness_unverified:
+        if self.ruler_identity_error or self.correctness_unverified:
             return True
         # 声明与载荷打架时, 只有「任务真的要过真卡」才够格拒绝通过: 否则一份本地
         # mock 运行会因为载荷老实写了 device="cpu" 而被判失败, 那是把观测当判据。
@@ -1077,6 +1078,8 @@ class MeasurementAssessment:
         (`tests/test_measurement_validity.py`), 免得将来加了第四个成因只改一处。
         """
         causes = []
+        if self.ruler_identity_error:
+            causes.append("计时量具身份/锚点不成立: " + self.ruler_identity_error)
         if self.correctness_unverified:
             causes.append("这个候选的正确性没有凭据 "
                           "(只有 `verify_l3_only` 这条绕开 L2 的路会这样)")
@@ -1100,6 +1103,8 @@ class MeasurementAssessment:
             out["launch_dominance"] = round(self.launch_dominance, 4)
         if self.launch_floor_us is not None:
             out["launch_floor_us"] = self.launch_floor_us
+        if self.ruler_identity_error:
+            out["ruler_identity_error"] = self.ruler_identity_error
         if self.dispersion is not None:
             out["dispersion_iqr_over_median"] = self.dispersion
         if self.dispersion_exceeded is not None:
@@ -1166,7 +1171,8 @@ def assess(median_time_ms: Optional[float] = None,
            reported_device: Optional[str] = None,
            environment_drift: Optional[List[str]] = None,
            gpu_harness_peers: Optional[int] = None,
-           correctness_verified: Optional[bool] = None) -> MeasurementAssessment:
+           correctness_verified: Optional[bool] = None,
+           ruler_identity_error: str = "") -> MeasurementAssessment:
     """综合判定测量有效性: 信号各自独立判定, 合成时取更差的一档
 
     问「测得准不准」的三个: launch 地板支配 (`median_time_ms` vs `launch_floor_us`)、
@@ -1312,11 +1318,16 @@ def assess(median_time_ms: Optional[float] = None,
             "关于另一个对象的, 「通过」没有指称对象 —— 只有 `verify_l3_only` 这条绕开 "
             "L2 的路径会走到这里, 调用方应当把手里那份 L2 结果作为凭据传进来")
 
+    if ruler_identity_error:
+        validity = Validity.UNINFORMATIVE
+        reasons.append("RULER_BROKEN: " + ruler_identity_error)
+
     return MeasurementAssessment(
         validity=validity,
         reasons=reasons,
         launch_dominance=dom,
         launch_floor_us=launch_floor_us,
+        ruler_identity_error=ruler_identity_error,
         contaminated=contaminated,
         dispersion=dispersion,
         max_over_median=max_over_median,

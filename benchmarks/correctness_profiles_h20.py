@@ -129,7 +129,7 @@ class ProfileSSH(AcceptanceSSH):
         return super().capabilities - {Cap.ENV_PROVISION, Cap.DEP_ANALYSIS, Cap.DEPLOY}
 
     def _ssh_exec_json(self, payload):
-        if payload.get("action") not in {"compile","verify","gpu_info","ping","shutdown","benchmark_with_baselines"}:
+        if payload.get("action") not in {"compile","verify","gpu_info","ping","shutdown","benchmark_with_baselines","cuda_calibration_probe"}:
             self.forbidden_actions.append(payload.get("action"))
             raise RuntimeError("profile acceptance forbids this action")
         row = {"request": payload}; self.trace.append(row)

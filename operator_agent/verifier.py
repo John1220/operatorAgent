@@ -306,8 +306,11 @@ class Verifier:
     L1 Compile -> L2 Function -> L3 Performance + Roofline
     """
 
-    def __init__(self, backend: Backend):
+    def __init__(self, backend: Backend, *, cuda_ruler_profile=None):
         self.backend = backend
+        from .cuda_ruler_profile import validate_profile
+        self._cuda_ruler_profile = (validate_profile(cuda_ruler_profile)
+                                   if cuda_ruler_profile is not None else None)
         self.name = "Verifier"
         # 能力**快照**: 门面/提供方的 `capabilities` 可能是延迟解析的 property,
         # 每次分支都去读它会让「同一轮验证内判据变了」这种事在原理上可能发生。
@@ -1666,6 +1669,8 @@ class Verifier:
             metrics["reference_receipt"] = bench["reference_receipt"]
             metrics["reference_contract_hash"] = as_reference(task.constraints.reference_contract).digest()
             metrics["frozen_contract_hash"] = self._reference_bindings[task.task_id]
+        if "timing_receipt" in bench:
+            metrics["timing_receipt"] = bench["timing_receipt"]
         # 从 benchmark 结果传递额外字段。
         #
         # ⚠️ 必须 bench 优先、candidate 兜底, 两个都要查。远程路径上这两层的分工不同:
@@ -2058,6 +2063,25 @@ class Verifier:
         """
         return False if (passed and assessment.l3_pass_is_refused) else passed
 
+    def _measurement_launch_floor(self, metrics, heartbeat):
+        if self._cuda_ruler_profile is None:
+            return self._detect_theoretical_peak().get("launch_floor_us")
+        from .cuda_ruler_profile import measurement_floor, validate_profile
+        try:
+            profile = validate_profile(self._cuda_ruler_profile)
+            floor = measurement_floor(profile, heartbeat, metrics.get("timing_receipt"))
+            metrics["cuda_ruler_profile"] = dict(protocol=profile["protocol"],
+                hash=profile["hash"], identity_hash=profile["identity_hash"],
+                calibration_hash=profile["calibration_hash"], channel=profile["channel"],
+                policy=profile["policy"], launch_floor_us=floor,
+                expected_good_ms=profile["expected_good_ms"])
+            metrics["launch_floor_source"] = profile["protocol"]
+            return floor
+        except Exception as exc:
+            metrics["ruler_identity_error"] = str(exc)
+            metrics["launch_floor_source"] = "calibrated-ruler-refused-no-fallback"
+            return None
+
     def _assess_measurement(self, metrics: dict, msg: str, candidate_ms,
                             gpu_util_pct=None, task: Optional[TaskSchema] = None,
                             environment_drift: Optional[list] = None,
@@ -2080,7 +2104,8 @@ class Verifier:
         required = frozenset(task.target.required_caps) if task else frozenset()
         assessment = measurement.assess(
             median_time_ms=candidate_ms,
-            launch_floor_us=self._detect_theoretical_peak().get("launch_floor_us"),
+            launch_floor_us=self._measurement_launch_floor(metrics, heartbeat),
+            ruler_identity_error=metrics.get("ruler_identity_error", ""),
             gpu_util_pct=gpu_util_pct,
             # 正确性凭据 (§14-10 / §20.4): 读**已经发布进 metrics 的那一份** (与
             # static_guards / arm_device_labels 同一写法) —— `_verify_performance` 是
@@ -2198,6 +2223,8 @@ class Verifier:
                         "lib_fallback": bool(metrics.get("lib_fallback")),
                         "real_device": assessment.backend_real_device,
                         "l3_pass_is_refused": assessment.l3_pass_is_refused,
+                        "ruler_identity_error": metrics.get("ruler_identity_error", ""),
+                        "cuda_ruler_profile": metrics.get("cuda_ruler_profile"),
                         "cv_exceeded": cv_exceeded,
                         "launch_dominance_exceeded": (
                             assessment.launch_dominance is not None

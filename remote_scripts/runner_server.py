@@ -58,6 +58,7 @@ if os.environ.get(TOKEN_ENV):
 # Same dispatch as the one-shot runner, never a second kernel action table.
 import run_kernel  # noqa: E402
 from session_inputs import SessionInputs, PROTOCOL as INPUT_CACHE_PROTOCOL  # noqa: E402
+from cuda_calibration import run_probe  # noqa: E402
 
 _INPUTS = SessionInputs()
 
@@ -124,7 +125,10 @@ def _serve_one(line: str) -> bool:
     saved = sys.stdout
     sys.stdout = sys.stderr
     try:
-        result = run_kernel.run_action(req)
+        if action == "cuda_calibration_probe":
+            result = run_probe(req.get("mode"), req, run_kernel)
+        else:
+            result = run_kernel.run_action(req)
     except Exception as e:            # 一个坏请求不该带走整个会话
         result = {"success": False, "error": f"{type(e).__name__}: {e}",
                   "traceback_tail": traceback.format_exc().strip().splitlines()[-6:]}

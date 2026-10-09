@@ -72,6 +72,8 @@ def protocol_identity():
         "operator_agent/reference.py", "operator_agent/remote_executor.py",
         "operator_agent/remote_input_fidelity.py", "operator_agent/confirm.py",
         "operator_agent/session_inputs.py",
+        "operator_agent/cuda_calibration.py",
+        "operator_agent/cuda_ruler_profile.py",
         "operator_agent/oracle.py", "operator_agent/backend_caps.py",
         "operator_agent/tolerance.py", "operator_agent/eligibility.py",
         "operator_agent/correctness_boundaries.py", "operator_agent/source_lang.py",

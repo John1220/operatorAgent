@@ -407,6 +407,9 @@ class Conductor:
         # 缓慢漂移 / 悄悄坏掉」, 不需要逐次; 短跑根本到不了期, 于是默认不会给已有
         # 链路添任何行为变化。
         heartbeat_interval: int = 5,
+        # Optional independently audited identity, only narrows acceptance.
+        cuda_calibration_identity_hash: str = "",
+        cuda_ruler_profile_path: Optional[str] = None,
         # ⚠️ 这里**曾经**有一个 `require_double_confirm: bool = False` 的构造参数。
         # 设计 §3.5 把「长期记忆的独立确认」列在**不允许配置**那一栏 (无开关、无环境
         # 变量、不可被任务参数改写), 而那个默认 `False` 的参数正好是「默认关的安全装置
@@ -487,6 +490,22 @@ class Conductor:
                 f"heartbeat_interval 不能超过 {MAX_HEARTBEAT_INTERVAL}: "
                 f"{heartbeat_interval!r}（仅 harness 可显式放宽）")
         self.heartbeat_interval = heartbeat_interval
+        if (type(cuda_calibration_identity_hash) is not str
+                or (cuda_calibration_identity_hash and
+                    (len(cuda_calibration_identity_hash) != 64 or
+                     any(c not in "0123456789abcdef" for c in cuda_calibration_identity_hash)))):
+            raise ValueError("cuda_calibration_identity_hash must be an exact SHA256")
+        self.cuda_calibration_identity_hash = cuda_calibration_identity_hash
+        self.cuda_ruler_profile = None
+        if cuda_ruler_profile_path is not None:
+            from .cuda_ruler_profile import read_profile
+            self.cuda_ruler_profile = read_profile(cuda_ruler_profile_path)
+            if heartbeat_interval != 1:
+                raise ValueError("calibrated CUDA ruler requires heartbeat_interval=1")
+            identity = self.cuda_ruler_profile["identity_hash"]
+            if cuda_calibration_identity_hash and cuda_calibration_identity_hash != identity:
+                raise ValueError("CUDA ruler/calibration identity mismatch")
+            self.cuda_calibration_identity_hash = identity
         #: §10.3 的 ε。抽签值本身是 (seed, 轮次) 的纯函数, 不用随机数发生器 —— 于是
         #: ε-greedy 与「跑完能离线复算」不冲突 (见 `selection` 模块注释)。
         self.selection_epsilon = float(selection_epsilon)
@@ -547,7 +566,7 @@ class Conductor:
         self._coder_pipeline = coder_pipeline
         self.coder = CoderAgent(self.kernel_db, llm=llm, prompt_manager=self.pm,
                                 pipeline=coder_pipeline)
-        self.verifier = Verifier(self.backend)
+        self.verifier = Verifier(self.backend, cuda_ruler_profile=self.cuda_ruler_profile)
         self.search = SearchAgent(llm=llm, prompt_manager=self.pm)
         self.fixer = FixerAgent(llm=llm, prompt_manager=self.pm, failure_db=self.failure_db)
         # 优化配方选择器 (确定性规则，不依赖 LLM)
@@ -995,9 +1014,17 @@ class Conductor:
         window = f"hb-{epoch}"
         self._heartbeat_ran_for = nxt
         try:
-            result = run_heartbeat(
-                backend_bench_fn(self.backend), epoch=epoch, window_id=window,
-            )
+            # CUDA 测量不能被远端 CPU 小 matmul 心跳认证。缺原生能力时失败关闭。
+            if (self.cuda_ruler_profile is not None or
+                    (self._environment or {}).get("fingerprint", {}).get("device") == "cuda"):
+                from .cuda_calibration import native_heartbeat
+                result = native_heartbeat(self.backend, epoch=epoch, window_id=window,
+                    expected_identity_hash=self.cuda_calibration_identity_hash,
+                    ruler_profile=self.cuda_ruler_profile)
+            else:
+                result = run_heartbeat(
+                    backend_bench_fn(self.backend), epoch=epoch, window_id=window,
+                )
         except Exception as exc:  # noqa: BLE001 — 心跳炸了不挡主流程, 但必须留痕
             # 清掉上一次的结果: 否则「没跑成」之后的轮次会复用**上一扇窗**的心跳,
             # 而它恰好是 ok=True —— 那就把「心跳没跑成」洗成了「尺子是好的」。
@@ -1209,6 +1236,9 @@ class Conductor:
             self._run_controls = {
                 "target_gflops": float(target_gflops),
                 "heartbeat_interval": self.heartbeat_interval,
+                "cuda_calibration_identity_hash": self.cuda_calibration_identity_hash,
+                "cuda_ruler_profile_hash": (self.cuda_ruler_profile["hash"]
+                                            if self.cuda_ruler_profile is not None else ""),
                 "expected_output": (run_contract.describe_inputs({"expected": expected_output})
                                     if expected_output is not None else None),
             }

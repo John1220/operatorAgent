@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Tuple
 
 #: 失败原因前缀。与 `confirm.py` 报告侧的 "标定心跳失败 (RULER_BROKEN)" 对齐。
@@ -196,6 +196,11 @@ class HeartbeatResult:
     known_good_ratio: float
     known_slow_ratio: float
     window_id: str
+    channel: str = "remote-python-perf-counter"
+    identity_hash: str = ""
+    evidence: dict = field(default_factory=dict)
+    absolute_anchor_checked: bool = False
+    ruler_profile_hash: str = ""
 
 
 def heartbeat(bench_fn: Callable[[Any, Any], float],

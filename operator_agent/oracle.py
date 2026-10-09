@@ -235,6 +235,11 @@ def evaluate(contract: FrozenContract,
     validity = str(raw.get("validity") or "valid")
     reasons = [str(r) for r in (raw.get("reasons") or [])]
     evidence = [str(e) for e in (raw.get("evidence") or [])]
+    if raw.get("ruler_identity_error"):
+        hb_broken, hb_ok = True, False
+        reason = f"{RULER_BROKEN}: calibrated ruler: {raw['ruler_identity_error']}"
+        hb_reasons.append(reason)
+        reasons.append(reason)
 
     # ── 3. 资格位 (设计 §4.3 八条, 短路) ──
     # 先把规则输入收成一份, 再喂 derive_eligibility —— 同一份也进 provenance。
@@ -324,6 +329,13 @@ def evaluate(contract: FrozenContract,
         },
     }
     prov.update(raw.get("provenance") or {})
+    # Registered evaluator-owned evidence cannot be rewritten by candidate raw metadata.
+    prov["heartbeat_channel"] = getattr(heartbeat, "channel", "")
+    prov["heartbeat_identity_hash"] = getattr(heartbeat, "identity_hash", "")
+    prov["heartbeat_evidence"] = getattr(heartbeat, "evidence", {})
+    prov["heartbeat_absolute_anchor_checked"] = getattr(heartbeat, "absolute_anchor_checked", False)
+    prov["heartbeat_ruler_profile_hash"] = getattr(heartbeat, "ruler_profile_hash", "")
+    prov["cuda_ruler_profile"] = raw.get("cuda_ruler_profile")
     # 资格位的**原料** (见上面 rule_inputs 的说明): 五个布尔回推不出是哪个输入判的。
     # 写在 `prov.update(...)` **之后** —— 这是评测器自己的审计记录, 不该被载荷的
     # provenance 覆盖; 能改写「为什么判成这样」的记录等于没有记录。

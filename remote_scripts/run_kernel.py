@@ -1380,6 +1380,13 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
 
         # 两臂按块交错计时。候选臂全程在 shield_torch 内 (每一次执行都是), 基线臂不在
         # —— 基线本身就是 torch 原生算子, 套进 shield 会立刻抛 CheatDetectedError。
+        timing_identity = None
+        if is_cuda:
+            try:
+                from cuda_calibration import ruler_identity, CHANNEL, digest
+            except ImportError:
+                from operator_agent.cuda_calibration import ruler_identity, CHANNEL, digest
+            timing_identity = ruler_identity(sys.modules[__name__])
         try:
             candidate_stats, base_stats, paired = _bench_pair_interleaved(
                 candidate, base_fn, warmup, repeat, is_cuda)
@@ -1388,6 +1395,12 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                 base_cleanup()
         if reference_contract is not None:
             evidence["reference_receipt"] = execution_receipt(reference_contract)
+        if timing_identity is not None:
+            evidence["timing_receipt"] = dict(channel=CHANNEL,
+                calibration_identity=timing_identity, identity_hash=digest(timing_identity),
+                requested_counts=dict(warmup=warmup, repeat=repeat), paired=paired,
+                candidate_runs=candidate_stats["runs"], baseline_runs=base_stats["runs"],
+                default_stream_after=torch.cuda.current_stream() == torch.cuda.default_stream())
         elapsed = candidate_stats["median_time_ms"] / 1000
         gflops, bandwidth = _compute_metrics(real_inputs, elapsed)
         return {"success": True, "device": str(device), "candidate": candidate_stats,

@@ -97,6 +97,9 @@ class DeclaredFakeBackend(Backend):
     def ensure_environment(self, required_pips=None):
         return self._optional("ensure_environment", required_pips=required_pips)
 
+    def calibration_probe(self, mode="heartbeat"):
+        return self._optional("calibration_probe", mode=mode)
+
     def deploy(self):
         return self._optional("deploy")
 

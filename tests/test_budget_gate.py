@@ -168,7 +168,20 @@ class TestTheRulerIsNotStarvedByTheBudget(unittest.TestCase):
     """
 
     def test_heartbeats_keep_running_after_the_calibration_share_is_used_up(self):
-        c = Conductor(backend=LaunchDominatedGPU(NET_MS_MATMUL_4096),
+        # This fixture reports CUDA, so explicitly supply the native channel.
+        # CPU proxy heartbeats no longer certify CUDA; timings remain offline fakes.
+        from operator_agent.backend_caps import Cap
+        from tests.test_cuda_calibration import receipt
+        class NativeTimer(LaunchDominatedGPU):
+            @property
+            def capabilities(self):
+                return super().capabilities | {Cap.NATIVE_CUDA_CALIBRATION}
+            @property
+            def selected_gpu(self):
+                return 2
+            def calibration_probe(self, mode="heartbeat"):
+                return receipt(mode)
+        c = Conductor(backend=NativeTimer(NET_MS_MATMUL_4096),
                       kernel_db=KernelDatabase(jsonl_path=None), llm=_TaggingLlm(),
                       max_optimize_rounds=3, heartbeat_interval=1,
                       budget=BudgetPlan(oracle_total=10))       # 标定份额 = 1

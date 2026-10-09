@@ -50,6 +50,8 @@ class Cap(str, Enum):
     REFERENCE_IDENTITY = "reference_identity"
     #: `benchmark_with_baselines`: 候选与基线在同一张卡上交错计时
     SAME_DEVICE_BASELINE = "same_device_baseline"
+    #: 固定原生 CUDA 参照；复用生产 event/交错计时，不允许 CPU 心跳替代
+    NATIVE_CUDA_CALIBRATION = "native_cuda_calibration"
     #: `ensure_environment`: 能自检并 provision 自己的运行环境
     ENV_PROVISION = "env_provision"
     #: `deploy`: 能把 runner 及其依赖同步到执行侧
@@ -71,6 +73,7 @@ OPTIONAL_CAP_METHODS = {
     Cap.REMOTE_VERIFY: "verify_function",
     Cap.REFERENCE_IDENTITY: "reference_identity",
     Cap.SAME_DEVICE_BASELINE: "benchmark_with_baselines",
+    Cap.NATIVE_CUDA_CALIBRATION: "calibration_probe",
     Cap.ENV_PROVISION: "ensure_environment",
     Cap.DEPLOY: "deploy",
     Cap.DEP_ANALYSIS: "analyze_dependencies",
@@ -268,6 +271,9 @@ class Backend(ABC):
 
     def benchmark_with_baselines(self, *args, **kwargs):
         raise CapabilityMissing(Cap.SAME_DEVICE_BASELINE, self)
+
+    def calibration_probe(self, *args, **kwargs):
+        raise CapabilityMissing(Cap.NATIVE_CUDA_CALIBRATION, self)
 
     def ensure_environment(self, *args, **kwargs):
         raise CapabilityMissing(Cap.ENV_PROVISION, self)
