@@ -18,12 +18,13 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from benchmarks import workload_decision_h20 as wd
 from operator_agent import Conductor, KernelDatabase
+from operator_agent.artifact_store import ArtifactStore
 from operator_agent.budget import BudgetPlan
 from operator_agent.contract import case_key, freeze_from_task
 from operator_agent.kernel_db import FailureDatabase
 from operator_agent.schemas import UnifiedSketch, TilingStrategy, VerificationLevel as Level
 from operator_agent.search_objective import reading, validate_snapshot, results_dict
-from operator_agent.run_contract import atomic_json, audit_value, code_hash, digest, json_value, protocol_identity
+from operator_agent.run_contract import atomic_json, audit_value, code_hash, digest, json_value, protocol_identity, load_checkpoint
 from operator_agent.reference_contract import registered_reference, validate_receipt
 
 
@@ -74,6 +75,114 @@ def check_plan(path,plan,t):
         raise ValueError('frozen search evaluator drift')
     if json_value(freeze_from_task(t).as_dict())!=plan['contract']:
         raise ValueError('frozen search contract drift')
+
+
+def check_candidate(plan,rounds,code):
+    # Enforce fixed order BEFORE Verifier can compile/dispatch, not just in the
+    # retrospective audit. A Fixer retry/substitution must not buy a new window.
+    if len(rounds)>=2 or code!=plan['candidates'][len(rounds)]['source']:
+        raise ValueError('undeclared/retried search candidate refused before verification')
+
+
+def audit_durable(artifact, rounds, plan, *, task, input_sets, controls):
+    """Read-only final-product audit. No metadata backfill, save, resume or RPC.
+
+    Check the actual files independently against raw candidate observations and
+    a fully sealed checkpoint. Loading an artifact is NOT live verification.
+    Missing/torn/mismatched durable evidence fails this audit, never triggers a
+    measurement retry or patches the original product to make it look accepted.
+    """
+    errors=[];proof=dict(completed=False,errors=errors,read_only=True,
+                        gpu_measurements=0,resumed=False)
+    try:
+        from operator_agent.contract import load_dict
+        from operator_agent.report import build_report
+        directory=Path(artifact.saved_dir)
+        contract=load_dict(plan['contract'])
+        if contract.hash!=freeze_from_task(task).hash or protocol_identity()!=plan['measurement_protocol']:
+            raise ValueError('durable audit frozen contract/protocol drift')
+        required=('result.json','sketch.json','verification.json','benchmark.json',
+                  'execution_snapshot.json','contract.json','run_manifest.json','report.md')
+        code_file=ArtifactStore._find_code_file(directory)
+        if code_file is None:raise ValueError('durable selected source missing')
+        paths=[directory/name for name in required]+[code_file]
+        if directory.is_symlink() or any(p.is_symlink() or not p.is_file() for p in paths):
+            raise ValueError('durable evidence missing/symlink')
+        before={p.name:code_hash(p.read_text()) for p in paths}
+        loaded=ArtifactStore(str(directory)).load(str(directory))
+        raw=json.loads((directory/'result.json').read_text())
+        snap,binding=load_checkpoint(directory/'execution_snapshot.json',task,input_sets,controls)
+        scores=[]
+        for code,results in rounds:
+            l3=next(r for r in results if r.level is Level.L3_PERFORMANCE)
+            point=reading(l3.metrics,contract)
+            if not point['can_select'] or point['score'] is None:
+                raise ValueError('durable winner lacks qualified raw workload evidence')
+            scores.append(point['score'])
+            sidecar_errors=wd.binding_errors(SimpleNamespace(saved_dir=str(directory),code=code),
+                l3.metrics,contract,dict(plan,candidate=dict(hash=code_hash(code))))
+            if sidecar_errors:raise ValueError('; '.join(sidecar_errors))
+        if len(scores)!=2:raise ValueError('durable audit requires exactly two frozen observations')
+        winner=max(range(len(scores)),key=lambda i:scores[i])
+        source,results=rounds[winner]
+        expected_selection=dict(basis='objective',selected_round=winner+1,
+            fallback_to_best=winner!=len(rounds)-1,evidence_scope='current_process_selection_only')
+        search=raw.get('search_objective');selection=raw.get('candidate_selection')
+        if (search is None or search!=snap['search_objective']
+                or selection!=expected_selection
+                or search!=json_value(audit_value(artifact.metadata['search_objective']))
+                or selection!=artifact.metadata['candidate_selection']
+                or loaded.metadata.get('search_objective')!=search
+                or loaded.metadata.get('candidate_selection')!=selection):
+            raise ValueError('durable search identity/selection missing or changed')
+        validate_snapshot(search,contract,snap['round_done'])
+        best=search['best']
+        if (best['round']!=winner+1 or best['score']!=scores[winner]
+                or loaded.code!=source or artifact.code!=source or best['code']!=source
+                or loaded.sketch.to_dict()!=best['sketch']
+                or loaded.sketch.to_dict()!=artifact.sketch.to_dict()
+                or raw.get('iteration_history')!=snap['iteration_history']
+                or loaded.iteration_history!=json_value(audit_value(artifact.iteration_history))):
+            raise ValueError('durable winner source/sketch/score/history drift')
+        # Only known derived publication/case annotations may differ. All raw
+        # timings, receipts, windows and bindings must belong to the selected
+        # candidate -- swapping the last probe's results is NOT a roundtrip.
+        derived={'claim_level','objective','implementation_decision',
+                 'case_key','case_source','case_declared','case_match'}
+        def core(rows):
+            return json_value(audit_value([dict(level=r.level.value,passed=r.passed,message=r.message,
+                metrics={k:v for k,v in r.metrics.items() if k not in derived}) for r in rows]))
+        if core(loaded.verification_results)!=core(results):
+            raise ValueError('durable selected verification not its own raw evidence')
+        selected_l3=next(r for r in loaded.verification_results if r.level is Level.L3_PERFORMANCE)
+        if (loaded.benchmark_data!=json_value(audit_value(artifact.benchmark_data))
+                or reading(loaded.benchmark_data,contract)['score']!=scores[winner]
+                or core([SimpleNamespace(level=Level.L3_PERFORMANCE,passed=selected_l3.passed,
+                    message=selected_l3.message,metrics=loaded.benchmark_data)])!=core([selected_l3])):
+            raise ValueError('durable selected benchmark drift')
+        if (snap['current_code']!=rounds[-1][0] or snap['round_done']!=len(rounds)
+                or snap['best_gflops']!=0. or loaded.all_passed or raw.get('all_passed') is not False
+                or loaded.metadata.get('stop')!=artifact.metadata['stop']
+                or loaded.metadata['stop']['reason']!='budget_exhausted'
+                or (loaded.metadata.get('corpus_admission') or {}).get('kept') is not False
+                or loaded.benchmark_data.get('implementation_decision',{}).get('decision')!='inconclusive'
+                or any((directory/name).exists() for name in ('confirmation.json','admission.json'))):
+            raise ValueError('durable last probe/stop/non-admission drift')
+        report=(directory/'report.md').read_text()
+        regenerated=build_report(artifact=loaded,task=task,generated_at='audit-only')
+        start='### 声明 workload 的搜索选优';end='## 2. 证据链 (逐轮)'
+        section=regenerated.split(start,1)[1].split(end,1)[0]
+        chain=regenerated.split(end,1)[1].split('## 3.',1)[0]
+        if start+section not in report or end+chain not in report:
+            raise ValueError('durable report disagrees with loaded selection/history')
+        after={p.name:code_hash(p.read_text()) for p in paths}
+        if after!=before:raise ValueError('durable audit mutated or observed changing evidence')
+        proof.update(completed=True,selected_round=winner+1,candidate_hash=code_hash(source),
+            score=scores[winner],checkpoint_verified=True,
+            protocol_hash=digest(binding['manifest']['measurement_protocol']),file_hashes=before)
+    except (OSError,ValueError,KeyError,TypeError,AttributeError,IndexError,StopIteration) as exc:
+        errors.append('durable search audit: '+type(exc).__name__+': '+str(exc))
+    return proof
 
 
 def audit(artifact, rounds, trace, plan, generated, corpus):
@@ -181,12 +290,15 @@ def run(args):
         verify=c.verifier.verify
         def capture(*a,**k):
             check_plan(root/'plan.json',plan,t)
+            check_candidate(plan,rounds,k['kernel_code'])
             results=verify(*a,**k);rounds.append((k['kernel_code'],results));return results
         c.verifier.verify=capture
         art=c.execute(t,xs,target_gflops=0.)
+        check_plan(root/'plan.json',plan,t)
         proof=audit(art,rounds,backend.trace,plan,generated,corpus)
-        summary.update(proof=proof,saved_dir=art.saved_dir)
-        summary['errors']+=proof['errors']
+        durable=audit_durable(art,rounds,plan,task=t,input_sets=xs,controls=c._run_controls)
+        summary.update(proof=proof,durable=durable,saved_dir=art.saved_dir)
+        summary['errors']+=proof['errors']+durable['errors']
     except (Exception,KeyboardInterrupt) as exc:
         summary['errors'].append(type(exc).__name__+': '+str(exc))
     finally:
@@ -200,7 +312,8 @@ def run(args):
         for key,old in previous.items():
             if old is None:os.environ.pop(key,None)
             else:os.environ[key]=old
-    summary['completed']=bool(not summary['errors'] and summary['cleanup'] and summary['cleanup']['quiescent'] and summary['cleanup']['removed'] and len(rounds)==2)
+    summary['completed']=bool(not summary['errors'] and summary.get('durable',{}).get('completed')
+        and summary['cleanup'] and summary['cleanup']['quiescent'] and summary['cleanup']['removed'] and len(rounds)==2)
     atomic_json(root/'summary.json',audit_value(summary));print(wd.dumps(summary),flush=True)
     return 0 if summary['completed'] else 1
 

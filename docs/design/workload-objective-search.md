@@ -209,3 +209,7 @@ evaluator source，但不在 measurement_protocol 文件列表里。
 
 日志：`output/workload_search_validation/targeted-final.log`、`full-tests-complete.log`、
 `golden-final.log`。早期失败的夹具/驱动尝试日志保留，但不当成最终通过或新真机读数。
+
+后续：该阶段已本地提交为 `d33a8a4`。最终协议的完整复验与磁盘证据封口跟踪于
+[最终协议验收记录](workload-search-final-protocol-acceptance.md)，上文实测/离线投影
+是先前阶段的历史记录，不覆盖后续的新协议试验。
