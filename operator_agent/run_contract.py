@@ -78,6 +78,8 @@ def protocol_identity():
         "operator_agent/kernel_db.py", "operator_agent/artifact_store.py",
         "operator_agent/oracle.py", "operator_agent/backend_caps.py",
         "operator_agent/workload.py",
+        "operator_agent/search_objective.py",
+        "operator_agent/bandit.py", "operator_agent/selection.py",
         "operator_agent/tolerance.py", "operator_agent/eligibility.py",
         "operator_agent/correctness_boundaries.py", "operator_agent/source_lang.py",
         "operator_agent/resource_check.py", "operator_agent/hardware_caps.py",
@@ -224,6 +226,9 @@ def load_checkpoint(path, task, input_sets, controls=None):
             raise RunBindingError("checkpoint/candidate binding mismatch")
         if snapshot.get("environment_fingerprint") != m.get("environment"):
             raise RunBindingError("checkpoint environment mismatch")
+        if loaded.case_weights or loaded.aggregate:
+            from .search_objective import validate_snapshot
+            validate_snapshot(snapshot.get("search_objective"), loaded, snapshot["round_done"])
         return snapshot, binding
     except RunBindingError:
         raise

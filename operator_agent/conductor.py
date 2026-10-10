@@ -19,6 +19,7 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Union
 from .eligibility import decision_speedup
+from .search_objective import SearchObjective
 from .schemas import (
     TaskSchema, RouteType, VerificationLevel, VerificationResult,
     UnifiedSketch, KernelArtifact,
@@ -364,6 +365,8 @@ class RunState:
     search_alternatives: list
     plan: Any
     last_tunable_perf: Any
+    #: Declared-objective winner is session-local; snapshots are audit/proposal only.
+    search_objective: Any
 
     # ---- 只在收尾读的累积量 ----
     fix_attempts: list
@@ -594,7 +597,7 @@ class Conductor:
                     # §21.1 生产者侧: 模型连续两次交的都是「不改候选」的动作信封
                     # (解释 / 请求观测), 响应过之后仍然没有补丁 ⇒ 本轮没有候选可验证。
                     # 与 `fix_error` 分开: 那个是修复**抛了异常**, 这个是模型**明说不改**。
-                    "ask_turns_exhausted")
+                    "ask_turns_exhausted", "qualified_candidate_hold")
 
     def _record_stop(self, artifact, round_num: int, reason: str, detail: str = "") -> None:
         """把「循环为什么停」记成数据, 而不是只留一行 print。
@@ -1455,6 +1458,16 @@ class Conductor:
                 "verification_results": snap["verification_results"],
                 "evidence_scope": "previous_process_audit_only",
             }
+            if snap.get("search_objective"):
+                artifact.metadata["resume_audit"]["search_objective"] = snap["search_objective"]
+                # Only restore SOURCE as a proposal. Do not restore best score,
+                # eligibility, bandit, progress or old verification results.
+                historical_best = snap["search_objective"].get("best")
+                if historical_best:
+                    from .schemas import UnifiedSketch
+                    current_code = historical_best["code"]
+                    current_sketch = UnifiedSketch.from_dict(historical_best["sketch"])
+                    pending_fix = current_code
             pending_fix = pending_fix or current_code
             self._resume_candidate_once = True
             snap_fingerprint = snap.get("environment_fingerprint")
@@ -1575,6 +1588,7 @@ class Conductor:
             search_alternatives=search_alternatives,
             plan=plan,
             last_tunable_perf=last_tunable_perf,
+            search_objective=SearchObjective.for_task(task),
             fix_attempts=fix_attempts,
             reflexion_pending=reflexion_pending,
             duplicate_rounds=duplicate_rounds,
@@ -1622,6 +1636,7 @@ class Conductor:
             applied_recipes=state.applied_recipes,
             disabled_recipes=state.disabled_recipes,
             all_verification_results=state.all_verification_results,
+            search_objective=state.search_objective.snapshot() if state.search_objective else None,
         )
 
 
@@ -1692,7 +1707,8 @@ class Conductor:
                       f"{self._budget.plan.llm_tokens}) ⇒ 本轮退化成纯数值搜索 "
                       f"(不问 LLM 要结构改动)")
             _elig = l3_result.metrics.get("eligibility") or {}
-            _can_tune = _elig.get("can_tune") is True
+            _can_tune = (state.artifact.iteration_history[-1]["search_objective"]["can_tune"]
+                         if state.search_objective else _elig.get("can_tune") is True)
             if not _can_tune:
                 print(f"\n[Search] 本轮读数无调参资格 "
                       f"(can_tune=False; 档位="
@@ -1700,8 +1716,9 @@ class Conductor:
                       f" ⇒ 不进信念")
             print(f"\n[Search] L3 性能未达标，启动优化...")
             # ── bandit 记账 (§5 / §10.5-3) ──
-            # 回报口径 = 相对**本轮之前**最好 gflops 的改进 —— 与 `best_gflops` /
-            # 停滞判定同一个量, 不另立一个口径。资格位决定这次回报算不算数:
+            # Explicit workloads already recorded their reward against the
+            # previous objective winner. This branch preserves legacy GFLOPS.
+            # 资格位决定这次回报算不算数:
             # `can_count_progress=False` 的那一轮只记「试过」, 回报不进均值
             # (「试过但没数」既不是「没试过」, 也不是「试过且不好」)。
             _cur = l3_result.metrics.get("gflops")
@@ -1709,11 +1726,10 @@ class Conductor:
             if (isinstance(_cur, (int, float)) and not isinstance(_cur, bool)
                     and isinstance(state.best_gflops, (int, float)) and state.best_gflops > 0):
                 _reward = (float(_cur) - float(state.best_gflops)) / float(state.best_gflops)
-            state.bandit.update(bandit_arm, _reward,
-                          eligible=_elig.get("can_count_progress") is True,
-                          # §10.3 的分母原料: 这一轮把秒换成数字花了多少。只有真跑出
-                          # L3 读数才算 (L1/L2 就挂掉的轮次没有测量秒可言 ⇒ None)。
-                          cost_s=_measure_s if l3_result is not None else None)
+            if state.search_objective is None:
+                state.bandit.update(bandit_arm, _reward,
+                    eligible=_elig.get("can_count_progress") is True,
+                    cost_s=_measure_s if l3_result is not None else None)
             perf_data = {
                 "gflops": l3_result.metrics.get("gflops", 0),
                 "speedup": (decision_speedup(l3_result.metrics) or 0),
@@ -1741,6 +1757,13 @@ class Conductor:
                 # ---- 优化历史 ----
                 "optimization_history": state.optimization_history,
             }
+            if state.search_objective:
+                point = state.artifact.iteration_history[-1]["search_objective"]
+                perf_data.update(speedup=point["score"], search_objective=point,
+                    performance_scope="declared_workload", primary_diagnostics_only=True,
+                    workload_cases={k: {f: r.get(f) for f in
+                        ("speedup_vs_baseline", "measurement_validity", "eligibility", "roofline_analysis")}
+                        for k, r in (l3_result.metrics.get("cases") or {}).items()})
             if _llm_broke:
                 # 与 `tuning_refused` 走同一条通道 (perf_data), 不新增签名 ——
                 # SearchAgent 见到它就跳过 `_llm_optimize` 走规则路径。
@@ -1833,6 +1856,7 @@ class Conductor:
                             applied_recipes=state.applied_recipes,
                             disabled_recipes=state.disabled_recipes,
                             all_verification_results=state.all_verification_results,
+                            search_objective=state.search_objective.snapshot() if state.search_objective else None,
                         )
                         self._record_stop(state.artifact, round_num, "search_error", "Search 优化抛异常, 终止优化循环")
 
@@ -2409,6 +2433,15 @@ class Conductor:
                               "冻结参考身份未确立/已漂移: 不修候选、不搜索、不计进展、不写失败语料")
             return _ROUND_STOP
 
+        if state.search_objective:
+            point = state.search_objective.observe(code=state.current_code,
+                sketch=state.current_sketch, results=verify_results, round_num=round_num)
+            _round_rec["search_objective"] = point
+            _perm["best_updated"] = point["best_updated"]
+            if l3_result:
+                state.bandit.update(bandit_arm, point["reward"],
+                    eligible=point["can_count_progress"] and point["can_tune"], cost_s=_measure_s)
+
         # 每轮都算一遍「这一场里各轮的尺是不是同一把」, 但**只在它有话说的时候**打印
         # (与上面 [Novelty] 同一个姿势)。一致时不占日志: 「各轮同尺」是这片要守的
         # 默认前提, 不是成果; 要露出来的只有「变了」与「某一轮自己说不清用了哪把」。
@@ -2457,7 +2490,9 @@ class Conductor:
         self._escalation_log.append(dict(_esc_decision.as_dict(), round=round_num))
         measurement_ok = True
         if l3_result is not None:
-            measurement_ok = self._measurement_drives_loop(l3_result, round_num)
+            measurement_ok = (_round_rec["search_objective"]["can_count_progress"]
+                              if state.search_objective else
+                              self._measurement_drives_loop(l3_result, round_num))
             if not measurement_ok:
                 state.invalid_measurement_rounds += 1
             # 读的是 metrics 里那个布尔而不是重算一遍判据: 键没了就说明提供方
@@ -2469,7 +2504,9 @@ class Conductor:
         if l3_result and l3_result.passed is False and measurement_ok:
             current_gflops = l3_result.metrics.get("gflops", 0)
             # 当 gflops 为 0 (指标计算不可用) 时，用速度比判断
-            if current_gflops > 0 and state.best_gflops <= 0:
+            if state.search_objective:
+                self._workload_progress(state, _round_rec)
+            elif current_gflops > 0 and state.best_gflops <= 0:
                 # 首个有效观测只能用来建立基线: 没有"之前"可比, 因此既不算改善
                 # 也不算停滞, 更不能据此禁用本轮配方 (首轮 plan 是在 roofline=None
                 # 下按算子类型选的, 无从判断其好坏)。
@@ -2609,7 +2646,9 @@ class Conductor:
         # 所以拿得到 L3 就意味着 L1/L2 过了、且 L3 没过。在这里再写
         # `not l3_result.passed` 或 `not l1_l2_failed` 都是永不生效的条件
         # (同一文件里刚为 `can_disable_recipe` 删掉过一个)。
-        if l3_result is not None and reference_ceiling_reached(l3_result.metrics or {}):
+        if l3_result is not None and (state.search_objective.at_reference_ceiling(l3_result.metrics or {})
+                                      if state.search_objective else
+                                      reference_ceiling_reached(l3_result.metrics or {})):
             _att = binding_attainment(l3_result.metrics or {})
             _rl = (l3_result.metrics or {}).get("roofline_analysis") or {}
             print(f"\n[Conductor] 绑定轴已达 roofline {_att:.1f}% "
@@ -2735,6 +2774,7 @@ class Conductor:
                         applied_recipes=state.applied_recipes,
                         disabled_recipes=state.disabled_recipes,
                         all_verification_results=state.all_verification_results,
+                        search_objective=state.search_objective.snapshot() if state.search_objective else None,
                     )
                     self._record_stop(state.artifact, round_num, "fix_error", "Fixer 修复抛异常, 停止迭代")
 
@@ -2795,6 +2835,7 @@ class Conductor:
                     applied_recipes=state.applied_recipes,
                     disabled_recipes=state.disabled_recipes,
                     all_verification_results=state.all_verification_results,
+                    search_objective=state.search_objective.snapshot() if state.search_objective else None,
                 )
                 return _ROUND_CONTINUE
             print(f"\n[Conductor] L1/L2 验证失败且已达最大轮次，停止迭代")
@@ -2808,6 +2849,30 @@ class Conductor:
             state, round_num,
             _esc_decision=_esc_decision, _measure_s=_measure_s, _space=_space,
             bandit_arm=bandit_arm, l3_result=l3_result)
+
+    def _workload_progress(self, state, round_record):
+        """Progress/recipe effects use the SAME score and previous winner as reward."""
+        point = round_record["search_objective"]
+        comparison = point["comparison"]
+        if comparison is None:
+            print(f"\n[Conductor] 建立 workload 目标基线: {point['score']:.4f}x")
+            return
+        self._verdict_tail.append(comparison)
+        round_record[LINEAGE_BAND_KEY] = point["comparison_band"]
+        if comparison == "FAST":
+            state.rounds_without_improvement = 0
+            if state.plan and state.plan.selected_recipes:
+                state.applied_recipes.update(r.id for r in state.plan.selected_recipes)
+        else:
+            state.rounds_without_improvement += 1
+            round_record["permanent_effects"]["stagnation_counted"] = True
+            if comparison == "SLOW" and state.plan:
+                for recipe in state.plan.selected_recipes:
+                    if recipe.id not in state.applied_recipes:
+                        state.disabled_recipes.add(recipe.id)
+                        round_record["permanent_effects"]["recipes_disabled"].append(recipe.id)
+        print(f"\n[Conductor] workload {comparison}: {point['score']:.4f}x vs "
+              f"{point['best_before']:.4f}x; {point['comparison_reason']}")
 
     def _finalize_run(self, *, state):
         """收尾: 把跑完的循环状态落成最终产物、写报告、给出返回值。
@@ -2835,8 +2900,24 @@ class Conductor:
         state.artifact.sketch = state.current_sketch
         state.artifact.verification_results = state.all_verification_results
 
-        if state.all_verification_results:
-            l3 = next((r for r in state.all_verification_results if r.level == VerificationLevel.L3_PERFORMANCE), None)
+        if state.search_objective:
+            winner = state.search_objective.winner()
+            state.artifact.metadata["search_objective"] = state.search_objective.snapshot()
+            state.artifact.metadata["candidate_selection"] = dict(
+                basis="objective", selected_round=state.search_objective.best["round"] if winner else None,
+                fallback_to_best=bool(winner and state.search_objective.best["round"] !=
+                    state.artifact.iteration_history[-1]["round"]),
+                evidence_scope="current_process_selection_only")
+            if winner:
+                (state.artifact.code, state.artifact.sketch,
+                 state.artifact.verification_results) = winner
+                if not state.artifact.all_passed and state.artifact.metadata["stop"]["reason"] == "passed":
+                    state.artifact.metadata["last_probe_stop"] = state.artifact.metadata["stop"]
+                    self._record_stop(state.artifact, state.artifact.iteration_history[-1]["round"],
+                        "qualified_candidate_hold", "最后一轮虽过 L3，但不具备进度/选优资格；保留合格候选，未达目标")
+
+        if state.artifact.verification_results:
+            l3 = next((r for r in state.artifact.verification_results if r.level == VerificationLevel.L3_PERFORMANCE), None)
             if l3:
                 state.artifact.benchmark_data = l3.metrics
                 from .contract import case_key
@@ -2859,7 +2940,7 @@ class Conductor:
                         evaluated and evaluated <= set(state.declared_cases))
 
             # 提取编译元信息 (Triton: num_warps, num_stages 等)
-            l1 = next((r for r in state.all_verification_results if r.level == VerificationLevel.L1_COMPILE), None)
+            l1 = next((r for r in state.artifact.verification_results if r.level == VerificationLevel.L1_COMPILE), None)
             if l1 and l1.metrics:
                 state.artifact.compile_info = {
                     k: v for k, v in l1.metrics.items()
@@ -2937,6 +3018,7 @@ class Conductor:
             applied_recipes=state.applied_recipes,
             disabled_recipes=state.disabled_recipes,
             all_verification_results=state.all_verification_results,
+            search_objective=state.search_objective.snapshot() if state.search_objective else None,
         )
         print(f"\n[Conductor] 产物已保存到: {saved_dir}")
 
@@ -3167,6 +3249,7 @@ class Conductor:
                              disabled_recipes: set,
                              all_verification_results: list,
                              environment: Optional[dict] = None,
+                             search_objective: Optional[dict] = None,
                              ) -> dict:
         """把运行时状态打包成可 JSON 化的 dict"""
         def vr_to_dict(vr: VerificationResult) -> dict:
@@ -3202,6 +3285,7 @@ class Conductor:
             # 「没有可比的上一次」而不是「没漂移」。
             "environment_fingerprint": env.get("fingerprint") or None,
             "environment_drift": env.get("drift"),
+            **({"search_objective": search_objective} if search_objective is not None else {}),
         }
 
     def _flush_snapshot(self, *, task: TaskSchema, artifact_dir: Optional[str],
@@ -3211,7 +3295,8 @@ class Conductor:
                         rounds_without_improvement: int,
                         optimization_history: list,
                         applied_recipes: set, disabled_recipes: set,
-                        all_verification_results: list) -> Optional[str]:
+                        all_verification_results: list,
+                        search_objective: Optional[dict] = None) -> Optional[str]:
         """写 execution_snapshot.json 到 artifact_dir; artifact_dir 不存在时用 output/<kernel>/<hw>/snap_<task_id>/ 预创建。
 
         返回实际写入的目录 (用于把 snapshot_target_dir 指向该预创建目录, 避免后续轮次错位)。
@@ -3228,6 +3313,7 @@ class Conductor:
             disabled_recipes=disabled_recipes,
             all_verification_results=all_verification_results,
             environment=self._environment,
+            search_objective=search_objective,
         )
         target_dir = artifact_dir
         # 若没有 artifact_dir (第 1 轮还没走 save), 就预创建一个 "staging" 快照目录。

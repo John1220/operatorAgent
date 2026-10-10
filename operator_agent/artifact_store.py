@@ -118,6 +118,14 @@ class ArtifactStore:
         for name in ("corpus_admission", "claim_level"):
             if (artifact.metadata or {}).get(name) is not None:
                 result_data[name] = artifact.metadata[name]
+        # Selected source/results and last-probe state can differ. These audit
+        # keys must survive ordinary artifact reload, not only sealed resume.
+        # Register explicitly; do not dump arbitrary metadata or invent a legacy
+        # objective. Nonfinite diagnostics remain explicit, never valid scores.
+        from .run_contract import audit_value
+        for name in ("search_objective", "candidate_selection", "last_probe_stop"):
+            if (artifact.metadata or {}).get(name) is not None:
+                result_data[name] = audit_value(artifact.metadata[name])
         result_path = artifact_dir / "result.json"
         result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -221,7 +229,7 @@ class ArtifactStore:
         result_file = dir_path / "result.json"
         if not result_file.exists():
             return None
-        from .schemas import UnifiedSketch, TilingStrategy, MemoryPlan, PipelineStage, VerificationResult, VerificationLevel
+        from .schemas import UnifiedSketch, VerificationResult, VerificationLevel
         data = json.loads(result_file.read_text(encoding="utf-8"))
         code_path = dir_path / self._find_code_file(dir_path)
         code = code_path.read_text(encoding="utf-8") if code_path else ""
@@ -229,15 +237,9 @@ class ArtifactStore:
         sketch_file = dir_path / "sketch.json"
         if sketch_file.exists():
             sketch_data = json.loads(sketch_file.read_text(encoding="utf-8"))
-            sketch = UnifiedSketch(
-                algorithm=sketch_data.get("algorithm", ""),
-                version=sketch_data.get("version", 1),
-                tiling=TilingStrategy(**sketch_data.get("tiling", {})),
-                memory_plan=MemoryPlan(**sketch_data.get("memory_plan", {})),
-                pipeline=[PipelineStage(**p) for p in sketch_data.get("pipeline", [])],
-                target_dsl=sketch_data.get("target_dsl", "python"),
-                optimization_hints=sketch_data.get("optimization_hints", []),
-            )
+            # to_dict() uses global/local/register and from/to, not dataclass
+            # field names. Share the schema decoder (including hot hints).
+            sketch = UnifiedSketch.from_dict(sketch_data)
         verification_results = []
         verify_file = dir_path / "verification.json"
         if verify_file.exists():
@@ -259,7 +261,9 @@ class ArtifactStore:
             sketch=sketch,
             verification_results=verification_results,
             benchmark_data=benchmark_data,
-            metadata={k:data[k] for k in ("corpus_admission", "claim_level") if k in data},
+            iteration_history=data.get("iteration_history", []),
+            metadata={k:data[k] for k in ("corpus_admission", "claim_level", "stop",
+                "search_objective", "candidate_selection", "last_probe_stop") if k in data},
             saved_dir=str(dir_path),
         )
 

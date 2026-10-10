@@ -830,6 +830,14 @@ class SearchAgent:
             optimization_history=history_text,
         )
 
+        if perf_data.get("performance_scope") == "declared_workload" and not refused:
+            point = perf_data["search_objective"]
+            prompt += ("\n\n【冻结的 workload 搜索目标】\n"
+                "上述加速比与达标比例是整体目标；GFLOPS/带宽/roofline 是主 case 诊断，"
+                "不是候选排名或整体收敛依据。不得改权重、删 case 或放宽回退上限。\n"
+                + json.dumps({"identity": point["identity"], "objective": point["score"],
+                              "cases": perf_data["workload_cases"]}, ensure_ascii=False, indent=2))
+
         # max_tokens 调高至 4096, 避免 thinking 占满后 JSON 没输出
         result = self.llm.chat_json([{"role": "user", "content": prompt}], temperature=0.3, max_tokens=4096, caller_tag="Search")
 

@@ -495,26 +495,67 @@ def _best_known_good(artifact: Any, m: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _search_objective_lines(artifact: Any) -> List[str]:
+    """Selection audit only; neither reload nor this report confers eligibility."""
+    metadata = getattr(artifact, "metadata", None) or {}
+    search = metadata.get("search_objective")
+    if not isinstance(search, dict):
+        return []
+    identity = search.get("identity") or {}
+    selected = metadata.get("candidate_selection") or {}
+    best = search.get("best")
+    out = ["### 声明 workload 的搜索选优", "",
+           f"- 冻结目标: `{identity.get('aggregate') or '未确立'}`；"
+           f"contract_hash=`{identity.get('contract_hash') or '未确立'}`",
+           f"- 目标门槛: {identity.get('min_speedup')}×；主 case GFLOPS/加速比仅为诊断。"]
+    if not isinstance(best, dict):
+        out.append("- 没有本会话合格赢家；返回末次探针仅供诊断，不代表 best 已确立。")
+    elif (selected.get("selected_round") != best.get("round")
+          or best.get("candidate_hash") != hashlib.sha256(
+              str(getattr(artifact, "code", "") or "").encode("utf-8")).hexdigest()):
+        out.append("- ⚠️ 选优身份与返回源码不一致，不能确立搜索赢家。")
+    else:
+        out += [f"- 保留候选: 第 {best['round']} 轮；workload score={best.get('score')}×；"
+                f"candidate_hash=`{best.get('candidate_hash')}`",
+                f"- 回退到较早最佳候选: {'是' if selected.get('fallback_to_best') is True else '否'}；"
+                "源码、sketch 和验证结果属于该候选，不是末轮结果。"]
+    probe_stop = metadata.get("last_probe_stop")
+    if isinstance(probe_stop, dict):
+        out.append(f"- 末次探针停因: `{probe_stop.get('reason')}`；不替代最终停因。")
+    out += ["- 仅为本会话已观测候选的选择审计，不证明全局最优或部署资格；"
+            "独立确认与入库仍走原门槛，恢复必须重新验证。", ""]
+    return out
+
+
 def _evidence_chain(artifact: Any) -> List[str]:
     out = ["## 2. 证据链 (逐轮)", ""]
     rounds = _rounds(artifact)
     if not rounds:
         out += ["(没有逐轮血缘 —— 这次运行不是 Conductor 循环跑出来的, 或血缘没写)", ""]
         return out
-    out.append("| 轮 | 动作 | L1/L2/L3 | 加速比 | gflops | 档位 | 配方 |")
-    out.append("|---|---|---|---|---|---|---|")
+    declared = any(isinstance(h.get("search_objective"), dict) for h in rounds)
+    out.append("| 轮 | 动作 | L1/L2/L3 | 主 case 加速比 (诊断) | gflops (诊断) | 档位 | 配方 | workload score | reward (对本轮前 best) | 进度判决 |"
+               if declared else "| 轮 | 动作 | L1/L2/L3 | 加速比 | gflops | 档位 | 配方 |")
+    out.append("|---|---|---|---|---|---|---|---|---|---|" if declared else "|---|---|---|---|---|---|---|")
     for h in rounds:
         levels = h.get("levels_passed") or {}
         flags = "/".join(
             ("✅" if levels.get(lv) else ("❌" if lv in levels else "-"))
             for lv in ("L1", "L2", _L3))
-        out.append("| {r} | {a} | {f} | {s} | {g} | {v} | {rec} |".format(
+        line = "| {r} | {a} | {f} | {s} | {g} | {v} | {rec} |".format(
             r=h.get("round"), a=h.get("action"), f=flags,
             s=h.get("speedup"), g=h.get("gflops"), v=h.get("measurement_validity"),
-            rec=",".join(h.get("recipes_applied") or []) or "-"))
-    out += ["",
-            "口径: 逐轮只留下 `iteration_history` 里的那几列 (档位/加速比/gflops); "
-            "完整 metrics 只保留最后一轮, 所以这张表**不是**逐轮 metrics 的替代品。", ""]
+            rec=",".join(h.get("recipes_applied") or []) or "-")
+        if declared:
+            point = h.get("search_objective") or {}
+            line += " " + " | ".join(str(point[k]) if point.get(k) is not None else "-"
+                                       for k in ("score", "reward", "comparison")) + " |"
+        out.append(line)
+    out += ["", ("口径: workload score/reward/判决来自逐轮冻结目标读数；首个合格样本只有 baseline，"
+                 "没有 reward/进度比较。完整产物结果属于保留候选，checkpoint 另记末次探针；"
+                 "本表不是逐轮完整 metrics 的替代品。" if declared else
+                 "口径: 逐轮只留下 `iteration_history` 里的那几列 (档位/加速比/gflops); "
+                 "完整 metrics 只保留最后一轮, 所以这张表**不是**逐轮 metrics 的替代品。"), ""]
     return out
 
 
@@ -554,6 +595,7 @@ def build_report(*, artifact: Any, task: Any = None,
              ""]
     lines += _claim_level_lines(m)
     lines += _best_known_good(artifact, m)
+    lines += _search_objective_lines(artifact)
     lines += _evidence_chain(artifact)
     lines += _correctness_lines(artifact)
     u = collect_unable(artifact=artifact, observations=observations,

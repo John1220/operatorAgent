@@ -355,7 +355,9 @@ class TestTheFieldListHasOneSource(unittest.TestCase):
 
     def test_the_field_count_is_pinned(self):
         """数目写死: 少一个 (丢状态) 或多一个 (多副本) 都要有人来解释"""
-        self.assertEqual(32, len(_run_state_fields(self.src)))
+        # search_objective retains the frozen metric and its session-local
+        # candidate receipt; live state is deliberately NOT restored on resume.
+        self.assertEqual(33, len(_run_state_fields(self.src)))
 
     def test_finalize_takes_exactly_one_state_object(self):
         fin = _func(_tree(self.src), "_finalize_run")

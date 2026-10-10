@@ -60,7 +60,7 @@ class Bandit:
         #:         "win_sum": 那些正回报之和, "cost_sum"/"cost_n": 这条臂花掉的测量秒}
         #
         # 「赢」的定义不是另立一个口径: 调用方给的 reward **就是**「相对本轮之前最好
-        # gflops 的改进」(见 `conductor` 里那处记账), 所以 `reward > 0` 恰好是
+        # 冻结搜索目标的改进」(显式 workload 是聚合加速比，legacy 是 GFLOPS), 所以 `reward > 0` 恰好是
         # §10.3 分数里那个 `P(beats_best)`, 不需要第二次比较。
         self.stats: Dict[Any, Dict[str, float]] = {}
         #: 试过、但回报没被采纳的次数 (没资格 / 没数)。审计用: 「有几轮的数没进统计」。
@@ -84,9 +84,10 @@ class Bandit:
                                          "wins": 0, "win_sum": 0.0,
                                          "cost_sum": 0.0, "cost_n": 0})
         st["pulls"] += 1
-        ok = (eligible and isinstance(reward, (int, float))
-              and not isinstance(reward, bool))     # bool 是 int 的子类, 显式排除
-        if isinstance(cost_s, (int, float)) and not isinstance(cost_s, bool) and cost_s > 0:
+        ok = (eligible is True and isinstance(reward, (int, float))
+              and not isinstance(reward, bool) and math.isfinite(reward))
+        if (isinstance(cost_s, (int, float)) and not isinstance(cost_s, bool)
+                and math.isfinite(cost_s) and cost_s > 0):
             st["cost_sum"] += float(cost_s)
             st["cost_n"] += 1
         if not ok:

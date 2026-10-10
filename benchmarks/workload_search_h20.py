@@ -1,0 +1,208 @@
+"""Fixed two-candidate H20 search wiring audit; local-plan-only by default.
+
+NOT an LLM search or deployment speedup claim. Frozen min_speedup=10 forces
+bounded search of num_warps=4/8 LayerNorm variants, each measured ONCE on two
+fixed large cases. No retries, shape/weight/window selection or gate relaxation.
+Owned scratch only, no shared runtime edits, installs or shared process kills.
+"""
+from __future__ import annotations
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace
+
+ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT))
+from benchmarks import workload_decision_h20 as wd
+from operator_agent import Conductor, KernelDatabase
+from operator_agent.budget import BudgetPlan
+from operator_agent.contract import case_key, freeze_from_task
+from operator_agent.kernel_db import FailureDatabase
+from operator_agent.schemas import UnifiedSketch, TilingStrategy, VerificationLevel as Level
+from operator_agent.search_objective import reading, validate_snapshot, results_dict
+from operator_agent.run_contract import atomic_json, audit_value, code_hash, digest, json_value, protocol_identity
+from operator_agent.reference_contract import registered_reference, validate_receipt
+
+
+def parser():
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--execute',action='store_true')
+    p.add_argument('--host',default='algorithm-h20')
+    p.add_argument('--gpu',type=int,choices=range(8))
+    p.add_argument('--output',default=str(ROOT/'output'/'workload_search_h20'))
+    p.add_argument('--cuda-ruler-profile')
+    p.set_defaults(cuda_calibration=None)
+    return p
+
+
+def candidates():
+    base=wd.trial_code('unfused-fp32')
+    marker='enable_fp_fusion=False'
+    assert base.count(marker)==1
+    return [dict(name='warps-'+str(w),source=base.replace(marker,marker+',num_warps='+str(w))) for w in (4,8)]
+
+
+def declaration(args):
+    t=wd.task('workload-search-h20')
+    t.constraints.min_speedup=10.0  # Frozen search-forcing threshold, never relaxed.
+    profile,calibration=wd.ruler(args)
+    cs=candidates()
+    sources=wd.evaluator_sources()
+    sources['benchmarks/workload_search_h20.py']=code_hash(Path(__file__).read_text())
+    body=dict(schema='workload-search-h20-v1',contract=json_value(freeze_from_task(t).as_dict()),
+        candidates=[dict(c,hash=code_hash(c['source'])) for c in cs],
+        supplied_cases=['X=8192x15360','X=8192x12288'],
+        measurement_protocol=protocol_identity(),evaluator_sources=sources,
+        controls=dict(host=args.host,gpu=args.gpu,max_rounds=3,oracle_total=5,heartbeat_interval=1,
+            wall_clock_s=1800,max_rpcs=wd.MAX_RPCS,max_commands=wd.MAX_COMMANDS,
+            rpc_timeout=wd.RPC_TIMEOUT,cuda_ruler_profile=profile,cuda_calibration=calibration,
+            budget=dict(oracle_total=5,wall_clock_s=1800,llm_tokens=128)),
+        input_storage_limit=wd.MAX_STORAGE_BYTES,
+        retry_windows=False,adaptive=False,performance_scope='fixed-candidate search wiring only')
+    return t,json_value(dict(body,hash=digest(body)))
+
+
+def check_plan(path,plan,t):
+    if json.loads(Path(path).read_text())!=plan or plan['hash']!=digest({k:v for k,v in plan.items() if k!='hash'}):
+        raise ValueError('frozen search plan drift')
+    sources=wd.evaluator_sources()
+    sources['benchmarks/workload_search_h20.py']=code_hash(Path(__file__).read_text())
+    if sources!=plan['evaluator_sources'] or protocol_identity()!=plan['measurement_protocol']:
+        raise ValueError('frozen search evaluator drift')
+    if json_value(freeze_from_task(t).as_dict())!=plan['contract']:
+        raise ValueError('frozen search contract drift')
+
+
+def audit(artifact, rounds, trace, plan, generated, corpus):
+    """Independently reconstruct the ranking/reward from retained Oracle rows."""
+    errors=[]
+    from operator_agent.contract import load_dict
+    contract=load_dict(plan['contract'])
+    supplied=plan['supplied_cases'];expected_codes=[c['source'] for c in plan['candidates']]
+    if [code for code,_ in rounds]!=expected_codes or generated!=expected_codes:
+        errors.append('did not evaluate exactly the two frozen candidates in order')
+    metrics=[];scores=[]
+    for i,(code,results) in enumerate(rounds):
+        levels={r.level.value:r.passed for r in results}
+        l3=next((r for r in results if r.level is Level.L3_PERFORMANCE),None)
+        if levels.get('L1') is not True or levels.get('L2') is not True or not l3:
+            errors.append('candidate missing complete real L1/L2/L3: '+str(i));continue
+        m=l3.metrics;metrics.append(m)
+        errors+=wd.assess(SimpleNamespace(verification_results=results), 'passed',
+            wd.as_suite(contract.correctness_suite), [r for r in trace if r['request'].get('code')==code], False)
+        errors+=wd.metrics_errors(m,contract,supplied)
+        errors+=wd.trace_metrics_errors([m],[r for r in trace if r['request'].get('code')==code],
+                                       supplied,code,plan['controls']['gpu'])
+        point=reading(m,contract);scores.append(point['score'])
+        if not point['can_select'] or point['score'] is None or l3.passed:
+            errors.append('candidate not a valid below-target full-workload search observation: '+str(i))
+        for result in results:
+            if result.metrics.get('run_binding',{}).get('candidate_hash')!=code_hash(code):
+                errors.append('candidate result binding drift')
+    errors+=wd.receipt_errors(registered_reference(),trace)+wd.transfer_errors(trace)
+    errors+=wd.ruler_errors(metrics,trace,plan['controls']['cuda_calibration'],plan['controls']['cuda_ruler_profile'],plan['controls']['gpu'])
+    windows=[m['cases'][k]['arm_windows']['candidate'] for m in metrics for k in supplied]
+    windows += [r['response']['paired']['arm_windows']['candidate'] for r in trace if r['request']['action']=='cuda_calibration_probe']
+    if len(windows)!=len(set(windows)):errors.append('reused candidate/case/heartbeat windows')
+    if len(scores)==2 and all(s is not None for s in scores):
+        winner=max(range(2),key=lambda i:scores[i]) # Stable tie: first.
+        selected=artifact.metadata['candidate_selection']['selected_round']
+        if selected!=winner+1 or artifact.code!=expected_codes[winner]:errors.append('did not return objective winner')
+        history=artifact.iteration_history
+        p1,p2=[r['search_objective'] for r in history]
+        if p1['best_before'] is not None or p1['reward'] is not None:
+            errors.append('first sample was not a fresh search baseline')
+        if (p2['best_before']!=scores[0] or p2['reward']!=(scores[1]-scores[0])/scores[0]
+                or p2['score']!=scores[1]):errors.append('reward compared with wrong objective/incumbent')
+        arms=artifact.metadata['bandit']['arms']
+        if artifact.metadata['bandit']['total_scored']!=1 or sum(a['pulls'] for a in arms.values())!=2:
+            errors.append('bandit skipped or duplicated a frozen candidate observation')
+    snap=json.loads((Path(artifact.saved_dir)/'execution_snapshot.json').read_text())
+    validate_snapshot(snap['search_objective'],contract,snap['round_done'])
+    if (artifact.all_passed or artifact.remeasure or artifact.metadata['stop']['reason']!='budget_exhausted'
+            or artifact.metadata['budget']['spent']['confirm']!=0
+            or (corpus.exists() and corpus.read_bytes())):
+        errors.append('search exit not bounded non-admitting budget stop')
+    if artifact.benchmark_data.get('implementation_decision',{}).get('decision')!='inconclusive':
+        errors.append('below-target search winner granted deployment claim')
+    return dict(errors=errors,objective_scores=scores,case_and_heartbeat_windows=windows,
+                selected_round=artifact.metadata['candidate_selection']['selected_round'],
+                stop=artifact.metadata['stop'],budget=artifact.metadata['budget'],
+                decision=artifact.benchmark_data.get('implementation_decision'),bandit=artifact.metadata['bandit'])
+
+
+def run(args):
+    if args.execute and (args.gpu is None or not args.cuda_ruler_profile):
+        raise ValueError('--execute requires authorized --gpu AND --cuda-ruler-profile')
+    t,plan=declaration(args)
+    budget=BudgetPlan(**plan['controls']['budget'])  # Validate before any SSH/preparation.
+    parent=Path(args.output).resolve();parent.mkdir(parents=True,exist_ok=True)
+    root=Path(tempfile.mkdtemp(prefix='workload-search-',dir=parent))
+    atomic_json(root/'plan.json',plan,readonly=True)
+    (root/'driver.py').write_text(Path(__file__).read_text())
+    print('PLAN '+str(root/'plan.json')+' HASH '+plan['hash'],flush=True)
+    summary=dict(completed=False,mode='execute' if args.execute else 'plan-only',run_root=str(root),
+                 plan_hash=plan['hash'],errors=[],cleanup=None)
+    if not args.execute:
+        atomic_json(root/'summary.json',summary);return 0
+    backend=None;rounds=[];generated=[];art=None
+    log_keys=('OPERATOR_AGENT_LOG_DIR','OPERATOR_AGENT_LOG_KEEP')
+    previous={k:os.environ.get(k) for k in log_keys}
+    os.environ.update(OPERATOR_AGENT_LOG_DIR=str(root/'logs'),OPERATOR_AGENT_LOG_KEEP='10000')
+    try:
+        check_plan(root/'plan.json',plan,t)
+        backend=wd.BoundedProfileSSH(host=args.host,timeout=wd.RPC_TIMEOUT)
+        environment=backend.prepare(args.gpu);wd.validate_scratch(backend.scratch)
+        if 'H20' not in environment.get('selected',{}).get('name',''):raise ValueError('not H20')
+        reference=backend.reference_identity(registered_reference().content_dict())
+        validate_receipt(registered_reference(),reference.get('reference_receipt'))
+        atomic_json(root/'environment.json',dict(environment=environment,reference=reference))
+        xs=[wd.primary(s) for s in wd.LARGE]
+        if [case_key(x) for x in xs]!=plan['supplied_cases']:raise ValueError('actual inputs differ from frozen plan')
+        corpus=root/'corpus'/'kernel_db.jsonl'
+        c=Conductor(backend=backend,kernel_db=KernelDatabase(str(corpus),persist_retrievals=False),
+            failure_db=FailureDatabase(str(root/'failures'/'failure_db.jsonl')),use_coder_pipeline=False,
+            max_optimize_rounds=3,heartbeat_interval=1,budget=budget,
+            cuda_ruler_profile_path=args.cuda_ruler_profile,
+            cuda_calibration_identity_hash=plan['controls']['cuda_calibration']['identity_hash'])
+        c.store.output_dir=root/'artifacts'
+        c.designer.run=lambda *a,**k: UnifiedSketch(algorithm='layernorm',target_dsl='triton')
+        def generate(*a,**k):
+            check_plan(root/'plan.json',plan,t)
+            if len(generated)>=2:raise ValueError('attempted third candidate')
+            code=plan['candidates'][len(generated)]['source'];generated.append(code);return code
+        c.coder=SimpleNamespace(run=generate)
+        c.search=SimpleNamespace(run=lambda sketch,perf: (
+            UnifiedSketch(algorithm='layernorm',target_dsl='triton',version=sketch.version+1,
+                          tiling=TilingStrategy(128,64,32)),'fixed next candidate, not LLM search'))
+        verify=c.verifier.verify
+        def capture(*a,**k):
+            check_plan(root/'plan.json',plan,t)
+            results=verify(*a,**k);rounds.append((k['kernel_code'],results));return results
+        c.verifier.verify=capture
+        art=c.execute(t,xs,target_gflops=0.)
+        proof=audit(art,rounds,backend.trace,plan,generated,corpus)
+        summary.update(proof=proof,saved_dir=art.saved_dir)
+        summary['errors']+=proof['errors']
+    except (Exception,KeyboardInterrupt) as exc:
+        summary['errors'].append(type(exc).__name__+': '+str(exc))
+    finally:
+        if backend:
+            try:summary['cleanup']=backend.cleanup()
+            except (Exception,KeyboardInterrupt) as exc:summary['cleanup']=dict(quiescent=False,removed=False,error=str(exc))
+            summary['errors']+=wd.cleanup_errors(summary['cleanup'],backend)
+            summary['forbidden_actions']=backend.forbidden_actions
+            atomic_json(root/'evidence.json',audit_value(dict(rounds=[dict(code=code,results=results_dict(rs)) for code,rs in rounds],
+                trace=wd.compact_trace(backend.trace),work_counts=getattr(backend,'work_counts',{}),generated=generated)))
+        for key,old in previous.items():
+            if old is None:os.environ.pop(key,None)
+            else:os.environ[key]=old
+    summary['completed']=bool(not summary['errors'] and summary['cleanup'] and summary['cleanup']['quiescent'] and summary['cleanup']['removed'] and len(rounds)==2)
+    atomic_json(root/'summary.json',audit_value(summary));print(wd.dumps(summary),flush=True)
+    return 0 if summary['completed'] else 1
+
+
+if __name__=='__main__':raise SystemExit(run(parser().parse_args()))
