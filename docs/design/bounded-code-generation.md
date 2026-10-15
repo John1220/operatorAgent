@@ -224,6 +224,24 @@ Golden 4 PASS。671 个历史文件、原 ruler/Golden registry 不变；没有 
 生产 identity 因 coder 源码改变更新为 `8bc9ff3330790e63b656dda8bf9ed9a74007f24ddf5e5f710a2442b474544e7d`，
 不把旧失败结果改签成新协议事实。数值、workload、目标、预算和远端隔离边界未放宽。
 
-新计划 `4d460efbe3dd` 只在本地冻结：85 份源码、12077-byte 请求，尚未批准/执行，
-真实模型请求/远端派发为 0。真实验收须再次单独批准，详情见
+该离线阶段结束时，新计划 `4d460efbe3dd` 只在本地冻结：85 份源码、12077-byte 请求，
+当时未批准/执行，真实模型请求/远端派发为 0。后续真实执行另记下节，离线修复详情见
 [离线命名和诊断修复](single-candidate-codegen-h20-acceptance.md#11-离线修复入口helper-命名与固定失败诊断)。
+
+### 后续真实执行：编译通过，主输入数值验证失败
+
+2026-10-15，用户对“本地提交后执行新计划”的建议回复“开动吧”，实现先提交为
+`9cb6b1a`，随后按计划 `4d460efbe3dd` 只执行一次模型请求和一个原文候选；没有 push。
+真实目录 `output/workload_codegen_h20/workload-codegen-uwh99mow/` 保留完整失败证据。
+
+模型返回的源码通过静态预筛和 H20 编译，前一轮同名入口问题未复现。但方差归约
+错误地计入 masked padding：`var_true + (BLOCK-N)*mean²/N`。第一个主输入
+`(8192,15360)` 在容差内通过；第二个 `(8192,12288)` 的全部 100663296 个元素
+超出容差，最大绝对误差 0.04296875，结果为 `correctness_failed`、accepted=false。
+32 个 suite case 均 not_run，候选主测/确认窗口均为 0；只有一个原生校准心跳。
+
+本轮共 18 commands / 12 RPC，owned runner/scratch 已确认 quiescent + removed，
+没有重试、修复、入库或修改共享进程。事后 model/raw/durable 只读审计均完成，
+仅确认失败证据一致，不是正向验收通过；825 个历史文件、原 ruler 和 registry 不变。
+下一步先离线补强 masked reduction 与布局语义，不改写当前失败候选或续用 claim。
+详情见[主输入正确性失败记录](single-candidate-codegen-h20-acceptance.md#12-新计划真实执行编译通过主输入数值验证失败)。

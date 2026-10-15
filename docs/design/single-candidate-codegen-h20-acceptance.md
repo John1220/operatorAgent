@@ -17,6 +17,8 @@
 第 10 节记录新计划获批后的真实执行：模型返回源码，但静态预筛失败，未进入
 候选 CUDA 编译、数值验证或性能主测；仍无正向代码生成或部署验收结论。
 第 11 节记录随后完成的离线命名/诊断修复，不覆盖第 10 节的候选或失败证据。
+第 12 节记录新计划的真实执行：静态预筛和编译通过，第二个主输入数值验证失败；
+没有进入候选性能主测，owned 清理已确认，仍无入库或部署验收结论。
 
 ## 2. 默认 plan-only 与执行资格
 
@@ -437,7 +439,7 @@ Fixer/Search，以及驱动诊断读回和篡改拒绝。
 protocol 文件集未变，其中仅该模块 hash 改变；验收 driver 的诊断接线另进 evaluator
 源码快照。**这不是把旧失败改签成新协议结果**，旧文件和原始 hash 全部保留。
 
-新计划仅在本地准备，**未批准/未执行**：
+本地修复结束时，新计划仅在本地准备，**当时未批准/未执行**（后续执行另记第 12 节）：
 `output/workload_codegen_h20/workload-codegen-s4c21jrn/plan.json`，hash
 `4d460efbe3dd93129b310c89a32d200c0cab98a77e6acc6e2bffb8232dfaeaa2`。
 仍冻结 85 份源码；命名提示使完整请求从 11789 增至 **12077 bytes**，request hash
@@ -453,3 +455,94 @@ protocol 文件集未变，其中仅该模块 hash 改变；验收 driver 的诊
 下一步是在取得**针对该新计划的明确人工批准**后，执行一轮原额度的单候选真实
 验收；失败仍停，不偷偷启用修复、多路采样或补测找绿。当前本地阶段的 completed
 只表示离线工作完成，不表示真实代码生成、CUDA 正确性或部署验收已通过。
+
+## 12. 新计划真实执行：编译通过，主输入数值验证失败
+
+2026-10-15，用户对“先本地提交，再执行新计划 `4d460efbe3dd` 的单候选验收”的
+建议回复“开动吧”。本次据此执行已披露的模型端点、物理 GPU 2 和原额度，不续用
+第 10 节已消费的计划。实现先本地提交为 `9cb6b1a`（`feat: add bounded model code
+generation and H20 acceptance`）；没有 push。
+
+执行前重新核对完整计划、85 份源码快照、12077-byte 请求、原 ruler、Golden registry
+和 825 个历史文件；计划 hash 仍为
+`4d460efbe3dd93129b310c89a32d200c0cab98a77e6acc6e2bffb8232dfaeaa2`。
+执行 claim 在外部动作前 exclusive 消费，不能退款或恢复。
+
+- 真实执行目录：`output/workload_codegen_h20/workload-codegen-uwh99mow/`。
+- KernelArtifact：该目录下的 `artifacts/layernorm/nvidia_gpu/20261015_140819_44a6b620/`。
+- 授权、提交回执、执行日志、局部数学诊断与只读审计：
+  `output/workload_codegen_validation/authorized-naming-u3z7b84d/`。
+
+结果为 **`correctness_failed`，exit code=1；completed、accepted、deployment_accepted
+均为 false**。这次模型请求、静态预筛和 CUDA 编译均成功；失败来自实际数值验证，
+不是生成失败、性能不达标或 degraded。
+
+| 实际动作 | 数量 / 状态 |
+|---|---|
+| 准备回执 | 七阶段全部 passed；15 个有界只读文件 |
+| 指定 GPU | H20、物理 GPU 2；查询时空闲 14084 MiB、利用率 0% |
+| work command / RPC | 18 / 12；gpu_info 8、native heartbeat 1、compile 1、verify 2 |
+| 模型请求 / 输出 token 预留 | 1 / 4096，无重试或 fallback |
+| 请求 / 原始响应 | 12077 / 1907 bytes；finish_reason=stop |
+| API usage | 输入 4045、输出 389，合计 4434 tokens；调用约 34.18 秒 |
+| 模型源码 | 761 bytes，原文保留；唯一 Python 入口与不同名 JIT helper，prechecked |
+| L1 编译 | 1 次 RPC，通过；不等同于底层 JIT specialization 次数上限 |
+| 主输入数值验证 | 2 次 RPC，第一个通过、第二个失败，均全元素比较 |
+| 32-case correctness suite | 全部 not_run；主输入失败后未进入 suite |
+| 候选主测 / 确认窗口 | 0 / 0；无候选性能成绩 |
+| 原生校准心跳 | 1；独立冻结 ruler 锚点检查通过，不是候选性能测量 |
+| owned cleanup | quiescent=true、removed=true，shutdown 已确认；owned PID absent、signals=[] |
+| 入库、重试、修复、安装、共享进程操作 | 均未发生 |
+
+GPU snapshot 不是独占租约。CostTracker 约 `$0.001602` 仅为估算，不是服务端账单。
+模型源码 hash 为 `bdb1698cfa2e9a6a341ecf35e2987d8d4349384ed43b23d71661b4500853b2cf`；
+没有修改源码、换成可信模板或补测找绿。
+
+### 12.1 根因：padding 元素错误地进入中心化方差
+
+源码用 `BLOCK=next_power_of_2(N)`；masked load 将越界 lane 填成 0，但随后的
+`x_centered = x - mean` 把这些 lane 变成 `-mean`。方差归约没有再次排除它们，故
+每个 padding lane 额外贡献 `mean²`：
+
+```text
+var_generated = var_true + (BLOCK - N) * mean² / N
+```
+
+冻结的可信主输入生成器按 `[-1, 0, 1, 2]` 重复填充；均值为 0.5，总体方差为 1.25。
+两个 workload 的 BLOCK 都是 16384，但 padding 比例不同：
+
+| 主输入 shape | padding 数 | 错误方差 | 实测最大绝对误差 | 匹配比例 / 结果 |
+|---|---:|---:|---:|---|
+| `(8192,15360)` | 1024 | 约 1.266667 | 0.0087890625 | 1.0 / 通过 |
+| `(8192,12288)` | 4096 | 约 1.333333 | 0.04296875 | 0.0 / 失败 |
+
+第二个输入的 **100663296 / 100663296** 个元素超出冻结容差；首个错误值为
+`-1.298828125`，参考为 `-1.341796875`，无参考 nonfinite。第一个输入通过仅因
+这次误差仍在容差内，不代表算法正确。容差保持 atol=1e-5、rtol=0.01、要求匹配比例 1。
+
+事后只用四个输入值做局部数学演算，预测出的最大绝对误差和匹配比例与两次实测
+完全一致；没有在本地 import/exec 模型源码，也没有新增 API/GPU 调用。
+此外源码使用 `row*N` 连续地址假设，未处理输入 strides；这是待处理的布局语义
+问题，**不是已观测到的 strided case 失败**，因为 suite 尚未运行。
+
+### 12.2 失败证据审计与下一步
+
+本地重新执行 model/raw/durable 只读审计，核对请求/响应、源码血缘、参考回执、
+两次真实数值结果、checkpoint、准备与清理证据。三项审计均 completed=true、
+errors=[]，raw/durable 均保持 `correctness_failed`；**审计成功只说明证据一致，
+不等于候选验收通过**。审计自身的 gpu_measurements=0 不能解释为本轮没有真机动作。
+
+初次事后审计脚本误把远端 probe 的 `absolute_anchor_checked` 要求为 true。
+实际协议明确要求原始 probe 为 false，由控制器对独立冻结 ruler 执行锚点检查。
+修正本地审计后，`anchor_reading` 只读重算通过（good ratio 约 0.997、slow ratio
+约 7.1972）；原脚本和失败日志保留，不修改原始回执，也不新增测量。
+
+最终审计前后：本轮执行证据、准备快照和 825 个历史文件均不变；生产 protocol
+仍为 `8bc9ff3330790e63b656dda8bf9ed9a74007f24ddf5e5f710a2442b474544e7d`，原 ruler 和
+Golden registry 不变。提交后的收尾仅更新验收文档；不冒充重新跑过第 11 节的
+全量/Golden 测试，也不将之前的 CPU/mock 成绩当作当前模型源码的 CUDA 证明。
+
+下一步先做独立的**离线语义修复阶段**：明确 masked reduction 中无效 lane 的贡献、
+非二次幂长度与输入布局/stride 语义，补充相应回归；不放宽容差、不缩减 suite，
+不针对当前四值数据特化，不修改这份失败候选后重测。真实再试需冻结新计划并获得
+针对它的授权，本次 claim 已消费；本轮没有启动第二个候选。
