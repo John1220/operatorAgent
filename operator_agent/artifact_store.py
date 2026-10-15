@@ -123,7 +123,8 @@ class ArtifactStore:
         # Register explicitly; do not dump arbitrary metadata or invent a legacy
         # objective. Nonfinite diagnostics remain explicit, never valid scores.
         from .run_contract import audit_value
-        for name in ("search_objective", "candidate_selection", "last_probe_stop"):
+        for name in ("search_objective", "candidate_selection", "last_probe_stop",
+                     "llm_call_budget", "code_generation"):
             if (artifact.metadata or {}).get(name) is not None:
                 result_data[name] = audit_value(artifact.metadata[name])
         result_path = artifact_dir / "result.json"
@@ -263,7 +264,8 @@ class ArtifactStore:
             benchmark_data=benchmark_data,
             iteration_history=data.get("iteration_history", []),
             metadata={k:data[k] for k in ("corpus_admission", "claim_level", "stop",
-                "search_objective", "candidate_selection", "last_probe_stop") if k in data},
+                "search_objective", "candidate_selection", "last_probe_stop", "llm_cost",
+                "llm_call_budget", "code_generation") if k in data},
             saved_dir=str(dir_path),
         )
 

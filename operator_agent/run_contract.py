@@ -84,6 +84,8 @@ def protocol_identity():
         "operator_agent/correctness_boundaries.py", "operator_agent/source_lang.py",
         "operator_agent/resource_check.py", "operator_agent/hardware_caps.py",
         "operator_agent/exec_guard.py", "operator_agent/budget.py", "operator_agent/calibration.py",
+        "operator_agent/llm_client.py", "operator_agent/llm_budget.py",
+        "operator_agent/llm_transport.py", "operator_agent/single_candidate_coder.py",
         "remote_scripts/run_kernel.py", "remote_scripts/runner_server.py",
         "remote_scripts/run_kernel_xpu.py",
     )

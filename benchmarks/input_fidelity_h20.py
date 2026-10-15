@@ -178,39 +178,62 @@ class AcceptanceSSH(SSHExecutor):
             raise RuntimeError("existing runtime not probed")
         return json.loads(self._ssh_exec(f"{shlex.quote(self.runtime)} -c {shlex.quote(code)}"))
 
+    def _prepare_stage(self, name, operation):
+        # Default callers retain the original transport and decision policy.
+        # A bounded driver may observe these trusted stages, not raw commands.
+        return operation()
+
     def prepare(self, requested_gpu=None):
         probe = ('import json,os,sys,torch,triton; print(json.dumps(dict('
                  'runtime=sys.executable,work_dir=os.getcwd(),cuda=torch.cuda.is_available(),'
                  'torch=torch.__version__,triton=triton.__version__)))')
-        env = json.loads(self._ssh_exec(f"cd {shell_path(self.work_dir)} && "
-            f"~/.local/bin/uv run --no-sync python -c {shlex.quote(probe)}"))
-        if env["cuda"] is not True:
-            raise RuntimeError("existing remote runtime has no CUDA; acceptance incomplete")
-        self.runtime = env["runtime"]
-        self.work_dir = shlex.quote(env["work_dir"])
-        snapshot = self._ssh_exec("nvidia-smi --query-gpu=index,name,memory.free,utilization.gpu "
-                                  "--format=csv,noheader,nounits")
-        gpu = select_gpu(snapshot, requested_gpu)
-        self._gpu_pin = gpu["index"]
-        created = self.remote_python('import json,tempfile,os; '
-            'p=tempfile.mkdtemp(prefix="opag-fidelity-",dir="/tmp"); '
-            'os.chmod(p,0o700); print(json.dumps(dict(path=p,mode=os.stat(p).st_mode & 0o777)))')
-        self.scratch = validate_scratch(created["path"])
-        if created["mode"] != 0o700:
-            raise RuntimeError("scratch permissions are not private")
+        def runtime_probe():
+            env = json.loads(self._ssh_exec(f"cd {shell_path(self.work_dir)} && "
+                f"~/.local/bin/uv run --no-sync python -c {shlex.quote(probe)}"))
+            if env["cuda"] is not True:
+                raise RuntimeError("existing remote runtime has no CUDA; acceptance incomplete")
+            self.runtime = env["runtime"]
+            self.work_dir = shlex.quote(env["work_dir"])
+            return env
+        env = self._prepare_stage('runtime_probe', runtime_probe)
+        snapshot = self._prepare_stage('gpu_query', lambda: self._ssh_exec(
+            "nvidia-smi --query-gpu=index,name,memory.free,utilization.gpu --format=csv,noheader,nounits"))
+        def gpu_select():
+            gpu = select_gpu(snapshot, requested_gpu)
+            self._gpu_pin = gpu["index"]
+            return gpu
+        gpu = self._prepare_stage('gpu_select', gpu_select)
+        def scratch_create():
+            created = self.remote_python('import json,tempfile,os; '
+                'p=tempfile.mkdtemp(prefix="opag-fidelity-",dir="/tmp"); '
+                'os.chmod(p,0o700); print(json.dumps(dict(path=p,mode=os.stat(p).st_mode & 0o777)))')
+            self.scratch = validate_scratch(created["path"])
+            if created["mode"] != 0o700:
+                raise RuntimeError("scratch permissions are not private")
+            return created
+        self._prepare_stage('scratch_create', scratch_create)
         self.remote_runner_path = self.scratch + "/run_kernel.py"
-        files = self._remote_files()
-        for local, remote in files:
-            self._scp(local, remote)
-        observed = self.remote_python('import json,hashlib,pathlib; paths=' + repr([r for _, r in files])
-            + '; print(json.dumps({p:hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in paths}))')
-        hashes = {remote: hashlib.sha256(local.read_bytes()).hexdigest() for local, remote in files}
-        if observed != hashes:
-            raise RuntimeError("isolated deployment source hash mismatch")
+        def source_upload():
+            files = self._remote_files()
+            for local, remote in files:
+                self._scp(local, remote)
+            return files
+        files = self._prepare_stage('source_upload', source_upload)
+        def source_readback():
+            observed = self.remote_python('import json,hashlib,pathlib; paths=' + repr([r for _, r in files])
+                + '; print(json.dumps({p:hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest() for p in paths}))')
+            hashes = {remote: hashlib.sha256(local.read_bytes()).hexdigest() for local, remote in files}
+            if observed != hashes:
+                raise RuntimeError("isolated deployment source hash mismatch")
+            return hashes
+        hashes = self._prepare_stage('source_readback', source_readback)
         self._deployed = True
-        info = self._ssh_exec_json({"action": "gpu_info"})
-        if info.get("device") != "cuda" or info.get("selected_gpu") != self._gpu_pin or self.session_gpu != self._gpu_pin:
-            raise RuntimeError("runner did not read back the selected physical GPU")
+        def runner_readback():
+            info = self._ssh_exec_json({"action": "gpu_info"})
+            if info.get("device") != "cuda" or info.get("selected_gpu") != self._gpu_pin or self.session_gpu != self._gpu_pin:
+                raise RuntimeError("runner did not read back the selected physical GPU")
+            return info
+        info = self._prepare_stage('runner_readback', runner_readback)
         return dict(environment=env, gpu_snapshot=snapshot, selected=gpu, device=info,
                     sources={Path(p).name: h for p, h in hashes.items()})
 

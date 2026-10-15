@@ -458,7 +458,15 @@ class Conductor:
         # 后端自己的构造参数，这里再塞一份就会出现「两个地方都能改同一个数」。
         execution_limits: Optional["Limits"] = None,
         compile_limits: Optional["Limits"] = None,
+        single_candidate_coder=None,
     ):
+        self._single_candidate_coder = single_candidate_coder
+        if single_candidate_coder is not None:
+            from .single_candidate_coder import SingleCandidateCoder
+            if (not isinstance(single_candidate_coder, SingleCandidateCoder)
+                    or single_candidate_coder.llm is not llm or use_coder_pipeline
+                    or max_optimize_rounds != 1):
+                raise ValueError('single candidate requires matching bounded LLM, no pipeline, max_rounds=1')
         # `is None` 而不是 `or`: `FailureDatabase` 定义了 `__len__`, 于是**一条记录都没有的
         # 注入实例是假的**, `failure_db or FailureDatabase()` 会把它丢掉换成一个默认实例 ——
         # 调用方拿不到自己注入的那个库, 而失败记录被写进了默认路径。真机探针 (doc 49 §7.17)
@@ -570,6 +578,8 @@ class Conductor:
         self._coder_pipeline = coder_pipeline
         self.coder = CoderAgent(self.kernel_db, llm=llm, prompt_manager=self.pm,
                                 pipeline=coder_pipeline)
+        if single_candidate_coder is not None:
+            self.coder = single_candidate_coder
         self.verifier = Verifier(self.backend, cuda_ruler_profile=self.cuda_ruler_profile)
         self.search = SearchAgent(llm=llm, prompt_manager=self.pm)
         self.fixer = FixerAgent(llm=llm, prompt_manager=self.pm, failure_db=self.failure_db)
@@ -1131,6 +1141,13 @@ class Conductor:
                 配方集合/best_gflops/优化历史, 从下一轮继续跑, 不用从头生成。
         """
         operator_name = task.source.kernel_type or "operator"
+        if self._single_candidate_coder is not None and resume_from:
+            raise ValueError('single-candidate campaign cannot resume historical evidence')
+        if self._single_candidate_coder is not None:
+            if (self.max_optimize_rounds != 1 or self.coder is not self._single_candidate_coder
+                    or self.llm is not self._single_candidate_coder.llm):
+                raise ValueError('single-candidate execution policy drift')
+            self._single_candidate_coder.validate(task, test_inputs)
         hardware_name = task.target.hardware or "unknown"
         # 账本水位线: `CostTracker` 挂在 client 上**累加**, 而 `reset()` 全仓没人调
         # (`harness_pass_rate.run_one` 的 docstring 记过一次真事故: 六次运行的 token 被当成
@@ -1246,6 +1263,8 @@ class Conductor:
                 "expected_output": (run_contract.describe_inputs({"expected": expected_output})
                                     if expected_output is not None else None),
             }
+            if self._single_candidate_coder is not None:
+                self._run_controls['code_generation'] = self._single_candidate_coder.declaration()
         except (ValueError, TypeError) as exc:
             raise run_contract.RunBindingError("unbound expected output/control: " + type(exc).__name__) from exc
         snap_path, snap_scan = self._resolve_snapshot_path(resume_from)
@@ -1334,7 +1353,7 @@ class Conductor:
         # Step 1.5: 远程环境前置自检 (缺依赖自动配置/列出清单)
         # 能力判断而不是 `hasattr`: 可选方法在 Backend 基类上恒存在 (一调就抛),
         # 于是 hasattr 恒为真 —— 那正是 doc 49 §3.2 那一类静默 no-op 的温床。
-        if Cap.ENV_PROVISION in self.backend.capabilities:
+        if Cap.ENV_PROVISION in self.backend.capabilities and self._single_candidate_coder is None:
             print(f"\n[Conductor] 远程环境前置自检...")
             passed, manifest = self.backend.ensure_environment()
             if not passed:
@@ -1512,7 +1531,9 @@ class Conductor:
         if current_sketch is None:
             # 非续跑: 正常跑 Designer
             print(f"\n[Designer] 生成设计草图...")
-            current_sketch = self.designer.run(task, hw_info)
+            current_sketch = (self._single_candidate_coder.design(task, hw_info)
+                              if self._single_candidate_coder is not None
+                              else self.designer.run(task, hw_info))
             artifact.sketch = current_sketch
         else:
             print(f"\n[Designer] 已从快照恢复 sketch (v{current_sketch.version}), 跳过 Designer 调用")
@@ -1942,6 +1963,8 @@ class Conductor:
         # 实现实例化器 ⇒ 那里就炸; 这里只管「建不建得出来、先试哪个点」。
         _space = require_supported_space(
             param_space_of(self.backend, state.task), self.backend)
+        if self._single_candidate_coder is not None and _space is not None:
+            raise ValueError('single model candidate cannot be replaced by a template parameter space')
         template_choice = None
         _template_sel = None
         # §21.3 这一段进没进**本轮修复提示**的留痕 (读者: A/B 对照与复盘)。
@@ -2083,7 +2106,9 @@ class Conductor:
                 if prev_l3:
                     prev_l3_metrics = prev_l3.metrics
 
-            state.plan = self.planner.plan(
+            # Bounded mode uses ONLY its frozen prompt/context. Do not credit
+            # heuristic recipes that were never sent to this model.
+            state.plan = (None if self._single_candidate_coder is not None else self.planner.plan(
                 kernel_type=state.task.source.kernel_type,
                 dsl=state.current_sketch.target_dsl if state.current_sketch else state.task.target.dsl,
                 roofline=prev_l3_metrics if round_num > 1 else None,
@@ -2092,9 +2117,9 @@ class Conductor:
                 round_num=round_num,
                 disabled_recipes=state.disabled_recipes,
                 active_recipes=state.applied_recipes,
-            )
-            current_recipes_text = state.plan.to_prompt()
-            if state.plan.selected_recipes:
+            ))
+            current_recipes_text = state.plan.to_prompt() if state.plan else ''
+            if state.plan and state.plan.selected_recipes:
                 recipe_names = ", ".join(
                     f"{r.id}({r.name})" for r in state.plan.selected_recipes
                 )
@@ -2107,8 +2132,11 @@ class Conductor:
             state.current_code = self.coder.run(
                 state.current_sketch, state.task,
                 optimization_recipes=current_recipes_text,
-                test_inputs=state.test_inputs,
+                test_inputs=(state.input_sets if self._single_candidate_coder is not None
+                             else state.test_inputs),
             )
+            if self._single_candidate_coder is not None:
+                self._single_candidate_coder.check_candidate(state.current_code)
             # Multi-finalist selection runs real L1/L2 before the main
             # verification block; it must not bypass this generation gate.
             if self._run_binding is not None:
@@ -2473,6 +2501,19 @@ class Conductor:
             state.snapshot_target_dir = self._snap(state, round_num)
             self._record_stop(state.artifact, round_num, "passed", "所有验证通过 (L1/L2/L3)")
 
+            return _ROUND_STOP
+
+        if self._single_candidate_coder is not None:
+            # One candidate is a campaign policy, not just a loop bound. Even
+            # the end-of-round Search/Fixer callbacks must not spend a request
+            # or analyze/install dependencies. Keep ordinary verification and
+            # independent-confirmation/admission semantics unchanged.
+            failed_correctness = any(not r.passed for r in verify_results
+                if r.level in (VerificationLevel.L1_COMPILE, VerificationLevel.L2_FUNCTION))
+            state.snapshot_target_dir = self._snap(state, round_num)
+            self._record_stop(state.artifact, round_num,
+                'l1_l2_failed' if failed_correctness else 'rounds_exhausted',
+                'single model candidate evaluated; no search, repair or retry')
             return _ROUND_STOP
 
         # 缺口 1: 「数字不好看」不等于「性能未改善」—— 测量本身可能不可信。
@@ -2993,6 +3034,13 @@ class Conductor:
                 state.artifact.metadata["llm_cost"] = cost_summary
 
         # 保存产物到文件系统
+        if self.llm is not None and getattr(self.llm, 'call_budget', None) is not None:
+            state.artifact.metadata['llm_call_budget'] = self.llm.call_budget.summary()
+        if self._single_candidate_coder is not None:
+            state.artifact.metadata['code_generation'] = {
+                'declaration': self._single_candidate_coder.declaration(),
+                'lineage': self._single_candidate_coder.last_generation,
+            }
         saved_dir = self.store.save(state.artifact, state.task)
         # Artifact 上记录一下落盘目录, 方便下游 (golden harness / 日志) 直接引用
         try:

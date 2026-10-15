@@ -20,8 +20,14 @@ import re
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
+import hashlib
+import math
 from dataclasses import dataclass, field
 from typing import Optional
+
+from .llm_budget import LLMCallBudget, LLMCallRefused, strict_object, validated_usage
+from .llm_transport import dispatch as bounded_dispatch
 
 
 # ─── 常见模型的每 M tokens 参考价格 (单位: USD / 1M tokens, input / output) ───
@@ -400,6 +406,7 @@ class LLMClient:
         fallback_model: Optional[str] = None,
         fallback_base_url: Optional[str] = None,
         fallback_api_key: Optional[str] = None,
+        call_budget: Optional[LLMCallBudget] = None,
     ):
         # 端点不写进仓库: 由 base_url 参数或 LLM_BASE_URL 环境变量提供
         self.base_url = (base_url or os.environ.get("LLM_BASE_URL", "")).rstrip("/")
@@ -434,6 +441,38 @@ class LLMClient:
         # ── 成本监控 Harness: 账本实例, 每次 LLMClient 创建都带独立账本
         self.cost_tracker: CostTracker = CostTracker()
 
+        # Explicit bounded campaigns are opt-in. Legacy callers retain their
+        # old behavior; they are NOT claimed to have a pre-request hard cap.
+        self._call_budget = call_budget
+        self._bounded_key = self.api_key
+        if call_budget is not None:
+            if not isinstance(call_budget, LLMCallBudget):
+                raise TypeError('LLMCallBudget required')
+            self._validate_bounded_endpoint()
+            call_budget.bind(self._bounded_identity())
+
+    @property
+    def call_budget(self):
+        return self._call_budget
+
+    def _validate_bounded_endpoint(self):
+        try:
+            parsed = urllib.parse.urlsplit(self.base_url)
+            port = parsed.port
+            valid = (parsed.scheme in ('https', 'http') and parsed.hostname
+                     and not parsed.username and not parsed.password
+                     and not parsed.query and not parsed.fragment)
+        except ValueError:
+            valid = False
+        if not valid or type(self.model) is not str or not self.model:
+            raise LLMCallRefused('invalid bounded model endpoint/identity')
+
+    def _bounded_identity(self):
+        return dict(endpoint_sha256=hashlib.sha256(self.base_url.encode()).hexdigest(),
+                    model=self.model, credential_present=bool(self.api_key),
+                    enable_thinking=self.enable_thinking, timeout=self.timeout,
+                    default_temperature=self.temperature, default_max_tokens=self.max_tokens)
+
     def chat(
         self,
         messages: list[dict],
@@ -450,6 +489,13 @@ class LLMClient:
         Args:
             caller_tag: 调用方标识, 写入 CostTracker 账本, 便于按 Agent 类型分解账单
         """
+        if self.call_budget is not None:
+            # Bypass the fallback handler entirely. Every agent shares this
+            # ledger; changing caller or resetting CostTracker grants no credit.
+            self._active_model, self._active_base_url = self.model, self.base_url
+            self._fallback_triggered = False
+            return self._call_model(self.base_url, self.api_key, self.model,
+                                    messages, temperature, max_tokens, raw, caller_tag)
         try:
             self._active_model = self.model
             self._active_base_url = self.base_url
@@ -497,8 +543,8 @@ class LLMClient:
         # `fixer.py` 0.1/1024, `planner.py` 0.2/2048), 所以「本次真发出去的几个值」只能
         # 在这一处算一次, 再分给 body、错误文案、账本三个读者。报表若另读
         # `client.temperature` 就会把 0.1 的那一半印成 0.3 —— #52 同一条 (#98)。
-        sent_temperature = temperature or self.temperature
-        sent_max_tokens = max_tokens or self.max_tokens
+        sent_temperature = self.temperature if temperature is None else temperature
+        sent_max_tokens = self.max_tokens if max_tokens is None else max_tokens
         body = {
             "model": model,
             "messages": messages,
@@ -507,6 +553,9 @@ class LLMClient:
             "stream": False,
             "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
         }
+
+        if self.call_budget is not None:
+            return self._call_bounded_model(base_url, api_key, model, body, raw, caller_tag)
 
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -588,6 +637,60 @@ class LLMClient:
         content = self._strip_thinking(content)
         return content.strip()
 
+    def _call_bounded_model(self, base_url, api_key, model, body, raw, caller_tag):
+        budget = self.call_budget
+        self._validate_bounded_endpoint()
+        if (base_url != self.base_url or api_key != self._bounded_key
+                or self.api_key != self._bounded_key or model != self.model):
+            raise LLMCallRefused('frozen model configuration drift')
+        if (type(body['temperature']) not in (int, float)
+                or not math.isfinite(body['temperature']) or not 0 <= body['temperature'] <= 2
+                or type(self.enable_thinking) is not bool):
+            raise LLMCallRefused('invalid bounded sampling configuration')
+        try:
+            data = json.dumps(body, ensure_ascii=False, allow_nan=False)
+        except (ValueError, TypeError):
+            raise LLMCallRefused('invalid bounded request') from None
+        call, seconds = budget.reserve(self._bounded_identity(), data, caller_tag, self.timeout)
+        start = time.monotonic()
+        response_text, outcome, usage_source = None, 'failed', None
+        try:
+            response_text = bounded_dispatch(dict(url=base_url + '/chat/completions',
+                key=api_key, body_text=data, timeout=seconds,
+                max_response_bytes=budget.limits.max_response_bytes), seconds)
+            if (type(response_text) is not str
+                    or len(response_text.encode()) > budget.limits.max_response_bytes):
+                response_text = None  # Never retain an unbounded transport result.
+                raise ValueError('response_size_limit')
+            result = strict_object(response_text)
+            choices = result['choices']
+            if not isinstance(choices, list) or len(choices) != 1:
+                raise ValueError('exactly one response choice required')
+            choice = choices[0]
+            content = choice['message'].get('content')
+            usage, usage_source = validated_usage(result.get('usage'))
+            norm = parse_usage(usage)
+            self.cost_tracker.record(model=model,
+                prompt_tokens=norm['prompt_tokens'] if usage_source == 'api_usage' else _estimate_tokens_from_text(data),
+                completion_tokens=norm['completion_tokens'] if usage_source == 'api_usage' else _estimate_tokens_from_text(content if isinstance(content, str) else ''),
+                usage_source=usage_source, caller_tag=caller_tag,
+                cached_prompt_tokens=norm['cached_prompt_tokens'], cache_semantics=norm['cache_semantics'],
+                reported_model=result.get('model'), temperature=body['temperature'],
+                max_tokens=body['max_tokens'], enable_thinking=self.enable_thinking)
+            if (result.get('model') != model or choice.get('finish_reason') != 'stop'
+                    or type(content) is not str or not content.strip()
+                    or norm['completion_tokens'] > body['max_tokens']
+                    or time.monotonic() - start > seconds):
+                raise ValueError('invalid/truncated/over-budget model output')
+            outcome = 'answered'
+            # No reasoning substitution, JSON repair or mechanical code rewrite.
+            return content if raw else content.strip()
+        except Exception:
+            raise LLMCallRefused('bounded model call failed; no fallback/retry') from None
+        finally:
+            budget.finish(call, response=response_text, outcome=outcome,
+                          wall_seconds=time.monotonic() - start, usage_source=usage_source)
+
     def chat_json(
         self,
         messages: list[dict],
@@ -597,6 +700,12 @@ class LLMClient:
     ) -> dict:
         """聊天并尝试将回复解析为 JSON dict"""
         text = self.chat(messages, temperature, max_tokens, caller_tag=caller_tag)
+        if self.call_budget is not None:
+            try:
+                return strict_object(text)
+            except (ValueError, TypeError):
+                self.call_budget.abort('invalid_json')
+                raise LLMCallRefused('strict JSON output required; no repair/retry') from None
         return self._extract_json(text)
 
     # ── 内部方法 ──────────────────────────────────────────
@@ -723,6 +832,8 @@ class LLMClient:
         return text
 
     def __repr__(self) -> str:
+        if self.call_budget is not None:
+            return f'LLMClient(model={self.model!r}, bounded=True, endpoint=redacted)'
         if self._fallback_triggered:
             return (
                 f"LLMClient(主模型={self.model!r} [失败→降级], "

@@ -221,7 +221,9 @@ class TestStopReasonIsRecorded(unittest.TestCase):
         # 改成 continue」—— 少一个出口, 两边一起少, 等式照样成立。实测: 把第一个出口
         # (wall_clock_exhausted) 改成 return _ROUND_CONTINUE, 全量 2570 条全绿。
         # 所以个数与对应关系都写死。
-        self.assertEqual(15, len(exits),
+        # One new bounded-single-candidate terminal exit. Keep the absolute
+        # anchor and exact reason mapping; do not replace them with >= checks.
+        self.assertEqual(16, len(exits),
                          "终止出口的个数变了 —— 少一个就是某个出口被改成了「继续」")
         self.assertEqual(1, len(delegated),
                          "委派式出口的个数变了 —— 进出口清单的话, 这里也要改")
@@ -239,7 +241,9 @@ class TestStopReasonIsRecorded(unittest.TestCase):
         self.assertEqual(
             ["'wall_clock_exhausted'", "'budget_exhausted'", "'budget_exhausted'",
              "'search_error'", "'budget_exhausted'", "'template_no_candidate'",
-             "'transport_unknown_hold'", "'reference_identity_hold'", "'passed'", "'stagnant'", "'converged'", "'infra_retry'", "'fix_error'",
+             "'transport_unknown_hold'", "'reference_identity_hold'", "'passed'",
+             "'l1_l2_failed' if failed_correctness else 'rounds_exhausted'",
+             "'stagnant'", "'converged'", "'infra_retry'", "'fix_error'",
              "'ask_turns_exhausted'", "'l1_l2_failed'"],
             reasons,
             "出口与 reason 的对应关系漂了 —— 这份清单按全轮的三个方法、按行序钉")

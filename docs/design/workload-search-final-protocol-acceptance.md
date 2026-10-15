@@ -8,7 +8,8 @@
 生产 protocol hash 为
 `f14423ca3d71dd7a6fdb29500c8f25d5c05c76277ad12daef69f7c788a2290a6`。
 本次**不改生产实现**，仅增强 H20 验收驱动和本地守卫，再对这个最终协议采集一次
-新证据。驱动也要在执行前提交，完整 evaluator sources 与它自身 hash 进入新计划。
+新证据。驱动及守卫在执行前本地提交为 `fd78902`，完整 evaluator sources 与它自身
+hash 进入新计划；执行时 Git 工作区干净。未 push。
 
 沿用原候选、workload、参考、标尺和预算：
 
@@ -59,10 +60,94 @@ python -m pytest tests -q
 python tests/golden_regression.py compare
 ```
 
-驱动专项与最终全量、Golden、真机结果待本次冻结执行后回填；不更改
-registry 或容差，不把前一阶段结果误写成本次新协议 GPU 验收。
+- 新驱动守卫 36 项；连同搜索/重载专项，**89 passed**。
+- 最终冻结源码的全量：**3609 passed / 1 skipped / 2 warnings**，约 179.6 秒。
+  两个 warning 来自已有 nonfinite correctness fixture，不是新的功能失败。
+- 全量和真机工作结束后串行 Golden compare：**PASS 4 / REVIEW 0 / FAIL 0 / SKIP 0**。
+  registry SHA256 前后均为
+  `38836e092efd7ca9773ce414c39271ab0f050e29318b27d3de9d57e417d60819`，默认容差未改。
+- 日志：`output/workload_search_final_validation/targeted-final.log`、
+  `full-tests-final.log`、`golden-final.log`。
 
 ## 4. 最终记录
 
-待本次唯一冻结试验结束后填写新 plan/protocol hash、真机档位与分数、磁盘审计、
-旧窗口互斥和清理证据。满足以上范围后才关闭最终协议缺口；真实 LLM 搜索另行验收。
+### 4.1 本次新协议试验
+
+- run root：`output/workload_search_final_h20/workload-search-lcw_onp9`。
+- source commit：`fd78902d329aa8c55fad5590e9227c2e02241abf`。
+- plan hash：`f70d2df8fc863fbe7fc392552db333f05f2f37294027a98fbbda8d77507b85dd`。
+- protocol hash：`f14423ca3d71dd7a6fdb29500c8f25d5c05c76277ad12daef69f7c788a2290a6`。
+- contract hash：`407e4e52bdafe1bedc5f9e43f15f2df3b888e1bb8bf8676057a1211324e2d5bf`。
+- 本次计划与执行前只读 expected-plan 完全一致。与上次计划比，候选、case、参考、
+  profile、门槛、权重和预算都相同，只有协议/源码清单变化。
+
+| 候选 | 8192×15360 | 8192×12288 | 等权几何平均 | 资格 |
+| --- | --- | --- | --- | --- |
+| warps-4，第 1 轮 | 2.0185× | 1.9543× | 1.9861406169× | 两 case valid |
+| warps-8，第 2 轮 | 1.7346× | 1.9573× | 1.8425885542× | 两 case valid |
+
+两轮 L1、两组主测 L2、v2 32-case 正确性套件均通过。性能凭据 valid，但都低于
+冻结的 **10×** 门槛，因此两轮整体 L3 均未通过。这是预期的有界搜索接线验收，
+不是部署性能达标，也不宣称绝对峰值/全 shape 最优。
+
+首轮仅建立 baseline，reward/进度比较均为空；第二轮 reward=
+`-0.07227688788692398`（约 −7.2277%），判决 SLOW。正确保留第一轮代码、sketch
+及该候选完整证据；第二个 case 虽略快也不能覆盖较差的整体目标。bandit 两次 pull，
+一次计分。final artifact 的 candidate hash 为
+`5cce7c80eafd1ecf534082be24a09b58ab02eb5cd7c6423883589ca2580b4db1`。
+
+4 个 case 配对窗、2 个 native heartbeat 窗均互异，与上次 6 个窗口的交集为空。
+两次 absolute-anchor heartbeat 均 OK；参考 receipt、输入保真、实际 RPC 与 scope
+指标通过核对。测量仍为 shared-device（7 个其他进程、观测瞬时 util=0%），不升级成
+exclusive-device 或无干扰保证。没有临时追加候选、补测、修改标尺或挑更好的窗口。
+
+### 4.2 预算与退出
+
+实际 284 RPC / 18 commands，Oracle 花费 4/5（calibration=2、explore=2、confirm=0），
+确认格保留，LLM tokens=0。按原策略 heartbeat 的 calibration phase 计划格为 1，
+记录 over_plan=1，但不超过总预算或挪用确认格。墙钟检查约 254.7 秒，1800 秒上限
+未放宽。第 3 轮之前拒绝新探索，stop=`budget_exhausted`。
+
+decision=`inconclusive`，隔离 corpus 为空；无 confirmation/admission 文件，没有
+use_custom 或新入库。H20 验收通过指的是“真实测量→正确选优→持久化→预算退出”
+接线成立，**不等于该候选已满足业务部署门槛**。
+
+### 4.3 原始磁盘产物与清理
+
+最终原始产物目录：
+
+```text
+output/workload_search_final_h20/workload-search-lcw_onp9/artifacts/
+  layernorm/nvidia_gpu/20261010_095442_88f19d43/
+```
+
+`summary.completed=true/errors=[]`，`durable.completed=true/errors=[]`。本次不再
+使用上一阶段的“离线补字段投影”：原始 result 就有选优身份，普通重载的 source、
+sketch、score 与原候选证据一致；完整 checkpoint seal、实际输入/controls/最终协议
+经过生产 reader 校验。checkpoint 仍记录第 2 轮探针，没有把末轮覆盖成赢家。
+原 report 的选优段与逐轮表和重载后的渲染一致。
+
+只读磁盘审计记录 9 个受检文件的 hash，前后完全相同。owned runner shutdown ack、
+owned PID absent、quiescent=true、scratch removed=true；无 signal，forbidden_actions
+为空，没有终止共享进程或修改共享 runtime。
+
+之后又从已落盘的 rounds/trace 和普通 ArtifactStore 重载结果独立复算，并重建
+确定性主输入验证完整 checkpoint。主 proof 与 durable proof 均与原 summary 完全
+相同，未 save/resume/派 RPC/新测 GPU。旧试验所有 18 个文件 hash 与本次原始文件
+hash 均保持不变。budget/bandit 摘要作为显式磁盘审计输入，不恢复为 live state。
+
+独立结果见 `output/workload_search_final_validation/actual-final-audit.json`，冻结控制
+和完整 81 项源码快照见该目录的 `before-execution.json`、`expected-plan.json`、
+`frozen-sources/`；真机日志为 `h20-final.log`。
+
+## 5. 结论与下一步
+
+**最终协议的固定两候选 H20 + 原始产物重载验收缺口已关闭**。生产代码仍是已提交
+的同一协议，没有把旧测量重新挂到新协议、改写旧 checkpoint 或复用旧资格。
+
+本次 generation/Search proposal 仍为固定桩；真实 LLM 搜索尚未验收。下一阶段应在
+这套证据/预算/清理门上接入真实提案，使用新的冻结任务和有界预算，单独报告模型
+调用成本、失败修复、实际候选数与合格 workload 证据，不能用本次结果代替自主性证明。
+
+下一阶段的第一小步见 [有界真实 LLM 提案验收](workload-llm-search-acceptance.md)：
+先验受限 launch 参数提案，不把可信模板 materialization 冒充自由源码生成。
