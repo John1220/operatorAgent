@@ -1,0 +1,34 @@
+# DSH 侧接线：两条记录。
+#   1) mcp-operator   —— MCP stdio server（六个工具；判定/修复/无人值守都走它）
+#   2) operator-tools —— 本包自己（斜杠命令 `/op` + 一段 system prompt）
+#
+# 这里**不写死绝对路径**：默认假定 `pip install operator-agent` 装出了 `operator-agent`
+# 与 `operator-agent-mcp` 两个命令。若装在 venv、或想直接从源码树跑，用下面注释里的形态。
+- insert:
+    - id: mcp-operator
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: operator
+        transport: stdio
+        command: operator-agent-mcp
+        # 真机一次**完整**判定（L1→L3、15 个边界 case）实测 866.8 s
+        # （docs/dsh-plugin-evaluation.md §9.8）；repair 默认 2 轮 ⇒ 约 30 min。
+        # 取 60 min 留余量：**超时不是优雅退出** —— server 是同步逐行读，
+        # 客户端 abort 后它仍会算完再写一个没人认领的响应。宁可给足，别让它超时。
+        toolCallTimeoutMs: 3600000
+        failOnStartupError: false
+        # env:
+        #   LLM_BASE_URL: https://your-endpoint/v1
+        #   LLM_MODEL: your-inner-model
+        #   LLM_API_KEY_FILE: ~/.config/operator_agent/llm.key
+
+    - id: operator-tools
+      name: dsh-operator-agent
+      config:
+        command: operator-agent
+        timeoutMs: 60000
+        # 从源码树跑的形态（没 pip install 时）：
+        # command: /abs/path/to/python3
+        # args: ["-m", "operator_agent"]
+        # env:
+        #   PYTHONPATH: /abs/path/to/operatorAgent

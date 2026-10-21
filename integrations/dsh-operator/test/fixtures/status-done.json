@@ -1,0 +1,27 @@
+{
+  "backend": null,
+  "detail": null,
+  "duration_s": 42.5,
+  "error": null,
+  "finished_at": null,
+  "log_tail": [
+    "line a",
+    "line b"
+  ],
+  "max_rounds": null,
+  "ok": true,
+  "phase": "done",
+  "pid": 999999,
+  "process_alive": null,
+  "started_at": 1760000000,
+  "summary": {
+    "all_passed": true,
+    "levels": {
+      "L1": true,
+      "L2": true,
+      "L3": true
+    },
+    "speedup": 1.83,
+    "validity": "ok"
+  }
+}

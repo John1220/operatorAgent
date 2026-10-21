@@ -1,0 +1,63 @@
+{
+  "backends": {
+    "local": {
+      "limits": [
+        "没有执行侧输入回读协议 ⇒ 带正确性套件的任务 L2 判 unknown（那不是「候选错了」）；要全量 L2 用 mock 或真机"
+      ],
+      "requires": [],
+      "wired": true
+    },
+    "mock": {
+      "notes": [
+        "控制机 numpy；最快，也是唯一默认"
+      ],
+      "requires": [],
+      "wired": true
+    },
+    "ssh": {
+      "env_present": false,
+      "limits": [
+        "本函数不做连接探测；连接失败在 verify 时以 ToolError 报出"
+      ],
+      "requires": [
+        "host（~/.ssh/config 别名即可）"
+      ],
+      "wired": true
+    }
+  },
+  "correctness_profiles": {
+    "operators": [
+      "relu",
+      "matmul",
+      "softmax",
+      "layernorm"
+    ],
+    "version": "builtin-l2-v1"
+  },
+  "kernel_types_with_input_layout": [
+    "add",
+    "gelu",
+    "gemm",
+    "layernorm",
+    "log_softmax",
+    "matmul",
+    "relu",
+    "rmsnorm",
+    "silu",
+    "softmax"
+  ],
+  "notes": [
+    "capabilities 不做网络探测（含 SSH）",
+    "backend=ssh 需要显式 host；本层不提供 auto 降级（「以为在真机上、其实在控制机」是这里最贵的误读）"
+  ],
+  "ok": true,
+  "runtime": {
+    "numpy": true,
+    "nvidia_smi": false,
+    "python": "3.9.12",
+    "torch_installed": true,
+    "triton_installed": true
+  },
+  "tool_version": 1,
+  "version": "0.6.0"
+}

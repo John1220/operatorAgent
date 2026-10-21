@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Operator judgement layer",
+    "description": "Give the agent operator-agent's compile / correctness / performance verdicts and its repair loop as MCP tools, plus a /op command for reading capability and run state without spending a model turn."
+  }
+}
