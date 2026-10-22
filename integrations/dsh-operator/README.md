@@ -168,6 +168,10 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 需要「判定/修复/从头自动化」时用模型工具（`mcp__operator__*`）：命令只是旁路，
 不替模型做判定。
 
+> 给模型的**使用说明**（什么时候该用、回来怎么读）不存在于本插件里：它是 Python 侧
+> `operator_agent/mcp_server.py` 的 `initialize.instructions`，宿主会自动渲染成
+> `mcp:operator` 提示段。只有一处来源，换任何 MCP 客户端也都在 —— 插件只负责 `/op`。
+
 细节（契约、拒绝码、数据布局、扩展点）见
 [实现说明](../../docs/design/dsh-plugin-implementation.md)。
 
@@ -195,15 +199,15 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 ## 8. 构建与发版（维护者）
 
 ```bash
-npm test        # 36 条：注册面/行为/格式化契约（真 CLI fixture）+ 真宿主契约
+npm test        # 38 条：注册面/行为/格式化契约（真 CLI fixture）+ 真宿主契约
 ```
 
 `npm test` 里有两层守卫，别只跑一层：
 
 | 文件 | 钉住什么 | 依赖 |
 |---|---|---|
-| `test/plugin.test.mjs`（29 条） | 注册面、`/op` 行为、路径解析、超时/取消、`scrubEnv`/`normalizeConfig`、宿主日志（同类只记一次）、两个 formatter 吃**真 CLI fixture** | 无（替身 ctx + 假 CLI） |
-| `test/host-contract.test.mjs`（7 条） | 把插件注册进**装在机器上的** DSH 自己的 `cordis` + `dsh-commands` 服务真执行（含 `agent` 透传），并用真 `readPluginMeta` 读一遍「脸」、用真 `evaluatePluginCompatibility` 核 `engines.dsh` | DSH 安装；找不到就**跳过**（`DSH_APP_ROOT` 可指定） |
+| `test/plugin.test.mjs`（30 条） | 注册面、`/op` 行为、路径解析、超时/取消、`scrubEnv`/`normalizeConfig`、宿主日志（同类只记一次）、两个 formatter 吃**真 CLI fixture** | 无（替身 ctx + 假 CLI） |
+| `test/host-contract.test.mjs`（8 条） | 把插件注册进**装在机器上的** DSH 自己的 `cordis` + `dsh-commands` 服务真执行（含 `agent` 透传），并用真 `readPluginMeta` 读一遍「脸」、用真 `evaluatePluginCompatibility` 核 `engines.dsh`；最后一条用**真 MCP SDK 客户端**连真 server 验 `instructions` 到达客户端 | DSH 安装；最后一条还需要能 import 判定层的 python3。找不到就**跳过**（`DSH_APP_ROOT` / `OPERATOR_AGENT_PYTHON`） |
 
 第二层是必要的：替身 ctx 只会照单全收，而宿主的 `normalizeDefinition` / `normalizeResult`
 会拒绝不合规的命令定义与返回值；元数据那几条更只认**真模块解析器 + `exports` 映射**。

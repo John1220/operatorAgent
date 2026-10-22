@@ -4,10 +4,12 @@
 //
 // 找不到 DSH 安装就**跳过**（不假装通过）：设 `DSH_APP_ROOT` 指到 DSH 的
 // `Contents/Resources/app`（或在 `node_modules` 里）即可。刻意不依赖 Python ——
-// 成功路径用一个假 CLI，所以这条在任何装了 DSH 的机器上都能跑。
+// 成功路径用一个假 CLI，所以这些在任何装了 DSH 的机器上都能跑；只有最后一条
+// （instructions 端到端）需要真 Python，找不到就自己跳过。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -25,6 +27,8 @@ function findDshApp() {
 
 /** 本包目录：宿主的元数据读取器就是拿裸包名从这里解析子路径的。 */
 const PACKAGE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+/** 判定层仓库根（`integrations/dsh-operator` 的上两级）：起真 server 时要拿它当 cwd。 */
+const REPO_ROOT = dirname(dirname(PACKAGE_DIR));
 
 const APP = findDshApp();
 const skip = APP ? false : "找不到 DSH 安装（设 DSH_APP_ROOT 后可跑）";
@@ -71,9 +75,9 @@ test("真宿主的 commands 服务收下 /op：名字、definitionId、hint 都�
   assert.equal(listed[0].name, "op");
   assert.equal(listed[0].definitionId, "dsh-operator-agent");
   assert.equal(listed[0].input.hint, "capabilities | status <run_dir> | help");
-  assert.equal(sections.length, 1);
-  assert.equal(sections[0].name, "tool:operator");
-  assert.equal(sections[0].order, 160);
+  // 真宿主上同样**不该**有自注册的提示段：说明来自 server 的 instructions，
+  // 由 mcp-client 注册成 `mcp:operator`（见 dsh-mcp-client 的 registerServerContext）。
+  assert.deepEqual(sections, []);
 });
 
 test("命令真的执行：宿主过一遍 normalizeResult，结果与生命周期事件都成立", { skip }, async () => {
@@ -158,4 +162,45 @@ test("宿主读得到这张「脸」：标题/描述/图标（少一条 exports 
   assert.deepEqual(meta.description, { en: of("en").description, zh: of("zh").description });
   assert.notDeepEqual(meta.title, { en: "dsh-operator-agent" }, "标题退化成了裸包名");
   assert.match(meta.icon, /^data:image\/svg\+xml;base64,/);
+});
+
+/** 找到一个**能 import 判定层**的 python（显式指定 > PATH 上的 python3）。 */
+function findPython() {
+  const candidates = [process.env.OPERATOR_AGENT_PYTHON, "python3", "/usr/bin/python3"].filter(Boolean);
+  return candidates.find((python) => {
+    const probe = spawnSync(python, ["-c", "import operator_agent.mcp_server"],
+                            { cwd: REPO_ROOT, timeout: 30_000 });
+    return probe.status === 0;
+  });
+}
+
+test("server 的 instructions 真的到达 MCP 客户端（宿主据此渲染 mcp:operator 段）", async (t) => {
+  if (!APP) return t.skip("找不到 DSH 安装（设 DSH_APP_ROOT 后可跑）");
+  const python = findPython();
+  if (!python) return t.skip("找不到能 import 判定层的 python（设 OPERATOR_AGENT_PYTHON）");
+
+  // 用**宿主自己依赖的那个** SDK 客户端起真 server：这条验的是「说明真的过线」，
+  // 而不是「我们在源码里写了 instructions」。
+  const [{ Client }, { StdioClientTransport }] = await Promise.all([
+    fromApp("@modelcontextprotocol/client/dist/index.mjs"),
+    fromApp("@modelcontextprotocol/client/dist/stdio.mjs"),
+  ]);
+  const client = new Client({ name: "contract", version: "0" }, { capabilities: {} });
+  await client.connect(new StdioClientTransport({
+    command: python,
+    args: ["-m", "operator_agent.mcp_server"],
+    cwd: REPO_ROOT,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME },
+  }));
+  try {
+    const text = client.getInstructions() ?? "";
+    assert.ok(text.includes("eligibility"), `instructions 没到客户端：${text.slice(0, 120)}`);
+    assert.ok(text.includes("hold_for_measurement"), "冲突处置那条丢了");
+    // DSH 默认 maxInstructionBytes = 32768：超了宿主会直接拒绝连接（不是截断）。
+    assert.ok(Buffer.byteLength(text) < 32 * 1024, `instructions 超了宿主上限：${Buffer.byteLength(text)}`);
+    const { tools } = await client.listTools();
+    assert.equal(tools.length, 6, tools.map((x) => x.name).join(","));
+  } finally {
+    await client.close();
+  }
 });

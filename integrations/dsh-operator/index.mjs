@@ -1,10 +1,14 @@
 /**
- * DSH 宿主插件：斜杠命令 + 系统提示段。
+ * DSH 宿主插件：斜杠命令 `/op`。
  *
  * 它**不执行判定**——判定永远在 Python 侧（`operator-agent` CLI / MCP server）。
- * 这个模块只做两件宿主侧的事：
- *   1. `/op`：让人不经过模型就能查状态/能力（输出直接给人看，不进模型上下文）；
- *   2. 一段 system prompt：告诉模型 `mcp__operator__*` 工具什么时候该用、回来怎么读。
+ * 这个模块只做一件宿主侧的事：让**人**不经过模型就能查能力/状态（输出直接给人看，
+ * 不进模型上下文）。
+ *
+ * 「什么时候该用 `operator_*` 工具、回来怎么读」的那段说明**不在这里**：它是 MCP
+ * server 的 `initialize.instructions`（`operator_agent/mcp_server.py`），宿主会自动
+ * 渲染成 `mcp:operator` 提示段。放那儿的好处是只有一处来源、换任何 MCP 客户端都在；
+ * 放这儿就得跟着工具描述一起手动同步。
  *
  * 为什么命令走 CLI 而不是 MCP：斜杠命令在**宿主进程**里执行，拿不到 MCP 的客户端连接；
  * 而 `operator-agent` 是同一个判定层的进程入口，参数与 MCP 工具同源。
@@ -15,7 +19,7 @@ import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 
 export const name = "operator-tools";
-export const inject = ["commands", "systemPrompt"];
+export const inject = ["commands"];
 
 const USAGE = [
   "用法：",
@@ -29,15 +33,6 @@ const USAGE = [
   "  prepare → verify（外层写核）· repair（给一份已有的核）· run + status（无人值守）",
 ].join("\n");
 
-const PROMPT_SECTION = [
-  "算子判定层（MCP 工具 `mcp__operator__*`）用于 GPU 算子（Triton/CUDA）的编译、正确性、性能判定与修复。",
-  "什么时候用：用户要把一个算子写成/改好/测快，或问「这个核对不对/快不快/读数可不可信」时。",
-  "什么时候**不要**用：纯 CPU/非算子任务；没有 GPU 却要做性能结论（`backend=mock` 的读数不代表加速卡成绩）。",
-  "典型顺序：`operator_prepare` 先冻结契约（声明 shapes/precision/required_caps），再 `operator_verify` 判候选；",
-  "已有核要修就用 `operator_repair`；从头自动化用 `operator_run` + `operator_status` 轮询。",
-  "读回包时：`levels` 看判到哪一级；**`route` 与 `eligibility` 必须一起读** —— 两者冲突时 `conflict.action=hold_for_measurement`，",
-  "此时不要照着 `route` 迭代，先修判据（形状/精度/required_caps）。`validity=degraded/uninformative` 的读数不驱动调参或入库。",
-].join("");
 
 /**
  * 解析 `/op` 后面的输入。**`rest` 是原样的剩余整段**（不是按空白切开的数组）：
@@ -294,8 +289,4 @@ export function apply(ctx, config = {}) {
     // 只有它带着会话工作区，相对路径要靠它才能落到人想去的地方。
     handler: async ({ rawInput, signal, agent }) => handle(rawInput, signal, agent),
   });
-
-  // `inject` 是**必需**语义（缺了 fiber 根本不启动），所以这里不做「拿不到就跳过」的兜底 ——
-  // 那种分支永远不会被执行，只会让人以为 systemPrompt 是可选的。
-  ctx.systemPrompt.section({ name: "tool:operator", order: 160, text: PROMPT_SECTION });
 }

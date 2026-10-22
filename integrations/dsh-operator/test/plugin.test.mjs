@@ -42,7 +42,7 @@ function fakeCli(body) {
   return file;
 }
 
-test("注册了 /op 命令与 system prompt 段", () => {
+test("注册了 /op 命令；提示段不归这里管（由 server 的 instructions 提供）", () => {
   const ctx = fakeCtx();
   apply(ctx, { command: "operator-agent" });
   assert.equal(ctx.commandDefs.length, 1);
@@ -50,10 +50,16 @@ test("注册了 /op 命令与 system prompt 段", () => {
   // 稳定身份：UI 侧靠它跨重启配对同一条命令。
   assert.equal(ctx.commandDefs[0].definitionId, "dsh-operator-agent");
   assert.equal(typeof ctx.commandDefs[0].handler, "function");
-  assert.equal(ctx.sections.length, 1);
-  assert.equal(ctx.sections[0].name, "tool:operator");
-  assert.ok(ctx.sections[0].text.includes("mcp__operator__"));
-  assert.ok(ctx.sections[0].text.includes("eligibility"), "提示段必须要求 route 与资格一起读");
+  // 「什么时候该用」那段是 MCP server 的 initialize.instructions（宿主渲染成 mcp:operator），
+  // 插件再注册一遍就变成两份会漂的副本 —— 这里钉住"别偷偷加回来"。
+  assert.deepEqual(ctx.sections, [], "插件不该再注册 system prompt 段");
+});
+
+test("没有 systemPrompt 服务的 ctx 也能装（inject 只剩 commands）", () => {
+  const ctx = fakeCtx();
+  ctx.systemPrompt = undefined;
+  assert.equal(apply(ctx, { command: "operator-agent" }), undefined);
+  assert.equal(ctx.commandDefs.length, 1);
 });
 
 test("apply 不返回任何东西：生命周期归 cordis，别自己攒 disposer", () => {

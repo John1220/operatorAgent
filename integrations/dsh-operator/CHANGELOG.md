@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.3
+
+给模型的说明**只剩一处来源**（判定层的回包契约没动，`/op` 行为没动）。
+
+- **提示段搬进 server 的 `initialize.instructions`**：原来同一段规则有三份副本（插件的
+  `tool:operator` 系统提示段、MCP 工具描述、设计文档），改一处就得记得同步另两处。
+  现在它是 `operator_agent/mcp_server.py` 的 `INSTRUCTIONS`，由宿主
+  `dsh-mcp-client` 的 `registerServerContext` 渲染成 `mcp:operator` 段（order 取
+  `MCP_SERVERS`、`interpolate:false`、懒取），**任何 MCP 客户端**都吃得到，不限于 DSH。
+  插件随之只剩 `/op` 一件事，`inject` 从 `["commands", "systemPrompt"]` 收成
+  `["commands"]`（少一个启动依赖）。
+- **端到端守住了「说明真的过线」**：新增一条测试，用宿主自己依赖的那个
+  `@modelcontextprotocol/client` 起真 stdio 连接，断言 `getInstructions()` 里含
+  `eligibility` / `hold_for_measurement` 且小于宿主 `maxInstructionBytes`（32 KiB，
+  超了是**拒绝连接**而不是截断）。找不到 python 就跳过并说明原因。
+- 指令文本顺带对非 DSH 客户端友好：说明里点明「DSH 里这些工具显示为
+  `mcp__operator__*`」，其它客户端看到的是 `operator_*`。
+
 ## 0.1.2
 
 `/op` 的可用性与安全性收口 + 两条防失配守卫（判定层的回包契约没动）。

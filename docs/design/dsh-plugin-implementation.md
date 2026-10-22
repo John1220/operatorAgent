@@ -33,8 +33,9 @@ python -m operator_agent capabilities
 
 ### 0.1.1 斜杠命令 `/op`（宿主插件，可选）
 
-装了 `integrations/dsh-operator` 之后还会有两条宿主侧的记录：MCP 的六个工具，加上
-`/op` 命令与一段系统提示段。命令**不经过模型**，输出直接给人看：
+装了 `integrations/dsh-operator` 之后还会有两条宿主侧的记录：MCP 的六个工具（外加
+server 自带的**使用说明**，宿主渲染成 `mcp:operator` 提示段），加上 `/op` 命令。
+命令**不经过模型**，输出直接给人看：
 
 ```
 /op capabilities          这台机器能做什么（只读）
@@ -51,7 +52,8 @@ cwd——GUI 进程的 cwd 多半是 `/`，按它解析会把「run 在但路径
 
 ### 0.2 装进 DSH（只做一次）
 
-装的是**两条记录**：一条 MCP（六个工具），一条宿主插件（`/op` 命令 + 提示段）。
+装的是**两条记录**：一条 MCP（六个工具 + server 的 `instructions`），一条宿主插件
+（只有 `/op` 命令 —— 提示段不在这里，见下）。
 打包好的版本在 [`integrations/dsh-operator/`](../../integrations/dsh-operator/README.md)，
 它的 `cordis.patch.yml` 一次插两条。
 
@@ -94,7 +96,9 @@ pkill -f operator_agent.mcp_server      # 宿主 500ms 后自动重连并 re-syn
 ```
 
 模型侧会出现六个工具：`mcp__operator__operator_{prepare,verify,repair,run,status,capabilities}`；
-宿主侧出现 `/op` 命令与 `tool:operator` 提示段。**本会话的工具列表要到下一回合才刷新** ——
+宿主侧出现 `/op` 命令，模型侧出现 `mcp:operator` 提示段（**由 server 的
+`initialize.instructions` 渲染**，`dsh-mcp-client` 的 `registerServerContext` 负责，
+order 取 `MCP_SERVERS`）。**本会话的工具列表要到下一回合才刷新** ——
 这是宿主的刷新时机，不是插件的问题。**斜杠命令有时要重启一次宿主才出现在命令面板**
 （工具与提示段是热加载的，命令面板不一定是）。
 
@@ -448,7 +452,7 @@ re-sync，**本会话的工具列表要到下一回合才刷新**。宿主本身
 | 侧 | 产物 | 说明 |
 |---|---|---|
 | Python | `pyproject.toml`（name `operator-agent`，两个 console script：`operator-agent` / `operator-agent-mcp`） | `pip install .` 后 `python -m operator_agent*` 与两个命令都可用；`remote_scripts/` 作为**兄弟顶层包**一起装（`remote_scripts/__init__.py` 就是为此存在） |
-| DSH | `integrations/dsh-operator/`（`package.json` + `dsh.bundle.patch` → `cordis.patch.yml` + `index.mjs` + `icon.svg` + `locale/*.json` + 测试 + README + CHANGELOG） | 宿主插件只做两件事：`/op` 命令与一段 `tool:operator` 提示段，**不复制判定逻辑**；`dsh plugin add <path>` 或手改 profile 都行（`desktop` profile 需先退出 DSH Desktop，或用 GUI 插件页） |
+| DSH | `integrations/dsh-operator/`（`package.json` + `dsh.bundle.patch` → `cordis.patch.yml` + `index.mjs` + `icon.svg` + `locale/*.json` + 测试 + README + CHANGELOG） | 宿主插件只做一件事：`/op` 命令，**不复制判定逻辑**；给模型的说明走 server 的 `instructions`（一处来源，任何 MCP 客户端都吃得到）；`dsh plugin add <path>` 或手改 profile 都行（`desktop` profile 需先退出 DSH Desktop，或用 GUI 插件页） |
 
 **插件在宿主里的「脸」**（对着 `dsh-app-boot` 的 `readPluginMeta` 核过）：标题/描述/图标来自
 `<包名>/package.json`、`<包名>/locale/<lang>.json`、`icon` 三处，全走**真模块解析器**，

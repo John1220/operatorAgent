@@ -795,7 +795,7 @@ L1→L2 得到 `debug_fix` + `whole_tensor`；契约声明 `required_caps=('real
 | 层 | 产物 | 验证 |
 |---|---|---|
 | Python | `pyproject.toml`（`operator-agent` / `operator-agent-mcp` 两个命令）+ `remote_scripts/__init__.py` + `protocol_identity()` 改包相对解析 + `MANIFEST.in` | 装到临时目录后**从 /tmp** 跑 `--selftest`、11 个 prompt 模板、47 条 identity 全对 |
-| DSH | `integrations/dsh-operator/`：npm 壳（`dsh.bundle.patch` + `engines.dsh`）+ ESM 宿主插件（`/op` 命令 + `tool:operator` 提示段） | Node 测试 8 条；装进本机 profile 后**提示段确实出现在系统提示里**、MCP 六工具同时可用、宿主日志无报错 |
+| DSH | `integrations/dsh-operator/`：npm 壳（`dsh.bundle.patch` + `engines.dsh`）+ ESM 宿主插件（`/op` 命令） | 当时（0.1.2 及以前）验的是「插件注册的 `tool:operator` 提示段出现在系统提示里、MCP 六工具同时可用、宿主日志无报错」；**0.1.3 起提示段改由 server 的 `initialize.instructions` 渲染成 `mcp:operator`**，插件不再注册它（端到端测试用真 SDK 客户端验过 instructions 到达客户端） |
 
 **本机当前形态**：源码树（不 pip install）——MCP 行用 `<abs-python> -m operator_agent.mcp_server`，
 插件行用 `index.mjs` 的绝对路径 + `PYTHONPATH` 指到仓库。
