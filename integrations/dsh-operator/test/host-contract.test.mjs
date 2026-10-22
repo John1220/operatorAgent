@@ -114,6 +114,31 @@ test("不认识的子命令回 error，且 error 文案非空（宿主会校验�
   assert.equal(out.result.kind, "error");
   assert.ok(out.result.text.trim().length > 0);
 });
+test("真宿主把 agent 交给 handler：含空格的相对路径整段到 CLI", { skip }, async () => {
+  const root = await realCommandsContext();
+  // 假 CLI 把收到的第三个参数（--run-dir 的值）原样回进 payload。
+  const cli = fakeCli(`printf '{"ok":true,"phase":"%s"}' "$3"`);
+  apply(ctxShim(root), { command: cli });
+  const agent = { session: { append: () => {} } };
+  const out = await root.commands.execute(agent, "/op status my runs/x", [], new AbortController().signal);
+
+  assert.equal(out.result.kind, "success", out.result.text);
+  assert.ok(out.result.text.includes("相位：my runs/x"),
+    `路径没整段到达 CLI（被切碎或被改写了）：${out.result.text}`);
+});
+
+test("engines.dsh 与**装在这台机器上的** DSH 版本相容", { skip }, async () => {
+  const { evaluatePluginCompatibility, getDshRuntimeVersion, pluginCompatibilityWarning } =
+    await fromApp("@deepseek-ai/dsh-app-boot/lib/index.js");
+  const pkg = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8"));
+  // 用宿主自己的判据 + 宿主自己的版本：这个范围是人手写的，装了新宿主会悄悄失配，
+  // 而失配的后果是**装不上**（`dsh plugin` 会直接拒），所以别等那一刻才发现。
+  const issue = evaluatePluginCompatibility(pkg, {});
+  assert.equal(issue, undefined,
+    `engines.dsh=${JSON.stringify(pkg.engines?.dsh)} 不满足装在这台机器上的 dsh `
+    + `${getDshRuntimeVersion()}：${issue ? pluginCompatibilityWarning(issue) : ""}`);
+});
+
 test("宿主读得到这张「脸」：标题/描述/图标（少一条 exports 就红）", { skip }, async () => {
   const { readPluginMeta } = await fromApp("@deepseek-ai/dsh-app-boot/lib/index.js");
   // 复刻 `link:` 安装形态：一个 node_modules/dsh-operator-agent 指向本包 —— 宿主就是

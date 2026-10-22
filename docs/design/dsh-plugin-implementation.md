@@ -44,6 +44,11 @@ python -m operator_agent capabilities
 命令只调 `operator-agent` CLI（与 MCP 工具同源），**不复制任何判定逻辑**；
 命令不存在时返回「pip install operator-agent」而不是抛异常。
 
+`<run_dir>` 的相对路径按**会话工作区**解析（`ctx.workingDirectory`），不是按宿主进程的
+cwd——GUI 进程的 cwd 多半是 `/`，按它解析会把「run 在但路径不对」报成「run-status.json
+不存在」。`~/x` 展开到 home，含空格整段保留（`rest` 是原样剩余整段，不按空白切），
+输出回显实际读取的目录。
+
 ### 0.2 装进 DSH（只做一次）
 
 装的是**两条记录**：一条 MCP（六个工具），一条宿主插件（`/op` 命令 + 提示段）。
@@ -360,8 +365,9 @@ operator_run:  (未开始) ──llm 缺失──▶ llm_not_configured（不起
 **为什么必须写在宿主 MCP 行的 `env:` 里**：DSH 会先洗掉子进程环境里名字含
 `KEY`/`PASSWORD`/`SECRET`/`TOKEN` 的变量（`/KEY|PASSWORD|SECRET|TOKEN/i`）、**外加所有
 `DSH_*`**，再应用显式覆盖。`LLM_API_KEY_FILE` 含 `KEY`，靠全局环境变量传不进去；
-`DSH_HOME` 之类也一样。注意 `/op` 那条路（宿主插件自己 `execFile`）用的是**宿主进程的
-完整环境**，不做这个清洗 —— 两条子进程路径的 env 策略本来就是不同的。
+`DSH_HOME` 之类也一样。`/op` 那条路（宿主插件自己 `execFile`）现在用**同一套规则**
+（`scrubEnv` + 配置里的 `env` 在其后合并）：`command` 是可配置的，不该因为换了个包装脚本
+就把宿主密钥交出去。两条路的差别只剩「谁提供基础环境」，清洗规则是同一条。
 
 ```yaml
 # ~/.dsh/profiles/<profile>/cordis.patch.yml

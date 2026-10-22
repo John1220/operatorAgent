@@ -11,6 +11,8 @@
  */
 
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { join, resolve as resolvePath } from "node:path";
 
 export const name = "operator-tools";
 export const inject = ["commands", "systemPrompt"];
@@ -20,6 +22,8 @@ const USAGE = [
   "  /op capabilities            这台机器能做什么（只读，不跑活）",
   "  /op status <run_dir>        查一次无人值守运行的相位（running/done/failed/lost）",
   "  /op help                    这段说明",
+  "",
+  "run_dir 可以相对写（按**会话工作区**解析），也可以绝对写；含空格请加引号。",
   "",
   "判定/修复/无人值守请用模型工具 mcp__operator__*：",
   "  prepare → verify（外层写核）· repair（给一份已有的核）· run + status（无人值守）",
@@ -35,10 +39,86 @@ const PROMPT_SECTION = [
   "此时不要照着 `route` 迭代，先修判据（形状/精度/required_caps）。`validity=degraded/uninformative` 的读数不驱动调参或入库。",
 ].join("");
 
+/**
+ * 解析 `/op` 后面的输入。**`rest` 是原样的剩余整段**（不是按空白切开的数组）：
+ * run_dir 可能是含空格的路径，切开就再也拼不回来。
+ */
 function parseInput(rawInput) {
-  const parts = String(rawInput || "").trim().split(/\s+/).filter(Boolean);
-  const sub = (parts.shift() || "help").toLowerCase();
-  return { sub, args: parts };
+  const text = String(rawInput || "").trim();
+  const match = /^(\S+)\s*([\s\S]*)$/.exec(text);
+  if (!match) return { sub: "help", rest: "" };
+  return { sub: match[1].toLowerCase(), rest: match[2].trim() };
+}
+
+/** 去掉一对匹配的引号（含空格路径的写法），不做其它转义处理。 */
+function stripQuotes(text) {
+  const pair = /^(["'])([\s\S]*)\1$/.exec(text);
+  return pair ? pair[2] : text;
+}
+
+/**
+ * 洗掉敏感环境变量，规则**与宿主给 MCP 子进程用的那套一致**：
+ * 名字含 `KEY`/`PASSWORD`/`SECRET`/`TOKEN`，或带 `DSH_` 前缀。
+ *
+ * 为什么 `/op` 也要洗：`command` 是可配置的，等于"把宿主环境交给一个可替换的二进制"。
+ * 显式 `config.env` 在清洗**之后**合并，所以真要传什么仍传得进去（见 `normalizeConfig`）。
+ */
+export function scrubEnv(source = process.env) {
+  const SENSITIVE = /KEY|PASSWORD|SECRET|TOKEN/i;
+  const out = {};
+  for (const [key, value] of Object.entries(source || {})) {
+    if (key.startsWith("DSH_") || SENSITIVE.test(key)) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+const KNOWN_CONFIG_KEYS = new Set(["command", "args", "timeoutMs", "env"]);
+
+/**
+ * 配置校验。**不校验的代价是静默**：`comand:` 拼错会让 `/op` 悄悄换成另一个二进制，
+ * `timeoutMs: "30s"` 会悄悄变回默认值——两种都只在事后从行为上才看得出来。
+ *
+ * 只对"写了但不对"说话；没写的键走默认值，不吵。`warn` 由调用方注入（测试直接收）。
+ */
+export function normalizeConfig(config = {}, warn = () => {}) {
+  const raw = config && typeof config === "object" && !Array.isArray(config) ? config : {};
+  if (raw !== config) warn("配置必须是对象，已全部改用默认值");
+  for (const key of Object.keys(raw)) {
+    if (KNOWN_CONFIG_KEYS.has(key)) continue;
+    const hint = key.toLowerCase() === "timeoutms" ? "；正确写法是 timeoutMs" : "";
+    warn(`配置项 ${key} 不认识（拼错了？），已忽略${hint}`);
+  }
+
+  let command = "operator-agent";
+  if (raw.command !== undefined) {
+    if (typeof raw.command === "string" && raw.command.trim()) command = raw.command;
+    else warn(`command 必须是非空字符串（收到 ${JSON.stringify(raw.command)}），改用 ${command}`);
+  }
+
+  let args = [];
+  if (raw.args !== undefined) {
+    if (Array.isArray(raw.args) && raw.args.every((a) => typeof a === "string")) {
+      args = [...raw.args];
+    } else warn(`args 必须是字符串数组（收到 ${JSON.stringify(raw.args)}），已忽略`);
+  }
+
+  let timeoutMs = 60_000;
+  if (raw.timeoutMs !== undefined) {
+    if (typeof raw.timeoutMs === "number" && Number.isFinite(raw.timeoutMs) && raw.timeoutMs > 0) {
+      timeoutMs = raw.timeoutMs;
+    } else warn(`timeoutMs 必须是正的毫秒数（收到 ${JSON.stringify(raw.timeoutMs)}），改用 ${timeoutMs}`);
+  }
+
+  let env;
+  if (raw.env !== undefined) {
+    const values = raw.env && typeof raw.env === "object" && !Array.isArray(raw.env)
+      ? Object.values(raw.env) : undefined;
+    if (values && values.every((v) => typeof v === "string")) env = { ...raw.env };
+    else warn(`env 必须是「字符串 → 字符串」的对象（收到 ${JSON.stringify(raw.env)}），已忽略`);
+  }
+
+  return { command, args, timeoutMs, env };
 }
 
 /** 跑一次 CLI，**永不抛**：命令不存在/超时/被取消/非零退出都折成结构化结果。 */
@@ -104,11 +184,16 @@ export function formatCapabilities(payload) {
   ].join("\n");
 }
 
-/** 只吃**成功**回包（`ok:true`）；拒绝回包由 {@link rejection} 折，别在这里猜。 */
-export function formatStatus(payload) {
+/**
+ * 只吃**成功**回包（`ok:true`）；拒绝回包由 {@link rejection} 折，别在这里猜。
+ * `runDir` 可选：传了就回显**实际读的那个路径**——相对路径解析出问题时，这是唯一线索。
+ */
+export function formatStatus(payload, runDir = undefined) {
   // 终态下 Python 侧给的 process_alive 是 null（不是 false）——按相位判，别按死活判，
   // 否则一个跑完的 run 会显示成「进程 在跑」。
-  const lines = [`相位：${payload.phase}（${processNote(payload.phase, payload.process_alive)}）`];
+  const lines = [];
+  if (runDir) lines.push(`目录：${runDir}`);
+  lines.push(`相位：${payload.phase}（${processNote(payload.phase, payload.process_alive)}）`);
   if (payload.started_at) lines.push(`开始：${new Date(payload.started_at * 1000).toISOString()}`);
   if (payload.duration_s != null) lines.push(`耗时：${payload.duration_s} s`);
   const summary = payload.summary;
@@ -124,33 +209,48 @@ export function formatStatus(payload) {
 }
 
 export function apply(ctx, config = {}) {
-  const command = String(config.command || "operator-agent");
-  const prefix = Array.isArray(config.args) ? config.args.map(String) : [];
-  const timeoutMs = Number(config.timeoutMs) || 60_000;
-  // `env` 用于「没 pip install、直接从源码树跑」的形态（PYTHONPATH 指到仓库）。
-  const env = config.env && typeof config.env === "object"
-    ? { ...process.env, ...config.env } : undefined;
-  const run = (argv, signal) => runCli(command, [...prefix, ...argv], timeoutMs, env, signal);
-
-  // 宿主日志里留痕（`ctx.logger` 是 cordis 核心服务，不用 inject）。**同类只记一次**：
-  // 命令没装/超时会被用户反复撞上，日志不该刷屏；`reported` 随插件实例生灭，不用自己清。
-  const reported = new Set();
-  const report = (level, reason, detail) => {
-    if (reported.has(reason)) return;
-    reported.add(reason);
-    ctx.logger[level](`operator-tools: ${detail}（同类失败只记这一次）`);
+  // 宿主日志里留痕（`ctx.logger` 是 cordis 核心服务，不用 inject）。**同一件事只说一次**：
+  // 配置错一次就够，命令没装/超时会被反复撞上，都不该刷屏；`said` 随插件实例生灭。
+  const said = new Set();
+  const say = (level, key, message) => {
+    if (said.has(key)) return;
+    said.add(key);
+    ctx.logger[level](`operator-tools: ${message}`);
   };
+
+  const { command, args: prefix, timeoutMs, env: extraEnv } = normalizeConfig(
+    config, (message) => say("warn", `config:${message}`, message));
+  // 清洗在**前**、显式 `env` 在**后**：默认不把宿主密钥交给子进程，但配置里写了就照传。
+  // `env` 也用于「没 pip install、直接从源码树跑」的形态（PYTHONPATH 指到仓库）。
+  const env = { ...scrubEnv(process.env), ...(extraEnv || {}) };
+  const run = (argv, signal) => runCli(command, [...prefix, ...argv], timeoutMs, env, signal);
 
   // 取消是人的正常操作，不进日志；「命令不存在」是插件根本没接线，按 error 记。
   const fail = (out) => {
     if (out.reason !== "cancelled") {
-      report(out.reason === "not_installed" ? "error" : "warn", out.reason, out.detail);
+      const level = out.reason === "not_installed" ? "error" : "warn";
+      say(level, out.reason, `${out.detail}（同类失败只记这一次）`);
     }
     return { kind: "error", text: out.detail };
   };
 
-  const handle = async (rawInput, signal) => {
-    const { sub, args } = parseInput(rawInput);
+  /**
+   * 相对路径按**会话工作区**解析。宿主进程的 cwd 不是人的工作区（GUI 进程多半在 `/`），
+   * 不解析就会报「run-status.json 不存在」，看着像 run 丢了。
+   * `workingDirectory` 没装/查不到时原样传下去——不因为可选依赖把整条命令变成不可用。
+   */
+  const resolveRunDir = (raw, agent) => {
+    const text = stripQuotes(String(raw || "").trim());
+    if (!text) return "";
+    if (text === "~" || text.startsWith("~/")) return join(homedir(), text.slice(2));
+    if (text.startsWith("/")) return text;
+    const wd = typeof ctx.get === "function" ? ctx.get("workingDirectory") : undefined;
+    const cwd = wd && agent ? wd.get(agent.session) : undefined;
+    return cwd ? resolvePath(cwd, text) : text;
+  };
+
+  const handle = async (rawInput, signal, agent) => {
+    const { sub, rest } = parseInput(rawInput);
     if (sub === "help" || sub === "-h" || sub === "--help") {
       return { kind: "success", text: USAGE };
     }
@@ -162,20 +262,21 @@ export function apply(ctx, config = {}) {
         if (payload.ok === false) return rejection(payload);
         return { kind: "success", text: formatCapabilities(payload) };
       } catch {
-        report("warn", "bad_output", `返回的不是 JSON：${out.text.slice(0, 120)}`);
+        say("warn", "bad_output", `返回的不是 JSON：${out.text.slice(0, 120)}`);
         return { kind: "error", text: `返回的不是 JSON：\n${out.text.slice(0, 400)}` };
       }
     }
     if (sub === "status") {
-      if (!args[0]) return { kind: "error", text: "用法：/op status <run_dir>" };
-      const out = await run(["status", "--run-dir", args[0]], signal);
+      if (!rest) return { kind: "error", text: "用法：/op status <run_dir>" };
+      const runDir = resolveRunDir(rest, agent);
+      const out = await run(["status", "--run-dir", runDir], signal);
       if (!out.ok) return fail(out);
       try {
         const payload = JSON.parse(out.text);
         if (payload.ok === false) return rejection(payload);
-        return { kind: "success", text: formatStatus(payload) };
+        return { kind: "success", text: formatStatus(payload, runDir) };
       } catch {
-        report("warn", "bad_output", `返回的不是 JSON：${out.text.slice(0, 120)}`);
+        say("warn", "bad_output", `返回的不是 JSON：${out.text.slice(0, 120)}`);
         return { kind: "error", text: `返回的不是 JSON：\n${out.text.slice(0, 400)}` };
       }
     }
@@ -189,7 +290,9 @@ export function apply(ctx, config = {}) {
     name: "op",
     description: "算子判定层：查能力 / 查无人值守状态（不经过模型）",
     input: { hint: "capabilities | status <run_dir> | help" },
-    handler: async ({ rawInput, signal }) => handle(rawInput, signal),
+    // `agent` 是宿主给的（invocation = {commandId, agent, rawInput, attachments, signal}），
+    // 只有它带着会话工作区，相对路径要靠它才能落到人想去的地方。
+    handler: async ({ rawInput, signal, agent }) => handle(rawInput, signal, agent),
   });
 
   // `inject` 是**必需**语义（缺了 fiber 根本不启动），所以这里不做「拿不到就跳过」的兜底 ——

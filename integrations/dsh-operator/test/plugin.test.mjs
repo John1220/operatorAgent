@@ -4,15 +4,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { apply, formatCapabilities, formatStatus, runCli } from "../index.mjs";
+import { apply, formatCapabilities, formatStatus, normalizeConfig, runCli, scrubEnv }
+  from "../index.mjs";
 
 /** 真 CLI 的输出：reshape 判定层 payload 时，这两个 fixture 先红。 */
 const fixture = (name) =>
   JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 
-function fakeCtx() {
+function fakeCtx({ cwd = undefined } = {}) {
   const commandDefs = [];
   const sections = [];
   const logs = [];
@@ -24,8 +25,14 @@ function fakeCtx() {
     commands: { register: (def) => commandDefs.push(def) },
     systemPrompt: { section: (s) => sections.push(s) },
     logger: { info: record("info"), warn: record("warn"), error: record("error") },
+    // 宿主的 `ctx.get(服务名)` 对未提供的服务返回 undefined（不抛），替身照这个语义来。
+    get: (name) => (name === "workingDirectory" && cwd !== undefined
+      ? { get: () => cwd } : undefined),
   };
 }
+
+/** 命令的 invocation 里带着 agent（宿主：{commandId, agent, rawInput, attachments, signal}）。 */
+const fakeAgent = { session: { id: "s" } };
 
 function fakeCli(body) {
   const dir = mkdtempSync(join(tmpdir(), "fake-operator-"));
@@ -166,6 +173,131 @@ test("CLI 回非 JSON 时记 bad_output（否则用户只看到命令报错，�
   assert.equal(ctx.logs.length, 1);
   assert.equal(ctx.logs[0][0], "warn");
   assert.ok(ctx.logs[0][1].includes("不是 JSON"), ctx.logs[0][1]);
+});
+
+
+test("scrubEnv 用宿主那套规则洗：*KEY*/*PASSWORD*/*SECRET*/*TOKEN* 与全部 DSH_*", () => {
+  const cleaned = scrubEnv({
+    PATH: "/usr/bin",
+    LLM_API_KEY_FILE: "/home/u/llm.key",
+    LLM_API_KEY: "sk-secret",
+    GITHUB_TOKEN: "t",
+    DB_PASSWORD: "p",
+    MY_SECRET: "s",
+    DSH_HOME: "/Users/u/.dsh",
+    DSH_OPERATOR_ANYTHING: "x",
+    OPERATOR_AGENT_OUTPUT_DIR: "/tmp/out",
+    PYTHONPATH: "/repo",
+  });
+  assert.deepEqual(Object.keys(cleaned).sort(),
+                   ["OPERATOR_AGENT_OUTPUT_DIR", "PATH", "PYTHONPATH"]);
+});
+
+test("normalizeConfig：拼错的键会说，写错的类型会退回默认值", () => {
+  const warned = [];
+  const good = normalizeConfig(
+    { command: "python3", args: ["-m", "operator_agent"], timeoutMs: 1000, env: { A: "1" } },
+    (m) => warned.push(m));
+  assert.deepEqual(good, { command: "python3", args: ["-m", "operator_agent"],
+                           timeoutMs: 1000, env: { A: "1" } });
+  assert.deepEqual(warned, [], "正常配置不该报警");
+
+  // 两个真实的静默陷阱：键名拼错（会被忽略）、毫秒写成带单位（会退回默认）。
+  const w = [];
+  const bad = normalizeConfig({ comand: "python3", timeoutMs: "30s" }, (m) => w.push(m));
+  assert.equal(bad.command, "operator-agent", "拼错的 comand 不该被当成 command");
+  assert.equal(bad.timeoutMs, 60_000);
+  assert.equal(w.length, 2, JSON.stringify(w));
+  assert.ok(w[0].includes("comand"), w[0]);
+  assert.ok(w[1].includes("timeoutMs"), w[1]);
+
+  const w2 = [];
+  assert.equal(normalizeConfig({ timeoutMS: 1 }, (m) => w2.push(m)).timeoutMs, 60_000);
+  assert.ok(w2[0].includes("正确写法是 timeoutMs"), w2[0]);
+
+  const w3 = [];
+  const bad2 = normalizeConfig({ command: "", args: "x", env: { A: 1 } }, (m) => w3.push(m));
+  assert.equal(bad2.command, "operator-agent");
+  assert.deepEqual(bad2.args, []);
+  assert.equal(bad2.env, undefined);
+  assert.equal(w3.length, 3, JSON.stringify(w3));
+});
+
+test("配置错一次只在宿主日志里说一次（apply 加载时不刷屏）", () => {
+  const ctx = fakeCtx();
+  apply(ctx, { comand: "x", timeoutMs: "30s" });
+  assert.equal(ctx.logs.length, 2, JSON.stringify(ctx.logs));
+  assert.ok(ctx.logs.every(([level]) => level === "warn"));
+  assert.ok(ctx.logs[0][1].startsWith("operator-tools: 配置项 comand"), ctx.logs[0][1]);
+});
+
+test("/op status：相对路径按**会话工作区**解析（宿主 cwd 不是人的工作区）", async () => {
+  // 假 CLI 把收到的 --run-dir 原样回进 payload：直接证明**到 CLI 手里的那个路径**是什么。
+  const cli = fakeCli(`printf '{"ok":true,"phase":"%s"}' "$3"`);
+  const ctx = fakeCtx({ cwd: "/Users/zh/repos/operatorAgent" });
+  apply(ctx, { command: cli });
+  const out = await ctx.commandDefs[0].handler({
+    rawInput: "status runs/2026-10", agent: fakeAgent, signal: undefined });
+
+  assert.equal(out.kind, "success");
+  assert.ok(out.text.includes("目录：/Users/zh/repos/operatorAgent/runs/2026-10"), out.text);
+  assert.ok(out.text.includes("相位：/Users/zh/repos/operatorAgent/runs/2026-10"), out.text);
+});
+
+test("/op status：含空格的路径整段保留（按空白切会碎）", async () => {
+  const cli = fakeCli(`printf '{"ok":true,"phase":"%s"}' "$3"`);
+  const ctx = fakeCtx({ cwd: "/w" });
+  apply(ctx, { command: cli });
+
+  const plain = await ctx.commandDefs[0].handler({
+    rawInput: "status /Users/zh/my runs/x", agent: fakeAgent });
+  assert.ok(plain.text.includes("相位：/Users/zh/my runs/x"), plain.text);
+
+  const quoted = await ctx.commandDefs[0].handler({
+    rawInput: 'status "my runs/x"', agent: fakeAgent });
+  assert.ok(quoted.text.includes("相位：/w/my runs/x"), quoted.text);
+});
+
+test("/op status：绝对路径与 ~ 都不动会话工作区那套", async () => {
+  const cli = fakeCli(`printf '{"ok":true,"phase":"%s"}' "$3"`);
+  const ctx = fakeCtx({ cwd: "/w" });
+  apply(ctx, { command: cli });
+
+  const abs = await ctx.commandDefs[0].handler({ rawInput: "status /tmp/r", agent: fakeAgent });
+  assert.ok(abs.text.includes("目录：/tmp/r"), abs.text);
+
+  const home = await ctx.commandDefs[0].handler({ rawInput: "status ~/r", agent: fakeAgent });
+  assert.ok(home.text.includes(`目录：${homedir()}/r`), home.text);
+});
+
+test("拿不到 workingDirectory 时原样传下去，不把命令变成不可用", async () => {
+  const cli = fakeCli(`printf '{"ok":true,"phase":"%s"}' "$3"`);
+  const ctx = fakeCtx();                       // 没有 workingDirectory
+  apply(ctx, { command: cli });
+  const out = await ctx.commandDefs[0].handler({ rawInput: "status rel/dir", agent: fakeAgent });
+  assert.ok(out.text.includes("目录：rel/dir"), out.text);
+});
+
+test("显式 config.env 在清洗**之后**合并：要传仍传得进去", async () => {
+  process.env.DSH_OPERATOR_TEST_SCRUB = "dsh-value";       // DSH_ 前缀 → 必须洗掉
+  process.env.LLM_API_KEY_FROM_HOST = "sk-from-host";      // 含 KEY → 必须洗掉
+  try {
+    // 三个探针按顺序回进 version：DSH_* / 宿主里的敏感变量 / 显式写进 config 的那个。
+    const cli = fakeCli(
+      "printf '{\"ok\":true,\"version\":\"%s|%s|%s\",\"backends\":{},\"runtime\":{}," +
+      "\"kernel_types_with_input_layout\":[]}' " +
+      '"\${DSH_OPERATOR_TEST_SCRUB:-unset}" "\${LLM_API_KEY_FROM_HOST:-unset}" ' +
+      '"\${LLM_API_KEY_FILE:-unset}"');
+    const ctx = fakeCtx();
+    apply(ctx, { command: cli, env: { LLM_API_KEY_FILE: "/tmp/inside.key" } });
+    const out = await ctx.commandDefs[0].handler({ rawInput: "capabilities" });
+    assert.equal(out.kind, "success", out.text);
+    assert.ok(out.text.includes("unset|unset|/tmp/inside.key"),
+              `前两个该被洗掉、第三个该来自 config.env：${out.text}`);
+  } finally {
+    delete process.env.DSH_OPERATOR_TEST_SCRUB;
+    delete process.env.LLM_API_KEY_FROM_HOST;
+  }
 });
 
 test("runCli 把超时折成 reason=timeout，而不是抛异常", async () => {

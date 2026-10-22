@@ -115,6 +115,24 @@ class TestTheDshShim(unittest.TestCase):
         # 发布形态不写死绝对路径：command 是 pip 装出来的 console script
         self.assertEqual(config["command"], "operator-agent-mcp")
 
+    def test_every_patch_row_that_is_not_official_points_at_this_package(self):
+        """按包名安装时，patch 行里的 `name:` 必须**就是本包名**。
+
+        写错的后果不是报错而是「装上了但 boot 不起来」：宿主按 `name` 去 profile /
+        安装锚点解析，解析不到就跳过这一行（`skipping profile bundle …` 只在启动时打印）。
+        官方包（`@deepseek-ai/*`）由安装侧提供，不在此列。
+        """
+        import yaml
+        pkg = json.loads((self.SHIM / "package.json").read_text(encoding="utf-8"))
+        rows = yaml.safe_load((self.SHIM / "cordis.patch.yml").read_text(encoding="utf-8"))
+        names = [row["name"] for entry in rows for row in entry.get("insert", [])]
+        self.assertTrue(names, "patch 里没有 insert 行？")
+        for name in names:
+            if name.startswith("@deepseek-ai/"):
+                continue
+            self.assertEqual(name, pkg["name"],
+                             f"patch 行 name={name} 与包名 {pkg['name']} 不一致")
+
     def test_the_mcp_call_timeout_covers_a_real_machine_verdict(self):
         """一次真机完整判定的实测成本，必须是这一格的**下界**。
 

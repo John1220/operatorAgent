@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.2
+
+`/op` 的可用性与安全性收口 + 两条防失配守卫（判定层的回包契约没动）。
+
+- **相对路径按会话工作区解析**（`ctx.workingDirectory.get(agent.session)`）。原来相对
+  `run_dir` 是按**宿主进程的 cwd** 解析的（GUI 进程多半在 `/`），于是「run 在但路径不对」
+  被报成「run-status.json 不存在」，看着像 run 丢了。命令的 invocation 里本来就有
+  `agent`（`{commandId, agent, rawInput, attachments, signal}`），我们只接了后两个。
+  `~/x` 展开到 home；拿不到 `workingDirectory` 时原样传下去（不因为一个可选依赖把命令
+  变成不可用）；输出回显**实际读取的目录**。
+- **含空格的路径不再被切碎**：`parseInput` 原来按空白切开再拼，`/op status /a/my runs/x`
+  直接散架。现在 `rest` 是原样剩余整段，成对引号会被去掉。
+- **`/op` 的子进程环境按宿主同一套规则清洗**（`scrubEnv`：名字含
+  `KEY`/`PASSWORD`/`SECRET`/`TOKEN` 或带 `DSH_` 前缀的一律不给）。`command` 是可配置的，
+  原来等于把宿主密钥交给一个可替换的二进制；显式 `config.env` 在清洗**之后**合并，
+  所以真要传仍传得进去。
+- **配置校验**（`normalizeConfig`）：`comand:` 拼错原来会让 `/op` **静默**换成默认二进制，
+  `timeoutMs: "30s"` 会静默变回 60000。现在未知键/类型不对都在宿主日志里 warn 一次
+  （`timeoutMS` 这种大小写错误会给「正确写法是 timeoutMs」的提示）。
+- 两条防失配守卫：真宿主测试里用**宿主自己的** `evaluatePluginCompatibility` + 装在机器上的
+  版本核 `engines.dsh`（失配的后果是 `dsh plugin` 直接拒装）；Python 侧钉住 patch 行里非官方
+  的 `name:` 必须等于包名（写错是「装上了但 boot 不起来」）。两条都用变异验证过会红。
+- 日志去重机制合并成一处（`said`），同类只记一次；配置告警与运行时失败各自成组。
+
 ## 0.1.1
 
 对着 DSH `0.2.1-rc.2` 的源码逐条核对后的修补（判定层的回包契约没动）。

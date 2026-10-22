@@ -113,6 +113,8 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
 > 为什么必须写在 `env:` 里：DSH 会先洗掉子进程环境里名字**含 `KEY`/`PASSWORD`/`SECRET`/`TOKEN`**
 > 的变量（`/KEY|PASSWORD|SECRET|TOKEN/i`），**外加所有 `DSH_*`**，再应用显式覆盖。
 > `LLM_API_KEY_FILE` 含 `KEY`，靠全局环境变量传不进去；`DSH_HOME` 之类也一样传不进去。
+>
+> `/op`（宿主插件自己起的那条子进程）用的是**同一套规则**：先洗、再合并配置里的 `env`。
 
 ## 4. 验证装好了
 
@@ -150,6 +152,19 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 /op help                  用法
 ```
 
+`run_dir` 的解析规则（**相对路径不是按宿主进程的 cwd 解析**——GUI 进程的 cwd 多半是 `/`，
+按它解析会报「run-status.json 不存在」，看着像 run 丢了）：
+
+| 写法 | 解析成 |
+|---|---|
+| `/abs/path` | 原样 |
+| `runs/2026-10` | **会话工作区**下的 `runs/2026-10`（`ctx.workingDirectory`） |
+| `~/runs/x` | 你的 home 下的 `runs/x` |
+| `"my runs/x"` | 去掉引号后按上面的规则；路径里的空格**整段保留** |
+
+查不到 `workingDirectory` 服务时原样传给 CLI（不因为一个可选依赖把命令变成不可用）。
+输出里会回显**实际读取的目录**，所以相对路径写歪了一眼能看出来。
+
 需要「判定/修复/从头自动化」时用模型工具（`mcp__operator__*`）：命令只是旁路，
 不替模型做判定。
 
@@ -180,15 +195,15 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 ## 8. 构建与发版（维护者）
 
 ```bash
-npm test        # 26 条：注册面/行为/格式化契约（真 CLI fixture）+ 真宿主契约
+npm test        # 36 条：注册面/行为/格式化契约（真 CLI fixture）+ 真宿主契约
 ```
 
 `npm test` 里有两层守卫，别只跑一层：
 
 | 文件 | 钉住什么 | 依赖 |
 |---|---|---|
-| `test/plugin.test.mjs` | 注册面、`/op` 行为、超时/取消、`config.env`、宿主日志（同类只记一次）、两个 formatter 吃**真 CLI fixture** | 无（替身 ctx + 假 CLI） |
-| `test/host-contract.test.mjs` | 把插件注册进**装在机器上的** DSH 自己的 `cordis` + `dsh-commands` 服务真执行，并用真 `readPluginMeta` 读一遍「脸」 | DSH 安装；找不到就**跳过**（`DSH_APP_ROOT` 可指定） |
+| `test/plugin.test.mjs`（29 条） | 注册面、`/op` 行为、路径解析、超时/取消、`scrubEnv`/`normalizeConfig`、宿主日志（同类只记一次）、两个 formatter 吃**真 CLI fixture** | 无（替身 ctx + 假 CLI） |
+| `test/host-contract.test.mjs`（7 条） | 把插件注册进**装在机器上的** DSH 自己的 `cordis` + `dsh-commands` 服务真执行（含 `agent` 透传），并用真 `readPluginMeta` 读一遍「脸」、用真 `evaluatePluginCompatibility` 核 `engines.dsh` | DSH 安装；找不到就**跳过**（`DSH_APP_ROOT` 可指定） |
 
 第二层是必要的：替身 ctx 只会照单全收，而宿主的 `normalizeDefinition` / `normalizeResult`
 会拒绝不合规的命令定义与返回值；元数据那几条更只认**真模块解析器 + `exports` 映射**。
