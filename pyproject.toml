@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "operator-agent"
+version = "0.6.0"
+description = "无人值守 GPU 算子开发 agent：设计/生成/验证/修复 Triton 核，并给出可审计的判定"
+readme = "README.md"
+requires-python = ">=3.9"
+# 控制面零第三方依赖：numpy 是唯一硬依赖；torch/triton 只在真机执行侧需要。
+dependencies = ["numpy>=1.21"]
+license = { text = "Apache-2.0" }
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+  "License :: OSI Approved :: Apache Software License",
+]
+
+[project.scripts]
+operator-agent = "operator_agent.cli:main"
+operator-agent-mcp = "operator_agent.mcp_server:main"
+
+[tool.setuptools]
+include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["operator_agent*", "remote_scripts*"]
+
+[tool.setuptools.package-data]
+operator_agent = ["prompts/*.md", "skills/*.md"]

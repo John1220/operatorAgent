@@ -1,0 +1,13 @@
+# 发布物只包含代码与随包数据。运行期产物（output/、logs/）与本地检出（triton/）
+# 绝不能进 sdist：output/ 里有 0400 的产物文件（run_layout 写的），打包器删不动它们；
+# 更重要的是，它们是**这台机器测出来的读数**，换一张卡就不成立（见 kernel_db 的注释）。
+prune output
+prune logs
+prune tests
+prune benchmarks
+prune docs
+prune triton
+prune debug
+prune operator-dev-agent-design
+prune .git
+global-exclude __pycache__ *.pyc *.pyo .DS_Store
