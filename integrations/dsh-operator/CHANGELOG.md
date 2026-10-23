@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.1.4
+
+**文档更正**：上一版写错的两处事实，用隔离 `DSH_HOME` + 本机 CLI 实测推翻。
+
+- **`engines.dsh` 失配 ≠「装不上」**。`dsh plugin --profile <p> add …` 是 pnpm 透传，
+  **不做版本门禁**：用 CLI `0.1.1-rc.2` 装 `engines.dsh: ^0.2.1-rc.2` 的包，装得上。
+  真正的把关在 **boot** —— `dsh-app-boot` 解析 profile 的 bundle 列表时
+  `evaluatePluginCompatibility` 不过就抛错、被捕获进 `skippedBundles`，在 stderr 留一行
+  `dsh: skipping profile bundle "<name>": <reason>`，然后照常启动。
+  所以失配的表现是「**装好了但没生效**」，比报错更难查；`host-contract` 里那条
+  `engines.dsh` 守卫正是为这个留的。
+- **`dsh plugin … remove` 会同步 `dsh.profile.bundles`**。原来说「只摘 `dependencies`、
+  得手工删 bundles、否则启动报 `skipping profile bundle`」是错的：实测 `add` 与 `remove`
+  都会把 profile 的 `dsh.profile.bundles` 改成 `[base, web-app]` / `[base, web-app, 本包]`。
+  README §2.3 已按实测改写（并留了「你的 CLI 版本不同就 `grep` 一眼确认」的话）。
+- 顺手把「`ctx.get` 对未 inject 的服务也读得到 + `dsh-base` 装了 `dsh-working-directory`」
+  这两条实测结论写进 README §5.5：`/op status` 的相对路径解析在真 profile 里是生效的，
+  不是死代码。
+
 ## 0.1.3
 
 给模型的说明**只剩一处来源**（判定层的回包契约没动，`/op` 行为没动）。
@@ -38,7 +57,8 @@
   `timeoutMs: "30s"` 会静默变回 60000。现在未知键/类型不对都在宿主日志里 warn 一次
   （`timeoutMS` 这种大小写错误会给「正确写法是 timeoutMs」的提示）。
 - 两条防失配守卫：真宿主测试里用**宿主自己的** `evaluatePluginCompatibility` + 装在机器上的
-  版本核 `engines.dsh`（失配的后果是 `dsh plugin` 直接拒装）；Python 侧钉住 patch 行里非官方
+  版本核 `engines.dsh`（失配**不会**被 `dsh plugin` 拦住，而是在 boot 时把这个 bundle 跳过并
+  在 stderr 打 `dsh: skipping profile bundle …`，见 0.1.4 的更正）；Python 侧钉住 patch 行里非官方
   的 `name:` 必须等于包名（写错是「装上了但 boot 不起来」）。两条都用变异验证过会红。
 - 日志去重机制合并成一处（`said`），同类只记一次；配置告警与运行时失败各自成组。
 
@@ -106,7 +126,7 @@
   现在「命令不存在」记 error、超时/非 JSON 记 warn，且**同类只记一次**（`reported` 随插件
   实例生灭）——取消不记，那是人的正常操作。
 - README 补「2.3 卸载 / 禁用」：GUI 插件页 / CLI / 纯手工三条路，并点明 CLI 那条是**透传
-  给 pnpm** 的，不会改 `dsh.profile.bundles`（不改就会在启动时报 `skipping profile bundle`）。
+  给 pnpm** 的（`add` / `remove` 都会顺带同步 `dsh.profile.bundles` —— 见 0.1.4 的更正）。
 - 守卫：`test/host-contract.test.mjs` 用**真 `readPluginMeta`** 经 `node_modules` 符号链接
   读一遍元数据（去掉任一条 exports 都会红，已用变异验证）；`tests/test_packaging.py`
   新增 `TestTheDshPluginFace` 把宿主的 locale/icon 规则镜像一份（不需要装 DSH）。

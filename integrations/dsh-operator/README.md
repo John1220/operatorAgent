@@ -87,7 +87,7 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
 | 手段 | 效果 |
 |---|---|
 | **GUI 侧边栏 插件 页**：关开关（禁用）/ 删除 | 推荐。删除会同时摘掉 profile 的 `dependencies` 与 `dsh.profile.bundles`；禁用只是让 bundle 不生效（patch 不再插入），文件还在 |
-| `dsh plugin --profile <profile> remove dsh-operator-agent` | ⚠️ 这条是**透传给 pnpm** 的（`dsh plugin --profile <name> <pnpm-args...>`），它只摘 `dependencies`，**不会**改 `dsh.profile.bundles`。所以要再手工把名字从 profile `package.json` 的 `dsh.profile.bundles` 里删掉，否则启动时会报 `skipping profile bundle …`。`desktop` profile 还要求先完全退出 Desktop |
+| `dsh plugin --profile <profile> remove dsh-operator-agent` | 实测（本机 CLI `0.1.1-rc.2`）**会同时**摘掉 profile 的 `dependencies` 与 `dsh.profile.bundles`。你的 CLI 版本不同的话，卸完 `grep dsh-operator-agent <profile>/package.json` 确认一眼即可。`desktop` profile 还要求先完全退出 Desktop |
 | 纯手工 | 从 profile（或你放这两行的那个 patch）里删掉 `mcp-operator` 与 `operator-tools` 两条，再把名字从 `dsh.profile.bundles` 去掉 |
 
 两半是**独立**的：卸载插件不影响 Python 侧的 `operator-agent` CLI；反过来
@@ -105,10 +105,18 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
           LLM_BASE_URL: https://your-endpoint/v1
           LLM_MODEL: your-inner-model
           LLM_API_KEY_FILE: ~/.config/operator_agent/llm.key   # 0600，仓库外
+          # 阿里云百炼的思考开关使用顶层字段；其他服务按其接口选择
+          LLM_THINKING_PARAMETER: enable_thinking
 ```
 
 也可以用 `LLM_API_KEY` 直接给值（不推荐）。没配时这两条工具会立刻返回
 `llm_not_configured`，**不会**起一个跑不出结论的进程。
+
+`operator_run` 和 `operator_repair` 共用客户端的密钥解析：显式密钥、`LLM_API_KEY`、
+`LLM_API_KEY_FILE` 依次取值。文件为空或不可读时拒绝调用；文件内容不会写进环境变量。
+`LLM_THINKING_PARAMETER` 默认是 `chat_template_kwargs`；设置为 `enable_thinking` 时，
+请求改用顶层字段。思考仍默认关闭，输出预算不变。更换服务后也应清空不再使用的
+`LLM_FALLBACK_MODEL`，避免主模型失败后切回旧模型。
 
 > 为什么必须写在 `env:` 里：DSH 会先洗掉子进程环境里名字**含 `KEY`/`PASSWORD`/`SECRET`/`TOKEN`**
 > 的变量（`/KEY|PASSWORD|SECRET|TOKEN/i`），**外加所有 `DSH_*`**，再应用显式覆盖。
@@ -142,6 +150,14 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 2 轮约 30 min）。**别往回调小**——超时不是优雅退出，server 会继续算完再写一个没人认领的响应；
 更长的工作请用 `operator_run` + `operator_status` 轮询（`run` 立刻返回 pid，不占一次调用）。
 
+### 5.1 生成与修复质量
+
+核心生成/修复提示词已共用版本化规约。`operator_prepare` 返回规约身份；`operator_repair` 默认加入与当前源码、契约及数值反馈绑定的诊断，并返回 `initial_full_l2_passed`、`full_l2_passed` 和完整证据文件位置。当前诊断识别器聚焦 LayerNorm 尾部归约 mask；其他模式明确返回 `unknown`。诊断是修复假设，最终结果仍需完整验证。
+
+无实际源码或 AST 变化的修复会停止，避免反复验证相同失败候选。输入保真或参考身份未知时先恢复观测资格。固定 10 任务的计划、回放与对照命令见[质量闭环说明](../../docs/design/operator-quality-improvement.md)；CPU 回放不代表新模型或 GPU 质量提升。
+
+新增的[配对评测入口](../../docs/design/operator-quality-paired-evaluation.md)用 `--paired` 生成同一初始候选，两组独立修复；SSH 评测会先检查 GPU、现有运行时及 runner，预检失败不会请求模型。`--preflight PLAN` 可单独检查环境，不需要模型凭据。
+
 ## 5.5 斜杠命令 `/op`
 
 命令在**宿主进程**里执行，`/op status` 的输出直接给人看、不进模型上下文：
@@ -162,7 +178,8 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 | `~/runs/x` | 你的 home 下的 `runs/x` |
 | `"my runs/x"` | 去掉引号后按上面的规则；路径里的空格**整段保留** |
 
-查不到 `workingDirectory` 服务时原样传给 CLI（不因为一个可选依赖把命令变成不可用）。
+查不到 `workingDirectory` 服务时原样传给 CLI（不因为一个可选依赖把命令变成不可用）。真 profile 里这个服务由 `@deepseek-ai/dsh-base` 装上，而 `ctx.get` 对**没 inject** 的服务
+也读得到 —— 两条都在本机验过，所以这条解析在真机上是生效的。
 输出里会回显**实际读取的目录**，所以相对路径写歪了一眼能看出来。
 
 需要「判定/修复/从头自动化」时用模型工具（`mcp__operator__*`）：命令只是旁路，
