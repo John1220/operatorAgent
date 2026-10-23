@@ -190,7 +190,7 @@ test("scrubEnv 用宿主那套规则洗：*KEY*/*PASSWORD*/*SECRET*/*TOKEN* 与�
     GITHUB_TOKEN: "t",
     DB_PASSWORD: "p",
     MY_SECRET: "s",
-    DSH_HOME: "/Users/u/.dsh",
+    DSH_HOME: "/home/synthetic/.dsh",
     DSH_OPERATOR_ANYTHING: "x",
     OPERATOR_AGENT_OUTPUT_DIR: "/tmp/out",
     PYTHONPATH: "/repo",
@@ -240,14 +240,14 @@ test("配置错一次只在宿主日志里说一次（apply 加载时不刷屏�
 test("/op status：相对路径按**会话工作区**解析（宿主 cwd 不是人的工作区）", async () => {
   // 假 CLI 把收到的 --run-dir 原样回进 payload：直接证明**到 CLI 手里的那个路径**是什么。
   const cli = fakeCli(`printf '{"ok":true,"phase":"%s"}' "$3"`);
-  const ctx = fakeCtx({ cwd: "/Users/zh/repos/operatorAgent" });
+  const ctx = fakeCtx({ cwd: "/workspace/operatorAgent" });
   apply(ctx, { command: cli });
   const out = await ctx.commandDefs[0].handler({
     rawInput: "status runs/2026-10", agent: fakeAgent, signal: undefined });
 
   assert.equal(out.kind, "success");
-  assert.ok(out.text.includes("目录：/Users/zh/repos/operatorAgent/runs/2026-10"), out.text);
-  assert.ok(out.text.includes("相位：/Users/zh/repos/operatorAgent/runs/2026-10"), out.text);
+  assert.ok(out.text.includes("目录：/workspace/operatorAgent/runs/2026-10"), out.text);
+  assert.ok(out.text.includes("相位：/workspace/operatorAgent/runs/2026-10"), out.text);
 });
 
 test("/op status：含空格的路径整段保留（按空白切会碎）", async () => {
@@ -256,8 +256,8 @@ test("/op status：含空格的路径整段保留（按空白切会碎）", asyn
   apply(ctx, { command: cli });
 
   const plain = await ctx.commandDefs[0].handler({
-    rawInput: "status /Users/zh/my runs/x", agent: fakeAgent });
-  assert.ok(plain.text.includes("相位：/Users/zh/my runs/x"), plain.text);
+    rawInput: "status /workspace/my runs/x", agent: fakeAgent });
+  assert.ok(plain.text.includes("相位：/workspace/my runs/x"), plain.text);
 
   const quoted = await ctx.commandDefs[0].handler({
     rawInput: 'status "my runs/x"', agent: fakeAgent });
