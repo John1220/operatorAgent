@@ -54,6 +54,9 @@ function ctxShim(root, onSection = () => {}) {
     commands: root.commands,
     systemPrompt: { section: onSection },
     logger: { info: () => {}, warn: () => {}, error: () => {} },
+    // 真 ctx 上 `get` 是服务查找入口（对未提供的服务返回 undefined，不抛）。
+    // 少这一条，插件里「拿不到 workingDirectory 就原样传」的回退分支就会被悄悄走通。
+    get: (name) => root.get(name),
   };
 }
 
@@ -63,6 +66,27 @@ function fakeCli(body) {
   writeFileSync(file, `#!/bin/sh\n${body}\n`, "utf8");
   chmodSync(file, 0o755);
   return file;
+}
+
+/**
+ * 拉起**真**的服务栈：fs / sessionProjections / sessions / systemPrompt / workingDirectory /
+ * commands 六个宿主服务。`/op status` 的相对路径解析要落到「会话工作区」，而这件事只有
+ * 真 `workingDirectory` + 真 session 投影才能证 —— 替身 ctx 只能证明「我传了什么」。
+ */
+async function realWorkspaceStack() {
+  const specs = [
+    "@deepseek-ai/dsh-fs", "@deepseek-ai/dsh-session-projection", "@deepseek-ai/dsh-session",
+    "@deepseek-ai/dsh-system-prompt", "@deepseek-ai/dsh-working-directory", "@deepseek-ai/dsh-commands",
+  ];
+  const root = new (await fromApp("@deepseek-ai/cordis/lib/index.js")).Context();
+  for (const spec of specs) {
+    root.plugin((await fromApp(spec + "/lib/index.js")).default);
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  }
+  for (const service of ["sessions", "workingDirectory", "commands"]) {
+    assert.ok(root.get(service), `宿主没起 ${service} 服务`);
+  }
+  return root;
 }
 
 test("真宿主的 commands 服务收下 /op：名字、definitionId、hint 都活在服务侧", { skip }, async () => {
@@ -136,7 +160,8 @@ test("engines.dsh 与**装在这台机器上的** DSH 版本相容", { skip }, a
     await fromApp("@deepseek-ai/dsh-app-boot/lib/index.js");
   const pkg = JSON.parse(readFileSync(join(PACKAGE_DIR, "package.json"), "utf8"));
   // 用宿主自己的判据 + 宿主自己的版本：这个范围是人手写的，装了新宿主会悄悄失配，
-  // 而失配的后果是**装不上**（`dsh plugin` 会直接拒），所以别等那一刻才发现。
+  // 失配**不会**在 `dsh plugin` 那一刻被拦住（那是 pnpm 透传）：装得上，但 boot 时这个
+  // bundle 会被跳过、只在 stderr 留一行 `dsh: skipping profile bundle …` —— 更该提前发现。
   const issue = evaluatePluginCompatibility(pkg, {});
   assert.equal(issue, undefined,
     `engines.dsh=${JSON.stringify(pkg.engines?.dsh)} 不满足装在这台机器上的 dsh `
@@ -203,4 +228,25 @@ test("server 的 instructions 真的到达 MCP 客户端（宿主据此渲染 mc
   } finally {
     await client.close();
   }
+});
+
+test("真 session + 真 workingDirectory：相对 run_dir 按**会话工作区**解析", { skip }, async () => {
+  const root = await realWorkspaceStack();
+  const cli = fakeCli(`printf '{"ok":true,"phase":"%s"}' "$3"`);
+  apply(ctxShim(root), { command: cli });
+
+  // 会话的 cwd 是 header 里的（GUI 建会话时由 workspace 层强制要求，缺了会被判 invalid）。
+  const session = await root.sessions.create("workspace-probe", {
+    meta: { cwd: "/workspace/operatorAgent" },
+  });
+  assert.equal(root.workingDirectory.get(session), "/workspace/operatorAgent",
+    "真 workingDirectory 没拿到会话工作区");
+
+  const agent = { session, append: () => {} };
+  const out = await root.commands.execute(
+    agent, "/op status runs/some-dir", [], new AbortController().signal);
+
+  assert.equal(out.result.kind, "success", out.result.text);
+  assert.ok(out.result.text.includes("目录：/workspace/operatorAgent/runs/some-dir"),
+    `相对路径没落到会话工作区：${out.result.text}`);
 });
