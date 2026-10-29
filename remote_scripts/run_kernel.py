@@ -33,14 +33,18 @@ if _HERE not in sys.path:
 try:
     import tolerance
     from anticheat import shield_torch
+    from compile_evidence import capture_compile_failure
     from remote_input_fidelity import (JSON_PROTOCOL, InputFidelityError,
-        decode_json_inputs, to_torch_inputs, torch_input_readback, torch_output_digest)
+        decode_json_inputs, materialize_seed_inputs, seed_input_digest,
+        to_torch_inputs, torch_input_readback, torch_output_digest)
 except ImportError:          # 仓库内直接运行: 模块还在 operator_agent/ 下
     sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "operator_agent"))
     import tolerance
     from anticheat import shield_torch
+    from compile_evidence import capture_compile_failure
     from remote_input_fidelity import (JSON_PROTOCOL, InputFidelityError,
-        decode_json_inputs, to_torch_inputs, torch_input_readback, torch_output_digest)
+        decode_json_inputs, materialize_seed_inputs, seed_input_digest,
+        to_torch_inputs, torch_input_readback, torch_output_digest)
 
 import gpu_claim  # 同目录 (部署后 = 工作目录; 仓库内 = remote_scripts/)
 try:
@@ -602,18 +606,30 @@ def _error_shape_torch(bad, *, n_bad: int, total: int, has_nonfinite: bool):
 
 
 def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
-              precision: str = "", reference_source: str = "", reference_contract=None) -> dict:
-    """Run candidate and reference on one device; return only verification summary."""
+              precision: str = "", reference_source: str = "", reference_contract=None,
+              preloaded_inputs=None) -> dict:
+    """Run candidate and reference on one device; return only verification summary.
+
+    `preloaded_inputs`（2026-10-20）：调用方已经在**本进程内**按契约 seed 物化并核过
+    digest 的那组 ndarray。给了它就走「精确输入」那条分支（`exact_inputs=True`），
+    不再走 JSON 解码 —— 这与原来的语义**一致且更严**：原来是「字节过关再用」，
+    现在是「digest 过关再用」。
+    """
     evidence = {}
+    execution_phase = None
     try:
         import torch
         if reference_contract is not None:
             validate_gate(reference_contract, precision, max_error, reference_source, kernel_type)
             evidence["reference_receipt"] = execution_receipt(reference_contract)
-            if inputs.get("protocol") != JSON_PROTOCOL:
+            if preloaded_inputs is None and inputs.get("protocol") != JSON_PROTOCOL:
                 raise ReferenceIdentityError("v2 requires exact inputs; generated lookalikes forbidden")
-        real_inputs = _deserialize_inputs(inputs)
-        exact_inputs = inputs.get("protocol") == JSON_PROTOCOL
+        if preloaded_inputs is not None:
+            real_inputs = preloaded_inputs
+            exact_inputs = True
+        else:
+            real_inputs = _deserialize_inputs(inputs)
+            exact_inputs = inputs.get("protocol") == JSON_PROTOCOL
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if exact_inputs:
             if _detect_language(code) == "triton" and device.type != "cuda":
@@ -646,7 +662,9 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
         # 候选先跑、参考后跑这个顺序本身也是一道防护 (参考还没算出来, 候选无从
         # 回收它的显存), 见 docs/research/12 第四节。
         with shield_torch(), torch.no_grad():
+            execution_phase = "candidate_launch"
             actual = module.kernel(**candidate_inputs)
+            execution_phase = None
         if reference_contract is not None:
             evidence["reference_receipt"] = execution_receipt(reference_contract)
             if (not isinstance(actual, torch.Tensor) or actual.dtype != torch.float16
@@ -757,6 +775,10 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
     except InputFidelityError as e:
         return {"success": False, "error": str(e), "input_fidelity_error": str(e), **evidence}
     except Exception as e:
+        compile_failure = capture_compile_failure(e, code, execution_phase)
+        if compile_failure is not None:
+            evidence["candidate_compile_failure"] = compile_failure
+            evidence["device"] = str(device)
         return {"success": False, "error": f"Remote verification error: {type(e).__name__}: {e}", **evidence}
 
 
@@ -876,9 +898,10 @@ def _execute_torch_numpy(code: str, real_inputs: dict, lang: str) -> dict:
         return {"success": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def run_benchmark(code: str, inputs: dict, warmup: int = 3, repeat: int = 10) -> dict:
+def run_benchmark(code: str, inputs: dict, warmup: int = 3, repeat: int = 10,
+                  preloaded_inputs=None) -> dict:
     lang = _detect_language(code)
-    real_inputs = _deserialize_inputs(inputs)
+    real_inputs = preloaded_inputs if preloaded_inputs is not None else _deserialize_inputs(inputs)
 
     if lang == "triton":
         return _benchmark_triton(code, real_inputs, warmup, repeat)
@@ -1299,7 +1322,8 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                                  warmup: int = 10, repeat: int = 30,
                                  precision: str = "",
                                  baseline_priority=None,
-                                 reference_source: str = "", reference_contract=None) -> dict:
+                                 reference_source: str = "", reference_contract=None,
+                                 preloaded_inputs=None) -> dict:
     """Time the candidate against exactly one baseline, interleaved, on device.
 
     `baseline_priority` is the control side's ordered preference; the first
@@ -1314,7 +1338,7 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
             evidence["reference_receipt"] = execution_receipt(reference_contract)
             if inputs.get("protocol") != JSON_PROTOCOL or baseline_priority not in (None, [], ["pytorch_eager"]):
                 raise ReferenceIdentityError("v2 exact inputs / fixed eager baseline required; fallback forbidden")
-        real_inputs = _deserialize_inputs(inputs)
+        real_inputs = preloaded_inputs if preloaded_inputs is not None else _deserialize_inputs(inputs)
         reference, reference_type = _load_reference_from_source(reference_source, real_inputs)
         if reference is None:
             reference, reference_type = _reference_torch(kernel_type, real_inputs, reference_contract)
@@ -1746,12 +1770,27 @@ def run_action(payload: dict) -> dict:
     elif action == "execute":
         result = run_execute(payload.get("code", ""), payload.get("inputs", {}))
     elif action == "verify":
+        spec = payload.get("inputs_spec")
+        preloaded = None
+        if spec is not None:
+            # 控制端说「这组输入可以从 seed 复算」。本侧**再核一次 digest**：
+            # 对不上就明确要求回退（`input_seed_mismatch`），绝不拿近似值凑合。
+            try:
+                candidate_inputs = materialize_seed_inputs(spec)
+                if seed_input_digest(candidate_inputs) != spec.get("digest"):
+                    return {"success": False, "input_seed_mismatch": True,
+                            "error": "seed 物化 digest 与控制端不一致（退回传字节）"}
+                preloaded = candidate_inputs
+            except InputFidelityError as exc:
+                return {"success": False, "input_seed_mismatch": True,
+                        "error": f"seed 物化失败: {exc}"}
         result = run_verify(payload.get("code", ""), payload.get("inputs", {}),
                             payload.get("kernel_type", ""),
                             float(payload.get("max_error", 1e-5)),
                             precision=payload.get("precision", ""),
                             reference_source=payload.get("reference_source", ""),
-                            reference_contract=payload.get("reference_contract"))
+                            reference_contract=payload.get("reference_contract"),
+                            preloaded_inputs=preloaded)
     elif action in ("benchmark", "benchmark_with_baselines"):
         if payload.get("reference_contract") is not None:
             try:
@@ -1771,9 +1810,22 @@ def run_action(payload: dict) -> dict:
         # 已建上下文的进程), 看不见还在 import 的对手; claim 生命期 = 整个进程。
         # 前后各扫一次: 窗口中途新到的对手由后一次抓住, 取 max 当「窗口内有对手」。
         peers_before = gpu_claim.scan_claims(_SELECTED_GPU_ID, exclude_pid=os.getpid())
+        spec = payload.get("inputs_spec")
+        preloaded = None
+        if spec is not None:
+            try:
+                candidate_inputs = materialize_seed_inputs(spec)
+                if seed_input_digest(candidate_inputs) != spec.get("digest"):
+                    return {"success": False, "input_seed_mismatch": True,
+                            "error": "seed 物化 digest 与控制端不一致（退回传字节）"}
+                preloaded = candidate_inputs
+            except InputFidelityError as exc:
+                return {"success": False, "input_seed_mismatch": True,
+                        "error": f"seed 物化失败: {exc}"}
         if action == "benchmark":
             result = run_benchmark(payload.get("code", ""), payload.get("inputs", {}),
-                                   payload.get("warmup", 3), payload.get("repeat", 10))
+                                   payload.get("warmup", 3), payload.get("repeat", 10),
+                                   preloaded_inputs=preloaded)
         else:
             result = run_benchmark_with_baselines(
                 payload.get("code", ""), payload.get("inputs", {}),

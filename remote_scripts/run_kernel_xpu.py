@@ -580,6 +580,20 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
 
 # ─── Main entry point ─────────────────────────────────────────
 
+def _without_seed_inputs(inputs_spec, run):
+    """Unsupported seed transport must request concrete inputs before execution.
+
+    This runner has no seed materializer or digest verifier. Returning the same
+    explicit fallback signal as the NVIDIA runner prevents an unexpected seed
+    request from silently executing with the default empty ``inputs`` mapping.
+    Ordinary concrete-input requests retain their existing path.
+    """
+    if inputs_spec:
+        return {"success": False, "input_seed_mismatch": True,
+                "error": "XPU runner cannot reconstruct seed inputs; resend concrete inputs"}
+    return run()
+
+
 def main():
     """支持两种调用方式:
     1. python run_kernel_xpu.py <action> '<json_args>'
@@ -607,24 +621,27 @@ def main():
         "gpu_info": lambda: run_gpu_info(args.get("reference_contract")),
         "compile": lambda: run_compile(args.get("code", "")),
         "execute": lambda: run_execute(args.get("code", ""), args.get("inputs", {})),
-        "verify": lambda: run_verify(args.get("code", ""), args.get("inputs", {}),
+        "verify": lambda: _without_seed_inputs(args.get("inputs_spec"), lambda: run_verify(
+                                     args.get("code", ""), args.get("inputs", {}),
                                      args.get("kernel_type", ""),
                                      args.get("max_error", 1e-3),
                                      precision=args.get("precision", ""),
                                      reference_source=args.get("reference_source", ""),
-                                     reference_contract=args.get("reference_contract")),
-        "benchmark": lambda: run_benchmark(args.get("code", ""), args.get("inputs", {}),
+                                     reference_contract=args.get("reference_contract"))),
+        "benchmark": lambda: _without_seed_inputs(args.get("inputs_spec"), lambda: run_benchmark(
+                                           args.get("code", ""), args.get("inputs", {}),
                                            warmup=args.get("warmup", 3),
                                            repeat=args.get("repeat", 10),
-                                           reference_contract=args.get("reference_contract")),
-        "benchmark_with_baselines": lambda: run_benchmark_with_baselines(
+                                           reference_contract=args.get("reference_contract"))),
+        "benchmark_with_baselines": lambda: _without_seed_inputs(
+            args.get("inputs_spec"), lambda: run_benchmark_with_baselines(
             args.get("code", ""), args.get("inputs", {}),
             args.get("kernel_type", ""),
             warmup=args.get("warmup", 10), repeat=args.get("repeat", 30),
             precision=args.get("precision", ""),
             baseline_priority=args.get("baseline_priority") or None,
             reference_source=args.get("reference_source", ""),
-            reference_contract=args.get("reference_contract")),
+            reference_contract=args.get("reference_contract"))),
     }
     fn = dispatch.get(action)
     if fn is None:
