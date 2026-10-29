@@ -1,6 +1,7 @@
 # DSH 侧接线：两条记录。
-#   1) mcp-operator   —— MCP stdio server（六个工具；判定/修复/无人值守都走它）
-#   2) operator-tools —— 本包自己（斜杠命令 `/op` + 一段 system prompt）
+#   1) mcp-operator   —— MCP stdio server（八个工具；判定/修复/无人值守都走它，
+#                        给模型的说明也在它这里：server 的 `initialize.instructions`）
+#   2) operator-tools —— 本包自己（只有斜杠命令 `/op`，**不**再注册提示段）
 #
 # 这里**不写死绝对路径**：默认假定 `pip install operator-agent` 装出了 `operator-agent`
 # 与 `operator-agent-mcp` 两个命令。若装在 venv、或想直接从源码树跑，用下面注释里的形态。

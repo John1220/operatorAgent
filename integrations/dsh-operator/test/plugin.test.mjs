@@ -247,7 +247,9 @@ test("/op status：相对路径按**会话工作区**解析（宿主 cwd 不是�
 
   assert.equal(out.kind, "success");
   assert.ok(out.text.includes("目录：/workspace/operatorAgent/runs/2026-10"), out.text);
-  assert.ok(out.text.includes("相位：/workspace/operatorAgent/runs/2026-10"), out.text);
+  // 这里的假 CLI 把路径塞进了 phase 字段，所以首行也会带上它——两处都认，但
+  // 「实际读了哪个目录」的权威落点是 `目录：` 行。
+  assert.ok(out.text.includes("/workspace/operatorAgent/runs/2026-10"), out.text);
 });
 
 test("/op status：含空格的路径整段保留（按空白切会碎）", async () => {
@@ -257,11 +259,11 @@ test("/op status：含空格的路径整段保留（按空白切会碎）", asyn
 
   const plain = await ctx.commandDefs[0].handler({
     rawInput: "status /workspace/my runs/x", agent: fakeAgent });
-  assert.ok(plain.text.includes("相位：/workspace/my runs/x"), plain.text);
+  assert.ok(plain.text.includes("目录：/workspace/my runs/x"), plain.text);
 
   const quoted = await ctx.commandDefs[0].handler({
     rawInput: 'status "my runs/x"', agent: fakeAgent });
-  assert.ok(quoted.text.includes("相位：/w/my runs/x"), quoted.text);
+  assert.ok(quoted.text.includes("目录：/w/my runs/x"), quoted.text);
 });
 
 test("/op status：绝对路径与 ~ 都不动会话工作区那套", async () => {
@@ -364,13 +366,125 @@ test("formatCapabilities 吃真 CLI 的 capabilities fixture（字段名不许�
   assert.ok(!text.includes("?"), `有字段没读到：\n${text}`);
 });
 
+// 宿主的 GenericCommandCard 折叠时把**全文**塞进单行摘要、换行被压平（README §5.5）。
+// 所以首行是折叠态下用户唯一能看见的东西：它必须自己就能读完，而不是一个「算子判定层 0.6.0」的孤零零开头。
+test("formatCapabilities 首行自带摘要：折叠态不看明细也知道后端与覆盖数", () => {
+  const payload = fixture("capabilities.json");
+  const [first] = formatCapabilities(payload).split("\n");
+  assert.ok(first.includes("算子判定层 0.6.0"), first);
+  assert.ok(first.includes("local/mock/ssh"), `首行缺后端：${first}`);
+  // 布局数是「10」，不是把十个名字全铺在首行（铺了就会溢出折行）。
+  assert.ok(first.includes("10 个算子有输入布局"), `首行缺覆盖数：${first}`);
+  assert.ok(!first.includes("matmul"), `首行不该铺算子名：${first}`);
+  // 首行要短到折叠态一行放得下（原实现 25 字符切开，这里放宽到 60 仍留余量）。
+  assert.ok(first.length <= 60, `首行过长（${first.length}）：${first}`);
+});
+
+test("formatCapabilities 明细仍在后面，展开能看全（首行只是摘要，不是砍功能）", () => {
+  const payload = fixture("capabilities.json");
+  const lines = formatCapabilities(payload).split("\n");
+  assert.ok(lines.length >= 3, `明细被吃了：\n${lines.join("\n")}`);
+  const body = lines.slice(1).join("\n");
+  assert.ok(body.includes("已接线后端：local / mock / ssh"), body);
+  assert.ok(body.includes("python 3.9.12"), body);
+  // 十个算子名一个不少地留在明细里。
+  for (const name of payload.kernel_types_with_input_layout) {
+    assert.ok(body.includes(name), `明细缺 ${name}：\n${body}`);
+  }
+});
+
+test("formatCapabilities 后端为空/缺字段时首行不崩，也不编造", () => {
+  const first = formatCapabilities({ version: "9.9.9", tool_version: 2, backends: {},
+    kernel_types_with_input_layout: [] }).split("\n")[0];
+  assert.ok(first.includes("9.9.9"), first);
+  assert.ok(first.includes("后端 无"), `空后端要明说：${first}`);
+  assert.ok(first.includes("0 个算子有输入布局"), `空布局要明说：${first}`);
+});
+
+// ── 回执语义 ────────────────────────────────────────────────────────────────
+// 宿主折叠态只显示首行（nowrap + ellipsis）。所以「跑没跑成」必须由首行自己说，
+// 不能指望用户点开才发现。成功 ✓ / 失败 ✗ / 取消明说「已取消」而不挂 ✗。
+
+test("回执：成功的两条命令首行都以 ✓ 开头，且说的是完成而不是数据", () => {
+  const caps = formatCapabilities(fixture("capabilities.json")).split("\n")[0];
+  assert.ok(caps.startsWith("✓ 已执行"), `capabilities 首行缺回执：${caps}`);
+  const status = formatStatus(fixture("status-done.json")).split("\n")[0];
+  assert.ok(status.startsWith("✓ 查询完成"), `status 首行缺回执：${status}`);
+});
+
+test("回执：首行装得下（摘要 nowrap 截断，超了就只看见省略号）", () => {
+  // 81 字符是 comfortably 放得下的上限；再长就会在常见窗口宽度下被截。
+  const caps = formatCapabilities(fixture("capabilities.json")).split("\n")[0];
+  assert.ok(caps.length <= 60, `capabilities 首行过长（${caps.length}）：${caps}`);
+  const status = formatStatus(fixture("status-done.json"), "/some/really/long/run/dir").split("\n")[0];
+  assert.ok(status.length <= 40, `status 首行过长（${status.length}）：${status}`);
+  // 首行不该把路径塞进来——路径在明细的 `目录：` 行，长了会把相位挤掉。
+  assert.ok(!status.includes("/some/really/long"), `路径不该进首行：${status}`);
+});
+
+test("回执：tool 号降到明细，不占首行的预算", () => {
+  const text = formatCapabilities(fixture("capabilities.json"));
+  assert.ok(!text.split("\n")[0].includes("tool"), `tool 号仍占首行：${text.split("\n")[0]}`);
+  // 但它没丢，只是挪到明细（回包契约版本和判定层版本不是一回事，不能合并）。
+  assert.ok(text.includes("工具版本：tool 1"), text);
+});
+
+test("回执：判定层拒绝走 ✗，一眼能和成功分开", () => {
+  const cli = fakeCli(`printf '{"ok":false,"error":"BAD_REQUEST","detail":"形状不合法"}'`);
+  const ctx = fakeCtx();
+  apply(ctx, { command: cli });
+  return ctx.commandDefs[0].handler({ rawInput: "capabilities" }).then((out) => {
+    assert.equal(out.kind, "error");
+    assert.ok(out.text.startsWith("✗"), `拒绝没有 ✗ 回执：${out.text}`);
+    assert.ok(out.text.includes("形状不合法"), out.text);
+  });
+});
+
+test("回执：CLI 没装走 ✗ 未执行，reason 进首行", async () => {
+  const ctx = fakeCtx();
+  apply(ctx, { command: "/nonexistent/operator-agent-xyz" });
+  const out = await ctx.commandDefs[0].handler({ rawInput: "capabilities" });
+  assert.equal(out.kind, "error");
+  assert.ok(out.text.startsWith("✗ 未执行"), `没装时缺回执：${out.text}`);
+  assert.ok(out.text.split("\n")[0].includes("not_installed"), out.text);
+});
+
+test("回执：非 JSON 走 ✗ 读数不可用（不是「成功但空的」）", async () => {
+  const cli = fakeCli(`printf 'garbage'`);
+  const ctx = fakeCtx();
+  apply(ctx, { command: cli });
+  const out = await ctx.commandDefs[0].handler({ rawInput: "capabilities" });
+  assert.equal(out.kind, "error");
+  assert.ok(out.text.startsWith("✗ 读数不可用"), out.text);
+});
+
+test("回执：缺参数与未知子命令也都以 ✗ 开头（不许静默）", async () => {
+  const ctx = fakeCtx();
+  apply(ctx, { command: fakeCli(`printf '{"ok":true}'`) });
+  const noArg = await ctx.commandDefs[0].handler({ rawInput: "status" });
+  assert.ok(noArg.text.startsWith("✗ 缺参数"), noArg.text);
+  const unknown = await ctx.commandDefs[0].handler({ rawInput: "wat" });
+  assert.ok(unknown.text.startsWith("✗ 未知子命令"), unknown.text);
+});
+
+test("回执：/op help 也带 ✓，且说明里写清折叠态只显示首行", async () => {
+  const ctx = fakeCtx();
+  apply(ctx, { command: fakeCli(`printf '{"ok":true}'`) });
+  const out = await ctx.commandDefs[0].handler({ rawInput: "help" });
+  assert.equal(out.kind, "success");
+  assert.ok(out.text.startsWith("✓ 已执行"), out.text);
+  assert.ok(out.text.includes("折叠时只显示首行"), out.text);
+});
+
 test("formatStatus 吃真 CLI 的 done fixture：终态不许说「在跑」", () => {
   const payload = fixture("status-done.json");
   assert.equal(payload.phase, "done");
   // Python 侧终态给的 process_alive 是 null —— 壳必须按相位判，不按死活判。
   assert.equal(payload.process_alive, null);
   const text = formatStatus(payload);
-  assert.ok(text.includes("相位：done（进程已结束）"), text);
+  // 相位在首行（折叠态唯一可见的那行），且只出现一次——展开态不重复。
+  assert.ok(text.split("\n")[0].includes("相位 done（进程已结束）"), text);
+  assert.equal(text.split("相位").length - 1, 1, `相位重复了：\n${text}`);
   assert.ok(!text.includes("在跑"), text);
   assert.ok(text.includes("2025-10-09T08:53:20.000Z"), text);
   assert.ok(text.includes("全部通过"), text);
@@ -384,6 +498,52 @@ test("formatStatus 四态各有各的进程文案，未知相位不猜", () => {
   assert.ok(formatStatus({ ...base, phase: "lost", process_alive: false }).includes("进程已退出"));
   assert.ok(formatStatus({ ...base, phase: "failed", process_alive: null }).includes("进程已结束"));
   assert.ok(formatStatus({ ...base, phase: "weird", process_alive: null }).includes("进程状态未知"));
+});
+
+test("formatStatus 展示任务预算、确认预留与明确停止原因", () => {
+  const text = formatStatus({ ok: true, phase: "done", process_alive: null,
+    stopped_reason: "budget_llm_calls",
+    task_budget: { wall_clock_s: 1800, max_llm_calls: 24, oracle_total: 20 },
+    budget: {
+      wall_clock: { limit_s: 1800, remaining_s: 123.5 },
+      model_calls: { limit: 24, reserved: 24, remaining: 0 },
+      verification: { plan: { oracle_total: 20, phase_caps: { confirm: 2 } },
+        spent_all: 18, spent: { confirm: 1 }, remaining: { total: 2, confirm: 1 } },
+    }, summary: { all_passed: false, levels: { L1: true, L2: false } } });
+  const first = text.split("\n")[0];
+  assert.ok(first.startsWith("✓ 查询完成") && first.includes("预算停止"), first);
+  assert.ok(first.length <= 40 && !first.includes("全部通过"), first);
+  assert.ok(text.includes("停止原因：budget_llm_calls"), text);
+  assert.ok(text.includes("任务墙钟：剩余 123.5 s / 上限 1800 s"), text);
+  assert.ok(text.includes("模型调用：预留 24 / 上限 24 · 剩余 0"), text);
+  assert.ok(text.includes("验证输入组：预留 18 / 上限 20 · 剩余 2"), text);
+  assert.ok(text.includes("最终确认：预留 2 · 已用 1 · 剩余 1"), text);
+});
+
+test("formatStatus 从 summary 取预算，缺失用量显示未知", () => {
+  const text = formatStatus({ ok: true, phase: "done", process_alive: null,
+    summary: { stopped_reason: "wall_clock_exhausted",
+      task_budget: { wall_clock_s: 12.5, max_llm_calls: 7, oracle_total: 11 },
+      budget: { wall_clock: { remaining_s: 0 }, model_calls: { reserved: null, remaining: null } },
+    } });
+  assert.ok(text.split("\n")[0].includes("预算停止"), text);
+  assert.ok(text.includes("停止原因：wall_clock_exhausted"), text);
+  assert.ok(text.includes("任务墙钟：剩余 0 s / 上限 12.5 s"), text);
+  assert.ok(text.includes("模型调用：预留 未知 / 上限 7 · 剩余 未知"), text);
+  assert.ok(text.includes("验证输入组：预留 未知 / 上限 11 · 剩余 未知"), text);
+  assert.ok(text.includes("最终确认：预留 未知 · 已用 未知 · 剩余 未知"), text);
+});
+
+test("formatStatus 不把无效计数或仍在运行的任务猜成预算停止", () => {
+  const text = formatStatus({ ok: true, phase: "running", process_alive: true,
+    stopped_reason: "budget_exhausted", task_budget: { max_llm_calls: 24 },
+    budget: { wall_clock: { remaining_s: NaN },
+      model_calls: { reserved: false, remaining: -1 },
+      verification: { spent_all: 1.5 } } });
+  assert.ok(!text.split("\n")[0].includes("预算停止"), text);
+  assert.ok(text.includes("任务墙钟：剩余 未知 s"), text);
+  assert.ok(text.includes("模型调用：预留 未知 / 上限 24 · 剩余 未知"), text);
+  assert.ok(text.includes("验证输入组：预留 未知"), text);
 });
 
 test("/op status 对 ok:false 的回包回 error，不伪装成成功", async () => {
@@ -407,4 +567,54 @@ JSON`);
   assert.equal(out.kind, "error");
   assert.ok(out.text.includes("没有 numpy"), out.text);
   assert.ok(!out.text.includes("?"), out.text);
+});
+
+test("formatStatus 展示取消终态、实例和清理未知，不推断远端停止", () => {
+  const text = formatStatus({ ok: true, phase: "cancelled", invocation_id: "a".repeat(32),
+    stopped_reason: "user_cancelled", cancellation: {}, cleanup: {
+      status: "cleanup_unknown", remote_execution: "unknown", provider_call: "unknown" } });
+  assert.ok(text.split("\n")[0].includes("cancelled（进程已结束）"), text);
+  assert.ok(text.includes("任务实例：" + "a".repeat(32)), text);
+  assert.ok(text.includes("本机清理：cleanup_unknown"), text);
+  assert.ok(text.includes("远端执行：unknown · 服务商调用：unknown"), text);
+});
+
+test("/op cancel 保留含空格目录，按实例请求并提示查终态", async () => {
+  const cli = fakeCli(`test "$1" = cancel && test "$2" = --run-dir && test "$3" = '/tmp/run space' && test "$4" = --invocation-id && test "$5" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa || exit 3
+printf '%s' '{"ok":true,"accepted":true,"invocation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'`);
+  const ctx = fakeCtx();
+  apply(ctx, { command: cli });
+  const out = await ctx.commandDefs[0].handler({ rawInput: 'cancel "/tmp/run space" ' + "a".repeat(32) });
+  assert.equal(out.kind, "success");
+  assert.ok(out.text.includes("取消已请求"), out.text);
+  assert.ok(out.text.includes("确认终态"), out.text);
+});
+
+test("/op cancel 缺身份拒绝；已结束回包不说刚刚取消", async () => {
+  const cli = fakeCli(`printf '%s' '{"ok":true,"accepted":false,"phase":"done","invocation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'`);
+  const ctx = fakeCtx();
+  apply(ctx, { command: cli });
+  const missing = await ctx.commandDefs[0].handler({ rawInput: "cancel /tmp/run" });
+  assert.equal(missing.kind, "error");
+  const done = await ctx.commandDefs[0].handler({ rawInput: "cancel /tmp/run " + "a".repeat(32) });
+  assert.ok(done.text.includes("任务已结束 · done"), done.text);
+  assert.ok(!done.text.includes("取消已请求"), done.text);
+});
+
+test("formatStatus 可列出待取消工具实例", () => {
+  const text = formatStatus({ ok: true, phase: "tool_calls", calls: [
+    { invocation_id: "a".repeat(32), phase: "running" },
+    { invocation_id: "b".repeat(32), phase: "cancelled" }] });
+  assert.ok(text.includes("2 次工具调用"), text);
+  assert.ok(text.includes("a".repeat(32) + " · running"), text);
+});
+
+test("/op cancel 不把 lost 的监督者失联说成任务已结束", async () => {
+  const cli = fakeCli(`printf '%s' '{"ok":true,"accepted":false,"phase":"lost","reason":"owner_unavailable","invocation_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'`);
+  const ctx = fakeCtx();
+  apply(ctx, { command: cli });
+  const out = await ctx.commandDefs[0].handler({ rawInput: "cancel /tmp/run " + "a".repeat(32) });
+  assert.ok(out.text.includes("监督者不可用"), out.text);
+  assert.ok(out.text.includes("本机清理结果未知"), out.text);
+  assert.ok(!out.text.includes("任务已结束"), out.text);
 });

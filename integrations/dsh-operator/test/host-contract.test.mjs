@@ -98,7 +98,7 @@ test("真宿主的 commands 服务收下 /op：名字、definitionId、hint 都�
   assert.equal(listed.length, 1);
   assert.equal(listed[0].name, "op");
   assert.equal(listed[0].definitionId, "dsh-operator-agent");
-  assert.equal(listed[0].input.hint, "capabilities | status <run_dir> | help");
+  assert.equal(listed[0].input.hint, "capabilities | status <run_dir> [invocation_id] | cancel <run_dir> <invocation_id> | help");
   // 真宿主上同样**不该**有自注册的提示段：说明来自 server 的 instructions，
   // 由 mcp-client 注册成 `mcp:operator`（见 dsh-mcp-client 的 registerServerContext）。
   assert.deepEqual(sections, []);
@@ -151,7 +151,9 @@ test("真宿主把 agent 交给 handler：含空格的相对路径整段到 CLI"
   const out = await root.commands.execute(agent, "/op status my runs/x", [], new AbortController().signal);
 
   assert.equal(out.result.kind, "success", out.result.text);
-  assert.ok(out.result.text.includes("相位：my runs/x"),
+  // 断言 `目录：` 行——它是「实际读了哪个路径」的权威落点（首行那处是被假 CLI
+  // 塞进 phase 字段的同一个路径，不是独立证据）。
+  assert.ok(out.result.text.includes("目录：my runs/x"),
     `路径没整段到达 CLI（被切碎或被改写了）：${out.result.text}`);
 });
 
@@ -224,7 +226,11 @@ test("server 的 instructions 真的到达 MCP 客户端（宿主据此渲染 mc
     // DSH 默认 maxInstructionBytes = 32768：超了宿主会直接拒绝连接（不是截断）。
     assert.ok(Buffer.byteLength(text) < 32 * 1024, `instructions 超了宿主上限：${Buffer.byteLength(text)}`);
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 6, tools.map((x) => x.name).join(","));
+    // 工具面是契约：加工具就得在这里显式加一笔（tool_version 也要 +1）。
+    assert.deepEqual(tools.map((x) => x.name).sort(), [
+      "operator_bench", "operator_cancel", "operator_capabilities", "operator_prepare",
+      "operator_repair", "operator_run", "operator_status", "operator_verify",
+    ]);
   } finally {
     await client.close();
   }

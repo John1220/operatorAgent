@@ -22,12 +22,17 @@ export const name = "operator-tools";
 export const inject = ["commands"];
 
 const USAGE = [
+  "✓ 已执行 · /op help",
   "用法：",
   "  /op capabilities            这台机器能做什么（只读，不跑活）",
-  "  /op status <run_dir>        查一次无人值守运行的相位（running/done/failed/lost）",
+  "  /op status <run_dir> [invocation_id]  查任务/工具调用（含 cancelled）",
+  "  /op cancel <run_dir> <invocation_id>  请求取消，再查 status 确认",
   "  /op help                    这段说明",
   "",
   "run_dir 可以相对写（按**会话工作区**解析），也可以绝对写；含空格请加引号。",
+  "",
+  "输出直接显示在对话里（一个可点开折叠的节点），**不进模型上下文**；",
+  "折叠时只显示首行（以 ✓ 开头的那行），点它展开看完整明细。这是旁路查询，不产生轮次。",
   "",
   "判定/修复/无人值守请用模型工具 mcp__operator__*：",
   "  prepare → verify（外层写核）· repair（给一份已有的核）· run + status（无人值守）",
@@ -153,16 +158,19 @@ export function runCli(command, argv, timeoutMs = 60_000, env = undefined, signa
 /**
  * 判定层的**拒绝**回包（`ok:false`）不是成功：原因进正文，kind 走 error。
  * 不这样折的话，`capabilities` 会打出一堆「?」，`status` 会把「查不到」显示成绿行。
+ *
+ * `✗` 前缀是**回执**：折叠态只显示首行，没有它的话「拒绝」和「成功」在收起时长得一样，
+ * 都是命令名加一段摘要。成功用 `✓`（在各自的 format* 里），失败用 `✗`，一眼能分。
  */
 function rejection(payload) {
-  return { kind: "error", text: `判定层拒绝：${payload.detail || payload.error || "未知原因"}` };
+  return { kind: "error", text: `✗ 判定层拒绝 · ${payload.detail || payload.error || "未知原因"}` };
 }
 
 /** 相位与进程死活是**两件事**：只有 `running` 才谈「在跑」。 */
 function processNote(phase, alive) {
   if (phase === "running") return alive === false ? "进程已退出" : "进程在跑";
   if (phase === "lost") return "进程已退出（没了但没写终态）";
-  if (phase === "done" || phase === "failed") return "进程已结束";
+  if (phase === "done" || phase === "failed" || phase === "cancelled") return "进程已结束";
   return "进程状态未知";
 }
 
@@ -170,9 +178,17 @@ export function formatCapabilities(payload) {
   const backends = payload.backends || {};
   const wired = Object.keys(backends).filter((k) => backends[k] && backends[k].wired);
   const runtime = payload.runtime || {};
-  const layouts = (payload.kernel_types_with_input_layout || []).join(", ");
+  const kernelTypes = payload.kernel_types_with_input_layout || [];
+  const layouts = kernelTypes.join(", ");
+  // 首行是**折叠态唯一的可见内容**：宿主 GenericCommandCard 的摘要是
+  // `white-space:nowrap; text-overflow:ellipsis` 的单行（不是折行），所以首行放不下的
+  // 部分会被直接截掉、连省略号之后都看不见。两个约束因此同时成立：
+  //   1) 回执必须在前（`✓ ` 开头），否则「跑没跑」这个判断又被挤到第二行看不见的地方；
+  //   2) 摘要要短，且**把低频信息（tool 号）挪到明细**，给回执腾位置。
+  // 明细留在后面的行里，点开才看（见 README §5.5）。
   return [
-    `算子判定层 ${payload.version || "?"}（tool ${payload.tool_version ?? "?"}）`,
+    `✓ 已执行 · 算子判定层 ${payload.version || "?"} · 后端 ${wired.join("/") || "无"} · ${kernelTypes.length} 个算子有输入布局`,
+    `工具版本：tool ${payload.tool_version ?? "?"}（回包契约版本，与判定层版本不是一回事）`,
     `已接线后端：${wired.join(" / ") || "无"}`,
     `运行时：python ${runtime.python || "?"} · torch ${runtime.torch_installed ? "有" : "无"} · triton ${runtime.triton_installed ? "有" : "无"}`,
     `有输入布局的算子：${layouts || "无"}`,
@@ -184,14 +200,47 @@ export function formatCapabilities(payload) {
  * `runDir` 可选：传了就回显**实际读的那个路径**——相对路径解析出问题时，这是唯一线索。
  */
 export function formatStatus(payload, runDir = undefined) {
+  if (payload.phase === "tool_calls") {
+    return [`✓ 查询完成 · ${payload.calls?.length ?? 0} 次工具调用`,
+      ...(payload.calls || []).map((call) => `${call.invocation_id} · ${call.phase}`)].join("\n");
+  }
   // 终态下 Python 侧给的 process_alive 是 null（不是 false）——按相位判，别按死活判，
   // 否则一个跑完的 run 会显示成「进程 在跑」。
-  const lines = [];
+  //
+  // 首行同 `formatCapabilities`：折叠态只显示这一行（摘要 nowrap 截断），所以回执 +
+  // 相位必须在最前。「查到了」和「查到什么」是两件事，首行两件都说。
+  // 相位只写一次：首行已经带着它了，下面不再重复（重复会让展开态读起来像回声）。
+  const summary = payload.summary;
+  const stoppedReason = payload.stopped_reason || summary?.stopped_reason;
+  const budgetStopped = payload.phase === "done" && typeof stoppedReason === "string"
+    && (stoppedReason.startsWith("budget_") || stoppedReason === "wall_clock_exhausted");
+  const phaseNote = `相位 ${payload.phase}（${processNote(payload.phase, payload.process_alive)}）`;
+  const lines = [`✓ 查询完成 · ${phaseNote}${budgetStopped ? " · 预算停止" : ""}`];
   if (runDir) lines.push(`目录：${runDir}`);
-  lines.push(`相位：${payload.phase}（${processNote(payload.phase, payload.process_alive)}）`);
+  if (payload.invocation_id) lines.push(`任务实例：${payload.invocation_id}`);
+  if (payload.cancellation) lines.push("取消：已请求（以相位确认最终结果）");
+  if (payload.cleanup) {
+    lines.push(`本机清理：${payload.cleanup.status ?? "未知"}`);
+    lines.push(`远端执行：${payload.cleanup.remote_execution ?? "未知"} · 服务商调用：${payload.cleanup.provider_call ?? "未知"}`);
+  }
   if (payload.started_at) lines.push(`开始：${new Date(payload.started_at * 1000).toISOString()}`);
   if (payload.duration_s != null) lines.push(`耗时：${payload.duration_s} s`);
-  const summary = payload.summary;
+  if (stoppedReason) lines.push(`停止原因：${stoppedReason}`);
+  const budget = payload.budget ?? summary?.budget;
+  const taskBudget = payload.task_budget ?? summary?.task_budget ?? budget?.limits;
+  if (budget != null || taskBudget != null) {
+    // Missing/inconsistent journals are unknown usage, never zero credit.
+    const count = (value) => Number.isInteger(value) && value >= 0 ? String(value) : "未知";
+    const seconds = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0
+      ? String(value) : "未知";
+    const wall = budget?.wall_clock;
+    const calls = budget?.model_calls;
+    const verification = budget?.verification;
+    lines.push(`任务墙钟：剩余 ${seconds(wall?.remaining_s)} s / 上限 ${seconds(wall?.limit_s ?? taskBudget?.wall_clock_s)} s`);
+    lines.push(`模型调用：预留 ${count(calls?.reserved)} / 上限 ${count(calls?.limit ?? taskBudget?.max_llm_calls)} · 剩余 ${count(calls?.remaining)}`);
+    lines.push(`验证输入组：预留 ${count(verification?.spent_all)} / 上限 ${count(verification?.plan?.oracle_total ?? taskBudget?.oracle_total)} · 剩余 ${count(verification?.remaining?.total)}`);
+    lines.push(`最终确认：预留 ${count(verification?.plan?.phase_caps?.confirm)} · 已用 ${count(verification?.spent?.confirm)} · 剩余 ${count(verification?.remaining?.confirm)}`);
+  }
   if (summary) {
     const levels = Object.entries(summary.levels || {}).map(([k, v]) => `${k}${v ? "✓" : "✗"}`).join(" ");
     lines.push(`结果：${summary.all_passed ? "全部通过" : "未通过"}（${levels || "未判"}）`);
@@ -221,12 +270,14 @@ export function apply(ctx, config = {}) {
   const run = (argv, signal) => runCli(command, [...prefix, ...argv], timeoutMs, env, signal);
 
   // 取消是人的正常操作，不进日志；「命令不存在」是插件根本没接线，按 error 记。
+  // `✗` 前缀同 rejection：折叠态只显示首行，失败回执必须自己说出来（取消不算失败，不挂 ✗）。
   const fail = (out) => {
     if (out.reason !== "cancelled") {
       const level = out.reason === "not_installed" ? "error" : "warn";
       say(level, out.reason, `${out.detail}（同类失败只记这一次）`);
     }
-    return { kind: "error", text: out.detail };
+    const mark = out.reason === "cancelled" ? "已取消" : `✗ 未执行 · ${out.reason}`;
+    return { kind: "error", text: `${mark}\n${out.detail}` };
   };
 
   /**
@@ -258,24 +309,33 @@ export function apply(ctx, config = {}) {
         return { kind: "success", text: formatCapabilities(payload) };
       } catch {
         say("warn", "bad_output", `返回的不是 JSON：${out.text.slice(0, 120)}`);
-        return { kind: "error", text: `返回的不是 JSON：\n${out.text.slice(0, 400)}` };
+        return { kind: "error", text: `✗ 读数不可用 · 返回的不是 JSON\n${out.text.slice(0, 400)}` };
       }
     }
-    if (sub === "status") {
-      if (!rest) return { kind: "error", text: "用法：/op status <run_dir>" };
-      const runDir = resolveRunDir(rest, agent);
-      const out = await run(["status", "--run-dir", runDir], signal);
+    if (sub === "status" || sub === "cancel") {
+      const match = /^([\s\S]+?)\s+([0-9a-f]{32})$/.exec(rest);
+      if (!rest || (sub === "cancel" && !match)) {
+        return { kind: "error", text: `✗ 缺参数 · 用法：/op ${sub} <run_dir>${sub === "cancel" ? " <invocation_id>" : " [invocation_id]"}` };
+      }
+      const runDir = resolveRunDir(match ? match[1] : rest, agent);
+      const argv = [sub, "--run-dir", runDir];
+      if (match) argv.push("--invocation-id", match[2]);
+      const out = await run(argv, signal);
       if (!out.ok) return fail(out);
       try {
         const payload = JSON.parse(out.text);
         if (payload.ok === false) return rejection(payload);
+        if (sub === "cancel") return { kind: "success", text:
+          payload.accepted ? `✓ 取消已请求 · ${payload.invocation_id}\n用 /op status 确认终态与清理结果。`
+            : payload.phase === "lost" ? `✓ 监督者不可用 · lost\n本机清理结果未知，请查 /op status。\n任务实例：${payload.invocation_id}`
+              : `✓ 任务已结束 · ${payload.phase}\n任务实例：${payload.invocation_id}` };
         return { kind: "success", text: formatStatus(payload, runDir) };
       } catch {
         say("warn", "bad_output", `返回的不是 JSON：${out.text.slice(0, 120)}`);
-        return { kind: "error", text: `返回的不是 JSON：\n${out.text.slice(0, 400)}` };
+        return { kind: "error", text: `✗ 读数不可用 · 返回的不是 JSON\n${out.text.slice(0, 400)}` };
       }
     }
-    return { kind: "error", text: `不认识的子命令 ${sub}\n\n${USAGE}` };
+    return { kind: "error", text: `✗ 未知子命令 · ${sub}\n\n${USAGE}` };
   };
 
   // 生命周期归 cordis：service tracker 让 register/section 的 effect 挂在**调用方 ctx** 上，
@@ -284,7 +344,7 @@ export function apply(ctx, config = {}) {
     definitionId: "dsh-operator-agent",
     name: "op",
     description: "算子判定层：查能力 / 查无人值守状态（不经过模型）",
-    input: { hint: "capabilities | status <run_dir> | help" },
+    input: { hint: "capabilities | status <run_dir> [invocation_id] | cancel <run_dir> <invocation_id> | help" },
     // `agent` 是宿主给的（invocation = {commandId, agent, rawInput, attachments, signal}），
     // 只有它带着会话工作区，相对路径要靠它才能落到人想去的地方。
     handler: async ({ rawInput, signal, agent }) => handle(rawInput, signal, agent),

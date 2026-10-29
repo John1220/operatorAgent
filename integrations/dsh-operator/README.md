@@ -40,8 +40,13 @@ dsh plugin --profile <profile> add /path/to/operatorAgent/integrations/dsh-opera
 > **完全退出 Desktop** 再跑（否则直接拒绝）。更顺的是在 GUI 里装：侧边栏的
 > **插件**页，或让模型用 `plugin_manager` 工具——两者都不需要退出。
 
-本包的 `cordis.patch.yml` 会插**两条**记录：`mcp-operator`（六个工具）与
-`operator-tools`（斜杠命令 `/op` + 一段 system prompt）。手工安装时两条都要复制。
+本包的 `cordis.patch.yml` 会插**两条**记录：`mcp-operator`（八个工具 + server 的
+`instructions`）与 `operator-tools`（只有斜杠命令 `/op`；给模型的提示段不在这里，
+见 §5.5）。手工安装时两条都要复制。
+
+> **装成组合包，别装成手工条目**：只有前者会出现在 GUI 插件页（有图标、可开关）。
+> 两者的区别、迁移步骤、以及「`engines.dsh` 失配导致组合包被静默跳过」这个坑，
+> 见 [`docs/design/dsh-profile-and-bundles.md`](../../docs/design/dsh-profile-and-bundles.md)。
 
 也可以直接从源码树跑（没 `pip install` 时）——把插件的 `command` 换成本机 Python：
 
@@ -91,7 +96,7 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
 | 纯手工 | 从 profile（或你放这两行的那个 patch）里删掉 `mcp-operator` 与 `operator-tools` 两条，再把名字从 `dsh.profile.bundles` 去掉 |
 
 两半是**独立**的：卸载插件不影响 Python 侧的 `operator-agent` CLI；反过来
-`pip uninstall operator-agent` 会让六个 MCP 工具全部变成「命令不存在」——`/op` 会明说
+`pip uninstall operator-agent` 会让八个 MCP 工具全部变成「命令不存在」——`/op` 会明说
 找不到命令，宿主日志里记一条 `operator-tools: 找不到命令 …`（error 级，同类只记一次）。
 
 ## 3. 配置内层 LLM（只有 `operator_run` / `operator_repair` 需要）
@@ -134,25 +139,40 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 然后在会话里让模型调一次 `operator_capabilities`：返回 `backends.{mock,local,ssh}.wired`
 就说明链路通了。
 
-## 5. 六个工具
+## 5. 八个工具
+
+工具契约 **6** 起，`verify` / `repair` / `bench` 各轮独立留存源码与完整结果。
+回包的 `evidence` 指向完整事实，`verify` / `repair` 还给出源码路径与完整 SHA256；
+每轮报告独立，旧报告保持原样。`repair` 每次实际验证也有独立证据，`bench` 仍仅供探索。
+`complete.json` 只证明留存完成，不代表源码正确或性能达标。数据布局见[实现说明](../../docs/design/dsh-plugin-implementation.md#3-数据布局一个-run-目录)。
 
 | 工具 | 一句话 | 要 LLM |
 |---|---|---|
 | `operator_capabilities` | 这台机器能做什么（只读，不联网、不探测 SSH） | 否 |
 | `operator_prepare` | 声明 → 冻结契约 + 契约自带的输入 + 回合身份 | 否 |
 | `operator_verify` | 对**外层给的**源码判 L1/L2/L3，返回正交事实 + 处方 + 资格 | 否 |
+| `operator_bench` | **多个**候选只跑 L3 的批量测量（探索级，**不可裁决**）：调参/扫网格用 | 否 |
 | `operator_repair` | 给一份**已有的**核：判 → 处方 → 内层模型修 → 再判（≤N 轮） | 是 |
 | `operator_run` | 起一次**无人值守**整段（本仓自己设计/写核/修），立刻返回 pid | 是 |
-| `operator_status` | 查无人值守的相位：`running` / `done` / `failed` / **`lost`** | 否 |
+| `operator_cancel` | 按 run/invocation 请求取消，再查 status 确认终态 | 否 |
+| `operator_status` | 查无人值守的相位：`running` / `done` / `failed` / `cancelled` / **`lost`** | 否 |
 
 **耗时与超时**：真机上一次**完整**判定（L1→L3、L2 的 15 个边界 case）实测 **866 s**，所以
 `cordis.patch.yml` 里 `toolCallTimeoutMs` 设成 **3600 s**（60 min：单次 866 s，`repair` 默认
-2 轮约 30 min）。**别往回调小**——超时不是优雅退出，server 会继续算完再写一个没人认领的响应；
+2 轮约 30 min）。**别往回调小**。契约 7 起 server 支持 MCP 取消通知；客户端超时本身仍不是本机/远端停止的证明，须查终态和清理回执；
 更长的工作请用 `operator_run` + `operator_status` 轮询（`run` 立刻返回 pid，不占一次调用）。
+
+工具契约 **7** 起新增 `operator_cancel`、CLI `cancel` 和 `/op cancel <run_dir> <invocation_id>`。
+后台 run 立即返回实例 ID；同步 verify/repair/bench 由独立 worker 执行，支持 MCP 取消通知。
+CLI Ctrl-C/SIGTERM 会清理本机 worker 后返回取消 JSON（退出码 130）。
+`accepted` 只表示请求已记录；需查 `status` 的终态、预算及清理回执。未完成的候选不因此通过，已发生调用不退款，远端与服务商是否停止保持未知。
+完整语义和目录见 [任务取消与中断](../../docs/design/task-cancellation.md)。
 
 ### 5.1 生成与修复质量
 
 核心生成/修复提示词已共用版本化规约。`operator_prepare` 返回规约身份；`operator_repair` 默认加入与当前源码、契约及数值反馈绑定的诊断，并返回 `initial_full_l2_passed`、`full_l2_passed` 和完整证据文件位置。当前诊断识别器聚焦 LayerNorm 尾部归约 mask；其他模式明确返回 `unknown`。诊断是修复假设，最终结果仍需完整验证。
+
+`operator_verify` / `operator_repair` 另有一格**归因**（不是判据）：`candidate_origin` 记这份源码自称是谁写的（`outer` = 你或人写的、`inner_fixer`、`inner_coder`），省略则回包与 `report.md` 记 `undeclared`；`operator_repair` 还回一个**派生**的 `final_candidate_origin`（有任一轮真改了源码就是 `inner_fixer`，那一格不接受声明）。它不影响任何通过与否，存在的目的是让「外层裸写的核」与「走过规约/技能注入的核」事后分得开——动机与判据见[分工边界](../../docs/design/hitl-generation-boundary.md)。
 
 无实际源码或 AST 变化的修复会停止，避免反复验证相同失败候选。输入保真或参考身份未知时先恢复观测资格。固定 10 任务的计划、回放与对照命令见[质量闭环说明](../../docs/design/operator-quality-improvement.md)；CPU 回放不代表新模型或 GPU 质量提升。
 
@@ -185,6 +205,34 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 需要「判定/修复/从头自动化」时用模型工具（`mcp__operator__*`）：命令只是旁路，
 不替模型做判定。
 
+### 输出长什么样（以及为什么首行必须是回执）
+
+`/op` 的结果在界面里是一个**默认折叠**的节点（宿主 `ui-chat` 的 `GenericCommandCard`），
+不是一条助手回复 —— 它不产生轮次，也不会有「已完成」标记。折叠摘要的样式是
+`white-space: nowrap; text-overflow: ellipsis`，也就是**只有首行可见，放不下的直接截掉**。
+
+所以插件把**回执**放在首行：
+
+| 情形 | 首行 |
+|---|---|
+| `/op capabilities` | `✓ 已执行 · 算子判定层 0.6.0 · 后端 local/mock/ssh · 10 个算子有输入布局` |
+| `/op status …` | `✓ 查询完成 · 相位 done（进程已结束）` |
+| 判定层拒绝 / 未装 / 非 JSON | `✗ …`（原因跟在后面） |
+| 被宿主取消 | `已取消`（取消是人的正常操作，不挂 `✗`） |
+
+两条硬约束，改首行前必须知道：
+
+- **回执必须在前**。没有它的话，折叠态的「跑成了」和「失败了」长得一模一样 ——
+  都是命令名加一段摘要，用户只能点开才知道结果。早期版本就是这样被误读成
+  「命令没反应」的。`✓` 和 `✗` 是唯一在收起状态下可分辨的信号。
+- **首行要短**，且不放路径、不放低频字段（`tool` 号挪到明细）。摘要 nowrap 截断，
+  塞长了会把真正有用的部分（版本/后端/覆盖数/相位）挤到省略号之后。
+- **不进模型上下文**是设计而非缺陷。想让模型用上这些信息，必须走 `mcp__operator__*`
+  工具，`/op` 的文本模型永远看不到。
+
+`test/plugin.test.mjs` 里有一组测试钉住这些（首行含 ✓、长度上限、tool 号不进首行、
+四类失败都有 `✗`、明细仍完整、空后端不崩），改格式化逻辑时先让它们红。
+
 > 给模型的**使用说明**（什么时候该用、回来怎么读）不存在于本插件里：它是 Python 侧
 > `operator_agent/mcp_server.py` 的 `initialize.instructions`，宿主会自动渲染成
 > `mcp:operator` 提示段。只有一处来源，换任何 MCP 客户端也都在 —— 插件只负责 `/op`。
@@ -208,10 +256,10 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 - 只接线了 `mock` / `local` / `ssh` 三个后端；**没有 `auto` 降级**（不给 host 就报
   `host_required`，避免「以为在真机上、其实在控制机」）。
 - `ssh` 单主机、单卡、串行；没有多卡/并发调度。
-- **无人值守运行**没有取消动作（只能按 pid 杀；状态会停在 `running`，下一次查询判 `lost`）。
-  （`/op` 命令本身可以被宿主取消——那是宿主侧的子进程，与判定层的运行不是一回事。）
+- **取消的外部边界**：契约 7 支持按实例取消后台任务和前台长调用；本机清理后远端 GPU/服务商是否停止仍为未知。不可捕获退出可能留下 `lost`。
+  取消 `/op status` 只停止旁路查询；取消任务使用 `/op cancel <run_dir> <invocation_id>` 并确认终态。
 - 没有 UI/曲线面板（那一格由其他插件占位；本包的差异化在判定层）。
-- 资源预检的元素宽度目前从源码推断（fp16 任务的 `256×256` tile 可能被误判为超限）。
+- 契约 8 的资源预检只采信明确的共享存储证据；逻辑 tile、累加器 dtype、动态/多配置的占用保持未知，交给原生检查。见 [S3 资源边界](../../docs/design/resource-precheck-evidence.md)。
 
 ## 8. 构建与发版（维护者）
 
