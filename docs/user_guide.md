@@ -231,6 +231,104 @@ print(f"验证结果: {'通过' if artifact.all_passed else '失败'}")
 print(f"产物目录: {artifact.kernel_id}")
 ```
 
+#### 方式四：接进 DSH（MCP，不需要写 JS）
+
+判定层已经是一个 MCP stdio server（八个工具，外加 server 自带的使用说明），
+再加一个很小的宿主插件（只有 `/op` 命令，用于人直接查能力/状态，不经过模型）。
+宿主侧两条配置（`~/.dsh/profiles/<profile>/cordis.patch.yml`）：
+
+```yaml
+- insert:
+    - id: mcp-operator
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: operator
+        transport: stdio
+        command: /absolute/path/to/python3
+        args: ['-m', 'operator_agent.mcp_server']
+        cwd: /absolute/path/to/operatorAgent
+        toolCallTimeoutMs: 600000
+        failOnStartupError: false
+```
+
+把第二条（宿主插件）也加上——它让 `/op` 可用。给模型“什么时候该用这套工具”的说明
+**不在这里**：它来自 MCP server 的 `instructions`，宿主会自动渲染成 `mcp:operator` 提示段。
+
+```yaml
+    - id: operator-tools
+      name: /absolute/path/to/operatorAgent/integrations/dsh-operator/index.mjs
+      config:
+        command: /absolute/path/to/python3
+        args: ['-m', 'operator_agent']
+        env:
+          PYTHONPATH: /absolute/path/to/operatorAgent
+        timeoutMs: 60000
+```
+
+重启（或等 profile 热重载）之后，模型侧多出八个工具（`prepare` / `verify` / `bench` / `repair` /
+`run` / `status` / `cancel` / `capabilities`），宿主侧多出 `/op capabilities` 与
+`/op status <run_dir>`。斜杠命令有时要重启一次宿主才出现在命令面板；工具表是 server 里的
+静态表，加/改工具要重启 server 进程，本会话到下一回合才刷新。
+
+注意三件实测踩出来的事：
+
+* profile patch 里 **`- id: …` 是覆盖已有行，不是插入** —— 新行必须写在 `- insert:` 下面
+  （写错只会得到一行 `patch: entry "x" not found` 的告警，等于没装）。
+* 判定层的进度输出会进 `run-dir/verify-N.log`，**stdout 只有协议行** —— 否则宿主的 JSON-RPC 流会错位。
+* `operator_verify` 的回包是**给模型读的**：逐 case 只留判定与身份（实测 40 KB → 4.8 KB），
+  输入保真等明细在 `report.md` / `verify-N.json` 里。
+
+要**整段自动化**（本仓的 `Conductor` 自己设计/写核/修/搜索）就用 `operator_run`：它起一个
+独立进程并立刻返回 `pid`，之后用 `operator_status` 轮询（`running` / `done` / `failed` / `lost`）。
+这条路需要**内层 LLM**，所以在 MCP 行的 `env` 里给引用（值不要写进 YAML）：
+
+```yaml
+    env:
+      LLM_BASE_URL: https://your-endpoint/v1
+      LLM_MODEL: your-inner-model
+      LLM_API_KEY_FILE: ~/.config/operator_agent/llm.key   # 0600，仓库外
+```
+
+没配就**立刻拒绝**（`llm_not_configured`），不会起一个跑不出结论的进程。
+
+也可以自己先看一遍协议对话（不依赖宿主）：
+
+```bash
+python -m operator_agent.mcp_server --selftest
+```
+
+#### 方式三：一次一回合的 CLI（HITL / 外层宿主）
+
+当驱动方是**人**或**另一个 agent**（例如 DSH 插件、MCP server、脚本），而不是一个从头跑到尾的
+`Conductor` 时，用这个入口。它每次只做一件事，stdout 只有一行 JSON：
+
+```bash
+# 0) 只读：这台机器上能做什么（不跑活、不联网）
+python -m operator_agent capabilities
+
+# 1) 把一份声明冻结成"回合"：契约 + 契约自带的输入 + 可复算的身份
+python -m operator_agent prepare \
+  --request "把 64x64x64 的 fp32 矩阵乘法写成算子" \
+  --shapes 64,64,64 --run-dir /tmp/op-run --min-speedup 1.0
+
+# 2) 对候选源码做判定（不生成、不修复、不搜索；--stop-after L1|L2|L3）
+python -m operator_agent verify --run-dir /tmp/op-run --code-file cand.py \
+  --candidate-origin outer   # 归因（不进判据）：这份核是谁写的；不给则回包记 undeclared
+```
+
+三条契约（写进守卫 `tests/test_hitl_tools.py`）：
+
+* **stdout 只有一行 JSON**；判定层的进度输出写进 `run-dir/verify-N.log`；
+* **退出码**：`0` = 判完了（候选没过也是 0，结论在 JSON 里），`2` = 被拒绝（带 `error`/`detail`），`1` = 意外；
+* **判据不许被调用方放宽**：`max_error` / `skip_anticheat` / `kernel_db` 这类参数出现即
+  `forbidden_parameter`。允许的参数只有 `request`/`shapes`/`hardware`/`dsl`/`precision`/
+  `min_speedup`/`required_caps`/`framework`/`notes`。
+
+返回里有两格必须**一起读**：`route`（处方）与 `eligibility`（五位资格）。工具已经算好
+`conflict`：当处方说"去搜索/算一轮"而资格说这个数不能驱动任何后果时，
+`conflict.action = hold_for_measurement` —— 此时**不要**照着 `route` 走。
+动机、粒度选择与实测读数见 [DSH 插件评估](dsh-plugin-evaluation.md) §7.3 / §9.5。
+
 ### 3.2 使用 IntentParser（自然语言输入）
 
 ```python
@@ -357,8 +455,11 @@ hardware_presets:
 **LLM 客户端**（`operator_agent/llm_client.py`，排查 LLM 侧问题时先读这三条）：
 
 - **零依赖**：只用标准库 `urllib` 的 OpenAI 兼容客户端，不装 `openai` 包；
-- **关掉了 Qwen3 的思考模式**（`chat_template_kwargs={"enable_thinking": False}`）——
-  否则 JSON / 代码会被截断；
+- **思考模式默认关闭**：默认发送 `chat_template_kwargs={"enable_thinking": False}`；
+  阿里云百炼等要求顶层字段的服务设置 `LLM_THINKING_PARAMETER=enable_thinking`。
+  该配置只改变参数位置，不会自动开启思考或扩大输出额度；
+- **文件密钥**：生成与修复都支持 `LLM_API_KEY_FILE`；非空显式 `api_key`、
+  `LLM_API_KEY`、文件内容按顺序取值，不把文件密钥导出到进程环境；
 - **JSON 抽取带自动修复**：模型输出的常见格式错误（围栏、尾逗号、单引号）会被就地修掉，
   修不掉才报错。
 
@@ -367,6 +468,10 @@ hardware_presets:
 | 环境变量 | 说明 | 默认值 |
 |---------|------|-------|
 | `LLM_API_KEY` | LLM API 密钥 | - |
+| `LLM_API_KEY_FILE` | 仓库外 UTF-8 密钥文件；支持 `~`，空文件或读取失败会报错 | - |
+| `LLM_BASE_URL` | OpenAI 兼容服务地址，包含 `/v1` | 必填 |
+| `LLM_MODEL` | 内层生成和修复使用的模型名称 | `Qwen3.8-27B` |
+| `LLM_THINKING_PARAMETER` | 思考参数位置：`chat_template_kwargs` 或 `enable_thinking` | `chat_template_kwargs` |
 | `REMOTE_SSH_HOST` | SSH 主机或 ssh config 别名 | algorithm-h20 |
 | `REMOTE_SSH_PORT` | SSH 端口 | 不设，由 ssh config 解析 |
 | `REMOTE_SSH_USER` | SSH 用户名 | 不设，由 ssh config 解析 |
@@ -856,6 +961,16 @@ AMBIGUOUS   没有可比值，或档位是 uninformative（带宽比信号本身
   因为「不要调库算子」是一条正确的教训，而「容差太紧」不是。
 
 ---
+
+## 7. 生成与修复质量评测
+
+生成、修复和优化提示词共用版本化规约。DSH 的 `operator_repair` 会把与当前源码及失败反馈绑定的结构化诊断交给 Fixer，并阻止源码或 AST 未变化的重复验证；完整 L2 套件结果独立于编译与性能状态返回。
+
+固定对照入口为 `python3 benchmarks/operator_quality.py`，默认只输出 10 个任务的冻结计划，不调用模型或设备。`--replay` 验证 CPU 回放接线，`--execute` 显式执行已冻结的 SSH/模型计划，`--compare` 比较任务与预算一致的报告。当前评测范围为完整 L2，性能标记为未测量。命令、预算、报告字段和边界见[算子生成与修复质量闭环](design/operator-quality-improvement.md)。
+
+诊断效果评估优先用 `--paired`，两组从同一份初始源码开始，生成成本只计一次。`--preflight PLAN` 单独检查现有 GPU/运行时/runner，零模型调用；正式 SSH 评测也会先预检。预检不安装依赖、不更新 runner，缺失或漂移时停止。完整用法见[预检与同候选配对评测](design/operator-quality-paired-evaluation.md)。
+
+`--portfolio` 用三个独立生成策略执行完整 L2 筛选，每槽最多一次生成，不调用修复器。首槽作为单次生成基线，所有槽均验证，选择最早通过者；未知、失败与全部费用均保留。具体预算、回放格式及边界见[三候选完整 L2 对照](design/operator-quality-portfolio.md)。
 
 ## 附录：核心模块参考
 

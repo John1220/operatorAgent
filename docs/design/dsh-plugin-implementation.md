@@ -7,7 +7,7 @@
 **不改任何判定语义**（容差、反作弊、资格、入库门一个字没动）。
 
 决策与实测读数在 [`docs/dsh-plugin-evaluation.md`](../dsh-plugin-evaluation.md)（§9.5–§9.13），
-本文只回答「**怎么用**、它由什么组成、契约是什么、坏了怎么查、怎么加第六个工具」。
+本文只回答「**怎么用**、它由什么组成、契约是什么、坏了怎么查、怎么加新工具」。
 
 ---
 
@@ -33,7 +33,7 @@ python -m operator_agent capabilities
 
 ### 0.1.1 斜杠命令 `/op`（宿主插件，可选）
 
-装了 `integrations/dsh-operator` 之后还会有两条宿主侧的记录：MCP 的六个工具（外加
+装了 `integrations/dsh-operator` 之后还会有两条宿主侧的记录：MCP 的八个工具（外加
 server 自带的**使用说明**，宿主渲染成 `mcp:operator` 提示段），加上 `/op` 命令。
 命令**不经过模型**，输出直接给人看：
 
@@ -52,7 +52,7 @@ cwd——GUI 进程的 cwd 多半是 `/`，按它解析会把「run 在但路径
 
 ### 0.2 装进 DSH（只做一次）
 
-装的是**两条记录**：一条 MCP（六个工具 + server 的 `instructions`），一条宿主插件
+装的是**两条记录**：一条 MCP（八个工具 + server 的 `instructions`），一条宿主插件
 （只有 `/op` 命令 —— 提示段不在这里，见下）。
 打包好的版本在 [`integrations/dsh-operator/`](../../integrations/dsh-operator/README.md)，
 它的 `cordis.patch.yml` 一次插两条。
@@ -95,7 +95,7 @@ dsh plugin --profile <profile> add /path/to/operatorAgent/integrations/dsh-opera
 pkill -f operator_agent.mcp_server      # 宿主 500ms 后自动重连并 re-sync
 ```
 
-模型侧会出现六个工具：`mcp__operator__operator_{prepare,verify,repair,run,status,capabilities}`；
+模型侧会出现八个工具：`mcp__operator__operator_{prepare,verify,bench,repair,run,status,cancel,capabilities}`；
 宿主侧出现 `/op` 命令，模型侧出现 `mcp:operator` 提示段（**由 server 的
 `initialize.instructions` 渲染**，`dsh-mcp-client` 的 `registerServerContext` 负责，
 order 取 `MCP_SERVERS`）。**本会话的工具列表要到下一回合才刷新** ——
@@ -120,7 +120,10 @@ python -m operator_agent verify --run-dir /tmp/op-smoke --code-file /tmp/bad.py 
 
 ### 0.4 工作流 B：手写核 + 真机（HITL，人看得见每一步）
 
-外层（人或模型）写候选，判定层只判。四步：
+外层（人或模型）写候选，判定层只判。**人写的核是这条路的正主**；模型自己写现在被
+`INSTRUCTIONS` 劝退（优先交给 `operator_run` / `operator_repair`），但**不被禁止** —— 写了就
+在 `candidate_origin` 里如实标 `outer`，理由见
+[`hitl-generation-boundary.md`](hitl-generation-boundary.md) §4.3。四步：
 
 ```bash
 # 1) 声明：形状、精度、必须真机
@@ -143,8 +146,9 @@ python -m operator_agent verify --run-dir /tmp/op-r1 --code-file cand.py \
 ```
 
 `<ssh-alias>` 是 `~/.ssh/config` 里的别名；**没有 `auto` 降级**，不给 host 会直接
-`host_required`。每一步都会在 `/tmp/op-r1` 留下 `verify-N.json`（回包）、`verify-N.log`
-（过程）、`report.md`（报告）。
+`host_required`。每一步都会留下兼容的 `verify-N.json`（摘要）、`verify-N.log`（过程），
+以及独立的 `verify-N/`（原始源码、完整判定和报告）。回包的 `evidence`、`source`、
+`source_hash` 与 `report` 指向这一轮；旧的顶层 `report.md` 保留原样。
 
 ### 0.5 工作流 C：整段自动化（无人值守）
 
@@ -191,6 +195,7 @@ python -m operator_agent repair --run-dir /tmp/op-r1 --code-file cand.py \
 | `eligibility` | 五位资格：这个数**被允许造成什么后果**（判对错/可调参/可入库/可报数/算进展） |
 | `conflict` | **必读**：`present=true` 时处方与资格打架，按 `action=hold_for_measurement` 办 |
 | `validity` | 测量档位：`valid` / `degraded` / `uninformative` |
+| `candidate_origin` | **归因**（不是判据）：这份源码自称是谁写的 —— `outer` / `inner_fixer` / `inner_coder`，没声明就是 `undeclared`。`repair` 另回一个**派生**的 `final_candidate_origin`（有任一轮真改了源码 ⇒ `inner_fixer`）。为什么要这一格见 [`hitl-generation-boundary.md`](hitl-generation-boundary.md) §4 |
 | `notes` | 可判的读法提示（如「基线是 TF32，契约是 fp32 ⇒ 不是同语义比较」） |
 | `report` | 报告路径；「我无法确立的事」在里面 |
 
@@ -235,7 +240,7 @@ DSH  ──(MCP stdio, JSON-RPC)──▶  operator_agent.mcp_server
 
 ---
 
-## 2. 六个工具的契约
+## 2. 八个工具的契约
 
 | 工具 | 做什么 | 必填 | 立刻返回 |
 |---|---|---|---|
@@ -243,7 +248,9 @@ DSH  ──(MCP stdio, JSON-RPC)──▶  operator_agent.mcp_server
 | `operator_prepare` | 声明 → 冻结契约 + 契约自带输入 + 回合身份 | `request` `shapes` `run_dir` | `contract_hash` / `cases` / `inputs` |
 | `operator_verify` | 对**外层给的**候选源码判 L1/L2/L3 | `run_dir` + (`code` \| `code_file`) | 正交判定 + 处方 + 资格 + 报告路径 |
 | `operator_run` | 起一次**无人值守**整段（本仓 `Conductor` 自己设计/写核） | `request` `shapes` `run_dir` | `pid` / `phase=running` / `status` 路径 |
-| `operator_status` | 查无人值守的相位 | `run_dir` | `running` / `done` / `failed` / **`lost`** |
+| `operator_bench` | 对**多个**候选只跑 L3 的批量测量；探索级，**回包不含任何裁决字段** | `run_dir` + `candidates[]` | 逐臂 `speedup` / `validity` / `best`；`grade=exploration` |
+| `operator_cancel` | 按 run/invocation 请求取消，随后查状态确认 | `run_dir` / `invocation_id` | 取消请求回执 |
+| `operator_status` | 查无人值守的相位 | `run_dir` | `running` / `done` / `failed` / `cancelled` / **`lost`** |
 | `operator_repair` | 给一份**已有的**核：判 → 处方 → 内层模型修 → 再判 | `run_dir` + (`code` \| `code_file`) | 每轮的判定/处方/动作，最终是否通过 |
 
 **声明（declaration）白名单**（写进契约的只有这些）：
@@ -254,6 +261,12 @@ DSH  ──(MCP stdio, JSON-RPC)──▶  operator_agent.mcp_server
 
 两套词表**刻意分开**：前者决定「判什么」，后者决定「怎么跑」；混用会被
 `unknown_parameter` 拒（2026-10-19 在真宿主里撞过一次，见 `tests/test_mcp_server.py::test_run_splits_tool_options_from_the_declaration`）。
+
+**第三类：`candidate_origin`（只在 `verify` / `repair` 上）**。它既不是声明也不是运行选项，
+是**归因**格：记这份源码自称是谁写的（`outer` / `inner_fixer` / `inner_coder`，没声明记
+`undeclared`），**不进判据、也不进契约** —— 所以 `prepare` 会按 `unknown_parameter` 拒收它，
+声明一下来源不可能改 `contract_hash`。词表只有 `hitl_tools.CANDIDATE_ORIGINS` 一处来源，
+MCP schema 的 `enum` 直接取它。详见 [`hitl-generation-boundary.md`](hitl-generation-boundary.md) §4.1。
 
 **不允许**出现在任何参数里的（出现即 `forbidden_parameter`，拒绝理由会写明属于哪一条）：
 `max_error` / `atol` / `rtol` / `skip_anticheat` / `require_double_confirm` / `skip_remeasure` /
@@ -270,9 +283,18 @@ DSH  ──(MCP stdio, JSON-RPC)──▶  operator_agent.mcp_server
   declaration.json      # 输入的唯一真相（verify 会重算并比 hash）
   contract.json         # {hash, contract}：冻结契约 + 身份
   run.json              # task_id / 创建时间 / 工具版本
-  verify-N.json         # 第 N 次判定的回包（裁剪版，<12 KB）
-  verify-N.log          # 判定层的过程输出（stdout 被收在这里）
-  report.md             # 最近一次的报告（best-known-good + 证据链 + 我无法确立的事）
+  verify-N.json         # 兼容摘要；完整指标由 evidence 引用
+  verify-N.log          # 兼容日志；每轮编号独立
+  verify-N/
+    candidate.py        # 实际交给验证器的源码，UTF-8 / CRLF 原样保留
+    started.json        # 执行前预留编号；中断后不复用
+    result.json         # 完整逐级事实、error_log、contract、implementation 与源码绑定
+    execution.log
+    report.md           # 这一轮的独立报告，历史回包不会指向后续轮次
+    complete.json       # 文件 SHA256 回执；只表示留存完整，不是候选通过
+  repair-N/             # 初始/最终源码、完整修复记录与 step-N/ 逐次验证证据
+  bench-N/              # 全部候选源码、逐臂完整指标、partial 状态；仍是 exploration
+  report.md             # 若旧版本留下此文件，保持原样，不再作为新轮次报告
   # 下面只在 operator_run 之后出现：
   autonomous.json       # 启动参数（backend/max_rounds/…）
   run-status.json       # 相位机（running → done|failed，含 pid 与错误原文）
@@ -283,6 +305,21 @@ DSH  ──(MCP stdio, JSON-RPC)──▶  operator_agent.mcp_server
   failure_db.jsonl
   candidate/            # Conductor 的 §22.1 布局（过门的候选落这里）
 ```
+
+**工具契约 6：独立留存。** `verify`、`repair`、`bench` 用原子目录预留分配编号，
+按现存最大编号继续，兼容只有旧 JSON/log、缺号和中断目录的情况。文件只创建一次；
+写盘失败或后端异常不生成完整回执，不覆盖旧轮次，原始错误继续返回。
+新路径失败后的部分产物可用于排查，但不能当作已完成实验。
+
+`repair-N/result.json` 保留未裁剪处方、完整诊断和候选记录；每次实际验证还有独立
+`step-N/` 的源码、完整判定、日志和报告。外层回包继续裁剪大段上下文。
+`bench-N/result.json` 保留全部请求候选和已测臂原始事实，未测臂不补造结果；
+这些事实不会使 bench 获得裁决或入库资格。
+
+自主运行保留既有当前候选和最终 ArtifactStore；另用布局的既有写者角色，
+在 `candidate/`、`measurements/`、`report/` 下保存带唯一事件 ID 的轮次证据。
+执行门拒绝的源码仍只留哈希，不把拒绝源码写入历史目录。
+旧产物不补造完整证据或历史资格；哈希与只读文件模式不构成同 UID 敌意代码隔离。
 
 **身份怎么保证**：`verify` 会重新冻结契约并和 `contract.json` 里的 hash 比；不一致返回
 `contract_drift`，**不按新判据继续**（与 `benchmarks/workload_codegen_h20.py` 的
@@ -336,6 +373,7 @@ operator_run:  (未开始) ──llm 缺失──▶ llm_not_configured（不起
 | `backend_not_wired` | `backend` 不在 `mock/local/ssh` | 见 §5 |
 | `host_required` | `backend=ssh` 但没给 host | 给 `~/.ssh/config` 的别名；**没有 auto 降级** |
 | `code_required` / `code_source_ambiguous` | 源码缺失或 `code`/`code_file` 同时给 | 只给一个 |
+| `unknown_candidate_origin` | `candidate_origin` 不在闭合词表里 | 用 `outer`/`inner_fixer`/`inner_coder`，或干脆不给（记 `undeclared`） |
 | `run_not_prepared` | 目录里没有 `declaration.json` | 先 `operator_prepare` |
 | `contract_drift` | 回合之间判据被改过 | 重新 prepare，别在旧回合上继续 |
 | `llm_not_configured` | 无人值守缺内层 LLM | 见 §6 |
@@ -404,6 +442,9 @@ operator_run:  (未开始) ──llm 缺失──▶ llm_not_configured（不起
 - **`route` 与 `eligibility` 必须一起读**：`failure_route.classify` 不读资格位（实测接缝），
   所以回包里多了 `conflict`：处方说「去搜索/算一轮」而资格说这个数不能驱动任何后果时，
   `conflict.action = hold_for_measurement`。**`classify` 本身没改**。
+- **写核这一步归谁**：本节只划「谁判 / 谁不判」。外层模型与内层模型的分工边界（生成知识、
+  搜索策略、跨轮记忆为什么都在内层）另见
+  [`hitl-generation-boundary.md`](hitl-generation-boundary.md)。
 
 ---
 
@@ -421,7 +462,7 @@ operator_run:  (未开始) ──llm 缺失──▶ llm_not_configured（不起
 | `tests/test_packaging.py` | 版本一致、runner 随包发、模板是 package-data、运行期目录不进 sdist、shim 的 patch 存在 |
 | `integrations/dsh-operator/test/plugin.test.mjs` | 插件注册面 + `/op` 行为（8 条，`npm test`） |
 
-**加第六个工具**：① `mcp_server._tool_definitions()` 加 schema；② `_call_tool()` 加一个分支
+**加第 N 个工具**：① `mcp_server._tool_definitions()` 加 schema；② `_call_tool()` 加一个分支
 （注意把**运行选项**从 declaration 里摘出来）；③ 若加新拒绝码，补进本文 §4 与测试；
 ④ **重启 server 进程**：`pkill -f operator_agent.mcp_server`，宿主会在 500 ms 后自动重连并
 re-sync，**本会话的工具列表要到下一回合才刷新**。宿主本身支持热刷新
@@ -434,15 +475,15 @@ re-sync，**本会话的工具列表要到下一回合才刷新**。宿主本身
 
 1. **资源预检读注释**（已修，2026-10-19）：Fixer 在修复说明里写 `BLOCK_M=256`，预检把注释
    当配置，把正确的修复又拒一次。现在用 tokenize 原位抹掉注释/docstring。
-2. **元素宽度仍从源码猜**（未修）：`_elem_bytes_from_code` 读到累加器的 `tl.float32` 就按
-   4 字节算 ⇒ fp16 任务的 `256×256` tile 被估成 384 KiB（实际 192 KiB）。修复要改成用任务
-   声明的 `precision`，属判定语义变更，待单独评估（评估文档 §9.13-7）。
+2. **资源误拒**（S3 已修）：不再从 `tl.float32`、任务 dtype 或逻辑 tile 推定共享占用。
+   历史 384/192 KiB 都是特定假设下的代理值，不是物理存储实测。未知资源继续原生检查，
+   显式共享缓冲区/native 回执按独立 dtype/copies 与身份判定，详见 [S3 资源边界](resource-precheck-evidence.md)。
 3. **L2 的真实成本**：15 个 case 每个一次一次性 SSH + 远端 import + Triton JIT，真机一次
    完整判定实测 **866 s**（其中 L3 只占小头）。
-4. **没有取消动作**：只能按 pid 杀；`run-status.json` 会停在 `running`，查询时判为 `lost`。
+4. **取消与外部停止边界**（S2 已接线）：`operator_cancel` / CLI cancel / `/op cancel` 按实例请求取消；MCP 长调用支持取消通知。终态、预算和清理见 [取消协议](task-cancellation.md)。本机回收不证明远端或服务商已停止；不可捕获退出仍可能为 `lost`。
 5. **`toolCallTimeoutMs`**：MCP 默认 60 s。`verify` 在真机上**一次完整判定就是 866 s**（见上面第 3 条），
    所以配置里设成 **3600 s**（60 min）——按 866 s 的单次成本 + `repair` 默认 2 轮（约 30 min）留余量。
-   超时**不是优雅退出**：server 同步逐行读，客户端 abort 后它仍会算完再写一个没人认领的响应。
+   超时本身不是停止证明；契约 7 起 server 在工作期间读取取消通知，取消后仍须查终态及清理回执。
    更长的无人值守用 `run` + `status` 轮询，不要占用一次工具调用。
 
 ---

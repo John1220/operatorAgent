@@ -46,7 +46,27 @@ python test_nvidia_matmul.py
 
 除此之外：
 
+- **方案评审（2026-10-26）**：[算子开发方案评审](docs/design/operator-development-review-20261026.md) —— 当前入口与设计的一致性、生成质量与成本证据、后续改进优先级；评审建议不替代设计规范
+- **插件封版待执行计划**：[收尾顺序与验收清单](docs/design/dsh-operator-completion-plan-20261026.md) —— 证据留存、任务取消、资源预检、当前入口验收、整体对照及交付包
+  ；[S0 固定起点验收](docs/status/dsh-operator-s0-20261026.md) —— 工作区快照、实际入口能力、历史证据清单与持久归档
+  ；[S1 独立留存验收](docs/status/dsh-operator-s1-20261026.md) —— 每轮源码、完整判定、报告、修复/探索证据与回归记录
+  ；[S2 取消与中断验收](docs/status/dsh-operator-s2-20261026.md) —— 按实例取消、MCP/CLI 中断、本机清理和预算保留
+  ；[S3 资源预检修复](docs/status/dsh-operator-s3-20261026.md) —— 混合精度、配置作用域、明确存储证据与未知状态
 - **操作指南**：[docs/user_guide.md](docs/user_guide.md) —— 安装、示例、`Conductor` 参数、环境变量全表
+- **生成与修复质量**：[共享规约、诊断与固定任务对照](docs/design/operator-quality-improvement.md) —— 插件修复闭环、离线回放和真实评测入口
+  ；[预检与同候选配对](docs/design/operator-quality-paired-evaluation.md) —— 模型调用前检查环境，生成一次、独立比较两种修复策略
+  ；[三候选完整 L2 筛选](docs/design/operator-quality-portfolio.md) —— 三种生成策略、首槽基线、完整费用与失败记录
+  ；[十任务 H20 实测](docs/research/operator-quality-portfolio-20261024.md) —— 首槽 8/10、组合 9/10，区分数值失败与预检未知
+  ；[边界修复验收](docs/research/operator-quality-boundary-fixes-20261024.md) —— 三项固定问题验证通过，新生成首槽 2/2、全部候选 3/6
+  ；[编译与列 stride 诊断](docs/design/compile-repair-diagnosis.md) —— 绑定实际编译节点、可信单列输入与 rank=2 寻址证据
+  ；[重复故障修复对照](docs/research/operator-quality-diagnosed-repair-20261024.md) —— 两组各修好 2/2，新增诊断覆盖 2/2，额外修复收益 0
+- **DSH 插件（判定层工具面）**：[实现说明](docs/design/dsh-plugin-implementation.md)（契约/状态机/拒绝码/扩展点）
+  与[方案评估](docs/dsh-plugin-evaluation.md)（为什么是这个形态、真机读数）；
+  可安装壳在 [integrations/dsh-operator/](integrations/dsh-operator/README.md)，
+  安装形态（profile / 组合包 / 手工条目的区别，为什么 GUI 看不见）见
+  [DSH profile 与组合包](docs/design/dsh-profile-and-bundles.md)
+  ；[内层/外层模型的分工边界](docs/design/hitl-generation-boundary.md) —— 写核与搜索为什么归内层、
+  这条边界目前只是建议性的、以及启用生成工具的判据
 - **阅读路线**：设计规范 §0.2 给了按依赖顺序的读法；**实现状态 §五** 是一张
   **机制 → 代码位置 → 守卫**的对照表，它才是本项目的目录
 - 根目录**没有** `CLAUDE.md`：原件的规范 / 状态 / 历史混在一起，已按治理规则（§25）归档到
@@ -137,3 +157,8 @@ Golden 的 CPU 对照保留真实计时：matmul 比较 GFLOPS，零 GFLOPS 的�
 - Python >= 3.9
 - **没有 `requirements.txt`**：`numpy` 必需；`torch` / `triton` 真机执行才需要；
   LLM 客户端只用标准库 `urllib`（零依赖）
+
+## License
+
+**Apache-2.0**，见 [LICENSE](LICENSE)。版权：`Copyright 2026 the operator-agent authors`（见 [NOTICE](NOTICE)）。
+第三方组件（ECharts / Mermaid）保留各自许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

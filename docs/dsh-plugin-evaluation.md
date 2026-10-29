@@ -5,6 +5,12 @@
 > 对照对象: 本机 DSH Desktop 2.0.18 自带的 `@deepseek-ai/dsh*` **0.2.1-rc.2**，profile `~/.dsh/profiles/desktop/`
 > **证据约定**: 【V】= 本次直接读到文件/行号或状态文档实测数字；【I】= 判断或推断。本文不改任何代码，未跑任何插件、未跑测试、未连真机。
 
+> **2026-10-26 S3 更正**：下文 10-19 历史记录中“256×256×64 确实放不下”“这次是合法的”
+> 不能作为确定资源结论。384/192 KiB 都是旧逻辑 tile 代理，不是原生 shared 存储实测；
+> 当次原核/日志未留存（S0 H04），不能事后补造。仅改为任务 precision 也不能证明中间缓冲区
+> 的 dtype、shared placement 或 copies。当前修复见 [资源证据边界](design/resource-precheck-evidence.md)。
+> 历史实验结果保留原记录，不作为新版本验收。
+
 ---
 
 ## 〇、结论摘要
@@ -815,6 +821,11 @@ L1→L2 得到 `debug_fix` + `whole_tensor`；契约声明 `required_caps=('real
    提供端点与密钥文件，我没有、也不该替你造一个）。
 4. 处方质量的**统计**（A 只是 n=1）：要回答“外层改一次的成功率”，得跑 5~10 个不同 bug
    （尾块 mask、stride、广播轴、K 循环、dtype）并记“几次改对”。
+   **2026-10-25 起这一批数据能顺便回答 §9.4 那个未验证假设**：回包与 `report.md` 现在带
+   `candidate_origin`（`outer`/`inner_fixer`/`inner_coder`，没声明记 `undeclared`），所以同一批
+   跑完就能比「外层裸写的核」与「内层生成的核」的 L2 通过率，不需要另开一轮真机。判据与
+   落地细节见 [`design/hitl-generation-boundary.md`](design/hitl-generation-boundary.md) §4.1 / §5。
+   注意它只是让归因**可记**，读数仍然是空的。
 5. 套件失败时**聚合形态**的改进：现在退回“未确立”，可考虑按 case 证据聚类给出方向 ——
    但那是**新判据**，要单独评估（不能为了让处方好看而发明一个形态）。
 6. ~~输入传输~~ **已落地（2026-10-20）**：seed + digest + 字节回退，端到端 730.9 → **240.6 s**。

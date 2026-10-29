@@ -19,13 +19,24 @@
 第 11 节记录随后完成的离线命名/诊断修复，不覆盖第 10 节的候选或失败证据。
 第 12 节记录新计划的真实执行：静态预筛和编译通过，第二个主输入数值验证失败；
 没有进入候选性能主测，owned 清理已确认，仍无入库或部署验收结论。
+第 13 节记录针对 masked reduction 和 stride 语义的离线提示与回归补强。
+第 14 节记录该新计划获批后的真实执行：模型扩展了包装入口的必填参数，静态接口
+预筛拒绝，未进入候选 CUDA 编译或测量，owned 清理已确认。
+第 15 节记录调用签名、包装函数职责和返回约定的离线结构化补强。
+第 16 节记录该新计划的真实执行：包装接口与编译通过，第二个主输入再次因 padding
+方差错误失败；owned 清理已确认，未进入性能主测。
+第 17 节记录随后新增的显式一次数值修复模式；该阶段仅本地接线、回归和计划冻结，
+不将新增历史反馈载荷视为已获旧计划授权。
+第 18 节记录该修复计划明确获批后的真实执行：模型原样返回失败源码，未进入
+候选验证，两个 claim 已消费，清理确认，无新增正确性或性能结论。
+第 19 节记录之后的离线诊断层与伪修复守卫，不能视作再次验收或恢复修复额度。
 
 ## 2. 默认 plan-only 与执行资格
 
 默认执行仅创建新的 0700 本地目录、只读 `plan.json` 和完整源码快照：
 
 ```bash
-python -B /Users/zh/repos/operatorAgent/benchmarks/workload_codegen_h20.py
+python -B benchmarks/workload_codegen_h20.py
 ```
 
 不读取项目模型配置，不使用隐式模型/端点环境变量，不分配两个大数组，不创建
@@ -546,3 +557,381 @@ Golden registry 不变。提交后的收尾仅更新验收文档；不冒充重�
 非二次幂长度与输入布局/stride 语义，补充相应回归；不放宽容差、不缩减 suite，
 不针对当前四值数据特化，不修改这份失败候选后重测。真实再试需冻结新计划并获得
 针对它的授权，本次 claim 已消费；本轮没有启动第二个候选。
+
+## 13. 离线补强：masked reduction 与输入/输出 stride 语义
+
+2026-10-15，本阶段更新生成要求和离线回归；真实模型请求、SSH/GPU 派发均为 0。
+第 12 节的失败候选、原始数值结果、执行 claim 和清理回执保留原样。
+
+### 13.1 把通用数值与布局要求写入冻结请求
+
+生产 `SingleCandidateCoder.PROMPT` 增加以下要求：
+
+- 覆盖声明中的形状、值模式和布局，包括非二次幂归约长度；
+- 无效 lane 在所有变换后仍应对归约贡献单位元，不能只在 load 时填零；
+- 归一化使用逻辑归约长度，不能使用补齐后的 block 大小；
+- 以运行时张量的实际 stride 计算地址，输入和输出分别取值；明确序列化 NumPy
+  metadata 的 stride 单位是 bytes，而运行时 Torch tensor stride 的单位是 elements；
+- 主 workload 连续不意味着可以忽略 suite 声明的 strided 输入。
+
+驱动的 caller-owned LayerNorm sketch 补充末轴总体方差、逻辑列数、冻结 epsilon、
+输出 dtype、均值/中心化平方归约中的 padding 处理，以及非零常量/近常量行与二维
+stride 要求。这些都是通用语义文字，不包含实现模板、上次源码、具体输入值、
+历史误差或性能成绩；没有把某个 BLOCK、launch 参数或四值数据答案写进提示。
+
+本阶段没有新增“靠 AST 证明数值正确”的守卫。源码仍原文保存，静态预筛只负责
+原有结构/接口等限制；参考、全量 suite、容差、真实验证与入库门继续负责验收。
+提示与 sketch 一并进入冻结声明、请求 hash 和执行前 drift 检查。
+
+### 13.2 回归同时保留错误反例和通过对照
+
+新增 `tests/test_single_candidate_semantics.py`，共 32 项离线测试，覆盖：
+
+- 通过 mock 模型派发核对完整请求字节、mask/stride 要求、32-case 声明、输入
+  metadata 单位以及仅传 metadata、不传模板/输入值的边界；
+- 提示、mask hint、stride hint 漂移时，在预留请求额度前拒绝；
+- 单独的 stride copy 文本夹具可通过静态门，仅说明允许读取实际 tensor stride；
+- 可信 CPU 反例在逻辑列数 3/31/33、near_constant/large_varying、连续/strided
+  布局中复现 padding 方差错误；连续地址假设也会被 strided case 拦住；
+- 主输入通过后 suite 失败、主输入失败后 suite not_run，均不能进入 L3；正确的
+  CPU 对照通过相同值模式/布局及确定性重复检查。
+
+CPU 反例使用明确的 NumPy fp32 参考，只验证现有数值/suite 路由。首轮测试遇到
+本机可选 PyTorch 的 near-constant CPU 参考差异，以及成功主输入不写 failure-only
+状态字段的问题；测试随后改为显式 NumPy 参考和核对实际主输入读数，保留初轮日志。
+没有为此修改生产参考、容差或 suite，也不把 CPU 对照当作 native fp16 CUDA 证明。
+
+`tests/fixtures/single_candidate_unmasked_variance.txt` 逐字保存第 12 节的 761-byte
+失败源码，hash 仍为 `bdb1698cfa2e9a6a341ecf35e2987d8d4349384ed43b23d71661b4500853b2cf`。
+该文件始终只作为文本读取，不 import/exec；测试还明确证明它仍可通过静态预筛和
+mock 模型血缘审计，但没有数值正确性凭证。不会因新增提示而把旧失败改判为成功。
+
+本轮本地验证记录位于 `output/workload_codegen_validation/semantics-local-q_eslm5k/`。
+全量初轮还发现既有 CLI 示例含本机绝对路径，触发仓库卫生守卫；已改为仓库相对
+命令，不放宽扫描规则。原失败日志保留为 `full-tests.log`。
+最终专项 **250 passed**，卫生与最终语义夹具复验 **48 passed**；修正后全量
+**4034 passed / 1 skipped / 2 warnings**（158.18 秒，仍为原 nonfinite fixture
+warnings），随后串行 Golden **4 PASS / 0 REVIEW / 0 FAIL / 0 SKIP**。两轮全量日志
+分别保留，Golden 没有刷新 registry 或容差；这些结果均为本地测试。
+事前/事后核对的 **1033 个历史文件**、原 ruler 和 Golden registry 均不变；最终
+验证前后的四份源码/测试/文本夹具 hash 一致。本轮没有 commit/push。
+
+### 13.3 新计划冻结了新提示，额度与验收判据保持原值
+
+生产 protocol 仅因 coder 源码改变，从
+`8bc9ff3330790e63b656dda8bf9ed9a74007f24ddf5e5f710a2442b474544e7d` 更新为
+`910115a969881d1f5c0d7719c8599d5dde9ea7829f5a4bcdff90f7ebfc222f40`。
+driver 的 sketch 改动另进入 evaluator 源码身份；仍冻结 85 份源码。
+
+离线阶段结束时，新计划**仅本地准备，当时未批准/未执行**（后续执行另记第 14 节）：
+`output/workload_codegen_h20/workload-codegen-3bp19hjl/plan.json`，hash
+`169b9d0bfb9e61295ca8e04f282b00c1d47f7505c01c17e7ae89ed34d08ebbe6`。
+完整请求为 **13181 bytes**，request hash
+`658487de996da4655fae3b3cc0a6d9a1a185b81f0978256fd3614e1a7f2699ae`。
+
+`prepared-plan-context.json` 已对照上个计划：仅提示/sketch、相关 context/request
+hash、源码/protocol 身份和计划 hash 变化。LayerNorm 契约、32-case suite、参考、
+两个主 workload、权重/门槛、原 ruler、模型身份、请求/派发/清理额度和远端隔离
+边界均保持一致。credential_present=false，无 execution claim、无 model journal。
+该离线阶段没有执行真实尝试；后续可审阅此具体计划，再进行新的一轮有界验收。
+
+## 14. 新计划获批执行：包装入口接口不匹配，预筛拒绝
+
+2026-10-15，最初自动审批在进程启动前拒绝了外部执行，此时请求/远端派发均为 0、
+新计划未消费。用户随后对计划 `169b9d0bfb9e` 的具体目的地、13181-byte 载荷和执行
+边界明确回复“明确批准新计划及上述数据外发，接受隔离限制”。再次核对 85 份源码、
+冻结请求、此前验证过的六个工作区文件及 1187 个历史文件后，才执行唯一一次真实请求。
+
+真实执行目录：`output/workload_codegen_h20/workload-codegen-n_jl29gn/`。
+预检、两次授权语境回执、首次未启动记录、执行日志与事后审计均另存于
+`output/workload_codegen_validation/authorized-semantics-jfykcsip/`。
+原 `execution-not-started.json` 记录仍按当时事实保留，没有覆盖成成功执行凭证。
+本阶段没有新增生产源码改动，没有 commit/push。
+
+结果为 **`generation_failed`，exit code=1；completed、accepted、deployment_accepted
+均为 false**。准备和模型响应成功，固定诊断为
+`failure={stage: precheck, reason: kernel_interface_refused}`。
+
+| 实际动作 | 数量 / 状态 |
+|---|---|
+| 准备回执 | 七阶段全部 passed，15 个有界只读文件 |
+| 指定 GPU | H20、物理 GPU 2；查询时空闲 25312 MiB、利用率 0% |
+| work command / RPC | 18 / 4；RPC 均为 gpu_info，含两次参考身份核对 |
+| 模型请求 / 输出 token 预留 | 1 / 4096；answered，finish_reason=stop |
+| 请求 / 原始响应 | 13181 / 2225 bytes；与批准计划一致 |
+| API usage | 输入 4235、输出 446，合计 4681 tokens；调用约 24.16 秒 |
+| 模型源码 | 924 bytes，原文保留；status=failed，budget aborted |
+| Verifier / 编译 / 数值验证派发 | 0 / 0 / 0 |
+| 32-case suite 执行 | 0；未创建 L2 结果，不能声称已有 suite 的数值 verdict |
+| 主测 / 确认 / 心跳窗口 | 0 / 0 / 0 |
+| 候选结果产物 / 入库 | 无 / 无；只保留预先绑定的 contract、run_manifest |
+| owned cleanup | quiescent=true、removed=true，shutdown 已确认；owned PID absent、signals=[] |
+| 重试、修复、fallback、安装、共享进程操作 | 均未发生 |
+
+GPU snapshot 不是独占租约；CostTracker 约 `$0.001716` 为估算，不是服务端账单。
+源码 hash 为 `25c204a4385ca5810759e9d90ee41469000be0ce179812249016ed283d3ac119`。
+
+### 14.1 根因：把包装函数需要计算的量误当成调用方参数
+
+冻结输入 metadata 的关键字集合只有 `X`，实际执行约定为 `kernel(X=...)`。模型
+却将包装入口写成：
+
+```python
+def kernel(X, Y, N, eps, stride_xm, stride_xn, stride_ym, stride_yn):
+```
+
+额外七个参数全部必填，调用方不会提供；因此静态接口守卫按原规则拒绝。包装入口
+应按冻结接口在函数体内分配输出、读取形状和实际 stride、使用冻结 epsilon，并
+返回输出；不能要求调用方新增输入。本次源码的包装入口也没有 return 语句。
+
+AST 读回还显示，模型虽然使用了 stride 参数，方差归约仍包含中心化后的 padding
+lane。这里只能记为源码中的静态观察：候选没有执行，不能沿用第 12 节的误差数值，
+也不能宣称本次 stride 或 masked reduction 已通过真机验证。模型 rationale 中的
+“matching the reference semantics”同样不构成验证证据。
+
+### 14.2 只读复核与下一步
+
+`post-run-audit.py` 对原始 JSON 响应、请求/响应 hash、源码血缘、usage/费用重建、
+准备回执、两份源码快照、固定失败原因、参考身份与 owned cleanup 做只读核对；
+在原文上复现同一静态守卫，不 import/exec、不改写候选，不新增 API/GPU 调用。
+
+`evidence_check_completed=true` 只说明失败事实一致。生产正向 `audit_model` 保持
+completed=false，并保留 `kernel_interface_refused`；aborted campaign 不具备正向
+凭证。没有可用于 raw/durable 候选审计的验证结果或 KernelArtifact，两个预绑定
+文件不能补成已验证产物。
+
+审计前后，本轮执行证据、准备快照、1187 个历史文件、原 ruler 与 Golden registry
+均不变，production protocol 仍为
+`910115a969881d1f5c0d7719c8599d5dde9ea7829f5a4bcdff90f7ebfc222f40`。
+本轮只做真实单次验收和文档收尾，不把第 13 节的本地测试改记为本轮 CUDA 结果。
+
+下一步先做独立离线阶段：将**实际调用签名、包装入口职责和返回约定**明确写入
+冻结 generation context；输入参数只能来自 caller metadata，形状、stride、输出
+分配和参考常量应由包装入口处理，并加入本次真实源码的文本回归。仍保留 mask/
+stride 数值门，不能因为接口先失败就忽略已知语义问题。本次 claim 已消费，
+不改写这份源码后重测，也不在本轮追加候选。
+
+## 15. 离线补强：结构化包装入口调用与返回约定
+
+本阶段在生成上下文新增 caller-derived `calling_convention`，由生产 coder 和默认
+plan-only 驱动共用同一个纯函数构造。真实模型请求、SSH/GPU 派发均为 0；第 14 节
+原始候选、失败结果与已消费 claim 保留原样。
+
+### 15.1 冻结实际参数来源，而不是让模型猜入口
+
+`wrapper_calling_convention(metadata)` 仅读取各组实际 caller keyword 名，生成
+版本为 `keyword-wrapper-v1` 的结构化约定，包含：
+
+- `entrypoint=kernel`、`invocation=kernel(**inputs)`；
+- 实际 `keyword_sets`、允许的 `parameter_names` 和规范化 `signature`；
+- `extra_parameters_allowed=false`，参数须显式且可用 keyword 调用；
+- 返回值为由 wrapper 分配的 tensor，形状/dtype 遵守冻结算子语义；
+- wrapper 内部分配输出、读取运行时形状/归约长度、分别读取输入和输出 stride、
+  从冻结契约/注册参考取得语义常量，并构造 helper 所需的额外 launch 参数；
+- metadata stride 单位为 bytes，运行时 tensor stride 单位为 elements。
+
+本次 LayerNorm 的参数集合精确为 `['X']`，规范化签名为 `def kernel(X):`；输出
+buffer、N、epsilon 与 stride 不会被编造成调用方输入。若其他受支持调用方显式
+声明 scalar 参数，则保留其名字，但仍不发送 scalar 值。多组不同 keyword 集合
+使用共同必填参数及其余参数的 `None` 默认值描述，不把每组输入扩展成并集实参。
+无法表示为显式 Python 参数的输入名在生成前拒绝，不把它插入签名文本。
+
+该结构只包含调用约定和职责文字，函数头属于接口声明，不包含实现函数体、可信
+候选模板、历史源码或历史误差。原有 mask/stride 数值要求也继续保留在提示/sketch。
+`context_hash`、完整请求、源码快照和计划身份全部覆盖新字段；执行前冻结检查和
+正向 `audit_generation` 都会从 input metadata 重建它，拒绝“改字段再重算 hash”
+伪造出来的调用约定。plan-only 只构造 metadata，不分配主 workload 数组。
+
+### 15.2 静态门拒绝额外参数与明显缺少返回值
+
+保留原 `check_kernel_interface` 的逐组参数兼容检查；仅在本单候选模式中进一步
+要求显式参数集合等于 caller keyword 集合的并集，拒绝额外参数（包括带默认值的
+额外参数）、`*args`、`**kwargs` 和 positional-only。与 keyword 调用兼容的
+keyword-only 参数仍允许；没有改动其他执行模式共用的接口检查器。
+
+新增固定原因 `kernel_return_missing`：wrapper 中至少需要一个带非 None 表达式
+的 return；helper、嵌套函数/类中的 return 不算 wrapper 返回。它只证明语法存在，
+不证明所有控制路径都返回、返回对象的 tensor 类型、输出分配或数值正确；这些
+仍须运行时与原 Verifier 验证。失败诊断词汇由 18 扩为 19 个静态原因，仍保持原
+两字段、固定词汇与 256-byte 界限。
+
+接口检查先于新增返回检查，因此第 14 节源码仍以 `kernel_interface_refused`
+拒绝，没有改写它的既有失败原因。第 12 节 padding 方差错误源码仍可通过静态门，
+不能据此改判数值正确。
+
+### 15.3 回归、历史隔离与新计划
+
+新增 `tests/test_single_candidate_wrapper_contract.py`，45 项离线测试覆盖实际请求
+字节与 context、metadata 推导、多输入集合/声明 scalar、非法参数名、无共享可变
+状态、冻结漂移和重算 hash 后的伪造拒绝，以及额外/隐藏参数、缺少返回值、嵌套
+return、keyword-only 正向静态路径、固定失败回执和单次请求不修复。
+
+`tests/fixtures/single_candidate_extra_wrapper_args.txt` 逐字保存第 14 节的 924-byte
+原文，hash 为 `25c204a4385ca5810759e9d90ee41469000be0ce179812249016ed283d3ac119`。
+它只作为文本读取，不 import/exec；本阶段不把其参数删掉后重测。记录位于
+`output/workload_codegen_validation/wrapper-local-fhog33k6/`。
+最终专项 **295 passed**；全量 **4079 passed / 1 skipped / 2 warnings**（164.48 秒，
+仍为原 nonfinite fixture warnings），随后串行 Golden **4 PASS / 0 REVIEW / 0 FAIL /
+0 SKIP**。验证前后六份源码/测试/文本夹具 hash 一致，1314 个历史文件、原 ruler
+和 Golden registry 不变；所有改动文件（含未跟踪文件）通过同一仓库卫生模式扫描。
+这些结果只证明本地接线、静态守卫与回归，不代表新模型源码已通过 CUDA 验收。
+
+离线阶段结束时，新计划**仅本地准备，当时未批准/未执行**（后续执行另记第 16 节）：
+`output/workload_codegen_h20/workload-codegen-bvqb4x61/plan.json`，hash
+`c601e21ad167f9ff5d0b7750d4ff734af8168c3c33273c44633a9f38c5fdf5f3`。
+完整请求 **14570 bytes**，request hash
+`90bf59bdf399a82c246b105d2e3af68dd6bbe4efbd7089ac85a0fca96dac1518`，仍冻结 85 份源码。
+production protocol 更新为
+`8088734fe5ac8e3360b28a3407d4fc915016ff014ab255f6247731c7a2c7c92b`。
+
+已对照上一计划：除提示、新 calling_convention、disclosure 内容说明以及相应
+context/request/源码/protocol/计划 hash 外，契约、注册参考、32-case suite、
+sketch、workload/权重/门槛、原 ruler、模型身份、所有额度和远端隔离边界保持一致。
+新计划没有 execution claim 或 model journal，credential_present=false。本阶段
+没有 commit/push；后续真实验收须针对这个具体新计划获得授权。
+
+## 16. 新计划获批执行：包装接口通过，padding 方差错误再次被数值门拦住
+
+2026-10-15，用户对计划 `c601e21ad167` 的 14570-byte 具体载荷、模型目的地、GPU 2
+单候选额度和隔离边界明确回复“明确批准新计划及上述数据外发，接受隔离限制”。
+执行前重查 85 份源码快照、完整请求、八个已验证工作区文件和 1465 个历史文件；
+核对一致后才 exclusive 消费本次 claim，不续用第 14 节的已消费计划。
+
+- 真实执行目录：`output/workload_codegen_h20/workload-codegen-mn841e1w/`。
+- KernelArtifact：该目录下 `artifacts/layernorm/nvidia_gpu/20261015_212243_490247e7/`。
+- 预检、明确批准、执行日志、局部数学诊断和只读审计：
+  `output/workload_codegen_validation/wrapper-acceptance-f_3n_ey8/`。
+
+结果为 **`correctness_failed`，exit code=1；completed、accepted、deployment_accepted
+均为 false，summary.errors=[]**。模型正常返回原文源码，包装入口、静态预筛与
+H20 编译均通过；真实数值验证失败后停止，未修复、重试或替换候选。
+
+| 实际动作 | 数量 / 状态 |
+|---|---|
+| 准备回执 | 七阶段全部 passed，15 个有界只读文件 |
+| GPU snapshot | H20、物理 GPU 2；查询时空闲 25312 MiB、利用率 0%，不代表独占 |
+| work command / RPC | 18 / 12；gpu_info 8、native heartbeat 1、compile 1、verify 2 |
+| 模型请求 / 输出 token 预留 | 1 / 4096，answered，finish_reason=stop |
+| 请求 / 原始响应 | 14570 / 2321 bytes；与批准计划一致 |
+| API usage | 输入 4510、输出 485，合计 4995 tokens；调用约 19.75 秒 |
+| 源码 | 955 bytes，status=prechecked；保持模型原文 |
+| 包装入口 | `kernel(X)`，内部 `empty_like` 分配 Y，四个实际 input/output stride 查询，返回 Y |
+| 编译 / 数值验证 RPC | 1 / 2；编译通过，两个主输入一过一败 |
+| 32-case suite | 全部 not_run，未产生 suite 的数值测量 |
+| 候选主测 / 确认窗口 | 0 / 0，无候选性能成绩 |
+| 原生校准心跳 | 1，独立冻结 ruler 锚点通过，不是候选性能测量 |
+| owned cleanup | quiescent=true、removed=true，shutdown 已确认；owned PID absent、signals=[] |
+| 入库、修复、重试、fallback、安装、共享进程操作 | 均未发生 |
+
+源码 hash 为 `b3f95ac94f85e6027b54df920ef48425f200185c466eaeec89b21b1a539b8c95`。
+CostTracker 约 `$0.001838` 是估算，不是服务端账单。一个编译 RPC 也不能作为底层
+JIT 专门化次数上限。
+
+### 16.1 接口要求得到遵守，数值提示没有转化为正确实现
+
+本次包装入口没有再要求调用方提供 Y、N、epsilon 或 stride，且明确返回输出。
+helper 使用独立 input/output stride 参数，但 strided suite 未运行，因此这些源码
+特征不能证明 strided 正确性。
+
+方差部分仍为 `x_centered = x - mean` 后对整个 block 归约平方和。masked load 的
+padding 先被置零，减去均值后变成 `-mean`，从而再次错误地贡献 `mean²`。本次实测：
+
+| 主输入 | 全量比较元素 | 最大绝对误差 | 匹配比例 | 结果 |
+|---|---:|---:|---:|---|
+| `(8192,15360)` | 125829120 | 0.0087890625 | 1.0 | 通过 |
+| `(8192,12288)` | 100663296 | 0.04296875 | 0.0 | 失败，全部元素超差 |
+
+第二个输入首个错误值为 `-1.298828125`，参考为 `-1.341796875`；两次 coverage 均为
+1、参考 nonfinite 均为 0。atol=1e-5、rtol=0.01、要求匹配比例 1，均未改变。
+
+只读数学诊断基于冻结主输入的四值重复模式重新计算：
+`var_generated = var_true + (BLOCK-N)*mean²/N`。均值为 0.5，真实方差为 1.25；
+两个 workload 的错误方差分别约为 1.266667 和 1.333333。局部四值演算预测出的
+最大绝对误差和匹配比例与本次真机结果一致，未在本地 import/exec 候选或新增 GPU
+测量。数值与第 12 节相同，但属于本次独立的原始验证回执，不是复制旧成绩。
+
+### 16.2 失败事实已核对，后续应转向有界反馈修复
+
+事后重新执行 model/raw/durable 只读审计，三者均 completed=true、errors=[]；
+raw/durable 保持 `correctness_failed`，checkpoint/source/contract/input 绑定一致。
+审计完成只说明证据一致，不等于候选验收通过；审计自身 gpu_measurements=0 也
+不代表本次未做真机验证。校准原始 probe 的 absolute_anchor_checked=false，由
+控制器独立核对冻结 ruler；只读重算 good ratio 约 1.01846、slow ratio 约 6.87009，
+锚点检查通过。
+
+审计前后，本轮执行证据、准备快照、1465 个历史文件、原 ruler 与 Golden registry
+均不变；production protocol 仍为
+`8088734fe5ac8e3360b28a3407d4fc915016ff014ab255f6247731c7a2c7c92b`。
+本轮未修改生产源码，未 commit/push，也未重跑或改记第 15 节的全量/Golden 成绩。
+
+这轮说明接口约定对本次输出有效，但反复补充通用提示仍未纠正已知数值错误。
+下一步建议设计独立的**带结构化验证反馈的一次有界数值修复**：冻结失败源码 hash、
+原始验证回执和允许反馈的字段，明确最多一次修复请求和一份新候选，保留原文与
+修复血缘，并沿用相同契约、参考、workload、容差与验证门。届时载荷会包含失败
+反馈，必须在新的具体计划中如实披露并另获批准。
+
+这是后续方向，本次 repair=0，claim 已消费；没有在本轮自动修复源码或追加候选，
+也没有为了找绿调整形状、容差或验收门槛。
+
+## 17. 离线新增：失败源码与结构化反馈的一次有界数值修复
+
+新增 `--repair-parent-run`，普通单候选生成默认行为和本文件前述历史事实不变。
+只接受原始单候选 L1 通过、primary 全量数值失败、suite 全部 not_run、清理确认的
+父运行；核对模型响应、原文、checkpoint、manifest、原始 RPC 与历史 evaluator。
+模型只收到旧模型源码和白名单数值指标，不收到原始日志、输出样本、输入数组、
+模板或仓库文件。新源码必须重新经过原来的完整正确性、测量及确认/入库门。
+
+一次性 plan claim 外，再由固定父身份 claim 防止换计划后追加修复；失败或准备
+中断不退额度，不允许修复链、第二次请求或机械补代码。普通 caller 不可冒充修复
+caller，血缘明确绑定父源码/身份、反馈和新源码。完整说明及新计划 hash 见
+[一次有界数值修复](bounded-numerical-repair.md)。
+
+本地阶段真实模型/SSH/GPU 派发均为 0；新计划尚未消费或批准，没有新增候选的
+真机正确性或性能结论，也没有 commit/push。
+专项 330 passed，全量 4114 passed / 1 skipped / 2 原有 warnings；随后串行 Golden
+4 PASS，2943 份历史文件、原 ruler 和 registry 未变。未修改判据或覆盖旧失败。
+
+## 18. 修复计划获批执行：源码完全未改，生成阶段拒绝
+
+2026-10-16，用户明确批准计划 `c507d78d6545` 的 17906-byte 新载荷、失败模型源码/
+数值反馈外发与远端同 UID 隔离限制。真实目录为
+`output/workload_codegen_h20/workload-codegen-_conj61k/`。只调用一次模型，返回合法
+JSON 与 955-byte 源码，但该源码与父候选逐字节一致；固定守卫
+`repair_unchanged_source` 拒绝，结果 `generation_failed`、accepted=false、exit=1。
+
+模型声称采用了更稳定的两阶段计算，但原代码本就先求均值再求中心化方差，实际
+未改掉 padding 参与方差的问题。rationale 不作为正确性或源码改动证明。
+Verifier、compile、数值验证、suite、主测、确认和原生心跳均为 0，无入库；实际
+18 commands / 4 gpu_info RPC，准备 7 阶段/15 回执通过，owned 清理确认。
+
+正向 generation audit 保持 completed=false；另行只读核对原始响应、精确源码/
+父血缘、预算、usage、claim 和清理，未恢复资格。3208 份历史文件、原 ruler 与
+registry 未变，生产源码未改，不回填旧测试成绩，无重试或 commit/push。
+计划与父修复 claim 均消费，不能给同一父候选换计划重试。详见
+[真实修复执行记录](bounded-numerical-repair.md#5-获批真实执行模型原样返回失败源码修复守卫拒绝)。
+
+## 19. 随后离线实现：带源码证据的诊断，不再直接重试模型
+
+新增真实响应 fixture、AST 伪修复检查与 Repair Diagnoser：保守绑定 masked load、
+均值、中心化、未屏蔽平方和及归一化输出的直线 def-use 链。诊断附源码位置、独立
+三个标量的数学反例和修复要求，unsupported 返回 unknown，不授予任何资格。
+
+显式 repair v2 上下文增加诊断/hash 血缘，默认普通生成与 v1 声明不自动加字段。
+离线 preview 不支持 execute，不访问模型、SSH、GPU、输入物化或 claim；当前已
+耗尽的父修复额度保持不变，没有新可执行计划。详情见[离线 Repair Diagnoser](repair-diagnoser.md)。
+
+新增 49 项离线回归；专项 379 passed，全量 4163 passed / 1 skipped / 2 原有
+warnings，随后串行 Golden 4 PASS。3439 份历史文件、原 ruler、registry、已消费
+claim 均不变；本阶段真实模型/SSH/GPU 派发为 0，无 commit/push。
+
+### 后续离线：预览证据可只读重算，不产生验收资格
+
+新增 preview audit，重建并核对 frozen inputs → diagnosis/source spans → generation
+context 的绑定。v2 预览有只读文件清单/hash 和生产者源码快照，v1 不伪造缺失的
+快照证明；两种格式的历史/新预览都已只读复核。completed 仅表示内部一致，不
+代表源程序曾执行或已被人批准，报告不授予候选资格，不重置已消费的 claim。
+本阶段仅离线实现/验证，未产生新模型/GPU 请求或真机执行计划。
+
+专项 422 passed，全量 4206 passed / 1 skipped / 2 原有 warnings，随后串行
+Golden 4 PASS；新增 43 项离线回归，3511 份历史文件与原 ruler/registry/claim
+未变，生产 protocol 未改。本阶段未 commit/push。

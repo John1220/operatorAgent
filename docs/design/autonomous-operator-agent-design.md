@@ -923,6 +923,11 @@ Candidate = SourceCandidate | TemplateCandidate
    不许靠 `hasattr` 嗅探"有没有这个方法"。
 4. **便宜代理剪枝与 L1 资源预检共用同一个估算器与同一个真源**，否则"证据"与"预检"是两套算法。
 
+   S3 落地边界：逻辑 tile、任务 dtype、累加器和 num_stages 不足以证明共享存储。
+   拒绝、剪枝和硬限制归因共用 `assess_shared_memory`；只有 harness 提供且身份/作用域
+   匹配的显式 shared layout 或原生资源回执可产生物理字节结论，否则保持 unknown。
+   `feasible=True` 只表示预检未拒绝，不能代替原生编译/launch、正确性或占用率证据。
+
 ---
 
 ## 13. Stage 1 接口草案

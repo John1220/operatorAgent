@@ -245,3 +245,106 @@ Golden 4 PASS。671 个历史文件、原 ruler/Golden registry 不变；没有 
 仅确认失败证据一致，不是正向验收通过；825 个历史文件、原 ruler 和 registry 不变。
 下一步先离线补强 masked reduction 与布局语义，不改写当前失败候选或续用 claim。
 详情见[主输入正确性失败记录](single-candidate-codegen-h20-acceptance.md#12-新计划真实执行编译通过主输入数值验证失败)。
+
+### 后续离线补强：masked reduction 与 stride 语义
+
+生成提示明确：padding 必须在中心化等变换后仍对归约贡献单位元；归一化使用逻辑
+长度；运行时输入/输出分别读取以元素为单位的 stride，序列化 NumPy metadata
+中的 stride 则以字节为单位。LayerNorm sketch 同时明确末轴总体方差、冻结 epsilon、
+非零常量/近常量行和连续/strided 布局要求。模型仍生成原文源码，数值正确性继续由
+原参考与 suite 验证。
+
+新增 32 项离线回归，包含请求冻结/drift、错误 padding/连续地址 CPU 反例及通过
+对照；上一轮失败源码作为逐字文本保留，仍能通过静态门，不冒充数值正确。CPU
+反例采用显式 NumPy 参考，不替代 native CUDA 参考或证明新模型会通过验收。
+最终全量 4034 passed / 1 skipped / 2 原有 warnings，随后串行 Golden 4 PASS。
+1033 个历史文件、原 ruler 和 registry 不变；没有 commit/push。全量初轮发现并
+修正文档中的本机绝对路径示例，保留失败日志，仓库卫生扫描规则保持原样。
+
+该离线阶段结束时，新计划 `169b9d0bfb9e` 冻结 85 份源码和 13181-byte 请求，
+当时未批准/未执行，真实模型请求和 SSH/GPU 派发均为 0。参考、suite、容差、workload、预算与原 ruler
+不变；protocol 更新为 `910115a969881d1f5c0d7719c8599d5dde9ea7829f5a4bcdff90f7ebfc222f40`。
+详情见[离线语义补强](single-candidate-codegen-h20-acceptance.md#13-离线补强masked-reduction-与输入输出-stride-语义)。
+
+### 后续真实执行：包装入口扩展了必填参数，静态预筛拒绝
+
+2026-10-15，用户明确批准计划 `169b9d0bfb9e` 的具体外发与执行边界后，真实目录
+`output/workload_codegen_h20/workload-codegen-n_jl29gn/` 完成七阶段准备，发送一次
+13181-byte 请求。模型返回 924-byte 源码，但包装入口要求 `X、Y、N、eps` 和四个
+stride 全部由调用方传入；冻结输入只有 `X`，因此固定接口守卫以
+`kernel_interface_refused` 拒绝，结果为 `generation_failed`、accepted=false。
+
+本轮 18 commands / 4 元数据 RPC，Verifier、编译、数值验证、suite、主测/确认/
+心跳窗口均为 0，owned 清理已确认。源码仍保留未排除 padding 的方差归约，这是
+静态观察，未产生新的数值结果。失败证据与 1187 个历史文件审计前后均不变；
+没有重试、修复、入库或 commit/push。
+
+下一步先离线明确实际调用签名、包装入口中的输出分配/形状/stride/常量职责及返回
+约定；不扩展调用方输入，不改写已失败源码后重测。详情见
+[接口预筛失败记录](single-candidate-codegen-h20-acceptance.md#14-新计划获批执行包装入口接口不匹配预筛拒绝)。
+
+### 后续离线补强：冻结 wrapper 调用签名、职责和返回约定
+
+生成 context 新增 caller-derived `calling_convention`：LayerNorm 明确为只接收 X、
+按 keyword 调用并返回输出 tensor；输出分配、形状/归约长度、输入/输出 stride
+和冻结语义常量由 wrapper 内部处理。生产 coder 与 plan-only 驱动共用同一构造器；
+新字段进入请求/hash，冻结检查和正向审计会从 metadata 重建校验。
+
+本单候选模式额外拒绝可选但未声明的参数、variadic/positional-only 参数，仍允许
+兼容 keyword 的显式参数；新增 `kernel_return_missing` 固定原因，仅检查 wrapper
+本身有带值 return，不将其视为 tensor 类型、所有路径或数值正确的证明。
+新增 45 项离线回归，最新失败源码以 924-byte 原文文本保留，不改写或执行候选。
+最终专项 295 passed，全量 4079 passed / 1 skipped / 2 原有 warnings，随后串行
+Golden 4 PASS；1314 个历史文件、原 ruler 和 registry 不变，没有 commit/push。
+
+该离线阶段结束时，新计划 `c601e21ad167` 仅本地冻结，85 份源码、14570-byte 请求，
+当时未批准/执行。
+参考、suite、容差、sketch、workload、预算和原 ruler 保持一致；本阶段真实请求/
+远端派发均为 0。详情见[结构化包装调用约定](single-candidate-codegen-h20-acceptance.md#15-离线补强结构化包装入口调用与返回约定)。
+
+### 后续真实执行：包装接口通过，数值门再次拒绝 padding 方差错误
+
+2026-10-15，用户明确批准计划 `c601e21ad167` 后，只发送一次 14570-byte 请求，
+真实目录为 `output/workload_codegen_h20/workload-codegen-mn841e1w/`。模型源码这次
+遵守 `kernel(X)`、内部输出分配、实际 input/output stride 查询和返回约定，静态
+预筛与 H20 编译通过。但中心化后的 padding 仍被计入方差，第二个主输入
+`(8192,12288)` 全部元素超差，最大绝对误差 0.04296875、匹配比例 0，结果为
+`correctness_failed`、accepted=false。
+
+第一主输入通过；32 个 suite case 均 not_run，候选主测/确认窗口为 0。实际为
+18 commands / 12 RPC，含 1 个原生校准心跳、1 次编译和 2 次数值验证。清理已确认，
+model/raw/durable 只读审计完成且保持失败事实，1465 个历史文件未变；无修复、
+重试、入库或 commit/push。
+
+下一步建议转向一次有界数值修复：把冻结失败源码与结构化验证反馈作为显式输入，
+约束修复次数、血缘与原验证门，再声明新计划；本轮没有追加修复请求。详情见
+[包装接口通过后的数值失败记录](single-candidate-codegen-h20-acceptance.md#16-新计划获批执行包装接口通过padding-方差错误再次被数值门拦住)。
+
+### 后续离线实现：显式的一次数值反馈修复
+
+已新增独立的 `single-candidate-repair-v1` 模式：冻结父源码和白名单数值反馈，
+新 caller `SingleCandidateRepair` 只调用一次，仍只生成一份候选。父证据只读核对、
+父身份单次 claim、防修复链、精确源码血缘及重新过原验证门已接入；普通模式仍
+为 repair=0，不会在失败后自动追加请求。新载荷须新批准，不续用已消费的旧计划。
+
+目前只完成本地实现、离线验证和新计划冻结，没有发送请求或派发 GPU，也没有
+候选修复成功的结论。范围、证据投影、额度与计划见[一次有界数值修复](bounded-numerical-repair.md)。
+
+### 后续真实执行：模型未改源码，修复生成失败
+
+2026-10-16，用户明确批准独立修复计划 `c507d78d6545` 后，只发送一次冻结请求。
+模型返回的 955-byte 源码与失败父候选完全相同，尽管 rationale 声称进行了两阶段
+数值修复。`repair_unchanged_source` 守卫在 Verifier 前拒绝，状态
+`generation_failed`，没有候选 compile/verify/suite/性能/确认或入库。
+
+准备与清理均已确认，实际 18 commands / 4 gpu_info RPC；两个 claim 均已消费，
+没有退款、重试、机械改写或第二份候选。只读失败审计确认响应、源码/血缘与预算
+一致，但不授予正向生成资格。3208 份历史文件、原 ruler 与 registry 未变，生产
+源码未改，无 commit/push。详情见[修复执行记录](bounded-numerical-repair.md#5-获批真实执行模型原样返回失败源码修复守卫拒绝)。
+
+### 随后离线补强：证据驱动诊断与 AST 伪修复拒绝
+
+新增真实响应回放、源码位置/代数反例绑定的 Repair Diagnoser，以及格式/注释不算
+修复的 AST 守卫。诊断为保守 hypothesis，unknown 不通过，AST 改动也不替代 fresh
+验证；不执行或改写候选，不追加真实请求。显式 v2 接线与只能离线的 preview 不
+重置旧 claim、不给旧批准扩容，也没有新真机计划。见[修复诊断层](repair-diagnoser.md)。
