@@ -2,7 +2,9 @@
 
 状态：**进行中；当前研究范围为原生 DSH vs 仅经插件发布接口接入的 DSH。A/C 六格批次部分执行后因验证器传输 unknown 停止**。设计见[两组插件接入方案](../design/s5-plugin-only-comparison-20261029.md)，旧三组 30 次方向性运行及九格预检原样保留，不转记为新两组结果。用户要求完成 S5 后再继续 S6；此前 Q1 单独对照维持暂停，不因本次研究范围调整恢复。
 
-最新补充：独立 C-only 三任务诊断已全部通过最终 L2（20 次模型调用、约 16 分钟）；三格实际均走公共检查入口，插件验证工具的真实模型使用仍待验收。详见 [C-only 结果](dsh-operator-s5-plugin-c-diagnostic-20261029.md)。
+最新收尾计划：[S5 最小完成计划](../design/s5-minimum-completion-plan-20261029.md)已整理。复用当前功能证据，按 P1 驱动/共同判定、P2 正式门槛、P3 固定 24 格、P4 重算报告收尾；未启动新批次，不以测出正增益为完成条件。
+
+最新功能证据：独立 C-only 三任务最终 L2 全通过；之后的[真实插件入口验收](dsh-operator-s5-plugin-entry-acceptance-20261029.md)已观测到实际 operator_verify；[失败反馈与修复验收](dsh-operator-s5-plugin-repair-acceptance-20261029.md)也已完成，最终源码提取修正后单独追加 GPU 终评通过、原始首跑失败保留。上述结果均不补齐历史 A/C 批次，也不授予正式 S5 credit。正式隔离条件和重复贡献对照仍待完成。
 
 ## 已有材料
 
