@@ -2,7 +2,8 @@
 
 Execution requires a separately authorized, exact prepared plan and its hash.
 Preparing a plan is not authorization. No HTTP/SSH/input allocation by default;
-no repair, template, resume, install, retries or timing-window selection.
+no implicit repair, template, resume, install, retries or timing-window selection.
+An explicit --repair-parent-run prepares a separate, once-per-parent repair plan.
 The remote runner is same-UID, NOT a hostile-code/VRAM/network sandbox.
 """
 from __future__ import annotations
@@ -22,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from benchmarks import workload_decision_h20 as wd
+from benchmarks import _numerical_repair as nr
 from benchmarks._preparation import PreparationJournal, POLICY as PREPARATION_POLICY, gpu_snapshot
 from benchmarks.input_fidelity_h20 import gpu_evidence
 from operator_agent import Conductor, KernelDatabase
@@ -37,14 +39,15 @@ from operator_agent.run_contract import (atomic_json, audit_value, code_hash, di
 from operator_agent.schemas import UnifiedSketch, VerificationLevel as Level
 from operator_agent.search_objective import reading, results_dict
 from operator_agent.single_candidate_coder import (PROMPT, SingleCandidateCoder,
-    SingleCandidatePolicy, audit_generation, generation_failure)
+    SingleCandidatePolicy, audit_generation, generation_failure, wrapper_calling_convention,
+    generation_declaration as describe_generation, generation_mode)
 
 LIMITS = LLMCallLimits(max_calls=1, max_output_tokens=4096, total_output_token_reservations=4096)
 POLICY = SingleCandidatePolicy()
 
 
 def parser():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     p.add_argument('--execute', action='store_true')
     p.add_argument('--approved-plan', help='prepared plan path; never an implicit approval')
     p.add_argument('--plan-hash', help='exact hash separately authorized by the human')
@@ -53,6 +56,7 @@ def parser():
     p.add_argument('--cuda-ruler-profile')
     p.add_argument('--model-url', help='explicit single endpoint, no credentials in URL')
     p.add_argument('--model', help='exact requested/reported model identity')
+    p.add_argument('--repair-parent-run', help='original L1-pass/primary-L2-fail run; separate approval required')
     p.add_argument('--output', default=str(ROOT / 'output' / 'workload_codegen_h20'))
     p.set_defaults(cuda_calibration=None)
     return p
@@ -82,30 +86,41 @@ def model_identity(args):
 def sketch():
     # Trusted semantic hint ONLY: no template source or model-chosen launch plan.
     return UnifiedSketch(algorithm='layernorm', target_dsl='triton',
-        optimization_hints=['Frozen native LayerNorm reference; FP32 accumulation; preserve input layout semantics.'])
+        optimization_hints=[
+            'Frozen native LayerNorm reference; FP32 accumulation; preserve input layout semantics.',
+            'Normalize each logical row along the last axis, using population variance over '
+            'the logical column count and the frozen reference epsilon; preserve the declared output dtype.',
+            'Exclude padded lanes from both the mean and centered-square variance reductions, '
+            'including after subtracting the mean; cover nonzero constant and near-constant rows.',
+            'Use actual input row/column strides and independent output strides in element units; '
+            'support the declared contiguous and strided layouts even when primary inputs are contiguous.',
+        ])
 
 
 def sources():
     result = wd.evaluator_sources()
     result['benchmarks/workload_codegen_h20.py'] = code_hash(Path(__file__).read_text())
     result['benchmarks/_preparation.py'] = code_hash((ROOT/'benchmarks/_preparation.py').read_text())
+    result['benchmarks/_numerical_repair.py'] = code_hash((ROOT/'benchmarks/_numerical_repair.py').read_text())
     return result
 
 
-def generation_declaration(task):
+def generation_declaration(task, repair=None, diagnosis=None):
     # Pure description: do not allocate 432 MiB, fake arrays or contact a model.
+    metadata = [{'X': dict(shape=list(s), dtype='float16', strides=[s[1]*2, 2])} for s in wd.LARGE]
     context = json_value(dict(task_id=task.task_id, hardware=task.target.hardware,
         dsl=task.target.dsl, contract=freeze_from_task(task).as_dict(),
         reference_source=task.source.reference_source, sketch=sketch().to_dict(),
-        input_metadata=[{'X': dict(shape=list(s), dtype='float16', strides=[s[1]*2, 2])} for s in wd.LARGE]))
-    return json_value(dict(schema='single-candidate-coder-v1', context=context,
-        context_hash=digest(context), policy=asdict(POLICY), prompt=PROMPT,
-        prompt_hash=code_hash(PROMPT), max_candidates=1, repairs=0, planner=False,
-        parallel_samples=False, template_fallback=False, mechanical_rewrite=False, source_author='model'))
+        input_metadata=metadata, calling_convention=wrapper_calling_convention(metadata)))
+    if repair is not None:
+        context['repair'] = copy.deepcopy(repair)
+    if diagnosis is not None:
+        context['repair_diagnosis'] = copy.deepcopy(diagnosis)
+    return describe_generation(context, POLICY)
 
 
 def request_body(generation, identity):
-    return dict(model=identity['model'], messages=[dict(role='system', content=PROMPT),
+    return dict(model=identity['model'], messages=[dict(role='system', content=generation['prompt']),
         dict(role='user', content=json.dumps(generation['context'], ensure_ascii=False))],
         temperature=.1, max_tokens=4096, stream=False, chat_template_kwargs={'enable_thinking': False})
 
@@ -115,18 +130,28 @@ def declaration(args):
     task.constraints.min_speedup = 10.  # Frozen wiring target, NOT a deployment promise.
     profile, calibration = wd.ruler(args)
     identity = model_identity(args)
-    gen = generation_declaration(task)
+    repair, parent = (nr.load_parent(args.repair_parent_run, task)
+                      if getattr(args, 'repair_parent_run', None) else (None, None))
+    if parent: nr.require_available(parent)
+    gen = generation_declaration(task, repair)
+    limits = LLMCallLimits(**dict(asdict(LIMITS), allowed_callers=(generation_mode(gen['context'])[2],)))
     body = dict(schema='workload-single-codegen-h20-v1', contract=gen['context']['contract'],
         supplied_cases=list(task.constraints.required_cases), generation=gen, model=identity,
-        model_limits=json_value(asdict(LIMITS)), measurement_protocol=protocol_identity(),
+        model_limits=json_value(asdict(limits)), measurement_protocol=protocol_identity(),
         preparation_policy=json_value(PREPARATION_POLICY),
         evaluator_sources=sources(),
+        budget_accounting=dict(unit='candidate_verification_dispatch_per_input_group',
+            reservation_policy='pre_dispatch_non_refundable',
+            calibration_policy='observe_only_may_exceed_total',
+            fixed_dispatch_sequence_unchanged=True),
         controls=dict(host=args.host, gpu=args.gpu, max_rounds=1, heartbeat_interval=1,
             cuda_ruler_profile=profile, cuda_calibration=calibration,
             wall_clock_s=1800, rpc_timeout=wd.RPC_TIMEOUT, max_rpcs=wd.MAX_RPCS,
             max_commands=wd.MAX_COMMANDS, cleanup_seconds=wd.CLEANUP_SECONDS,
             max_main_windows=2, max_confirmation_windows=2,
-            budget=dict(oracle_total=4, wall_clock_s=1800, llm_tokens=40000),
+            # Existing 10% split needs total=20 to reserve two input groups for
+            # confirmation. Model, candidate, window and RPC caps stay fixed.
+            budget=dict(oracle_total=20, wall_clock_s=1800, llm_tokens=40000),
             warmup=inspect.signature(wd.ProfileSSH.benchmark_with_baselines).parameters['warmup'].default,
             repeat=inspect.signature(wd.ProfileSSH.benchmark_with_baselines).parameters['repeat'].default,
             baseline_priority=['pytorch_eager']),
@@ -139,8 +164,12 @@ def declaration(args):
             static_precheck='conservative pruning, not isolation', installs=False),
         disclosure=dict(tensor_values=False, scalar_values=False, repository_files=False,
             credentials_in_body=False, template_source=False, previous_campaign_feedback=False,
-            content='exact frozen contract/registered reference, trusted sketch and input metadata only'),
+            content='exact frozen contract/registered reference, trusted sketch, caller-derived wrapper calling convention and input metadata only'),
         performance_scope='one model-authored source on two declared cases; not all-shape H20 acceptance')
+    if parent:
+        body['repair_parent'] = parent
+        body['disclosure'].update(previous_campaign_feedback=True, failed_model_source=True,
+            content='frozen generation context plus exact failed model source, parent identity hashes and allowlisted numerical feedback; no raw logs, output samples or templates')
     if identity:
         req = request_body(gen, identity)
         raw = json.dumps(req, ensure_ascii=False, allow_nan=False)
@@ -163,8 +192,15 @@ def check_plan(path, plan, task, *, frozen_sources=False):
             or sources() != plan['evaluator_sources']
             or protocol_identity() != plan['measurement_protocol']
             or json_value(freeze_from_task(task).as_dict()) != plan['contract']
-            or generation_declaration(task) != plan['generation']):
+            or generation_declaration(task, plan['generation']['context'].get('repair')) != plan['generation']):
         raise ValueError('frozen codegen plan/context/evaluator drift')
+    parent = plan.get('repair_parent')
+    if parent:
+        if digest(plan['generation']['context']['repair']['parent']) != parent['identity_hash']:
+            raise ValueError('repair parent identity drift')
+        nr.check_files(parent['root'], parent['files'])
+        if frozen_sources:
+            nr.check_files(Path(path).parent/'frozen-parent', parent['files'])
     if frozen_sources:
         for name, expected in plan['evaluator_sources'].items():
             p = Path(path).parent / 'frozen-sources' / name
@@ -185,6 +221,16 @@ def freeze(root, plan):
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open('xb') as f:
             f.write(data); f.flush(); os.fsync(f.fileno()); os.fchmod(f.fileno(), 0o444)
+    if plan.get('repair_parent'):
+        parent = plan['repair_parent']
+        nr.check_files(parent['root'], parent['files'])
+        for name, expected in parent['files'].items():
+            data = nr.safe_bytes(parent['root'], name)
+            if code_hash(data.decode()) != expected: raise ValueError('parent changed during freeze')
+            p = root/'frozen-parent'/name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with p.open('xb') as f:
+                f.write(data); f.flush(); os.fsync(f.fileno()); os.fchmod(f.fileno(),0o444)
 
 
 def claim_execution(path, root, plan):
@@ -380,7 +426,7 @@ def audit_model(root, plan):
         response = strict_object(call['response_text']); content = response['choices'][0]['message']['content']
         raw_usage, source = validated_usage(response.get('usage')); norm = parse_usage(raw_usage)
         tracker = CostTracker()
-        tracker.record(model=identity['model'], caller_tag='SingleCandidateCoder', usage_source=source,
+        tracker.record(model=identity['model'], caller_tag=generation_mode(decl['context'])[2], usage_source=source,
             prompt_tokens=norm['prompt_tokens'] if source == 'api_usage' else _estimate_tokens_from_text(json.dumps(call['request'], ensure_ascii=False, allow_nan=False)),
             completion_tokens=norm['completion_tokens'] if source == 'api_usage' else _estimate_tokens_from_text(content),
             cached_prompt_tokens=norm['cached_prompt_tokens'], cache_semantics=norm['cache_semantics'],
@@ -611,7 +657,10 @@ def run(args):
     parent = Path(args.output); parent.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix='workload-codegen-', dir=parent))
     freeze(root, plan)
-    guard = lambda: check_plan(root/'plan.json', plan, task, frozen_sources=True)
+    def guard():
+        check_plan(root/'plan.json', plan, task, frozen_sources=True)
+        if args.execute and plan.get('repair_parent'):
+            nr.check_claim(plan['repair_parent'], plan['hash'], root)
     summary = dict(completed=False, accepted=False, deployment_accepted=False, status='plan_only',
         mode='execute' if args.execute else 'plan-only', run_root=str(root), plan_hash=plan['hash'],
         errors=[], cleanup=None, model_attempts=0, verifier_dispatches=0, performance_scope=plan['performance_scope'])
@@ -623,10 +672,13 @@ def run(args):
     previous = {k:os.environ.get(k) for k in ('OPERATOR_AGENT_LOG_DIR','OPERATOR_AGENT_LOG_KEEP')}
     try:
         claim_execution(args.approved_plan, root, plan)
+        if plan.get('repair_parent'):
+            nr.claim(plan['repair_parent'], plan['hash'], root)
         os.environ.update(OPERATOR_AGENT_LOG_DIR=str(root/'logs'), OPERATOR_AGENT_LOG_KEEP='10000')
         client = PlanLLMClient(base_url=args.model_url, model=args.model, api_key=os.environ.get('LLM_API_KEY',''),
             temperature=.1, max_tokens=4096, timeout=60, enable_thinking=False,
-            call_budget=LLMCallBudget(LIMITS, root/'model-journal'))
+            call_budget=LLMCallBudget(LLMCallLimits(**dict(plan['model_limits'],
+                allowed_callers=tuple(plan['model_limits']['allowed_callers']))), root/'model-journal'))
         client.plan_guard = guard; client.frozen_plan = plan
         if client.call_budget.summary()['identity'] != plan['model']: raise ValueError('model identity drift')
         def candidate_guard(code):
@@ -645,7 +697,8 @@ def run(args):
         guard()
         xs = [wd.primary(s) for s in wd.LARGE]
         if [case_key(x) for x in xs] != plan['supplied_cases']: raise ValueError('actual workload drift')
-        coder = SingleCandidateCoder(client, task, sketch(), xs, POLICY)
+        coder = SingleCandidateCoder(client, task, sketch(), xs, POLICY,
+            repair=plan['generation']['context'].get('repair'))
         if coder.declaration() != plan['generation']: raise ValueError('actual metadata/generation context drift')
         c = Conductor(backend=backend, llm=client, single_candidate_coder=coder,
             kernel_db=KernelDatabase(str(corpus), persist_retrievals=False),

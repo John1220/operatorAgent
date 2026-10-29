@@ -57,10 +57,16 @@ def declaration(args):
         candidates=[dict(c,hash=code_hash(c['source'])) for c in cs],
         supplied_cases=['X=8192x15360','X=8192x12288'],
         measurement_protocol=protocol_identity(),evaluator_sources=sources,
-        controls=dict(host=args.host,gpu=args.gpu,max_rounds=3,oracle_total=5,heartbeat_interval=1,
+        budget_accounting=dict(unit='candidate_verification_dispatch_per_input_group',
+            reservation_policy='pre_dispatch_non_refundable',
+            calibration_policy='observe_only_may_exceed_total',
+            fixed_dispatch_sequence_unchanged=True),
+        controls=dict(host=args.host,gpu=args.gpu,max_rounds=3,oracle_total=7,heartbeat_interval=1,
             wall_clock_s=1800,max_rpcs=wd.MAX_RPCS,max_commands=wd.MAX_COMMANDS,
             rpc_timeout=wd.RPC_TIMEOUT,cuda_ruler_profile=profile,cuda_calibration=calibration,
-            budget=dict(oracle_total=5,wall_clock_s=1800,llm_tokens=128)),
+            # Two dispatches × two groups + two heartbeat batches = six;
+            # one confirm allowance remains protected. No extra candidate/RPC.
+            budget=dict(oracle_total=7,wall_clock_s=1800,llm_tokens=128)),
         input_storage_limit=wd.MAX_STORAGE_BYTES,
         retry_windows=False,adaptive=False,performance_scope='fixed-candidate search wiring only')
     return t,json_value(dict(body,hash=digest(body)))

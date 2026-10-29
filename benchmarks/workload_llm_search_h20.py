@@ -78,10 +78,14 @@ def declaration(args, identity=None):
         proposal_policy=dict(allowed_num_warps=list(WARPS), max_candidates=2, max_repairs=0,
             source_author='trusted_template', template_hash=code_hash(wd.trial_code('unfused-fp32')),
             prompt=PROMPT, prompt_hash=code_hash(PROMPT), duplicate_candidates=False),
+        budget_accounting=dict(unit='candidate_verification_dispatch_per_input_group',
+            reservation_policy='pre_dispatch_non_refundable',
+            calibration_policy='observe_only_may_exceed_total',
+            fixed_dispatch_sequence_unchanged=True),
         controls=dict(host=args.host,gpu=args.gpu,max_rounds=3,heartbeat_interval=1,
             wall_clock_s=1800,max_rpcs=wd.MAX_RPCS,max_commands=wd.MAX_COMMANDS,
             rpc_timeout=wd.RPC_TIMEOUT,cuda_ruler_profile=profile,cuda_calibration=calibration,
-            budget=dict(oracle_total=5,wall_clock_s=1800,llm_tokens=40000)),
+            budget=dict(oracle_total=7,wall_clock_s=1800,llm_tokens=40000)),
         input_storage_limit=wd.MAX_STORAGE_BYTES, retry_windows=False,
         performance_scope='real constrained LLM proposals, not free-form generation or deployment acceptance')
     return task, json_value(dict(body, hash=digest(body)))
