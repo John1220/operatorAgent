@@ -17,11 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from operator_agent.candidates import (
     ParamSpace, SourceCandidate, TemplateCandidate, as_lineage, dedup_key,
     is_template, param_space_of, prune_by_smem, require_supported_space,
-    smem_ok, source_candidate, space_origin, tile_smem_bytes,
+    smem_ok, source_candidate, space_origin, template_resource_binding, tile_smem_bytes,
 )
 from operator_agent.backend_caps import Backend
 from operator_agent.mock_gpu import MockGPU
-from operator_agent.resource_check import SMEM_SLACK, smem_limit_bytes
+from operator_agent.resource_check import SMEM_SLACK, SharedMemoryEvidence, smem_limit_bytes
 
 
 @dataclass
@@ -34,6 +34,17 @@ class _NoSmemCaps:
     """没有 smem 这个字段的设备描述 —— 「不知道」必须与「0」分开"""
 
     launch_floor_us: float = 3.0
+
+
+def _native_receipts(*point_bytes):
+    """Synthetic compiler receipts supplied by the harness, never inferred from tiling."""
+    receipts = {}
+    for point, byte_count in point_bytes:
+        binding = template_resource_binding(point)
+        receipts[binding] = SharedMemoryEvidence(
+            binding=binding, kind="native_compiler", producer="candidate-test-harness-v1",
+            native_bytes=byte_count)
+    return receipts
 
 
 _KERNEL_A = '''import triton
@@ -186,21 +197,28 @@ class TestProxyPrune(unittest.TestCase):
                          tile_smem_bytes(64, 64, 32, 4))
         self.assertIsNone(tile_smem_bytes(0, 64, 32, 4), "缺一维 ⇒ 不知道, 不是 0")
 
-    def test_nothing_is_dropped_when_it_fits(self):
+    def test_unknown_resources_are_retained_without_claiming_fit(self):
         res = prune_by_smem(self._points((64, 64, 32)), _Caps())
         self.assertEqual(1, len(res.kept))
         self.assertEqual([], res.dropped)
         self.assertFalse(res.no_limit)
-        #: 「没摘」不再必然等于「没有可报的事」: 估算是**下界**时, 这句提示必须出来
-        #: (否则读者会把「没摘」读成「放得下」)。CHECKLOG I66。
-        self.assertIn("下界", res.as_note())
+        self.assertEqual(1, res.resource_unknown)
+        self.assertEqual("unknown", res.resource_reports[0]["assessment"])
+        self.assertIsNone(res.resource_reports[0]["estimated_smem_bytes"])
+        self.assertIn("未知", res.as_note())
+        self.assertNotIn("下界", res.as_note(), "逻辑 tile 不证明物理 shared 的下界")
 
     def test_the_oversized_point_is_named_and_dropped(self):
-        res = prune_by_smem(self._points((64, 64, 32), (512, 512, 128)), _Caps(64))
+        small, big = self._points((64, 64, 32), (512, 512, 128))
+        res = prune_by_smem([small, big], _Caps(64),
+                            resource_evidence=_native_receipts((small, 32 * 1024),
+                                                               (big, 512 * 1024)))
         self.assertEqual([(64, 64, 32)], [(c.params["BLOCK_M"], c.params["BLOCK_N"],
                                            c.params["BLOCK_K"]) for c in res.kept])
         self.assertEqual(1, len(res.dropped))
+        self.assertEqual(0, res.resource_unknown)
         self.assertIn("512x512x128", res.as_note())
+        self.assertEqual("native_compiler", res.resource_reports[1]["evidence_kind"])
 
     def test_the_slack_is_shared_with_the_l1_precheck(self):
         """宽松系数只有**一处**: 剪枝与 L1 预检用的是同一个对象, 不是两个 1.2
@@ -210,7 +228,7 @@ class TestProxyPrune(unittest.TestCase):
         """
         import operator_agent.resource_check as rc
         self.assertIs(SMEM_SLACK, rc.SMEM_SLACK, "两个 1.2 会漂成两套阈值")
-        est = tile_smem_bytes(64, 64, 32, 4)     # 32768 B
+        est = 32768  # Explicit physical bytes, not a source tile proxy.
         self.assertTrue(smem_ok(est, _Caps(30)), "留出余量 ⇒ 放行 (交给远端判定)")
         self.assertFalse(smem_ok(est, _Caps(26)), "明显放不下 ⇒ 摘")
         # ⚠️ 剪枝那条路**也要**钉这个边界, 否则「两处共用一个系数」只是句口号:
@@ -220,12 +238,19 @@ class TestProxyPrune(unittest.TestCase):
                                   {"BLOCK_M": 32, "BLOCK_N": 32, "BLOCK_K": 16})
         edge = TemplateCandidate("t", "tiling",
                                  {"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32})
-        res = prune_by_smem([small, edge], _Caps(28))
+        receipts = _native_receipts((small, 8 * 1024), (edge, est))
+        res = prune_by_smem([small, edge], _Caps(28), resource_evidence=receipts)
         self.assertEqual(2, len(res.kept),
                           "1.0~1.2 之间: 剪枝必须与预检用同一条宽松边界")
-        res2 = prune_by_smem([small, edge], _Caps(26))
+        res2 = prune_by_smem([small, edge], _Caps(26), resource_evidence=receipts)
         self.assertEqual(1, len(res2.kept), "明显放不下 ⇒ 摘; 小点留着 ⇒ 不饿死这一轮")
         self.assertIn("64x64x32", res2.as_note())
+        # Preserve the fractional-KB, exact-byte boundary on the pruning path too.
+        exact = _native_receipts((small, 256), (edge, 1536))
+        self.assertEqual(2, len(prune_by_smem(
+            [small, edge], _Caps(1300 / 1024), resource_evidence=exact).kept))
+        self.assertEqual(1, len(prune_by_smem(
+            [small, edge], _Caps(1200 / 1024), resource_evidence=exact).kept))
 
     def test_missing_limit_is_a_third_state_not_a_pass(self):
         res = prune_by_smem(self._points((256, 256, 128)), _NoSmemCaps())
@@ -238,9 +263,12 @@ class TestProxyPrune(unittest.TestCase):
     def test_pruning_never_starves_the_round(self):
         """全被摘光 ⇒ 一个都不摘 (剪枝是省冤枉钱, 不是让这一轮没得跑)"""
         pts = self._points((256, 256, 128), (512, 512, 128))
-        res = prune_by_smem(pts, _Caps(1))
+        res = prune_by_smem(pts, _Caps(1), resource_evidence=_native_receipts(
+            (pts[0], 256 * 1024), (pts[1], 512 * 1024)))
         self.assertEqual(2, len(res.kept), "全超上界也要留下待远端判定")
         self.assertTrue(res.kept_all_to_avoid_starvation)
+        self.assertEqual(2, len(res.dropped), "回退保留不应丢失已确立的拒绝理由")
+        self.assertEqual(0, res.resource_unknown)
         self.assertIn("全部保留", res.as_note())
 
     def test_unknown_axes_are_not_pruned(self):
@@ -249,6 +277,54 @@ class TestProxyPrune(unittest.TestCase):
         res = prune_by_smem(pts, _Caps(1))
         self.assertEqual(1, len(res.kept))
         self.assertEqual([], res.dropped)
+        self.assertEqual(1, res.resource_unknown)
+
+    def test_large_logical_tiles_are_not_pruned_without_storage_receipts(self):
+        pts = self._points((64, 64, 32), (512, 512, 128))
+        res = prune_by_smem(pts, _Caps(1))
+        self.assertEqual(pts, res.kept)
+        self.assertEqual([], res.dropped)
+        self.assertEqual(2, res.resource_unknown)
+        self.assertFalse(res.kept_all_to_avoid_starvation,
+                         "unknown 保留与全部已拒后回退是两种事实")
+
+    def test_receipts_must_match_backend_template_version_and_every_parameter(self):
+        small = TemplateCandidate("fake", "mm", {"BLOCK_M": 32}, "v1")
+        original = TemplateCandidate("fake", "mm", {"BLOCK_M": 512, "warps": 4}, "v1")
+        original_receipt = _native_receipts((original, 512 * 1024))[template_resource_binding(original)]
+        variants = (
+            TemplateCandidate("other", original.template_id, original.params, "v1"),
+            TemplateCandidate("fake", "other_template", original.params, "v1"),
+            TemplateCandidate("fake", "mm", original.params, "v2"),
+            TemplateCandidate("fake", "mm", {"BLOCK_M": 512, "warps": 8}, "v1"),
+            TemplateCandidate("fake", "mm", {"BLOCK_M": 256, "warps": 4}, "v1"),
+        )
+        for point in variants:
+            with self.subTest(backend=point.backend, template=point.template_id,
+                              version=point.instantiator_ver, params=point.params):
+                binding = template_resource_binding(point)
+                self.assertNotEqual(template_resource_binding(original), binding)
+                receipts = _native_receipts((small, 1024))
+                # Even a mapping entry under the current key cannot bless an old receipt.
+                receipts[binding] = original_receipt
+                res = prune_by_smem([small, point], _Caps(64), resource_evidence=receipts)
+                self.assertEqual([small, point], res.kept)
+                self.assertEqual([], res.dropped)
+                self.assertEqual(1, res.resource_unknown)
+
+    def test_invalid_template_parameters_are_unknown_instead_of_pruning_or_throwing(self):
+        invalid_params = (
+            {"BLOCK_M": float("nan")}, {"BLOCK_M": float("inf")},
+            {"BLOCK_M": {64, 128}}, {"BLOCK_M": object()},
+            {1: "integer-key", "1": "string-key"},
+        )
+        for params in invalid_params:
+            with self.subTest(param_types=[type(value).__name__ for value in params.values()]):
+                point = TemplateCandidate("fake", "mm", params, "v1")
+                res = prune_by_smem([point], _Caps(1))
+                self.assertEqual(1, len(res.kept))
+                self.assertEqual([], res.dropped)
+                self.assertEqual(1, res.resource_unknown)
 
 
 if __name__ == "__main__":

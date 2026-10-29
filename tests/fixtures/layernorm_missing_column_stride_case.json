@@ -1,0 +1,81 @@
+{
+  "schema": "retained-stride-failure-fixture-v1",
+  "provenance": {
+    "kind": "retained_real_H20_L2_observation_projection",
+    "task_id": "layernorm-tail",
+    "date": "2026-10-23",
+    "source_sha256": "1806a7383c48aab0a896f3f18aaa7dd20c63eb6681c710d9c28e0c7a24117a04",
+    "measurements": "Existing verification observation, not executed by these tests.",
+    "redaction": "Connection details, logs, API data, unrelated cases and output digest omitted."
+  },
+  "failed_case": {
+    "case_id": "auto-cols32-rows8-fp32-random-strided",
+    "shape_key": "X=8x32",
+    "pattern": "random",
+    "layout": "strided",
+    "dtypes": {
+      "X": "fp32"
+    },
+    "verdict": "failed",
+    "metrics": {
+      "max_error": 4.74771785736084,
+      "max_rel_error": 403.2054443359375,
+      "matched_ratio": 0.0,
+      "bad_elements": 256,
+      "atol": 1e-05,
+      "rtol": 0.0001,
+      "required_matched_ratio": 1.0,
+      "compared_elements": 256,
+      "coverage": 1.0,
+      "reference_type": "pytorch_eager",
+      "device": "cuda",
+      "reference_nonfinite": 0,
+      "input_fidelity_expected": {
+        "X": {
+          "shape": [
+            8,
+            32
+          ],
+          "dtype": "<f4",
+          "strides": [
+            256,
+            8
+          ],
+          "offset": 0,
+          "storage": 0,
+          "writeable": true,
+          "storage_bytes": 2048,
+          "storage_digest": "061ae5944e621f636c5623945a456883115b45da9d92cc9f302c4e63d6650c9f",
+          "value_digest": "4adca7e9813ade8f2740165e03e9c35e0d0137a197b868ef39344d4c7795deca"
+        }
+      },
+      "input_fidelity_verified": true,
+      "input_fidelity": {
+        "protocol": "numpy-storage-v1",
+        "representation": "torch-storage-v1",
+        "observed": {
+          "X": {
+            "shape": [
+              8,
+              32
+            ],
+            "dtype": "<f4",
+            "strides": [
+              256,
+              8
+            ],
+            "offset": 0,
+            "storage": 0,
+            "writeable": true,
+            "storage_bytes": 2048,
+            "storage_digest": "061ae5944e621f636c5623945a456883115b45da9d92cc9f302c4e63d6650c9f",
+            "value_digest": "4adca7e9813ade8f2740165e03e9c35e0d0137a197b868ef39344d4c7795deca"
+          }
+        },
+        "tensor_devices": {
+          "X": "cuda:0"
+        }
+      }
+    }
+  }
+}

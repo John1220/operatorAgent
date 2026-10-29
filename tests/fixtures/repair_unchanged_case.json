@@ -1,0 +1,936 @@
+{
+  "schema": "offline-real-repair-case-v1",
+  "context": {
+    "task_id": "workload-single-codegen-h20",
+    "hardware": "nvidia_gpu",
+    "dsl": "triton",
+    "contract": {
+      "kernel_type": "layernorm",
+      "dtype_semantics": {
+        "dtype": "fp16",
+        "tf32": false,
+        "accum": "fp32",
+        "allow_reduced_precision": false,
+        "deterministic": true
+      },
+      "baseline": {
+        "name": "pytorch_eager",
+        "same_device": true,
+        "same_window": true,
+        "same_dtype_semantics": true,
+        "source": ""
+      },
+      "shapes": [
+        [
+          [
+            64,
+            64,
+            64
+          ],
+          1.0
+        ]
+      ],
+      "max_error": 1e-05,
+      "min_speedup": 10.0,
+      "target_metric": "speedup_vs_baseline",
+      "required_caps": [
+        "real_device"
+      ],
+      "cases": [
+        {
+          "seed": 0,
+          "tensors": [
+            {
+              "name": "X",
+              "shape": [
+                8192,
+                12288
+              ],
+              "dtype": "fp16"
+            }
+          ]
+        },
+        {
+          "seed": 0,
+          "tensors": [
+            {
+              "name": "X",
+              "shape": [
+                8192,
+                15360
+              ],
+              "dtype": "fp16"
+            }
+          ]
+        }
+      ],
+      "correctness_suite": {
+        "cases": [
+          {
+            "case_id": "auto-cols1-rows8-fp16-random-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "random",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols31-rows8-fp16-random-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    31
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "random",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols32-rows1-fp16-random-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    1,
+                    32
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "random",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols32-rows7-fp16-random-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    7,
+                    32
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "random",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols32-rows8-fp16-constant-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    32
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "constant",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols32-rows8-fp16-large-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    32
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "large",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols32-rows8-fp16-random-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    32
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "random",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols32-rows8-fp16-random-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    32
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "random",
+            "layout": "strided"
+          },
+          {
+            "case_id": "auto-cols32-rows8-fp16-small-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    32
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "small",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols32-rows8-fp16-zeros-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    32
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "zeros",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols32-rows9-fp16-random-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    9,
+                    32
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "random",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "auto-cols33-rows8-fp16-random-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "random",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-constant_nonbinary-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "constant_nonbinary",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-constant_nonbinary-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "constant_nonbinary",
+            "layout": "strided"
+          },
+          {
+            "case_id": "v2-large_varying-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "large_varying",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-large_varying-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "large_varying",
+            "layout": "strided"
+          },
+          {
+            "case_id": "v2-near_constant-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "near_constant",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-near_constant-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "near_constant",
+            "layout": "strided"
+          },
+          {
+            "case_id": "v2-signed_large-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "signed_large",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-signed_large-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "signed_large",
+            "layout": "strided"
+          },
+          {
+            "case_id": "v2-single-column-large-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "large",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-single-column-large-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "large",
+            "layout": "strided"
+          },
+          {
+            "case_id": "v2-single-column-nonbinary-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "constant_nonbinary",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-single-column-nonbinary-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "constant_nonbinary",
+            "layout": "strided"
+          },
+          {
+            "case_id": "v2-single-column-one-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "constant",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-single-column-one-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "constant",
+            "layout": "strided"
+          },
+          {
+            "case_id": "v2-single-column-small-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "small",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-single-column-small-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "small",
+            "layout": "strided"
+          },
+          {
+            "case_id": "v2-single-column-zero-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "zeros",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-single-column-zero-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    1
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "zeros",
+            "layout": "strided"
+          },
+          {
+            "case_id": "v2-small_varying-contiguous",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "small_varying",
+            "layout": "contiguous"
+          },
+          {
+            "case_id": "v2-small_varying-strided",
+            "inputs": {
+              "seed": 17,
+              "tensors": [
+                {
+                  "name": "X",
+                  "shape": [
+                    8,
+                    33
+                  ],
+                  "dtype": "fp16"
+                }
+              ]
+            },
+            "pattern": "small_varying",
+            "layout": "strided"
+          }
+        ],
+        "deterministic": true,
+        "required_checks": [],
+        "coverage_policy": {
+          "recipe_version": "axis-boundary-v1",
+          "axes": [
+            {
+              "name": "cols",
+              "minimum": 1,
+              "maximum": 33,
+              "anchor": 32,
+              "alignment": 32
+            },
+            {
+              "name": "rows",
+              "minimum": 1,
+              "maximum": 9,
+              "anchor": 8,
+              "alignment": 8
+            }
+          ],
+          "tensors": [
+            {
+              "name": "X",
+              "axes": [
+                "rows",
+                "cols"
+              ]
+            }
+          ],
+          "dtypes": [
+            "fp16"
+          ],
+          "patterns": [
+            "constant",
+            "constant_nonbinary",
+            "large",
+            "large_varying",
+            "near_constant",
+            "random",
+            "signed_large",
+            "small",
+            "small_varying",
+            "zeros"
+          ],
+          "layouts": [
+            "contiguous",
+            "strided"
+          ],
+          "seed": 17,
+          "max_cases": 128,
+          "max_input_bytes": 16777216
+        }
+      },
+      "correctness_profile": "builtin-layernorm-fp16-cuda-v2",
+      "reference_contract": {
+        "execution": {
+          "torch_version": "2.14.0+cu130",
+          "torch_git": "08187d9e0fba026dc8217405802ab5381dc88d90",
+          "cuda_runtime": "13.0",
+          "device": "cuda:0",
+          "device_name": "NVIDIA H20",
+          "compute_capability": "9.0",
+          "driver_version": "580.105.08",
+          "torch_config_sha256": "41c1a5f5d2721940d25beeaf04aa6b47f1c0ce25788158609496d0ee2b63fe8e",
+          "functional_sha256": "95ff403085bb179477a01df63acfddf59dfac0fb58829e99a9c8b5c2fe98899b",
+          "layer_norm_callable_sha256": "b1034c3890e9ce8671a772ec9995b79833f1e0d90ffde7e3fdc893abd5ca464f",
+          "primitive_sha256": "a4d7536fab09938c84b18c1390aba0025274cf36fb075a7babd5c5e16e06e5a0",
+          "native_libraries": [
+            [
+              "libtorch_cpu.so",
+              "3b720eed2395ae1903cb6cf56fe3defd5776997c09adf48f3f716cb272c22356"
+            ],
+            [
+              "libtorch_cuda.so",
+              "9ed4b912d08ae0a59c1638e9077b6d8f0439d7bd680e4a1a274441d42dd7b3f9"
+            ],
+            [
+              "libtorch_python.so",
+              "a5dfbc797469f387b004e432e0543e1006e729608ad9a2c8a6e50e4ae98b5b2f"
+            ]
+          ],
+          "deterministic_algorithms": false
+        },
+        "profile": "builtin-layernorm-fp16-cuda-v2",
+        "definition": "native-pytorch-layernorm-last-axis-no-affine-v2",
+        "input_dtype": "fp16",
+        "candidate_accum": "fp32_declared_not_arithmetic_attestation",
+        "output_dtype": "fp16",
+        "reference_accum": "native_implementation_pinned",
+        "epsilon": 1e-05,
+        "normalized_axis": -1,
+        "variance": "population",
+        "affine": false,
+        "fp_fusion": "allowed_subject_to_unchanged_tolerance",
+        "deterministic_outputs": true,
+        "comparison": "fp32_and",
+        "rtol": 0.01,
+        "required_matched_ratio": 1.0
+      },
+      "required_cases": [
+        "X=8192x12288",
+        "X=8192x15360"
+      ],
+      "max_regression": [
+        [
+          "X=8192x12288",
+          0.05
+        ],
+        [
+          "X=8192x15360",
+          0.05
+        ]
+      ],
+      "case_weights": [
+        [
+          "X=8192x12288",
+          1.0
+        ],
+        [
+          "X=8192x15360",
+          1.0
+        ]
+      ],
+      "aggregate": "weighted_geomean",
+      "hash": "407e4e52bdafe1bedc5f9e43f15f2df3b888e1bb8bf8676057a1211324e2d5bf",
+      "notes": ""
+    },
+    "reference_source": null,
+    "sketch": {
+      "algorithm": "layernorm",
+      "version": 1,
+      "tiling": {
+        "block_m": 64,
+        "block_n": 64,
+        "block_k": 32
+      },
+      "memory_plan": {
+        "global": [],
+        "local": [],
+        "register": []
+      },
+      "pipeline": [],
+      "target_dsl": "triton",
+      "optimization_hints": [
+        "Frozen native LayerNorm reference; FP32 accumulation; preserve input layout semantics.",
+        "Normalize each logical row along the last axis, using population variance over the logical column count and the frozen reference epsilon; preserve the declared output dtype.",
+        "Exclude padded lanes from both the mean and centered-square variance reductions, including after subtracting the mean; cover nonzero constant and near-constant rows.",
+        "Use actual input row/column strides and independent output strides in element units; support the declared contiguous and strided layouts even when primary inputs are contiguous."
+      ],
+      "hints_this_version": []
+    },
+    "input_metadata": [
+      {
+        "X": {
+          "shape": [
+            8192,
+            15360
+          ],
+          "dtype": "float16",
+          "strides": [
+            30720,
+            2
+          ]
+        }
+      },
+      {
+        "X": {
+          "shape": [
+            8192,
+            12288
+          ],
+          "dtype": "float16",
+          "strides": [
+            24576,
+            2
+          ]
+        }
+      }
+    ],
+    "calling_convention": {
+      "schema": "keyword-wrapper-v1",
+      "entrypoint": "kernel",
+      "invocation": "kernel(**inputs)",
+      "keyword_sets": [
+        [
+          "X"
+        ]
+      ],
+      "parameter_names": [
+        "X"
+      ],
+      "signature": "def kernel(X):",
+      "extra_parameters_allowed": false,
+      "parameter_style": "explicit_keyword_compatible",
+      "returns": {
+        "kind": "tensor",
+        "via": "return_value",
+        "allocated_by": "wrapper",
+        "shape_and_dtype": "frozen_operator_semantics"
+      },
+      "wrapper_responsibilities": {
+        "output_allocation": "inside_wrapper",
+        "shapes_and_reduction_lengths": "derive_from_runtime_inputs",
+        "tensor_strides": "read_inputs_and_outputs_independently",
+        "semantic_constants": "frozen_contract_or_registered_reference",
+        "helper_only_arguments": "derive_inside_wrapper_unless_declared_input"
+      },
+      "stride_units": {
+        "input_metadata": "bytes",
+        "runtime_tensor": "elements"
+      }
+    },
+    "repair": {
+      "schema": "bounded-numerical-repair-v1",
+      "repair_index": 1,
+      "parent": {
+        "plan_hash": "c601e21ad167f9ff5d0b7750d4ff734af8168c3c33273c44633a9f38c5fdf5f3",
+        "run_id": "ee3bd78874514291bf95e54dc2446f74",
+        "manifest_hash": "2bcb5c7f9bec58c0c070c745ebb82162566eb35e955cc3905ca6b53e35d96f0c",
+        "verification_id": "b74ece4909db4f908f730ad8f903d37b",
+        "source_hash": "b3f95ac94f85e6027b54df920ef48425f200185c466eaeec89b21b1a539b8c95",
+        "evidence_hash": "443e0c343e4ac1f178d15aead76fdd3956ee96c8cca93c1e65de8c1d74d033db"
+      },
+      "contract_hash": "407e4e52bdafe1bedc5f9e43f15f2df3b888e1bb8bf8676057a1211324e2d5bf",
+      "source": "import torch\nimport triton\nimport triton.language as tl\n\n@triton.jit\ndef _layernorm_helper(X_ptr, Y_ptr, M, N, stride_xm, stride_xn, stride_ym, stride_yn, eps, BLOCK_N: tl.constexpr):\n    row = tl.program_id(0)\n    x_base = X_ptr + row * stride_xm\n    y_base = Y_ptr + row * stride_ym\n    offs = tl.arange(0, BLOCK_N)\n    mask = offs < N\n    x = tl.load(x_base + offs * stride_xn, mask=mask, other=0.0).to(tl.float32)\n    mean = tl.sum(x, axis=0) / N\n    x_centered = x - mean\n    var = tl.sum(x_centered * x_centered, axis=0) / N\n    rstd = 1.0 / tl.sqrt(var + eps)\n    y = x_centered * rstd\n    tl.store(y_base + offs * stride_yn, y.to(tl.float16), mask=mask)\n\ndef kernel(X):\n    M, N = X.shape\n    Y = torch.empty_like(X)\n    BLOCK_N = triton.next_power_of_2(N)\n    grid = (M,)\n    _layernorm_helper[grid](\n        X, Y, M, N,\n        X.stride(0), X.stride(1),\n        Y.stride(0), Y.stride(1),\n        1e-05,\n        BLOCK_N=BLOCK_N\n    )\n    return Y",
+      "feedback": {
+        "stage": "L2",
+        "kind": "primary_numerical_mismatch",
+        "primary": [
+          {
+            "case_key": "X=8192x15360",
+            "shape": [
+              8192,
+              15360
+            ],
+            "passed": true,
+            "max_error": 0.0087890625,
+            "max_rel_error": 0.006550218444317579,
+            "matched_ratio": 1.0,
+            "bad_elements": 0,
+            "compared_elements": 125829120,
+            "coverage": 1.0,
+            "reference_nonfinite": 0,
+            "atol": 1e-05,
+            "rtol": 0.01,
+            "required_matched_ratio": 1.0,
+            "output_dtype": "torch.float16"
+          },
+          {
+            "case_key": "X=8192x12288",
+            "shape": [
+              8192,
+              12288
+            ],
+            "passed": false,
+            "max_error": 0.04296875,
+            "max_rel_error": 0.03202328830957413,
+            "matched_ratio": 0.0,
+            "bad_elements": 100663296,
+            "compared_elements": 100663296,
+            "coverage": 1.0,
+            "reference_nonfinite": 0,
+            "atol": 1e-05,
+            "rtol": 0.01,
+            "required_matched_ratio": 1.0,
+            "output_dtype": "torch.float16"
+          }
+        ],
+        "suite": {
+          "declared_cases": 32,
+          "executed_cases": 0,
+          "verdict": "not_run"
+        }
+      },
+      "feedback_hash": "45da452ac50db26ead4fcc8e5186af84007d0e6a3d08f87c98a2efbcfdf491e3"
+    }
+  },
+  "provenance": {
+    "plan_hash": "c507d78d65452fd5765d6873762c2aa0897130abad26cacc5cb31cf0b455801f",
+    "request_sha256": "95b8c5bb72b62d2d80283d4123db817021848533771ab7aac2decbe662d9333d",
+    "response_sha256": "b494c41c4270d4df52883762d03d6bda3e34bd1b6c31e9f4f0032e57bc287222",
+    "source_sha256": "b3f95ac94f85e6027b54df920ef48425f200185c466eaeec89b21b1a539b8c95",
+    "response_bytes": 2472,
+    "source_bytes": 955,
+    "recorded_client_date": "2026-10-16",
+    "origin": "real_response_replayed_offline_only",
+    "new_external_calls": 0,
+    "reported_model": "Qwen3.8-27B",
+    "parent_plan_hash": "c601e21ad167f9ff5d0b7750d4ff734af8168c3c33273c44633a9f38c5fdf5f3"
+  }
+}

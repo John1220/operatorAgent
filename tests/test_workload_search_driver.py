@@ -23,10 +23,12 @@ def test_local_plan_allocates_no_inputs_or_transport(tmp_path,monkeypatch):
     assert [c['name'] for c in plan['candidates']]==['warps-4','warps-8']
     assert all(c['hash']==rc.code_hash(c['source']) for c in plan['candidates'])
     assert plan['contract']['min_speedup']==10. and plan['contract']['aggregate']=='weighted_geomean'
-    assert plan['controls']['oracle_total']==5 and plan['controls']['max_rounds']==3
+    assert plan['controls']['oracle_total']==7 and plan['controls']['max_rounds']==3
     from operator_agent.budget import BudgetPlan
     budget=BudgetPlan(**plan['controls']['budget'])
-    assert budget.oracle_total==5 and budget.llm_tokens==128
+    assert budget.oracle_total==7 and budget.llm_tokens==128
+    assert plan['budget_accounting']['unit']=='candidate_verification_dispatch_per_input_group'
+    assert plan['budget_accounting']['fixed_dispatch_sequence_unchanged']
     assert plan['controls']['max_rpcs']==512 and plan['controls']['wall_clock_s']==1800
     assert plan['input_storage_limit']==256*1024*1024
     assert not plan['retry_windows'] and not plan['adaptive']
@@ -95,7 +97,9 @@ def durable_fixture(tmp_path,monkeypatch,second_wins=False):
         results=original(self,*a,**k);rounds.append((k['kernel_code'],results));return results
     monkeypatch.setattr(Verifier,'verify',capture)
     ratios=((1.5,1.5),(2.,2.)) if second_wins else ((2.,2.),(3.,.95))
-    art,c,_,_,_=execute(tmp_path,ratios=ratios,max_rounds=6,budget=BudgetPlan(oracle_total=3))
+    # Two groups per dispatch need four non-confirm units for two observations.
+    # The target remains 10x, so these below-target cases must not run confirmation.
+    art,c,_,_,_=execute(tmp_path,ratios=ratios,max_rounds=6,budget=BudgetPlan(oracle_total=5))
     t=task(min_speedup=10.)
     plan=dict(contract=rc.json_value(freeze_from_task(t).as_dict()),measurement_protocol=rc.protocol_identity())
     return art,c,t,rounds,plan

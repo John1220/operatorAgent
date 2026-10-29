@@ -290,7 +290,7 @@ def kernel(A, B):
     _mm[(1,)](A, B, A, 1, 1, 1, BLOCK_M=256, BLOCK_N=256, BLOCK_K=64)
     return A
 """
-# (256*64 + 64*256 + 256*256) * 4B = 384 KiB —— I75 首跑六次 L1 失败的同一形状
+# Historical proxy read this accumulator as 384KiB shared; no physical layout is proved.
 TRITON_SMALL_TILE = TRITON_BIG_TILE.replace(
     "BLOCK_M=256, BLOCK_N=256, BLOCK_K=64", "BLOCK_M=64, BLOCK_N=64, BLOCK_K=32")
 
@@ -305,10 +305,24 @@ class TestResourceGate(unittest.TestCase):
         pipe.caps = caps
         return pipe
 
-    def test_an_oversized_tile_dies_at_the_gate(self):
+    def test_a_logical_tile_is_not_pruned_without_shared_storage_evidence(self):
         pipe = self._pipe(MemCaps(228))
-        self.assertEqual([], pipe._prune_to_finalists(
+        self.assertEqual([TRITON_BIG_TILE], pipe._prune_to_finalists(
             [TRITON_BIG_TILE], "triton", "matmul"))
+
+    def _proven_oversized(self):
+        from operator_agent.resource_check import (SharedMemoryEvidence, assess_shared_memory,
+                                                   source_resource_binding)
+        binding = source_resource_binding(TRITON_BIG_TILE)
+        return assess_shared_memory(SharedMemoryEvidence(binding=binding, kind='native_compiler',
+            producer='controlled-test-compiler', native_bytes=384*1024), MemCaps(228), binding=binding)
+
+    def test_an_explicit_shared_resource_refusal_still_reaches_the_gate(self):
+        from unittest.mock import patch
+        with patch('operator_agent.coder_pipeline.check_resource_feasibility',
+                   return_value=self._proven_oversized()):
+            self.assertEqual([], self._pipe(MemCaps(228))._prune_to_finalists(
+                [TRITON_BIG_TILE], 'triton', 'matmul'))
 
     def test_a_fitting_tile_passes(self):
         pipe = self._pipe(MemCaps(228))
@@ -325,7 +339,10 @@ class TestResourceGate(unittest.TestCase):
     def test_the_resource_reason_reaches_the_repair_baseline(self):
         """修复基线的 issues 带着上界约束 —— 修代码的提示从此有硬数字 (G3 的流程半边)"""
         pipe = self._pipe(MemCaps(228))
-        best = pipe._best_failure([TRITON_BIG_TILE], "triton", "matmul")
+        from unittest.mock import patch
+        with patch('operator_agent.coder_pipeline.check_resource_feasibility',
+                   return_value=self._proven_oversized()):
+            best = pipe._best_failure([TRITON_BIG_TILE], "triton", "matmul")
         self.assertIsNotNone(best)
         _, issues = best
         self.assertTrue(any("资源预检" in i and "228" in i for i in issues), issues)

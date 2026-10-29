@@ -42,7 +42,9 @@ def test_default_plan_has_no_model_config_transport_or_large_allocation(tmp_path
     assert plan['model_limits']['total_output_token_reservations'] == 4096
     assert plan['generation']['max_candidates'] == 1 and plan['generation']['repairs'] == 0
     assert plan['controls']['max_rounds'] == 1
-    assert plan['controls']['budget']['oracle_total'] == 4
+    assert plan['controls']['budget']['oracle_total'] == 20
+    assert plan['budget_accounting']['unit'] == 'candidate_verification_dispatch_per_input_group'
+    assert plan['budget_accounting']['fixed_dispatch_sequence_unchanged']
     assert plan['runtime_boundary']['hostile_code_sandbox'] is False
     assert not plan['runtime_boundary']['vram_cap'] and not plan['runtime_boundary']['network_isolated']
     assert [m['storage_bytes']//1024**2 for m in plan['input_bounds']] == [240,192]

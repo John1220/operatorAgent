@@ -375,6 +375,13 @@ class TestTheGuardIsWiredInTheRightOrder(unittest.TestCase):
             if (isinstance(f, ast.Attribute) and f.attr == "run_with_action"
                     and isinstance(f.value, ast.Attribute) and f.value.attr == "fixer"):
                 return sub
+            if (isinstance(sub, ast.Call) and ast.unparse(sub.func) == 'self._call_generator'
+                    and [ast.unparse(arg) for arg in sub.args[:2]] ==
+                        ['self.fixer', 'self.fixer.run_with_action']):
+                # Normalize the receipt wrapper; keep location/order and the
+                # original check of the actual repair-base argument.
+                call = ast.Call(func=sub.args[1], args=sub.args[2:], keywords=sub.keywords)
+                return ast.copy_location(call, sub)
         return None
 
     def test_fixer_is_handed_the_retreat_variable_not_the_failing_code(self):

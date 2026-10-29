@@ -1,0 +1,23 @@
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def _layernorm_kernel(X_ptr, Y_ptr, N, eps, stride_xm, stride_xn, stride_ym, stride_yn, BLOCK_SIZE: tl.constexpr):
+    row = tl.program_id(0)
+    x_base = X_ptr + row * stride_xm
+    y_base = Y_ptr + row * stride_ym
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < N
+    x = tl.load(x_base + offs * stride_xn, mask=mask, other=0.0).to(tl.float32)
+    mean = tl.sum(x, axis=0) / N
+    x_centered = x - mean
+    var = tl.sum(x_centered * x_centered, axis=0) / N
+    rstd = 1.0 / tl.sqrt(var + eps)
+    y = x_centered * rstd
+    tl.store(y_base + offs * stride_yn, y.to(Y_ptr.dtype.element_ty), mask=mask)
+
+def kernel(X, Y, N, eps, stride_xm, stride_xn, stride_ym, stride_yn):
+    BLOCK_SIZE = triton.next_power_of_2(N)
+    grid = (X.shape[0],)
+    _layernorm_kernel[grid](X, Y, N, eps, stride_xm, stride_xn, stride_ym, stride_yn, BLOCK_SIZE=BLOCK_SIZE)

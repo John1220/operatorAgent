@@ -15,15 +15,20 @@
 
 import contextlib
 import io
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from operator_agent.budget import BudgetPlan
 from operator_agent.conductor import Conductor
 from operator_agent.kernel_db import KernelDatabase
+from operator_agent.resource_check import (SharedMemoryEvidence, assess_shared_memory,
+                                           source_resource_binding)
 from operator_agent.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision,
@@ -71,11 +76,11 @@ class _TaggingLlm:
 
 
 class _TightTileTaggingLlm(_TaggingLlm):
-    """出「贴到 smem 上界」的码 ⇒ §10.3 条件 2 有量具、门**可能**开
+    """保留历史源码模式；它的 BLOCK 不是 shared 存储证据。
 
     为什么这组用例要用它: 「没超预算时 LLM 仍会被问」这句断言, 只有在**升级门开着**
-    时才真的是关于 token 预算的。用默认假核时门本来就关着 (没有 BLOCK_* ⇒ 无量具),
-    「没问」是门的判决而不是预算的判决 —— 那样断言会变成永远为真的空话。
+    时才真的是关于 token 预算的。_run 为此单独注入 harness 已确立的原生资源报告，
+    不从这份源码推导资源量，否则「没问」可能只是资源条件不成立。
     """
 
     def chat(self, messages, **kw):
@@ -134,9 +139,9 @@ class TestTheOracleBudgetStopsTheLoop(unittest.TestCase):
         self.assertTrue(art.all_passed, "前提: 这一跑要让结论有资格进长期记忆")
         self.assertEqual(1, st["spent"]["confirm"],
                          f"补测没花预留那一格: {st}")
-        # 第 1 轮就过了 L3 ⇒ 探索只花 1 次; 补测那一次花的是**另一格** ——
+        # 第 1 轮就过了 L3 ⇒ 决赛 L1/L2 与随后 L3 各预留 1 次；补测花另一格。
         # 两笔账分得开, 就是「预留不与其他格混同」的可观测后果。
-        self.assertEqual(1, st["spent"]["explore"], f"它不该从探索那一格出钱: {st}")
+        self.assertEqual(2, st["spent"]["explore"], f"决赛验证与 L3 预留漏记了: {st}")
         self.assertEqual("passed", art.metadata["stop"]["reason"])
 
     def test_wall_clock_stops_before_spending_anything(self):
@@ -204,8 +209,24 @@ class TestTheTokenBudgetDegradesToNumericSearch(unittest.TestCase):
                       kernel_db=KernelDatabase(jsonl_path=None), llm=llm,
                       max_optimize_rounds=max_rounds, heartbeat_interval=1000,
                       budget=budget)
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            art = c.execute(_task(), _inputs(), None, target_gflops=0.0)
+
+        def native_report(code, caps, kernel_type=""):
+            # Synthetic harness receipt: a near-limit physical allocation keeps
+            # the structural gate independently testable from the token budget.
+            binding = source_resource_binding(code)
+            report = assess_shared_memory(SharedMemoryEvidence(
+                binding=binding, kind="native_compiler",
+                producer="token-budget-test-native-harness-v1", native_bytes=240 * 1024),
+                caps, binding=binding)
+            self.assertEqual(240 * 1024, report.estimated_smem_bytes)
+            self.assertEqual(228 * 1024, report.limit_bytes)
+            return report
+
+        with tempfile.TemporaryDirectory(prefix="token-budget-output-") as output_dir:
+            with patch.dict(os.environ, {"OPERATOR_AGENT_OUTPUT_DIR": output_dir}), \
+                    patch("operator_agent.conductor.check_resource_feasibility", native_report), \
+                    contextlib.redirect_stdout(io.StringIO()) as buf:
+                art = c.execute(_task(), _inputs(), None, target_gflops=0.0)
         return llm, art, buf.getvalue()
 
     def test_over_budget_never_asks_the_llm_for_a_structural_change(self):

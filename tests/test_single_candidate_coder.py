@@ -81,6 +81,14 @@ def test_one_request_exact_model_source_frozen_context_and_offline_audit(tmp_pat
     assert before == {p.name: p.read_bytes() for p in root.iterdir()}
     assert (root / 'candidate.json').stat().st_mode & 0o777 == 0o444
     assert coder.last_generation['candidate_hash'] == code_hash(CODE)
+    from operator_agent.generation_context import validate_candidate_record
+    record = json.loads((root / 'candidate-record.json').read_text())
+    assert validate_candidate_record(record) == coder.last_candidate_record
+    assert record['source_hash'] == code_hash(CODE)
+    assert record['strategy'] == 'bounded-single'
+    assert record['context']['knowledge']['skill'] is None
+    assert record['correctness_proven'] is False
+    assert (root / 'candidate-record.json').stat().st_mode & 0o777 == 0o444
 
 
 @pytest.mark.parametrize('which', ('task', 'sketch', 'inputs', 'reference', 'disk', 'policy', 'in_memory', 'code_path'))
@@ -254,7 +262,7 @@ def test_passing_single_candidate_still_requires_independent_confirmation(tmp_pa
     # is not a relaxation of any live/previous acceptance campaign.
     coder, t, sketch, xs = setup(tmp_path, min_speedup=1.05)
     b, cases = backend()
-    c = conductor(tmp_path, coder, b)
+    c = conductor(tmp_path, coder, b, budget=BudgetPlan(oracle_total=20))
     send = Mock(return_value=response())
     monkeypatch.setattr(lc, 'bounded_dispatch', send)
     c.verifier._verify_compile = lambda *a, **k: VerificationResult(Level.L1_COMPILE, True,
@@ -263,7 +271,7 @@ def test_passing_single_candidate_still_requires_independent_confirmation(tmp_pa
         'fake correctness only', metrics={'max_error': 0.})
     with contextlib.redirect_stdout(io.StringIO()): art = c.execute(t, xs, target_gflops=0.)
     assert art.all_passed and cases == [16, 32, 16, 32] and send.call_count == 1
-    assert art.remeasure is not None and art.metadata['budget']['spent']['confirm'] == 1
+    assert art.remeasure is not None and art.metadata['budget']['spent']['confirm'] == 2
     assert art.metadata['corpus_admission']['kept'] is True
 
 

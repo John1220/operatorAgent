@@ -444,21 +444,25 @@ def test_production_confirmation_producer_feeds_prepared_commit_without_replay_w
     c._run_controls=f.binding["manifest"]["controls"];c._run_binding_dir=f.folder
     c._environment={"fingerprint":f.binding["manifest"]["environment"]}
     c._heartbeat_for_next_measurement=lambda:(None,False)
-    calls=[];spends=[]
+    import time
+    from operator_agent.budget import BudgetLedger, BudgetPlan
+    calls=[]
     def verify(**kw):
         calls.append(kw)
         metrics=copy.deepcopy(f.metrics);metrics["speedup_vs_baseline"]=1.9
         metrics["arm_windows"]={"candidate":"actual-new-window","baseline":"actual-new-window"}
         return [VerificationResult(level=L.L3_PERFORMANCE,passed=True,message="offline L3",metrics=metrics)]
     c.verifier=SimpleNamespace(verify_l3_only=verify)
-    c._budget=SimpleNamespace(oracle_spend=lambda phase:spends.append(phase))
+    c.run_root=''
+    c._run_started=time.monotonic()
+    c._budget=BudgetLedger(BudgetPlan(oracle_total=10))
     c._produce_remeasure(f.art,f.task,f.input_sets,0)
     confirmation=json.loads((f.folder/"confirmation.json").read_text())
     assert confirmation["first_binding"]==f.metrics["run_binding"]
     assert confirmation["second_binding"]["verification_id"]!="first-verification"
     assert c._save_to_db(f.art,f.task)
     assert a.recover(f.folder,KernelDatabase(str(f.path),persist_retrievals=False)).persisted
-    assert len(calls)==1 and spends==["confirm"] and len(events(f.path))==1
+    assert len(calls)==1 and c._budget.spent['confirm']==1 and len(events(f.path))==1
 
 
 @pytest.mark.parametrize("stage",["before-append","partial-line","after-append","after-fsync","after-memory","after-receipt","after-result"])

@@ -92,6 +92,8 @@ def test_worse_last_candidate_does_not_replace_best_artifact_or_checkpoint(tmp_p
     assert art.code == generated[0]
     assert art.metadata['candidate_selection']['selected_round']==1
     assert art.metadata['candidate_selection']['fallback_to_best']
+    assert art.metadata['selected_source_hash'] == rc.code_hash(generated[0])
+    assert art.metadata['selected_source_hash'] != rc.code_hash(generated[1])
     assert art.benchmark_data['performance_verdict']['value']==2.
     assert art.iteration_history[-1]['search_objective']['comparison']=='SLOW'
     snap=json.loads((Path(art.saved_dir)/'execution_snapshot.json').read_text())
@@ -140,7 +142,7 @@ def test_degraded_can_update_soft_belief_but_not_winner_or_stagnation(tmp_path):
 def test_budget_exhaustion_returns_best_without_granting_target_pass(tmp_path):
     art,c,_,calls,generated=execute(tmp_path,ratios=((2.,2.),(3.,1.),(5.,5.)),
                                   max_rounds=6,budget=BudgetPlan(oracle_total=3))
-    assert len(calls)==4 and len(generated)==2
+    assert len(calls)==2 and len(generated)==1  # Two input groups reserve two units before dispatch.
     assert art.metadata['stop']['reason']=='budget_exhausted'
     assert art.code==generated[0] and not art.all_passed and art.remeasure is None
     assert art.metadata['budget']['spent']['confirm']==0

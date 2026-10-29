@@ -243,7 +243,7 @@ class TestExecutorExits(unittest.TestCase):
                 ex._ssh_exec("true")
             self.assertEqual(255, caught.exception.ssh_rc)
             out = ex.execute("def kernel(A): return A", {"A": np.ones((4, 4), np.float32)})
-        self.assertEqual(TRANSPORT_UNKNOWN, out.transport_outcome)
+        self.assertEqual(TRANSPORT_UNKNOWN, out.transport_outcome, f"execute error: {out.error}")
 
     def test_a_real_remote_failure_over_the_same_transport_stays_answered(self):
         """**反向对照**: 同一条 ssh 路上 rc=1 是「远端答了失败」, 不许和 255 挤成一格"""

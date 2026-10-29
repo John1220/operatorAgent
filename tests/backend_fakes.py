@@ -88,7 +88,10 @@ class DeclaredFakeBackend(Backend):
 
     def benchmark_with_baselines(self, kernel_code, inputs, kernel_type, warmup=10,
                                  repeat=30, precision="", baseline_priority=None,
-                                 reference_source=""):
+                                 reference_source="", input_seed=None):
+        # This in-process fake receives the actual inputs and does not implement
+        # the remote seed transport. Accept its optional production argument,
+        # without turning it into fabricated input-fidelity evidence.
         return self._optional("benchmark_with_baselines", kernel_code, inputs, kernel_type,
                               warmup, repeat, precision=precision,
                               baseline_priority=baseline_priority,

@@ -1,0 +1,70 @@
+{
+  "schema": "retained-single-column-compile-failure-fixture-v1",
+  "provenance": {
+    "kind": "retained_real_H20_L2_observation_projection",
+    "task_id": "layernorm-constant-strided",
+    "date": "2026-10-24",
+    "source_sha256": "324b3ca8240efa8b4bdb12e6a94b98a09b0099f8e8c4172daec242955c987e3f",
+    "measurements": "Existing failed suite observation, not executed by these tests.",
+    "typed_evidence": "The retained observation predates typed compiler events. Tests inject a synthetic exact native compiler class and explicit cuda device field; neither is a new execution claim.",
+    "redaction": "Connection details, free-form logs, API data, unrelated cases and reasons omitted."
+  },
+  "failed_case": {
+    "case_id": "auto-cols1-rows8-fp32-random-contiguous",
+    "shape_key": "X=8x1",
+    "pattern": "random",
+    "layout": "contiguous",
+    "dtypes": {
+      "X": "fp32"
+    },
+    "verdict": "failed",
+    "metrics": {
+      "input_fidelity_expected": {
+        "X": {
+          "shape": [
+            8,
+            1
+          ],
+          "dtype": "<f4",
+          "strides": [
+            4,
+            4
+          ],
+          "offset": 0,
+          "storage": 0,
+          "writeable": true,
+          "storage_bytes": 32,
+          "storage_digest": "e8bf0b09a232d78d0bee1bfe8c839905e1a07ff1f8a07b572ffe48c55778c563",
+          "value_digest": "e8bf0b09a232d78d0bee1bfe8c839905e1a07ff1f8a07b572ffe48c55778c563"
+        }
+      },
+      "input_fidelity_verified": true,
+      "input_fidelity": {
+        "protocol": "numpy-storage-v1",
+        "representation": "torch-storage-v1",
+        "observed": {
+          "X": {
+            "shape": [
+              8,
+              1
+            ],
+            "dtype": "<f4",
+            "strides": [
+              4,
+              4
+            ],
+            "offset": 0,
+            "storage": 0,
+            "writeable": true,
+            "storage_bytes": 32,
+            "storage_digest": "e8bf0b09a232d78d0bee1bfe8c839905e1a07ff1f8a07b572ffe48c55778c563",
+            "value_digest": "e8bf0b09a232d78d0bee1bfe8c839905e1a07ff1f8a07b572ffe48c55778c563"
+          }
+        },
+        "tensor_devices": {
+          "X": "cuda:0"
+        }
+      }
+    }
+  }
+}

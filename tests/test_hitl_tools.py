@@ -228,7 +228,7 @@ class TestVerifyReturnsOrthogonalFacts(unittest.TestCase):
 
         2026-10-18 实测：不裁的时候一次 L2 回包 40 KB（`correctness.cases[*].metrics`
         里是完整的 storage/view 回读）；裁到「只留 verdict/reason/身份」后 4.8 KB。
-        明细仍在 `report.md` 与 `verify-N.json` 里 —— 读者按需去取，不是不记。
+        完整指标留在 `evidence` 指向的独立 result.json 中，读者按需读取。
         """
         out = ht.verify(self.round_dir, CORRECT)
         size = len(json.dumps(out, ensure_ascii=False))
@@ -334,29 +334,35 @@ class TestTheCliKeepsStdoutParseable(unittest.TestCase):
 
         这里用一个**会 print 的替身后端**钉住那条纪律，不需要真的连 GPU。
         """
-        from operator_agent import hitl_tools as real
-
-        class Noisy:
-            name = "NoisyBackend"
-            capabilities = frozenset()
-
-        def fake_make_backend(name, **options):
-            print("  [RemoteExecutor] SSH 连接成功: 假后端")
-            return Noisy(), {"requested": name, "resolved": "NoisyBackend",
-                             "degraded": False, "attempts": []}
+        import sys
+        from unittest import mock
+        from operator_agent import hitl_tools as real, tool_calls, exec_guard
+        # S2 executes tools in a child: inject the noisy backend in that child,
+        # so this still checks the actual CLI/worker/log boundary.
+        script = '''
+import sys
+from operator_agent import hitl_tools as ht, tool_calls
+class Noisy:
+    name = "NoisyBackend"
+    capabilities = frozenset()
+def make(name, **options):
+    print("  [RemoteExecutor] SSH 连接成功: 假后端")
+    return Noisy(), dict(requested=name, resolved="NoisyBackend", degraded=False, attempts=[])
+ht._make_backend = make
+tool_calls.main([sys.argv[1]])
+'''
+        def start(directory):
+            return exec_guard.start_task_worker([sys.executable, '-c', script, str(directory)],
+                cwd=str(Path(__file__).resolve().parents[1]), log_path=directory/'execution.log')
 
         tmp = Path(tempfile.mkdtemp(prefix="hitl-noisy-"))
         run = tmp / "run"
         real.prepare(declaration(), run)
         cand = tmp / "c.py"
         cand.write_text(CORRECT, encoding="utf-8")
-        saved = real._make_backend
-        real._make_backend = fake_make_backend
-        try:
+        with mock.patch.object(tool_calls, '_start_call_worker', start):
             code, out = self._run(["verify", "--run-dir", str(run),
                                    "--code-file", str(cand), "--stop-after", "L1"])
-        finally:
-            real._make_backend = saved
         payload = json.loads(out)                 # 有污染就会在这里炸
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["backend_resolution"]["resolved"], "NoisyBackend")
@@ -376,6 +382,273 @@ class TestTheCliKeepsStdoutParseable(unittest.TestCase):
         code, out = self._run(["capabilities"])
         self.assertEqual(code, 0)
         self.assertIn("backends", json.loads(out))
+
+
+class TestBenchIsExplorationGrade(unittest.TestCase):
+    """`bench` 读数只能用来选方向，不能当依据 —— 这条在**结构上**守住。
+
+    设计稿：docs/design/hitl-bench-sweep.md。为什么不是「有但为 false」：一旦回包里
+    出现 `eligibility`，调用方就会拿它替代 `verify`（那正是它存在的动机），
+    所以这里钉的是「键根本不存在」。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="hitl-bench-"))
+        cls.round_dir = cls.tmp / "run"
+        ht.prepare(declaration(), cls.round_dir)
+
+    def test_it_reports_numbers_per_arm_and_no_verdict_fields(self):
+        out = ht.bench(self.round_dir, [
+            {"name": "base", "code": CORRECT},
+            {"name": "slow", "code": WRONG},
+        ])
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["grade"], "exploration")
+        self.assertEqual(len(out["arms"]), 2)
+        self.assertEqual(out["measured"], 2)
+        self.assertFalse(out["partial"])
+        # 裁决字段**一个都不许有**（顶层；逐臂的 validity 是测量的性质，允许）。
+        for banned in ("levels", "route", "eligibility", "passed", "verdicts", "validity"):
+            self.assertNotIn(banned, out, f"bench 回包里出现了裁决字段 {banned}")
+        arm = out["arms"][0]
+        self.assertEqual(arm["name"], "base")
+        for key in ("median_ms", "speedup", "gflops", "validity"):
+            self.assertIn(key, arm)
+        self.assertIn(out["best"], [a["name"] for a in out["arms"]])
+
+    def test_it_writes_bench_files_and_never_a_verify_round(self):
+        out = ht.bench(self.round_dir, [{"name": "only", "code": CORRECT}])
+        self.assertTrue((self.round_dir / f"bench-{out['batch']}.json").is_file())
+        self.assertTrue((self.round_dir / f"bench-{out['batch']}.log").is_file())
+        # 这是「不入库/不晋级」的落盘半边：verify 的轮次文件一个都不该多出来。
+        self.assertEqual(list(self.round_dir.glob("verify-*.json")), [])
+
+    def test_a_broken_candidate_gets_no_best_and_no_fake_numbers(self):
+        """L1 都过不了的候选：拿不到 speedup，也就不该被选成 best（不猜）。"""
+        broken = "def kernel(A, B):\n    this is not python\n"
+        out = ht.bench(self.round_dir, [{"name": "broken", "code": broken},
+                                        {"name": "ok", "code": CORRECT}])
+        self.assertTrue(out["ok"])
+        broken_arm = next(a for a in out["arms"] if a["name"] == "broken")
+        self.assertIsNone(broken_arm["speedup"])
+        self.assertTrue(broken_arm["error"], "炸掉的臂必须带原因，不许猜")
+        # 一个臂炸了不毁整批：另一个臂照样有数，且 best 不会指向炸掉的那个。
+        self.assertNotEqual(out["best"], "broken")
+        self.assertEqual(out["measured"], 2)
+
+    def test_the_batch_cap_is_explicit(self):
+        with self.assertRaises(ht.ToolError) as ctx:
+            ht.bench(self.round_dir, [{"name": f"a{i}", "code": CORRECT} for i in range(3)],
+                     max_candidates=2)
+        self.assertEqual(ctx.exception.code, "too_many_candidates")
+
+    def test_a_drifted_contract_is_refused(self):
+        run = Path(tempfile.mkdtemp(prefix="hitl-bench-drift-")) / "run"
+        ht.prepare(declaration(), run)
+        contract_path = run / "contract.json"
+        frozen = json.loads(contract_path.read_text(encoding="utf-8"))
+        frozen["hash"] = "0" * 64
+        contract_path.write_text(json.dumps(frozen), encoding="utf-8")
+        out = ht.bench(run, [{"name": "a", "code": CORRECT}])
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "contract_drift")
+
+
+class TestCandidateOriginIsAttributionNotJudgement(unittest.TestCase):
+    """`candidate_origin` 是**归因格**：记「这份源码自称是谁写的」，仅此而已。
+
+    这一层要钉住的不是「它能记」，而是三条**不许**：
+    ① 不许因为没声明就省略这一格（省略 = 把「走了哪条路」重新变成猜，
+      见 `docs/design/hitl-generation-boundary.md` §4）；
+    ② 不许影响任何判定字段（否则它就成了判据，而判据不许由调用方给）；
+    ③ 不许进契约（否则声明一下来源就会改 `contract_hash`，把回合判成 drift）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="hitl-origin-"))
+        cls.round_dir = cls.tmp / "run"
+        ht.prepare(declaration(), cls.round_dir)
+
+    #: 判定字段：来源变了这些必须一格都不动。
+    JUDGEMENT_KEYS = ("levels", "passed", "verdicts", "route", "eligibility",
+                      "validity", "conflict", "contract_hash", "notes")
+
+    def test_a_declared_origin_lands_in_the_payload_and_the_round_file(self):
+        out = ht.verify(self.round_dir, CORRECT, stop_after="L1",
+                        candidate_origin="outer")
+        self.assertEqual(out["candidate_origin"], "outer")
+        on_disk = json.loads(Path(out["log"]).with_suffix(".json")
+                             .read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["candidate_origin"], "outer")
+
+    def test_an_undeclared_origin_is_recorded_not_omitted(self):
+        """**核心那条**：没声明 ⇒ 记 `undeclared`，而不是没有这一格。"""
+        out = ht.verify(self.round_dir, CORRECT, stop_after="L1")
+        self.assertIn("candidate_origin", out)
+        self.assertEqual(out["candidate_origin"], ht.UNDECLARED_ORIGIN)
+        self.assertEqual(ht.UNDECLARED_ORIGIN, "undeclared")
+
+    def test_every_value_of_the_closed_vocabulary_is_accepted(self):
+        for value in ht.CANDIDATE_ORIGINS:
+            out = ht.verify(self.round_dir, CORRECT, stop_after="L1",
+                            candidate_origin=value)
+            self.assertEqual(out["candidate_origin"], value, value)
+
+    def test_an_unknown_origin_is_refused_naming_the_vocabulary(self):
+        with self.assertRaises(ht.ToolError) as ctx:
+            ht.verify(self.round_dir, CORRECT, stop_after="L1",
+                      candidate_origin="inner")
+        self.assertEqual(ctx.exception.code, "unknown_candidate_origin")
+        for value in ht.CANDIDATE_ORIGINS:
+            self.assertIn(value, ctx.exception.detail)
+
+    def test_the_origin_moves_no_judgement_field(self):
+        base = ht.verify(self.round_dir, WRONG, stop_after="L2")
+        for value in list(ht.CANDIDATE_ORIGINS) + [None]:
+            out = ht.verify(self.round_dir, WRONG, stop_after="L2",
+                            candidate_origin=value)
+            for key in self.JUDGEMENT_KEYS:
+                self.assertEqual(out[key], base[key],
+                                 f"{key} 被 candidate_origin={value!r} 改了")
+
+    def test_the_origin_cannot_enter_the_contract(self):
+        """来源不是声明的一部分：混进 prepare 必须按 `unknown_parameter` 拒。"""
+        with self.assertRaises(ht.ToolError) as ctx:
+            ht.prepare(declaration(candidate_origin="outer"),
+                       self.tmp / "poisoned")
+        self.assertEqual(ctx.exception.code, "unknown_parameter")
+        self.assertNotIn("candidate_origin", ht.ALLOWED_KEYS)
+        self.assertNotIn("candidate_origin", ht.FORBIDDEN_KEYS)
+
+    def test_the_report_names_the_origin(self):
+        out = ht.verify(self.round_dir, CORRECT, stop_after="L1",
+                        candidate_origin="inner_coder")
+        self.assertIn("候选来源: `inner_coder`",
+                      Path(out["report"]).read_text(encoding="utf-8"))
+
+    def test_a_report_whose_rounds_lack_the_key_gains_no_line(self):
+        """`Conductor` 那条路的 artifact 不带这个键 ⇒ 它的报告必须**一字不变**。
+
+        无条件加行会改动既有报告（含 golden 产物），而那条路的「谁写的核」
+        不是这一格要回答的问题。
+        """
+        from operator_agent.report import build_report
+        from operator_agent.schemas import KernelArtifact
+
+        def report(history):
+            return build_report(artifact=KernelArtifact(
+                kernel_id="k", task_id="t", code=CORRECT, language="python",
+                verification_results=[], benchmark_data={},
+                iteration_history=history))
+
+        self.assertNotIn("候选来源", report([{"round": 1, "action": "verify"}]))
+        self.assertIn("候选来源",
+                      report([{"round": 1, "action": "verify",
+                               "candidate_origin": "outer"}]))
+
+    def test_the_schema_enum_and_the_runtime_vocabulary_are_one_list(self):
+        """schema 与实现各写一份词表 = 「工具说收 A、实现只认 B」。"""
+        from operator_agent.mcp_server import _tool_definitions
+        tools = {t["name"]: t for t in _tool_definitions()}
+        for name in ("operator_verify", "operator_repair"):
+            enum = tools[name]["inputSchema"]["properties"]["candidate_origin"]["enum"]
+            self.assertEqual(enum, list(ht.CANDIDATE_ORIGINS), name)
+        self.assertNotIn("candidate_origin",
+                         tools["operator_prepare"]["inputSchema"]["properties"])
+
+
+class TestRepairAttributesTheFinalCodeNotTheInput(unittest.TestCase):
+    """`repair` 的 `final_candidate_origin` 是**派生**的，不接受声明。
+
+    内层 Fixer 真改过源码（`repair_loop` 的 `action="fixed"`）⇒ 最终那份就是内层写的，
+    哪怕调用方声称传进来的是 `outer`。这一格存在的意义就是让「裸写的核」与
+    「内层改过的核」事后可分。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="hitl-repair-origin-"))
+        self.run = self.tmp / "run"
+        ht.prepare(declaration(), self.run)
+
+    def _repair(self, rounds, origin=None):
+        from unittest import mock
+
+        from operator_agent import fixer as fixer_module, llm_client, repair_loop
+
+        def fake_loop(code, *args, **kwargs):
+            return {"passed": False, "rounds": rounds, "code": code, "log": "",
+                    "initial_full_l2_passed": False, "final_full_l2_passed": False}
+
+        # `_llm_problem` 与 `LLMClient` 都要挡：前者是配置门，后者一构造就去读
+        # `LLM_BASE_URL`（没有就抛），而这条用例测的是**来源怎么派生**，不是凭据。
+        with mock.patch.object(ht, "_llm_problem", lambda: None), \
+             mock.patch.object(llm_client, "LLMClient", lambda **k: object()), \
+             mock.patch.object(ht, "_make_backend", lambda *a, **k: (object(), {})), \
+             mock.patch.object(ht, "Verifier", lambda backend: object()), \
+             mock.patch.object(fixer_module, "FixerAgent", lambda **k: object()), \
+             mock.patch.object(repair_loop, "repair", fake_loop):
+            return ht.repair(self.run, CORRECT, backend="mock",
+                             candidate_origin=origin)
+
+    def test_a_round_that_really_fixed_makes_the_final_code_inner(self):
+        out = self._repair([{"round": 1, "action": "fixed", "source_hash": "a"}],
+                           origin="outer")
+        self.assertEqual(out["candidate_origin"], "outer")
+        self.assertEqual(out["final_candidate_origin"], "inner_fixer")
+
+    def test_no_fix_means_the_caller_still_owns_the_code(self):
+        for rounds in ([{"round": 1, "action": "done"}],
+                       [{"round": 1, "action": "stop", "why": "hold"}],
+                       [{"round": 1, "action": "repair_unchanged_source"}],
+                       []):
+            out = self._repair(rounds, origin="outer")
+            self.assertEqual(out["final_candidate_origin"], "outer", rounds)
+
+    def test_an_undeclared_input_stays_undeclared_when_nothing_was_fixed(self):
+        out = self._repair([{"round": 1, "action": "budget_exhausted"}])
+        self.assertEqual(out["candidate_origin"], ht.UNDECLARED_ORIGIN)
+        self.assertEqual(out["final_candidate_origin"], ht.UNDECLARED_ORIGIN)
+
+    def test_an_unknown_origin_is_refused_with_the_vocabulary(self):
+        # `repair` 先查内层 LLM 配置再查参数，所以这里把 LLM 那一关放行，
+        # 单独钉「词表外的值被拒」—— 否则这条用例测的是 llm_not_configured。
+        from unittest import mock
+        with mock.patch.object(ht, "_llm_problem", lambda: None):
+            with self.assertRaises(ht.ToolError) as ctx:
+                ht.repair(self.run, CORRECT, candidate_origin="inner")
+        self.assertEqual(ctx.exception.code, "unknown_candidate_origin")
+        for value in ht.CANDIDATE_ORIGINS:
+            self.assertIn(value, ctx.exception.detail)
+
+
+class TestTheRepairCliPathIsAlive(unittest.TestCase):
+    """`python -m operator_agent repair` 必须能走到 `repair()`。
+
+    WHY 有这条：repair 子命令曾经没有 `--code-stdin`，而 `_read_code` 对三个来源都做
+    `bool(...)` ⇒ 这条**文档里写着的**路径（`dsh-plugin-implementation.md` §0.5.1 工作流 D）
+    一次都跑不起来，直接 `AttributeError`。少一个选项不是「功能少一点」，是整条路死掉。
+    """
+
+    def test_repair_reaches_the_tool_instead_of_dying_in_argument_reading(self):
+        from unittest import mock
+
+        run = Path(tempfile.mkdtemp(prefix="hitl-repair-cli-")) / "run"
+        ht.prepare(declaration(), run)
+        source = Path(run).parent / "cand.py"
+        source.write_text(CORRECT, encoding="utf-8")
+
+        stdout = io.StringIO()
+        # 不配内层 LLM：这条用例要证明的是「走到了 repair」，不是「修好了」。
+        import os
+        with mock.patch.dict(os.environ, dict(LLM_BASE_URL='', LLM_API_KEY='', LLM_API_KEY_FILE='')), \
+             contextlib.redirect_stdout(stdout):
+            code = cli_main(["repair", "--run-dir", str(run),
+                             "--code-file", str(source),
+                             "--candidate-origin", "outer"])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(stdout.getvalue())["error"], "llm_not_configured")
 
 
 if __name__ == "__main__":

@@ -155,10 +155,9 @@ class TestTheComposedBackendServesBothHalves(unittest.TestCase):
             be.not_a_method_at_all
 
     def test_the_smem_limit_reaches_the_template_half(self):
-        """组合时丢了 smem 上界 ⇒ 空间按默认格枚举、剪枝才摘点 —— 白烧实例化与测量
-        (变异矩阵 M8 的证人)"""
+        """A cap alone does not establish a physical layout or justify deleting axes."""
         tiny = TritonTemplateSSHExecutor(self._FakeExec(), smem_limit_bytes=1)
-        self.assertLess(tiny.param_space().size(), param_space().size())
+        self.assertEqual(tiny.param_space().size(), param_space().size())
         for values in tiny.param_space().axes.values():
             self.assertTrue(values, "缩格不许把某一轴缩成空集 (那会让空间恒空)")
 

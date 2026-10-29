@@ -30,19 +30,31 @@ from operator_agent.backend_caps import Backend, Instantiation
 from operator_agent.bandit import Bandit
 from operator_agent.candidates import (ParamSpace, TemplateCandidate,
                                       dedup_key, point_label,
-                                      select_template_candidate, template_arm)
+                                      select_template_candidate, template_arm,
+                                      template_points, template_resource_binding)
 from operator_agent.conductor import Conductor
 from operator_agent.kernel_db import KernelDatabase
 from operator_agent.mock_gpu import MockGPU
-from operator_agent.resource_check import MemCaps, caps_from_metrics
+from operator_agent.resource_check import MemCaps, SharedMemoryEvidence, caps_from_metrics
 from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
 from tests.test_conductor_stagnation import SLOW_MATMUL
 
-#: ⚠️ `BLOCK_K` 必须在轴里: `prune_by_smem` 认不出三元组时**不剪** (宁可漏拦), 于是
-#: 少了它「剪枝生效」那几条用例会变成空转 —— 单值轴不改变点数, 只是让估算器认得出。
+# Full template parameters participate in resource binding; shapes alone do not
+# establish physical shared storage. Explicit synthetic receipts are below.
 _SPACE = ParamSpace(template_id="mm_tile", backend="fake", instantiator_ver="tv-1",
                     axes={"BLOCK_M": (64, 128), "BLOCK_N": (64, 128), "BLOCK_K": (64,)})
+
+
+def _resource_receipts(space=_SPACE):
+    """Synthetic native receipts, explicitly supplied by the test harness."""
+    receipts = {}
+    for point, byte_count in zip(space.points(), (49152, 81920, 81920, 131072)):
+        binding = template_resource_binding(point)
+        receipts[binding] = SharedMemoryEvidence(
+            binding=binding, kind="native_compiler", producer="queue-test-native-harness-v1",
+            native_bytes=byte_count)
+    return receipts
 
 
 class _TemplateBackend(MockGPU):
@@ -180,37 +192,46 @@ class TestTheRanking(unittest.TestCase):
 
     def test_the_prune_note_is_carried_and_unknown_limit_is_said(self):
         backend = _TemplateBackend()
-        no_limit = select_template_candidate(_SPACE, backend, caps=MemCaps(0))
+        receipts = _resource_receipts()
+        no_limit = select_template_candidate(_SPACE, backend, caps=MemCaps(0),
+                                             resource_evidence=receipts)
         self.assertTrue(no_limit.no_limit)
         self.assertIn("未生效", no_limit.pruned_note)
-        # 60 KiB: 49152 字节那个点放得下, 81920/130944 那三个明显超限 ⇒ 真的摘掉
-        tight = select_template_candidate(_SPACE, backend, caps=MemCaps(60))
+        unknown = select_template_candidate(_SPACE, backend, caps=MemCaps(60))
+        self.assertEqual(4, len(unknown.ranked), "只给 caps 和形状不能确定资源超限")
+        self.assertIn("未知", unknown.pruned_note)
+        # Receipts establish 49152 B vs 81920/131072 B, not a source formula.
+        tight = select_template_candidate(_SPACE, backend, caps=MemCaps(60),
+                                          resource_evidence=receipts)
         self.assertIn("摘掉", tight.pruned_note)
         self.assertFalse(tight.no_limit)
         self.assertEqual(1, len(tight.ranked))
         # 1 KiB: 四个点全超 ⇒ 一个都不摘 (剪枝不是「让这一轮没得跑」), 理由仍留着
-        starved = select_template_candidate(_SPACE, backend, caps=MemCaps(1))
+        starved = select_template_candidate(_SPACE, backend, caps=MemCaps(1),
+                                            resource_evidence=receipts)
         self.assertIn("全超上界", starved.pruned_note)
         self.assertEqual(4, len(starved.ranked))
 
     def test_all_pruned_falls_back_to_keeping_them(self):
         """剪枝全摘光时一个都不摘 (它不是「让这一轮没得跑」)"""
         backend = _TemplateBackend()
-        sel = select_template_candidate(_SPACE, backend, caps=MemCaps(1))
+        sel = select_template_candidate(_SPACE, backend, caps=MemCaps(1),
+                                        resource_evidence=_resource_receipts())
         self.assertEqual(4, len(sel.ranked), "全摘光 ⇒ 全部保留待远端判定")
+        self.assertIn("全超上界", sel.pruned_note)
 
     def test_a_junk_limit_is_unknown_not_one_kilobyte(self):
         """脏上界值 ⇒ **上界未知** (不剪), 不是「1 KB」(那会把点全判成放不下)
 
-        ⚠️ 脏值要真的喂进 `int(...)` 才算走到那一步: `caps_from_metrics("junk")` 走的是
-        「取不到属性 ⇒ None ⇒ 0」那条, **不抛**; 这里喂 `{"shared_mem_per_sm_kb": "abc"}`。
+        需要检查带实际字段的脏值；不能只测取不到属性的对象。
         """
         self.assertEqual(MemCaps(0), caps_from_metrics({"shared_mem_per_sm_kb": "abc"}))
         self.assertEqual(MemCaps(0), caps_from_metrics("junk"))
         self.assertEqual(MemCaps(0), caps_from_metrics(None))
         backend = _TemplateBackend()
         junk = select_template_candidate(
-            _SPACE, backend, caps=caps_from_metrics({"shared_mem_per_sm_kb": "abc"}))
+            _SPACE, backend, caps=caps_from_metrics({"shared_mem_per_sm_kb": "abc"}),
+            resource_evidence=_resource_receipts())
         self.assertTrue(junk.no_limit)
         self.assertIn("未生效", junk.pruned_note)
         self.assertEqual(4, len(junk.ranked))
@@ -223,6 +244,32 @@ class TestTheRanking(unittest.TestCase):
         self.assertEqual("template", d["chosen_lineage"]["kind"])
         self.assertIn("params", d["chosen_lineage"])
         self.assertEqual(4, len(d["ranked"]))
+
+    def test_template_points_forwards_only_explicit_harness_resource_receipts(self):
+        unknown = template_points(_SPACE, MemCaps(60))
+        self.assertEqual(4, len(unknown.kept))
+        self.assertEqual(4, unknown.resource_unknown)
+        known = template_points(_SPACE, MemCaps(60), resource_evidence=_resource_receipts())
+        self.assertEqual([_SPACE.points()[0]], known.kept)
+        self.assertEqual(3, len(known.dropped))
+        self.assertEqual(0, known.resource_unknown)
+
+    def test_old_version_or_parameter_receipts_cannot_prune_a_new_template_space(self):
+        old_receipts = _resource_receipts()
+        variants = (
+            ParamSpace(template_id="mm_tile", backend="fake", instantiator_ver="tv-2",
+                       axes=_SPACE.axes),
+            ParamSpace(template_id="mm_tile", backend="fake", instantiator_ver="tv-1",
+                       axes={"BLOCK_M": (64, 128), "BLOCK_N": (64, 128), "BLOCK_K": (128,)}),
+        )
+        for space in variants:
+            with self.subTest(version=space.instantiator_ver, axes=space.axes):
+                res = template_points(space, MemCaps(1), resource_evidence=old_receipts)
+                self.assertEqual(space.points(), res.kept)
+                self.assertEqual([], res.dropped)
+                self.assertEqual(4, res.resource_unknown)
+                self.assertFalse(res.kept_all_to_avoid_starvation)
+                self.assertIn("未知", res.as_note())
 
 
 class TestTheLoopConsumesTheQueue(unittest.TestCase):

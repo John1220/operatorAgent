@@ -22,9 +22,12 @@
 
 import contextlib
 import io
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -32,6 +35,7 @@ import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
 from operator_agent.bandit import Bandit
+from operator_agent.candidates import point_label
 from operator_agent.exhaustion import (EXHAUSTED, FROM_LLM_ON_DEMAND,
                                        FROM_TEMPLATE_SPACE, UNEXPLORED, UNKNOWN,
                                        Coverage, CoverageLedger,
@@ -190,11 +194,15 @@ class ExhaustionCase(unittest.TestCase):
         inputs = {"A": rng.standard_normal((64, 64)).astype(np.float32),
                   "B": rng.standard_normal((64, 64)).astype(np.float32)}
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            conductor = Conductor(backend=backend, kernel_db=KernelDatabase(),
-                                  llm=_DesignerOnlyLLM(),
-                                  max_optimize_rounds=rounds)
-            artifact = conductor.execute(task, inputs, target_gflops=0.0)
+        # A previous H20 test must not make this CPU fake's flat measurements
+        # degraded through a shared environment fingerprint; validity stays real.
+        with tempfile.TemporaryDirectory(prefix="exhaustion-output-") as output_dir:
+            with patch.dict(os.environ, {"OPERATOR_AGENT_OUTPUT_DIR": output_dir}), \
+                    contextlib.redirect_stdout(buf):
+                conductor = Conductor(backend=backend, kernel_db=KernelDatabase(),
+                                      llm=_DesignerOnlyLLM(),
+                                      max_optimize_rounds=rounds)
+                artifact = conductor.execute(task, inputs, target_gflops=0.0)
         return artifact, buf.getvalue()
 
 
@@ -202,44 +210,49 @@ class TestExhaustedRegionStillTerminates(ExhaustionCase):
     """可判路径上的保护: 停滞**两个条件都成立**时照样提前终止"""
 
     def test_flat_measurements_plus_exhausted_region_stops_early(self):
-        artifact, out = self._run(_flat_template_backend(), rounds=4)
+        backend = _flat_template_backend()
+        points = backend.param_space().points()
+        self.assertEqual(4, len(points), "缺资源证据时保留原参数空间的全部四点")
+        round_limit = len(points) + 3
+        artifact, out = self._run(backend, rounds=round_limit)
         self.assertIn("性能未改善", out)
         self.assertIn("提前终止", out, "候选穷尽 + 连续无改善 ⇒ 停滞可以成立")
         self.assertIn("候选区域已穷尽", out)
         self.assertEqual("stagnant", artifact.metadata["stop"]["reason"])
-        self.assertEqual("exhausted", artifact.metadata["coverage"]["last"]["state"])
-        self.assertEqual(1, artifact.metadata["coverage"]["last"]["total"],
-                         "这台设备的 smem 上界只留得下一个点 (剪枝的已知行为)")
+        coverage = artifact.metadata["coverage"]["last"]
+        self.assertEqual("exhausted", coverage["state"])
+        self.assertEqual(len(points), coverage["total"])
+        self.assertEqual(len(points), coverage["tried"])
+        self.assertEqual([], coverage["untried"])
+        self.assertLess(len(artifact.iteration_history), round_limit)
+        self.assertEqual({point_label(point) for point in points},
+                         {row["template_selection"]["chosen"]
+                          for row in artifact.iteration_history},
+                         "宣布穷尽前必须实际选过完整空间，不能把未尝试点省掉")
 
     def test_the_exhausted_stop_names_the_coverage(self):
-        artifact, out = self._run(_flat_template_backend(), rounds=4)
+        backend = _flat_template_backend()
+        total = backend.param_space().size()
+        artifact, out = self._run(backend, rounds=total + 3)
         detail = artifact.metadata["stop"]["detail"]
         self.assertIn("穷尽", detail, f"停机理由要说明是**哪一半**成立: {detail}")
+        self.assertIn(f"{total}/{total}", detail)
 
 
 class TestUnexhaustedRegionIsNotAStagnation(ExhaustionCase):
     """模板型但**还有没试过的点** ⇒ 不许宣布停滞 (只因轮数 = 设计点名的错读法)"""
 
     def test_a_second_point_keeps_the_loop_alive(self):
-        # 把上界放大到能容下多个点: 剪枝不再只剩一个 ⇒ 第 2、3 轮仍有未观测候选
-        import operator_agent.resource_check as rc
-        from operator_agent.conductor import Conductor
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
-                                            TargetSpec, TaskComplexity, TaskSchema,
-                                            TaskType)
+        # Source tile hints no longer prune the space. With four points retained,
+        # reaching the stagnant-round threshold before full coverage cannot stop.
         backend = _flat_template_backend()
-        real = rc.caps_from_metrics
-        rc.caps_from_metrics = lambda src: rc.MemCaps(1024)      # 上界放宽 ⇒ 全部点留下
-        try:
-            import operator_agent.conductor as cond
-            cond.caps_from_metrics = rc.caps_from_metrics
-            artifact, out = self._run(backend, rounds=4)
-        finally:
-            rc.caps_from_metrics = real
-            import operator_agent.conductor as cond
-            cond.caps_from_metrics = real
+        total = backend.param_space().size()
+        artifact, out = self._run(backend, rounds=total)
         cov = artifact.metadata["coverage"]
-        self.assertIn(cov["last"]["state"], ("exhausted", "unexplored"))
+        self.assertEqual("unexplored", cov["last"]["state"])
+        self.assertEqual(total, cov["last"]["total"])
+        self.assertLess(cov["last"]["tried"], total)
+        self.assertEqual(total - cov["last"]["tried"], len(cov["last"]["untried"]))
         rounds_with_untried = [h["coverage"] for h in artifact.iteration_history
                                if h["coverage"].get("state") == "unexplored"
                                and h["coverage"].get("threshold_reached")]

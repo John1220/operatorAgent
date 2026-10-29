@@ -205,7 +205,15 @@ class TestTheGateInTheProductionLoop(unittest.TestCase):
 
     def test_with_hard_limit_evidence_and_a_plateau_the_llm_is_asked(self):
         """三条件成立 ⇒ 问 LLM, 且升级买到 K 轮 (停滞计数清零 ⇒ 跑得比上限更久)"""
-        art, out, tags = self._run(_TightTileLlm())
+        from operator_agent.resource_check import (SharedMemoryEvidence, assess_shared_memory,
+                                                   source_resource_binding)
+        def native_report(code, caps, kind):
+            binding = source_resource_binding(code)
+            return assess_shared_memory(SharedMemoryEvidence(binding=binding,
+                kind='native_compiler', producer='controlled-test-compiler',
+                native_bytes=240*1024), caps, binding=binding)
+        with unittest.mock.patch('operator_agent.conductor.check_resource_feasibility', native_report):
+            art, out, tags = self._run(_TightTileLlm())
         self.assertIn("Search", tags, f"三条件都成立却没问 LLM: {tags}")
         self.assertIn("结构升级门通过", out)
         allowed = [e for e in art.metadata["escalation"] if e["allowed"]]
@@ -216,6 +224,18 @@ class TestTheGateInTheProductionLoop(unittest.TestCase):
         self.assertGreater(rounds, MAX_STAGNANT_ROUNDS + 1,
                            f"升级没有换来额外轮次 (轮数={rounds})")
         self.assertNotEqual("stagnant", art.metadata["stop"]["reason"])
+
+    def test_logical_tiles_cannot_create_hard_limit_evidence(self):
+        art, out, tags = self._run(_TightTileLlm())
+        self.assertNotIn('Search', tags)
+        self.assertTrue(all(COND_HARD_LIMIT in row['refusals'] for row in art.metadata['escalation']))
+
+    def test_invalid_memory_metrics_stay_unknown_without_crashing(self):
+        from types import SimpleNamespace
+        for value in (float('nan'), float('inf'), 'not-a-limit', True):
+            decision = Conductor._escalation_decision(SimpleNamespace(_verdict_tail=[]),
+                None, set(), set(), dict(shared_mem_per_sm_kb=value), 'def kernel(A): return A')
+            self.assertFalse(decision.allowed)
 
     def test_an_untrustworthy_round_still_denies_the_escalation(self):
         """读数不可信的轮次, 门必须**关着** —— 没有判决就没有平台化证据 (fail-closed)

@@ -302,10 +302,17 @@ class TestTheConductorUsesIt(unittest.TestCase):
         这是 M11 的观察面 —— 记账写死 `explore` 时, 产物里「精修花了多少次」永远是 0,
         而分相预算的全部意义就是让两格的花费分别看得见。
         """
-        c, art, out = self._run(rounds=2)
+        from tests.test_template_queue import _TemplateBackend
+        from operator_agent.candidates import ParamSpace
+        # A single declared point guarantees reuse; an unproved resource proxy
+        # must not be used to silently reduce a larger space to that point.
+        space = ParamSpace(template_id='phase-accounting-single-point', backend='fake',
+            axes={'BLOCK_M': (64,), 'BLOCK_N': (64,), 'BLOCK_K': (64,)})
+        c, art, out = self._run(rounds=2, backend=_TemplateBackend(space=space))
         spent = art.metadata["budget"]["spent"]
         phases = [h["phase"] for h in art.iteration_history if h["phase"]]
         self.assertIn("refine", phases, f"没有一轮精修: {phases}")
+        self.assertEqual(['explore', 'refine'], phases)
         self.assertEqual(phases.count("refine"), spent["refine"],
                          "记账必须跟着**这一轮的相位**走, 不许写死一格")
         self.assertEqual(phases.count("explore"), spent["explore"])

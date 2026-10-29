@@ -223,7 +223,7 @@ class TestStopReasonIsRecorded(unittest.TestCase):
         # 所以个数与对应关系都写死。
         # One new bounded-single-candidate terminal exit. Keep the absolute
         # anchor and exact reason mapping; do not replace them with >= checks.
-        self.assertEqual(16, len(exits),
+        self.assertEqual(18, len(exits),
                          "终止出口的个数变了 —— 少一个就是某个出口被改成了「继续」")
         self.assertEqual(1, len(delegated),
                          "委派式出口的个数变了 —— 进出口清单的话, 这里也要改")
@@ -241,6 +241,7 @@ class TestStopReasonIsRecorded(unittest.TestCase):
         self.assertEqual(
             ["'wall_clock_exhausted'", "'budget_exhausted'", "'budget_exhausted'",
              "'search_error'", "'budget_exhausted'", "'template_no_candidate'",
+             "'budget_exhausted'", "'budget_exhausted'",
              "'transport_unknown_hold'", "'reference_identity_hold'", "'passed'",
              "'l1_l2_failed' if failed_correctness else 'rounds_exhausted'",
              "'stagnant'", "'converged'", "'infra_retry'", "'fix_error'",

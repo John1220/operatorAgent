@@ -35,6 +35,9 @@ def test_default_plan_has_no_config_model_transport_or_input_allocation(tmp_path
     root=next(tmp_path.iterdir());plan=json.loads((root/'plan.json').read_text())
     assert plan['hash']==rc.digest({k:v for k,v in plan.items() if k!='hash'})
     assert plan['model'] is None and plan['model_limits']['max_calls']==2
+    assert plan['controls']['budget']['oracle_total']==7
+    assert plan['budget_accounting']['unit']=='candidate_verification_dispatch_per_input_group'
+    assert plan['budget_accounting']['fixed_dispatch_sequence_unchanged']
     assert plan['proposal_policy']['source_author']=='trusted_template'
     assert plan['proposal_policy']['max_repairs']==0
     assert plan['contract']['min_speedup']==10.
@@ -344,7 +347,7 @@ def test_production_conductor_consumes_real_response_hooks_and_saves_own_winner(
     s=driver.ProposalSession(m,tmp_path,plan,t,[])
     c=Conductor(backend=b,llm=m,kernel_db=KernelDatabase(str(tmp_path/'corpus.jsonl'),persist_retrievals=False),
         failure_db=FailureDatabase(str(tmp_path/'failure.jsonl')),use_coder_pipeline=False,
-        max_optimize_rounds=3,budget=BudgetPlan(oracle_total=3,llm_tokens=40000))
+        max_optimize_rounds=3,budget=BudgetPlan(oracle_total=5,llm_tokens=40000))
     c.store.output_dir=tmp_path/'artifacts'
     c.designer=SimpleNamespace(run=s.design);c.coder=SimpleNamespace(run=s.generate)
     c.search=SimpleNamespace(run=s.search);c.fixer=SimpleNamespace(run_with_action=s.refuse_repair)

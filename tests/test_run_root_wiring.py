@@ -103,14 +103,22 @@ class TestAnAdmittedCandidateLandsInTheLayout(unittest.TestCase):
                     survivors.append(os.path.join(dirpath, name))
         self.assertEqual([], survivors, f"被拒的候选留下了痕迹: {survivors}")
 
-    def test_only_the_candidate_slot_is_touched(self):
-        """布局的其余格子今天**没有**产物（既有产物没搬进来）—— 这条不许被读成「都搬了」"""
+    def test_round_history_uses_only_candidate_measurement_and_report_writers(self):
+        """S1 retains post-gate history without opening unrelated layout roles."""
         root = tempfile.mkdtemp(prefix="runroot-slots-")
         self._run(root)
         for name in DIR_NAMES:
             entries = os.listdir(os.path.join(root, name))
             if name == "candidate":
-                self.assertEqual(["code.py"], entries)
+                self.assertIn("code.py", entries)
+                self.assertTrue(any(entry.startswith('round-') for entry in entries))
+            elif name == "measurements":
+                self.assertTrue(entries)
+                self.assertTrue(all(entry.startswith(('round-', 'verification-event-')) for entry in entries))
+                self.assertTrue(any(entry.startswith('verification-event-') for entry in entries))
+            elif name == "report":
+                self.assertTrue(entries)
+                self.assertTrue(all(entry.startswith('round-') for entry in entries))
             else:
                 self.assertEqual([], entries, f"{name}/ 里有东西 —— 谁写的？")
 

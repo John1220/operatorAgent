@@ -1,0 +1,28 @@
+import torch
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _layernorm_fp16_kernel(X, Y, N, eps, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    base = X + row * N
+    ybase = Y + row * N
+    offs = tl.arange(0, BLOCK)
+    mask = offs < N
+    x = tl.load(base + offs, mask=mask, other=0.0).to(tl.float32)
+    mean = tl.sum(x, axis=0) / N
+    x_centered = x - mean
+    var = tl.sum(x_centered * x_centered, axis=0) / N
+    rstd = 1.0 / tl.sqrt(var + eps)
+    y = x_centered * rstd
+    tl.store(ybase + offs, y.to(tl.float16), mask=mask)
+
+
+def kernel(X):
+    N = X.shape[-1]
+    Y = torch.empty_like(X)
+    BLOCK = triton.next_power_of_2(N)
+    grid = (X.numel() // N,)
+    _layernorm_fp16_kernel[grid](X, Y, N, 1e-05, BLOCK=BLOCK)
+    return Y

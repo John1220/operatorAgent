@@ -253,7 +253,7 @@ class TestAssemblyContract(unittest.TestCase):
                           f"{name}.md 不渲染契约 ⇒ 走这条 DSL 时值算了没人读")
 
     def test_conductor_hands_test_inputs_to_the_coder(self):
-        """链路首环: conductor 那一处 `self.coder.run(...)` 必须带 test_inputs。
+        """链路首环: conductor 调 Coder 时必须带 test_inputs（含统一记录包装器）。
         结构断言 (AST 上的调用点) 而不是跑一次 conductor —— conductor 的其余部分要 SSH。"""
         src = (PKG / "conductor.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
@@ -261,10 +261,15 @@ class TestAssemblyContract(unittest.TestCase):
                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
         calls = []
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            direct = (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                     and node.func.attr == "run"
                     and isinstance(node.func.value, ast.Attribute)
-                    and node.func.value.attr == "coder"):
+                    and node.func.value.attr == "coder")
+            recorded = (isinstance(node, ast.Call)
+                        and ast.unparse(node.func) == 'self._call_generator'
+                        and [ast.unparse(arg) for arg in node.args[:2]] ==
+                            ['self.coder', 'self.coder.run'])
+            if direct or recorded:
                 owner = next((f for f in funcs
                               if any(a is node for a in ast.walk(f))), None)
                 calls.append((owner.name if owner else "<module>",

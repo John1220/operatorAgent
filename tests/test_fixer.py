@@ -259,7 +259,7 @@ def test_the_conductor_uses_the_action_bearing_entry():
     「调用形状」变了就必须有人改这里, 而不是让计数器悄悄失效。
     """
     src = pathlib.Path(conductor.__file__).read_text("utf-8")
-    assert "self.fixer.run_with_action(" in src
+    assert "self._call_generator(self.fixer, self.fixer.run_with_action," in src
     assert "self.fixer.run(" not in src, \
         "Conductor 又调回了两格投影 —— 动作信封不会再有生产者"
 

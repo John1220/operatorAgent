@@ -2,8 +2,8 @@
 
 `tests/test_candidates.py` 证的是判据本身算得对; 这里证三处接线:
 ① Verifier 把每 SM smem 上界发布进 L3 metrics (与 L1 预检同一个 caps 真源);
-② Conductor 把它与 `elem_bytes` 一起放进 `perf_data` (**缺了这一环, 剪枝永远不生效**);
-③ SearchAgent 真的按它摘点, 且「不知道」与「没摘」分得开。
+② Conductor 把上界与任务 `elem_bytes` 放进 `perf_data`；精度不是实际共享缓冲区证据；
+③ SearchAgent 缺少 harness 资源契约时保留点，且「不知道」与「放得下」分得开。
 
 ③ 是这一族最常见的失效形状: 判据写好了、有单测, 但生产路径上没人读它。
 
@@ -19,9 +19,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from operator_agent.agents import SearchAgent
-from operator_agent.candidates import ParamSpace
+from operator_agent.candidates import ParamSpace, TemplateCandidate, template_resource_binding
 from operator_agent.conductor import Conductor
 from operator_agent.kernel_db import KernelDatabase
+from operator_agent.resource_check import SharedMemoryEvidence
 from operator_agent.schemas import TilingStrategy, UnifiedSketch
 from tests.test_measurement_validity import (
     LaunchDominatedGPU, NET_MS_MATMUL_4096,
@@ -64,7 +65,7 @@ class TestTheLimitReachesTheSearcher(unittest.TestCase):
             c.execute(_task(min_speedup=5.0), _inputs(), None, target_gflops=0.0)
         self.assertTrue(search.perf_seen, "前提: 这一跑要走优化分支")
         perf = search.perf_seen[0]
-        self.assertIn("shared_mem_per_sm_kb", perf, "上界没进 perf_data ⇒ 剪枝永远不生效")
+        self.assertIn("shared_mem_per_sm_kb", perf, "硬件上界仍须传到搜索侧")
         self.assertEqual(228, perf["shared_mem_per_sm_kb"], "H20 的 caps 是 228 KB")
         self.assertEqual(4, perf["elem_bytes"], "fp32 声明精度 = 4 字节")
 
@@ -79,23 +80,27 @@ class TestTheLimitReachesTheSearcher(unittest.TestCase):
 
 class TestThePrunerActsInTheProductionPath(unittest.TestCase):
 
-    def test_a_neighbor_that_cannot_fit_is_dropped_before_the_measurement(self):
+    def test_large_and_small_neighbors_remain_unknown_without_storage_contracts(self):
         a = SearchAgent(llm=None, prompt_manager=None)
-        big = _sketch(512, 512, 128)          # (512*128+128*512+512*512)*4 ≈ 1.8 MiB
+        big = _sketch(512, 512, 128)
         small = _sketch(64, 64, 32)
         kept, note = a._prune_by_smem([small, big],
                                       {"shared_mem_per_sm_kb": 64, "elem_bytes": 4})
-        self.assertEqual([small.tiling.block_m], [s.tiling.block_m for s in kept])
-        self.assertIn("512x512x128", note)
+        self.assertEqual([small, big], kept, "大小 tile 都没有物理存储证据，不能假拒")
         self.assertIn("代理剪枝", note)
+        self.assertIn("未知", note)
+        self.assertNotIn("下界", note)
+        self.assertNotIn("摘掉", note)
 
     def test_pruning_a_whole_neighborhood_still_leaves_a_round_to_run(self):
         a = SearchAgent(llm=None, prompt_manager=None)
         pts = [_sketch(256, 256, 128), _sketch(512, 512, 128)]
         kept, note = a._prune_by_smem(pts, {"shared_mem_per_sm_kb": 1,
                                             "elem_bytes": 4})
-        self.assertEqual(2, len(kept), "全超上界 ⇒ 一个都不摘 (留给远端判定)")
-        self.assertIn("全部保留", note)
+        self.assertEqual(2, len(kept), "物理占用未知 ⇒ 保留待原生检查")
+        self.assertIn("未知", note)
+        self.assertIn("没摘不等于放得下", note)
+        self.assertNotIn("全超上界", note, "unknown 不是全部已拒后的防饿死回退")
 
     def test_the_note_reaches_the_suggestion_printed_upstream(self):
         """剪枝的说明要跟着 suggestion 走 —— 只在内部记账等于没说"""
@@ -105,6 +110,32 @@ class TestThePrunerActsInTheProductionPath(unittest.TestCase):
             prior, origin=_sketch(64, 64, 32),
             perf_data={"shared_mem_per_sm_kb": 1, "elem_bytes": 4})
         self.assertIn("代理剪枝", note)
+        self.assertIn("未知", note)
+
+    def test_user_perf_data_cannot_supply_trusted_resource_receipts(self):
+        a = SearchAgent(llm=None, prompt_manager=None)
+        sketches = [_sketch(64, 64, 32), _sketch(512, 512, 128)]
+        receipts = {}
+        for index, sketch in enumerate(sketches):
+            tile = sketch.tiling
+            point = TemplateCandidate("lattice", "tiling", {
+                "BLOCK_M": tile.block_m, "BLOCK_N": tile.block_n,
+                "BLOCK_K": tile.block_k, "_idx": index})
+            binding = template_resource_binding(point)
+            receipts[binding] = SharedMemoryEvidence(
+                binding=binding, kind="native_compiler", producer="user-perf-data-claim",
+                native_bytes=1024 if index == 0 else 512 * 1024)
+        kept, note = a._prune_by_smem(sketches, {
+            "shared_mem_per_sm_kb": 64, "elem_bytes": 4,
+            "resource_evidence": receipts,
+            "shared_memory_evidence": receipts,
+            "shared_bytes_per_cta": 512 * 1024,
+            "estimated_smem_bytes": 512 * 1024,
+        })
+        self.assertEqual(sketches, kept,
+                         "perf_data 里的用户自报值不能升级为 harness 可信证据")
+        self.assertIn("未知", note)
+        self.assertNotIn("摘掉", note)
 
 
 class TestTheSwitchIsWiredIntoTheController(unittest.TestCase):
