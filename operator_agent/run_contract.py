@@ -60,8 +60,14 @@ def audit_value(value):
 
 
 def protocol_identity():
-    """Version the *implementation*, not just a handwritten protocol label."""
-    root = Path(__file__).resolve().parents[1]
+    """Version the *implementation*, not just a handwritten protocol label.
+
+    路径按**包目录**解析（而不是 cwd，也不是硬编码的仓库根）：源码树里
+    `operator_agent/` 与 `remote_scripts/` 是兄弟目录，`pip install` 之后它们在
+    site-packages 里**仍是兄弟**（`remote_scripts/__init__.py` 就是为了这个）。
+    缺文件时给一句能查的话，而不是让 `FileNotFoundError` 埋在几十条哈希中间。
+    """
+    root = Path(__file__).resolve().parent.parent
     files = (
         "operator_agent/run_contract.py", "operator_agent/contract.py",
         "operator_agent/conductor.py", "operator_agent/verifier.py",
@@ -83,14 +89,39 @@ def protocol_identity():
         "operator_agent/tolerance.py", "operator_agent/eligibility.py",
         "operator_agent/correctness_boundaries.py", "operator_agent/source_lang.py",
         "operator_agent/resource_check.py", "operator_agent/hardware_caps.py",
+        "operator_agent/candidates.py", "operator_agent/coder_pipeline.py",
+        "operator_agent/triton_matmul_template.py",
+        "operator_agent/agents.py",
         "operator_agent/exec_guard.py", "operator_agent/budget.py", "operator_agent/calibration.py",
+        "operator_agent/task_budget.py", "operator_agent/autonomous.py",
         "operator_agent/llm_client.py", "operator_agent/llm_budget.py",
         "operator_agent/llm_transport.py", "operator_agent/single_candidate_coder.py",
+        "operator_agent/bounded_repair.py",
+        "operator_agent/repair_diagnoser.py",
+        "operator_agent/repair_stride_diagnoser.py",
+        "operator_agent/repair_scalar_diagnoser.py", "operator_agent/compile_evidence.py",
+        "operator_agent/generation_spec.py", "operator_agent/generation_context.py",
+        "operator_agent/prompt_manager.py",
+        "operator_agent/fixer.py", "operator_agent/repair_loop.py",
+        "operator_agent/tool_evidence.py", "operator_agent/hitl_tools.py",
+        "operator_agent/report.py",
+        "operator_agent/run_layout.py",
+        "operator_agent/task_cancellation.py", "operator_agent/tool_calls.py",
+        "operator_agent/task_clock.py",
+        "operator_agent/execution_audit.py", "operator_agent/backend_ownership.py",
+        "operator_agent/s5_shared_budget.py", "operator_agent/s5_inner_budget.py",
+        "operator_agent/s5_verify_client.py",
         "remote_scripts/run_kernel.py", "remote_scripts/runner_server.py",
         "remote_scripts/run_kernel_xpu.py",
     )
-    return {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
-            for name in files}
+    out = {}
+    for name in files:
+        path = root / name
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"protocol_identity: 缺 {name}（包不完整？root={root}）")
+        out[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return out
 
 
 def declaration(task, input_sets, controls=None):

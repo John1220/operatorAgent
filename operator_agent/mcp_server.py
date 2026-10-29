@@ -1,4 +1,4 @@
-"""最小 MCP stdio server：把 `hitl_tools` 的**六个**工具暴露给宿主的 agent
+"""最小 MCP stdio server：把 `hitl_tools` 的八个工具暴露给宿主的 agent
 
 为什么是这个形态（`docs/dsh-plugin-evaluation.md` §6.2 / §9.6）：
 
@@ -13,9 +13,9 @@ DSH 的插件必须是 Cordis 的 ESM 模块，而本仓是 Python —— 两者
 
     initialize                 → 版本协商 + capabilities.tools
     notifications/initialized  → 无响应（通知没有 id）
-    notifications/cancelled    → 无响应（本 server 的调用是同步的，取消靠进程退出）
+    notifications/cancelled    → 请求取消对应的前台 worker；通知不响应
     ping                       → {}
-    tools/list                 → 六个工具的 JSON Schema（静态表：改了要重启进程）
+    tools/list                 → 八个工具的 JSON Schema（静态表：改了要重启进程）
     tools/call                 → 转发给 hitl_tools；拒绝时 isError=true + 可归因的文本
 
 硬约束：**stdout 只许走协议行**。任何别的 print 都会把流打断（DSH 那条 `id` 校验会报
@@ -33,12 +33,15 @@ from __future__ import annotations
 import io
 import json
 import sys
+import queue
+import signal
+import threading
 from pathlib import Path
 from typing import Any, BinaryIO, Optional, TextIO
 
 from . import __version__
-from .hitl_tools import (ToolError, autonomous_status, capabilities, prepare,
-                         repair, run_autonomous, verify)
+from .hitl_tools import (CANDIDATE_ORIGINS, ToolError, autonomous_status, cancel_task, bench,
+                         capabilities, prepare, repair, run_autonomous, verify)
 
 SERVER_NAME = "operator"
 SERVER_VERSION = __version__
@@ -64,9 +67,42 @@ INSTRUCTIONS = """\
 `operator_verify` 判候选；已有核要修就用 `operator_repair`；从头自动化用 `operator_run`
 加 `operator_status` 轮询。（DSH 里这些工具显示为 `mcp__operator__*`。）
 
+`operator_run` 和 `operator_repair` 的任务预算由 `wall_clock_s`、`max_llm_calls`、`oracle_total` 指定；后者按验证
+case 派发预留计数，最终确认预留不可挪用，不是 GPU 秒数。`operator_status` 的 `budget` 与
+`stopped_reason` 说明用量和停止原因；`done` 包括预算停止，仍需查看验证结果。
+
+取消使用 `operator_cancel(run_dir, invocation_id)`，再查 `operator_status` 确认 cancelled
+或其他终态。后台 run 立刻返回 invocation_id；同步 verify/repair/bench 可用 MCP 取消通知，
+也可从 operator_status(run_dir) 列出的工具调用取得实例 ID。accepted 只是请求已记录；
+本机清理不证明远端 GPU 或服务商已停止。已发生的调用/测量不退款。
+
+**写核优先交给内层，别自己从头写**：从零整段用 `operator_run` —— 当前入口使用普通 Coder，
+带共享规约、`triton_skill`、优化配方和预检重试，再由控制器验证/修复；三温度采样等 Pipeline
+能力需要显式启用，不是该工具默认策略。已有一份核要改
+用 `operator_repair` —— 内层 Fixer 带共享 `GENERATION_SPEC`、coder 角色的 `triton_skill`
+注入与绑定当前源码的诊断；该路径不做规划、多候选采样或参数搜索（三条内层路径的能力并不相同）。
+理由是这些注入你在对话里一个都拿不到，而内层那条路有真机十任务的实测通过率，你自己写这条
+没有。**两条例外**：① **人写的核照常走 `operator_verify`** —— 那是设计过的用法，不要劝人
+别写，这条只针对「你自己动手写」；② 目前**没有**「只生成一个候选」的工具，所以如果你要的
+是单个候选、又不值得起一次整段 `operator_run`，那就自己写，并在 `candidate_origin` 里
+**如实**填 `outer`。
+
+要**扫参数或对比多个候选**（tile / warps / stages 这类网格，或同一任务的多份源码）用
+`operator_bench`：一次调用测一批，逐臂给 speedup 与 validity。它的回包 `grade=exploration`
+**没有**裁决字段 —— 那是设计，不是缺字段：读数只能用来选方向，别拿它当交付结论，
+survivors 仍要走 `operator_verify`。也别再手搓 ssh 基准脚本。
+
 读回包时：`levels` 看判到哪一级；**`route` 与 `eligibility` 必须一起读** —— 两者冲突时
 `conflict.action=hold_for_measurement`，此时不要照着 `route` 迭代，先修判据（形状 / 精度 /
 required_caps）。`validity=degraded` 或 `uninformative` 的读数不驱动调参或入库。
+修复回包的 `full_l2_passed=true` 才表示完整正确性套件通过；单独 L1 通过不是正确性。
+`diagnosis` 是绑定当前源码与失败观察的假设，不是通过凭据；未知时不猜原因。
+原样返回或只改注释的修复会停止，完整诊断和源码改动记录在 `evidence` 文件中。
+
+`candidate_origin`（`verify`/`repair` 的可选参数）是**归因**格，不是判据：你写的或人写的核
+填 `outer`，省略则回包与 `report.md` 记 `undeclared`（缺省是「记成没声明」，不是「不记」）。
+它不影响任何通过与否。`repair` 另回一个**派生**的 `final_candidate_origin` —— 只要有哪一轮
+真改了源码就是 `inner_fixer`，那一格不接受声明。
 """
 
 _SHAPES = {"type": "array", "minItems": 1,
@@ -74,9 +110,18 @@ _SHAPES = {"type": "array", "minItems": 1,
                      "items": {"type": "integer", "minimum": 0}},
            "description": "形状分布：matmul 是 [M,N,K]，逐元素/归一化是 [M,N]"}
 
+#: 候选来源。**闭合词表只有一处来源**（`hitl_tools.CANDIDATE_ORIGINS`），schema 与实现
+#: 各写一份就是「工具说收 A、实现只认 B」。省略 ⇒ 回包记 `undeclared`，不是省略这一格。
+_ORIGIN = {"type": "string", "enum": list(CANDIDATE_ORIGINS),
+           "description": ("这份源码是谁写的（归因用，**不进判据**）：outer = 你/人写的，"
+                           "inner_fixer = operator_repair 的内层模型改的，"
+                           "inner_coder = 本仓生成器产的。省略则回包记 undeclared。"
+                           "**如实填**：这一格是用来事后区分「裸写」与「走过 spec/技能注入」的，"
+                           "不是为了好看 —— 自己写的核填 outer，不要填 inner_coder。")}
+
 
 def _tool_definitions() -> list[dict]:
-    return [
+    definitions = [
         {
             "name": "operator_prepare",
             "description": ("把一个算子任务冻结成可复算的「回合」：返回契约哈希、契约自带的"
@@ -116,6 +161,7 @@ def _tool_definitions() -> list[dict]:
                     "run_dir": {"type": "string"},
                     "code": {"type": "string", "description": "候选源码文本"},
                     "code_file": {"type": "string", "description": "候选源码文件路径（与 code 二选一）"},
+                    "candidate_origin": _ORIGIN,
                     "stop_after": {"type": "string", "enum": ["L1", "L2", "L3"]},
                     "backend": {"type": "string", "enum": ["mock", "local", "ssh"],
                                 "default": "mock"},
@@ -127,6 +173,43 @@ def _tool_definitions() -> list[dict]:
                     "work_dir": {"type": "string"},
                     "timeout": {"type": "integer", "default": 300},
                     "persistent": {"type": "boolean", "default": False},
+                    "target_gflops": {"type": "number"},
+                },
+            },
+        },
+        {
+            "name": "operator_bench",
+            "description": ("对**多个**候选只跑 L3 的批量测量（探索级，**不可裁决**）：一次部署、"
+                            "逐臂与基线同窗配对，只回答「哪个方向更快」。已有 verdict 字段一律不出，"
+                            "要交付结论仍须 operator_verify。调参/扫网格用它，别再手搓 ssh 基准。"),
+            "inputSchema": {
+                "type": "object", "additionalProperties": False,
+                "required": ["run_dir", "candidates"],
+                "properties": {
+                    "run_dir": {"type": "string", "description": "已 prepare 的回合目录（复用其契约）"},
+                    "candidates": {
+                        "type": "array", "minItems": 1,
+                        "items": {
+                            "type": "object", "additionalProperties": False,
+                            "required": ["name"],
+                            "anyOf": [{"required": ["code"]}, {"required": ["code_file"]}],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "code": {"type": "string"},
+                                "code_file": {"type": "string"},
+                            },
+                        },
+                    },
+                    "backend": {"type": "string", "enum": ["mock", "local", "ssh"], "default": "mock"},
+                    "host": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "user": {"type": "string"},
+                    "key_path": {"type": "string"},
+                    "work_dir": {"type": "string"},
+                    "timeout": {"type": "integer", "default": 300},
+                    "persistent": {"type": "boolean", "default": True},
+                    "max_candidates": {"type": "integer", "default": 16},
+                    "deadline_s": {"type": "number", "default": 120},
                     "target_gflops": {"type": "number"},
                 },
             },
@@ -152,6 +235,12 @@ def _tool_definitions() -> list[dict]:
                     "framework": {"type": "string"},
                     "notes": {"type": "string"},
                     "max_rounds": {"type": "integer", "default": 1},
+                    "wall_clock_s": {"type": "number", "exclusiveMinimum": 0,
+                                     "default": 1800.0, "description": "整个任务的墙钟时限（秒）"},
+                    "max_llm_calls": {"type": "integer", "minimum": 1,
+                                      "default": 24, "description": "整个任务允许派发的模型调用总数，失败不退款"},
+                    "oracle_total": {"type": "integer", "minimum": 1,
+                                     "default": 20, "description": "验证 case 派发额度，确认预留不可挪用；不表示原始 GPU launch 次数或 GPU 秒数"},
                     "backend": {"type": "string", "enum": ["mock", "local", "ssh"], "default": "mock"},
                     "host": {"type": "string"},
                     "port": {"type": "integer"},
@@ -165,13 +254,25 @@ def _tool_definitions() -> list[dict]:
             },
         },
         {
+            "name": "operator_cancel",
+            "description": ("请求取消指定 run/invocation。只写请求，由拥有任务的监督进程清理；"
+                            "accepted 不是终态确认，随后查 operator_status。已结束/重复请求幂等。"),
+            "inputSchema": {
+                "type": "object", "additionalProperties": False,
+                "required": ["run_dir", "invocation_id"],
+                "properties": {"run_dir": {"type": "string"},
+                    "invocation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}},
+            },
+        },
+        {
             "name": "operator_status",
-            "description": ("查一次无人值守运行的相位。四态：running / done / failed / **lost**"
-                            "（进程没了但没写终态 —— 不许读成还在跑）。"),
+            "description": ("查自主任务或指定 invocation 的 running/done/failed/cancelled/lost。"
+                            "仅前台工具目录且未指定实例时列出 tool_calls；lost 的清理状态未知。"),
             "inputSchema": {
                 "type": "object", "additionalProperties": False,
                 "required": ["run_dir"],
-                "properties": {"run_dir": {"type": "string"}},
+                "properties": {"run_dir": {"type": "string"},
+                    "invocation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}},
             },
         },
         {
@@ -187,7 +288,15 @@ def _tool_definitions() -> list[dict]:
                     "run_dir": {"type": "string"},
                     "code": {"type": "string"},
                     "code_file": {"type": "string"},
+                    "candidate_origin": _ORIGIN,
                     "max_rounds": {"type": "integer", "default": 2},
+                    "wall_clock_s": {"type": "number", "exclusiveMinimum": 0,
+                                     "default": 1800.0,
+                                     "description": "修复任务总墙钟时限（秒）"},
+                    "max_llm_calls": {"type": "integer", "minimum": 1, "default": 24,
+                                      "description": "修复任务模型调用预留，失败不退款"},
+                    "oracle_total": {"type": "integer", "minimum": 1, "default": 20,
+                                     "description": "验证输入组派发额度，确认预留不可挪用"},
                     "stop_after": {"type": "string", "enum": ["L1", "L2", "L3"]},
                     "backend": {"type": "string", "enum": ["mock", "local", "ssh"], "default": "mock"},
                     "host": {"type": "string"},
@@ -208,6 +317,11 @@ def _tool_definitions() -> list[dict]:
             "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
         },
     ]
+    from .s5_verify_client import enabled
+    if enabled():
+        return [tool for tool in definitions if tool['name'] in
+                ('operator_prepare', 'operator_verify', 'operator_capabilities')]
+    return definitions
 
 
 def _jsonrpc_ok(msg_id: Any, result: Any) -> dict:
@@ -233,7 +347,8 @@ def _text_result(payload: dict, *, is_error: bool = False) -> dict:
 #: `operator_run` 的**运行选项**（相对 declaration 的白名单）。两套词表分开是有意的：
 #: declaration 决定"判什么"，运行选项决定"怎么跑"，前者不许被后者污染。
 _RUN_OPTION_KEYS = ("max_rounds", "backend", "host", "port", "user", "key_path",
-                    "work_dir", "timeout", "persistent", "target_gflops")
+                    "work_dir", "timeout", "persistent", "target_gflops",
+                    "wall_clock_s", "max_llm_calls", "oracle_total")
 
 
 def _call_tool(name: str, arguments: dict) -> dict:
@@ -247,10 +362,15 @@ def _call_tool(name: str, arguments: dict) -> dict:
         if bool(code) == bool(code_file):
             raise ToolError("code_source_ambiguous", "code 与 code_file 必须给且只给一个")
         if code_file:
-            code = Path(code_file).read_text(encoding="utf-8")
+            code = Path(code_file).read_bytes().decode("utf-8")
         return _text_result(repair(run_dir, code, **args))
     if name == "operator_status":
-        return _text_result(autonomous_status(dict(arguments or {}).get("run_dir", "")))
+        return _text_result(autonomous_status(**dict(arguments or {})))
+    if name == "operator_cancel":
+        args = dict(arguments or {})
+        if not args.get('run_dir') or not args.get('invocation_id'):
+            raise ToolError('cancellation_refused', 'run_dir and invocation_id are required')
+        return _text_result(cancel_task(**args))
     if name == "operator_run":
         # 工具层参数 ≠ 声明参数：`backend`/`max_rounds`/ssh 那几项属于**运行选项**，
         # 不能混进 declaration（白名单会拒）。2026-10-19 在真宿主里撞到过一次。
@@ -274,8 +394,15 @@ def _call_tool(name: str, arguments: dict) -> dict:
         if bool(code) == bool(code_file):
             raise ToolError("code_source_ambiguous", "code 与 code_file 必须给且只给一个")
         if code_file:
-            code = Path(code_file).read_text(encoding="utf-8")
+            code = Path(code_file).read_bytes().decode("utf-8")
         return _text_result(verify(run_dir, code, **args))
+    if name == "operator_bench":
+        args = dict(arguments or {})
+        run_dir = args.pop("run_dir", None)
+        if not run_dir:
+            raise ToolError("run_dir_required", "operator_bench 需要 run_dir")
+        candidates = args.pop("candidates", None)
+        return _text_result(bench(run_dir, candidates, **args))
     raise ToolError("unknown_tool", f"没有这个工具: {name}")
 
 
@@ -292,6 +419,7 @@ def handle_message(message: dict) -> Optional[dict]:
         return None
 
     if method == "initialize":
+        from .s5_verify_client import enabled
         wanted = params.get("protocolVersion")
         version = wanted if wanted in SUPPORTED_PROTOCOLS else SUPPORTED_PROTOCOLS[0]
         return _jsonrpc_ok(msg_id, {
@@ -300,7 +428,12 @@ def handle_message(message: dict) -> Optional[dict]:
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             # 使用说明跟着 server 走（见 INSTRUCTIONS 的注释）：客户端渲染进上下文，
             # 于是宿主的提示段与工具描述不会各说一套。
-            "instructions": INSTRUCTIONS,
+            "instructions": ("S5 supervised development experiment: prepare then verify with "
+                             "stop_after=L2 and the supplied backend. Verification is delegated "
+                             "to the common service; read status and feedback, revise source in "
+                             "the outer agent. No repair/run/bench or direct GPU execution. "
+                             "The final independent evaluation is not a development tool."
+                             if enabled() else INSTRUCTIONS),
         })
     if method == "ping":
         return _jsonrpc_ok(msg_id, {})
@@ -322,28 +455,112 @@ def handle_message(message: dict) -> Optional[dict]:
 
 
 def serve(instream: TextIO, outstream: TextIO, *, log: Optional[TextIO] = None) -> None:
-    """逐行读 JSON-RPC，逐行写响应。空行/坏行只记 stderr，不打断流。"""
+    """Read controls while foreground workers run; only this thread emits JSON."""
+    from .tool_calls import LONG_TOOLS, ToolCall
     log = log or sys.stderr
-    for raw in instream:
-        line = raw.strip()
-        if not line:
-            continue
+    inbox = queue.Queue()
+    active = {}
+    ended = False
+    interrupted = False
+
+    def read_lines():
         try:
-            message = json.loads(line)
-        except json.JSONDecodeError as exc:
-            log.write(f"[mcp] 坏行（不是 JSON）: {exc}\n")
-            continue
-        if isinstance(message, list):                      # 批量：逐条处理
-            replies = [r for r in (handle_message(m) for m in message) if r is not None]
-            if replies:
-                outstream.write(json.dumps(replies, ensure_ascii=False) + "\n")
-                outstream.flush()
-            continue
-        reply = handle_message(message)
+            for raw in instream:
+                inbox.put(raw)
+        finally:
+            inbox.put(None)
+
+    def emit(reply):
         if reply is None:
-            continue
-        outstream.write(json.dumps(reply, ensure_ascii=False) + "\n")
+            return
+        outstream.write(json.dumps(reply, ensure_ascii=False) + '\n')
         outstream.flush()
+
+    def key(value):
+        return (type(value).__name__, json.dumps(value, sort_keys=True))
+
+    def submit(message, done):
+        if not isinstance(message, dict):
+            done(handle_message(message))
+            return
+        params = message.get('params') or {}
+        method, msg_id = message.get('method'), message.get('id')
+        if (message.get('jsonrpc') == '2.0' and method == 'notifications/cancelled'
+                and msg_id is None):
+            job = active.get(key(params.get('requestId')))
+            if job:
+                job[0].cancel()
+            done(None)
+            return
+        if (message.get('jsonrpc') == '2.0' and msg_id is not None
+                and method == 'tools/call' and params.get('name') in LONG_TOOLS):
+            identity = key(msg_id)
+            if identity in active:
+                done(_jsonrpc_err(msg_id, -32600, 'Request ID already active'))
+                return
+            try:
+                active[identity] = (ToolCall(params['name'], params.get('arguments') or {}),
+                                    msg_id, done)
+            except (ToolError, OSError, ValueError) as exc:
+                body = exc.as_dict() if isinstance(exc, ToolError) else dict(
+                    ok=False, error='tool_failed', detail=repr(exc))
+                done(_jsonrpc_ok(msg_id, _text_result(body, is_error=True)))
+            return
+        done(handle_message(message))
+
+    def dispatch(message):
+        if not isinstance(message, list):
+            submit(message, emit)
+            return
+        if not message:
+            emit(_jsonrpc_err(None, -32600, 'Invalid Request'))
+            return
+        batch = dict(remaining=len(message), replies={})
+        def collect(index, reply):
+            if reply is not None:
+                batch['replies'][index] = reply
+            batch['remaining'] -= 1
+            if batch['remaining'] == 0 and batch['replies']:
+                emit([batch['replies'][i] for i in sorted(batch['replies'])])
+        for index, entry in enumerate(message):
+            submit(entry, lambda reply, index=index: collect(index, reply))
+
+    def on_signal(signum, frame):
+        nonlocal interrupted
+        interrupted = True
+    previous = {}
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, on_signal)
+    except ValueError:
+        pass
+    threading.Thread(target=read_lines, daemon=True).start()
+    try:
+        while (not ended or active) and not interrupted:
+            try:
+                raw = inbox.get(timeout=.05)
+                if raw is None:
+                    ended = True
+                elif raw.strip():
+                    try:
+                        dispatch(json.loads(raw))
+                    except json.JSONDecodeError as exc:
+                        log.write(f'[mcp] 坏行（不是 JSON）: {exc}\n')
+            except queue.Empty:
+                pass
+            for identity, (call, msg_id, done) in list(active.items()):
+                response = call.poll()
+                if response is not None:
+                    del active[identity]
+                    done(_jsonrpc_ok(msg_id, response))
+    finally:
+        try:
+            for call, _, _ in active.values():
+                call.close()
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+    return interrupted
 
 
 def main(argv=None) -> int:
@@ -354,10 +571,10 @@ def main(argv=None) -> int:
     real_out = sys.stdout
     sys.stdout = sys.stderr
     try:
-        serve(sys.stdin, real_out)
+        interrupted = serve(sys.stdin, real_out)
     finally:
         sys.stdout = real_out
-    return 0
+    return 130 if interrupted else 0
 
 
 def _selftest() -> int:

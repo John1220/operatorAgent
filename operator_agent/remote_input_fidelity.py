@@ -208,3 +208,74 @@ def torch_output_digest(output):
     digest = hashlib.sha256(str((str(value.dtype), tuple(value.shape))).encode())
     digest.update(value.reshape(-1).view(torch.uint8).cpu().numpy().tobytes())
     return digest.hexdigest()
+
+
+# ── 按 seed 物化输入（2026-10-20）───────────────────────────────────────────
+#
+# 为什么要有这条协议: L2 的输入原先整份 base64 传过去，fp16 4096³ 两个张量 ≈ 90 MB 文本；
+# 实测链路 ~0.28 MB/s ⇒ 一次 L2 光传输就 570 s（见评估文档 §9.8.1）。契约本来就拥有
+# `seed`/`shape`/`dtype`，物化又是确定性的 —— 于是可以只传描述 + digest。
+#
+# **判据不许因此变松**：控制端先在自己的机器上物化、比对 digest；远端再物化一次、
+# 再比一次。任意一侧不一致就退回「传字节」那条老路（`input_seed_mismatch`）。
+SEED_PROTOCOL = "numpy-seed-v1"
+
+_NP_DTYPES = {"fp32": "float32", "fp16": "float16", "fp64": "float64",
+              "int32": "int32", "int64": "int64"}
+
+
+def seed_dtype(name):
+    """case 里写的 dtype（`fp16`）→ numpy dtype；表外一律拒绝（不降级）。"""
+    key = str(name)
+    if key not in _NP_DTYPES:
+        raise InputFidelityError(f"seed 物化不支持 dtype={key!r}")
+    return np.dtype(_NP_DTYPES[key])
+
+
+def materialize_seed_inputs(spec):
+    """按 `{"seed": int, "tensors": [{"name","shape","dtype"}]}` 造输入。
+
+    抽取顺序**必须**与 `bench_cases.BenchmarkCase.materialize` 一致：一个 rng、
+    按声明顺序、浮点 `standard_normal`、整数 `integers(1,8)`。两个实现分家之日就是
+    「控制端以为在验 A、远端实际在验 B」之时，所以那边现在直接调这里。
+    """
+    if not isinstance(spec, dict) or spec.get("protocol") != SEED_PROTOCOL:
+        raise InputFidelityError("未知 seed 物化协议")
+    seed = spec.get("seed")
+    if type(seed) is not int or seed < 0:
+        raise InputFidelityError("seed 必须是非负 int")
+    tensors = spec.get("tensors")
+    if not isinstance(tensors, list) or not tensors:
+        raise InputFidelityError("tensors 不能为空")
+    rng = np.random.default_rng(seed)
+    out = {}
+    for t in tensors:
+        if not isinstance(t, dict):
+            raise InputFidelityError("tensor 声明必须是对象")
+        name, shape = t.get("name"), t.get("shape")
+        if not isinstance(name, str) or not name:
+            raise InputFidelityError("tensor 缺 name")
+        if not isinstance(shape, list) or any(type(d) is not int or d < 0 for d in shape):
+            raise InputFidelityError(f"tensor {name!r} 的 shape 无效")
+        dt = seed_dtype(t.get("dtype"))
+        if dt.kind == "f":
+            out[name] = rng.standard_normal(tuple(shape)).astype(dt)
+        else:
+            out[name] = rng.integers(1, 8, size=tuple(shape)).astype(dt)
+    return out
+
+
+def seed_input_digest(values):
+    """输入内容的规范摘要（名字 + dtype + shape + 连续字节），跨机器可复算。"""
+    h = hashlib.sha256()
+    for name in sorted(values):
+        arr = np.ascontiguousarray(values[name])
+        h.update(name.encode("utf-8"))
+        h.update(b"\0")
+        h.update(arr.dtype.str.encode("ascii"))
+        h.update(b"\0")
+        h.update(repr(tuple(arr.shape)).encode("ascii"))
+        h.update(b"\0")
+        h.update(arr.tobytes())
+        h.update(b"\0")
+    return h.hexdigest()

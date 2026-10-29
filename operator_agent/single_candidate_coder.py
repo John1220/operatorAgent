@@ -10,7 +10,6 @@ import ast
 import copy
 import json
 from dataclasses import asdict, dataclass
-import math
 from types import MappingProxyType
 
 import numpy as np
@@ -18,6 +17,9 @@ import numpy as np
 from .anticheat import static_audit
 from .contract import freeze_from_task
 from .interface_contract import check_kernel_interface
+from .generation_spec import GENERATION_SPEC
+from .generation_context import (build_generation_context, generation_request,
+    input_metadata, wrapper_calling_convention, make_candidate_record)
 from .llm_budget import LLMCallRefused, strict_object, validated_usage
 from .llm_client import LLMClient, parse_usage
 from .run_contract import atomic_json, code_hash, digest, json_value
@@ -29,13 +31,9 @@ PROMPT = ('Write exactly one complete Triton operator implementation. Return ONL
           'interface are immutable. Input values are deliberately not provided; implement '
           'general semantics, not a shape/value lookup. No dependencies, shell/file/network '
           'operations, benchmark code, builtin operator fallback, eval, exec or dynamic imports. '
-          'Only torch allocation and Triton computation are permitted. Export exactly one '
-          'undecorated top-level Python def kernel with the exact declared keyword input '
-          'names (case-sensitive). Define @triton.jit compute helpers with different names; '
-          'never redefine or rebind kernel. Launch the named JIT helper via helper[grid](...), '
-          'never kernel[grid](...). Do not decorate the Python wrapper with @triton.jit. '
+          'Only torch allocation and Triton computation are permitted. '
           'No retries or alternative candidates. '
-          'A local precheck is not correctness or performance acceptance.')
+          'A local precheck is not correctness or performance acceptance.\n\n' + GENERATION_SPEC)
 
 
 # Diagnostics contain only these caller-owned literals, not model/exception text.
@@ -59,6 +57,9 @@ PRECHECK_REASONS = MappingProxyType({
     'dynamic_host_operation': 'dynamic/host operation refused',
     'static_anticheat_refused': 'static anticheat gate refused candidate',
     'kernel_interface_refused': 'kernel interface refused candidate',
+    'kernel_return_missing': 'kernel entry must explicitly return an output value',
+    'repair_unchanged_source': 'repair must change the failed source',
+    'repair_no_structural_change': 'repair must change more than formatting/comments',
 })
 FAILURE_REASONS = MappingProxyType({
     'model_call': frozenset({'model_call_failed'}),
@@ -104,27 +105,73 @@ class SingleCandidatePolicy:
                 raise ValueError(name + ' must be a positive integer')
 
 
-def input_metadata(test_inputs):
-    """Only names/layout/dtypes, never tensor elements, scalars or repr(values)."""
-    sets = test_inputs if isinstance(test_inputs, (list, tuple)) else [test_inputs]
-    result = []
-    if not sets:
-        raise ValueError('explicit input interface required')
-    for inputs in sets:
-        if not isinstance(inputs, dict) or not inputs or any(type(k) is not str for k in inputs):
-            raise ValueError('explicit named inputs required')
-        row = {}
-        for key, value in sorted(inputs.items()):
-            if isinstance(value, np.ndarray) and not value.dtype.hasobject:
-                row[key] = dict(shape=list(value.shape), dtype=str(value.dtype), strides=list(value.strides))
-            elif type(value) in (bool, int, float):
-                if type(value) is float and not math.isfinite(value):
-                    raise ValueError('nonfinite scalar input')
-                row[key] = dict(scalar_type=type(value).__name__, value_disclosed=False)
-            else:
-                raise ValueError('unsupported input metadata; no implicit serialization')
-        result.append(row)
-    return result
+def _has_value_return(nodes):
+    """Syntactic presence only; nested functions do not return from the wrapper."""
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if (isinstance(node, ast.Return) and node.value is not None
+                and not (isinstance(node.value, ast.Constant) and node.value.value is None)):
+            return True
+        if _has_value_return(ast.iter_child_nodes(node)):
+            return True
+    return False
+
+
+def _allocation_memory_formats(tree):
+    """Admit format constants only in their allocation keyword position.
+
+    These are values, not another set of permitted torch operations. Keeping
+    the AST context explicit refuses aliases, calls and writes to the newly
+    admitted constants; runtime shape/format compatibility is still verified.
+    """
+    formats = {'contiguous_format', 'channels_last', 'channels_last_3d', 'preserve_format'}
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    admitted = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == 'torch' and node.attr in formats):
+            continue
+        keyword_node = parents.get(node)
+        call = parents.get(keyword_node)
+        if not (isinstance(node.ctx, ast.Load)
+                and isinstance(keyword_node, ast.keyword)
+                and keyword_node.arg == 'memory_format' and keyword_node.value is node
+                and isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name) and call.func.value.id == 'torch'
+                and call.func.attr in {'empty', 'empty_like'}
+                and (node.attr != 'preserve_format' or call.func.attr == 'empty_like')):
+            raise PrecheckRefused('torch_not_allocation')
+        admitted.add(node)
+    if not admitted:
+        return admitted
+    # The direct spelling must still name the imported module. Do not try to
+    # infer alias or rebinding semantics to justify a newly permitted value.
+    if not any(isinstance(node, ast.Import) and any(
+            name.name == 'torch' and name.asname is None for name in node.names)
+            for node in tree.body):
+        raise PrecheckRefused('torch_not_allocation')
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
+            root = node.value
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id == 'torch':
+                raise PrecheckRefused('torch_not_allocation')
+        if isinstance(node, ast.Name) and node.id == 'torch':
+            parent = parents.get(node)
+            if not (isinstance(node.ctx, ast.Load) and isinstance(parent, ast.Attribute)
+                    and parent.value is node and isinstance(parent.ctx, ast.Load)):
+                raise PrecheckRefused('torch_not_allocation')
+        if ((isinstance(node, ast.arg) and node.arg == 'torch')
+                or (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    and node.name == 'torch')
+                or (isinstance(node, ast.ExceptHandler) and node.name == 'torch')
+                or (isinstance(node, ast.ImportFrom) and any(
+                    (name.asname or name.name) == 'torch' for name in node.names))):
+            raise PrecheckRefused('torch_not_allocation')
+    return admitted
 
 
 def precheck(code, metadata):
@@ -152,6 +199,7 @@ def precheck(code, metadata):
                        'delattr', 'globals', 'locals', 'vars', 'input', 'breakpoint'}
     torch_attrs = {'empty', 'empty_like', 'float16', 'float32', 'float64', 'bfloat16',
                    'int8', 'int16', 'int32', 'int64', 'uint8', 'bool'}
+    memory_formats = _allocation_memory_formats(tree)
     # Do not execute model-chosen calls/decorators while importing the module.
     # Triton jit is the one required, trusted decorator. No autotuning: that
     # would hide a new search campaign inside this single source candidate.
@@ -188,7 +236,8 @@ def precheck(code, metadata):
         if isinstance(node, ast.Attribute):
             if node.attr.startswith('__'):
                 raise PrecheckRefused('dunder_access')
-            if isinstance(node.value, ast.Name) and node.value.id == 'torch' and node.attr not in torch_attrs:
+            if (isinstance(node.value, ast.Name) and node.value.id == 'torch'
+                    and node.attr not in torch_attrs and node not in memory_formats):
                 raise PrecheckRefused('torch_not_allocation')
             if isinstance(node.value, ast.Name) and node.value.id == 'triton' and node.attr not in {'jit', 'cdiv', 'next_power_of_2'}:
                 raise PrecheckRefused('undeclared_triton_host_operation')
@@ -204,33 +253,71 @@ def precheck(code, metadata):
         interface = check_kernel_interface(code, row.keys(), 'triton')
         if interface.applicable is not True or interface.problem:
             raise PrecheckRefused('kernel_interface_refused')
+    args = kernels[0].args
+    expected = wrapper_calling_convention(metadata)
+    actual_names = [arg.arg for arg in args.args + args.kwonlyargs]
+    if (args.posonlyargs or args.vararg or args.kwarg
+            or set(actual_names) != set(expected['parameter_names'])):
+        raise PrecheckRefused('kernel_interface_refused')
+    if not _has_value_return(kernels[0].body):
+        raise PrecheckRefused('kernel_return_missing')
     try:
         compile(code, '<single-candidate-precheck>', 'exec')  # Syntax only; never exec.
     except SyntaxError:
         raise PrecheckRefused('source_syntax_invalid') from None
 
 
+def generation_mode(context):
+    """Normal generation stays byte-compatible; repair is explicitly declared."""
+    if 'repair' not in context:
+        if 'repair_diagnosis' in context:
+            raise ValueError('diagnosis requires explicit repair context')
+        return 'single-candidate-coder-v1', PROMPT, 'SingleCandidateCoder', 0
+    from .bounded_repair import REPAIR_INSTRUCTION, validate_repair
+    validate_repair(context['repair'], context['contract'], context['input_metadata'])
+    if 'repair_diagnosis' in context:
+        from .repair_diagnoser import DIAGNOSED_REPAIR_INSTRUCTION, validate_diagnosis
+        diagnosis = validate_diagnosis(context['repair_diagnosis'], context['repair'],
+                                       context['contract'], context['input_metadata'])
+        if diagnosis['state'] != 'supported_hypothesis':
+            raise ValueError('no supported repair diagnosis')
+        return ('single-candidate-repair-v2', PROMPT + REPAIR_INSTRUCTION + DIAGNOSED_REPAIR_INSTRUCTION,
+                'SingleCandidateRepair', 1)
+    return 'single-candidate-repair-v1', PROMPT + REPAIR_INSTRUCTION, 'SingleCandidateRepair', 1
+
+
+def generation_declaration(context, policy):
+    schema, prompt, caller, repairs = generation_mode(context)
+    return json_value(dict(schema=schema, context=context, context_hash=digest(context),
+        policy=asdict(policy), prompt=prompt, prompt_hash=code_hash(prompt), max_candidates=1,
+        repairs=repairs, planner=False, parallel_samples=False, template_fallback=False,
+        mechanical_rewrite=False, source_author='model'))
+
+
 def audit_generation(declaration, budget, lineage, code):
     """Read-only, model response → exact source proof; never restore eligibility."""
     context = declaration['context']
-    if (declaration['schema'] != 'single-candidate-coder-v1'
+    schema, prompt, caller, repairs = generation_mode(context)
+    if (declaration['schema'] != schema
             or declaration['context_hash'] != digest(context)
-            or declaration['prompt'] != PROMPT or declaration['prompt_hash'] != code_hash(PROMPT)
+            or declaration['prompt'] != prompt or declaration['prompt_hash'] != code_hash(prompt)
             or declaration['source_author'] != 'model' or declaration['max_candidates'] != 1
-            or declaration['repairs'] != 0 or declaration['planner']
+            or type(declaration['repairs']) is not int or declaration['repairs'] != repairs or declaration['planner']
             or declaration['parallel_samples'] or declaration['template_fallback']
             or declaration['mechanical_rewrite']):
         raise ValueError('generation declaration inconsistent')
+    if context.get('calling_convention') != wrapper_calling_convention(context['input_metadata']):
+        raise ValueError('generation calling convention inconsistent')
     limits = budget['limits']
     if (budget['schema'] != 'llm-call-budget-v1' or budget['aborted'] is not None
             or budget['reserved_calls'] != 1 or len(budget['attempts']) != 1
-            or limits['max_calls'] != 1 or list(limits['allowed_callers']) != ['SingleCandidateCoder']
+            or limits['max_calls'] != 1 or list(limits['allowed_callers']) != [caller]
             or budget['retries'] or budget['fallback'] or budget['redirects']):
         raise ValueError('not a successful single-call campaign')
     call = budget['attempts'][0]
     request = call['request']
     body = json.dumps(request, ensure_ascii=False, allow_nan=False)
-    if (call['call'] != 1 or call['status'] != 'answered' or call['caller'] != 'SingleCandidateCoder'
+    if (call['call'] != 1 or call['status'] != 'answered' or call['caller'] != caller
             or call['request_sha256'] != code_hash(body) or call['request_bytes'] != len(body.encode())
             or len(body.encode()) > limits['max_request_bytes']
             or request['model'] != budget['identity']['model'] or request['temperature'] != .1
@@ -241,7 +328,7 @@ def audit_generation(declaration, budget, lineage, code):
             or budget['output_tokens_reserved'] != call['output_tokens_reserved']
             or not 0 < call['output_tokens_reserved'] <= min(limits['max_output_tokens'], limits['total_output_token_reservations'])
             or not 0 <= call['wall_seconds'] <= call['timeout_seconds'] <= limits['call_seconds']
-            or request['messages'] != [{'role': 'system', 'content': PROMPT},
+            or request['messages'] != [{'role': 'system', 'content': prompt},
                 {'role': 'user', 'content': json.dumps(context, ensure_ascii=False)}]):
         raise ValueError('model request lineage inconsistent')
     raw = call['response_text']
@@ -272,6 +359,21 @@ def audit_generation(declaration, budget, lineage, code):
             or len(code.encode()) > policy['max_source_bytes']):
         raise ValueError('model source envelope inconsistent')
     precheck(code, context['input_metadata'])
+    if repairs:
+        from .bounded_repair import repair_lineage, source_change
+        change = source_change(context['repair']['source'], code)
+        if (lineage.get('repair') != repair_lineage(context['repair'])
+                or change['change'] != 'changed_ast'
+                or ('repair_change' in lineage and lineage['repair_change'] != change)):
+            raise ValueError('repair source/parent lineage inconsistent')
+        if 'repair_diagnosis' in context:
+            if (lineage.get('repair_diagnosis_hash') != context['repair_diagnosis']['hash']
+                    or lineage.get('repair_change') != change):
+                raise ValueError('repair diagnosis lineage inconsistent')
+        elif 'repair_diagnosis_hash' in lineage:
+            raise ValueError('undeclared repair diagnosis lineage')
+    elif 'repair' in lineage:
+        raise ValueError('normal generation cannot carry repair lineage')
     return dict(completed=True, candidate_hash=code_hash(code), model_calls=1,
                 model_authored_source=True, precheck_only=True, gpu_measurements=0,
                 restored_eligibility=False)
@@ -280,13 +382,17 @@ def audit_generation(declaration, budget, lineage, code):
 class SingleCandidateCoder:
     last_finalists = ()  # No multi-finalist selection or extra L1/L2 dispatch.
 
-    def __init__(self, llm, task, sketch, test_inputs, policy=None):
+    def __init__(self, llm, task, sketch, test_inputs, policy=None, *, repair=None, diagnosis=None):
         if not isinstance(llm, LLMClient) or llm.call_budget is None:
             raise ValueError('production bounded LLMClient required')
         self.llm = llm
         self.policy = policy or SingleCandidatePolicy()
+        self._repair = copy.deepcopy(repair)
+        self._diagnosis = copy.deepcopy(diagnosis)
+        self._context = self._describe(task, sketch, test_inputs)
+        _, prompt, caller, _ = generation_mode(self._context)
         limits = llm.call_budget.limits
-        if (limits.max_calls != 1 or limits.allowed_callers != ('SingleCandidateCoder',)
+        if (limits.max_calls != 1 or limits.allowed_callers != (caller,)
                 or self.policy.max_output_tokens > limits.max_output_tokens
                 or self.policy.max_output_tokens > limits.total_output_token_reservations
                 or llm.call_budget.summary()['reserved_calls']):
@@ -294,38 +400,55 @@ class SingleCandidateCoder:
         if task.target.dsl != 'triton' or sketch.target_dsl != 'triton' or task.source.code_path:
             raise ValueError('only Triton with caller-supplied reference text is supported')
         if any((llm.call_budget.root / name).exists() or (llm.call_budget.root / name).is_symlink()
-               for name in ('generation-context.json', 'generation-declaration.json', 'candidate.json')):
+               for name in ('generation-context.json', 'generation-declaration.json', 'candidate.json',
+                            'candidate-record.json')):
             raise ValueError('generation already frozen; create a fresh campaign')
         self._sketch = copy.deepcopy(sketch)
-        self._context = self._describe(task, sketch, test_inputs)
         self._hash = digest(self._context)
         self._policy = asdict(self.policy)
-        self._prompt_hash = code_hash(PROMPT)
+        self._prompt_hash = code_hash(prompt)
         self._attempted = False
         self.last_generation = None
+        self.candidate_records = []
+        self.last_candidate_record = None
         atomic_json(llm.call_budget.root / 'generation-context.json', self._context, readonly=True)
         atomic_json(llm.call_budget.root / 'generation-declaration.json', self.declaration(), readonly=True)
 
-    @staticmethod
-    def _describe(task, sketch, inputs):
+    def _describe(self, task, sketch, inputs):
         if task.target.dsl != 'triton' or sketch.target_dsl != 'triton' or task.source.code_path:
             raise ValueError('frozen Triton/reference declaration drift')
-        return json_value(dict(task_id=task.task_id, hardware=task.target.hardware,
-            dsl=task.target.dsl, contract=freeze_from_task(task).as_dict(),
-            reference_source=task.source.reference_source, sketch=sketch.to_dict(),
-            input_metadata=input_metadata(inputs)))
+        shared = self._shared_context(task, sketch, inputs)
+        metadata = shared['input_metadata']
+        # Preserve the existing one-call disclosure and audit format exactly.
+        context = json_value(dict(task_id=task.task_id, hardware=shared['task']['hardware'],
+            dsl=shared['task']['dsl'], contract=shared['contract'],
+            reference_source=task.source.reference_source, sketch=shared['sketch'],
+            input_metadata=metadata, calling_convention=shared['interface']['wrapper']))
+        if self._repair is not None:
+            context['repair'] = copy.deepcopy(self._repair)
+            precheck(context['repair']['source'], metadata)
+        if self._diagnosis is not None:
+            context['repair_diagnosis'] = copy.deepcopy(self._diagnosis)
+        generation_mode(context)
+        return context
+
+    def _shared_context(self, task, sketch, inputs):
+        return build_generation_context(task, sketch, inputs,
+            producer='SingleCandidateCoder',
+            strategy='bounded-repair' if self._repair is not None else 'bounded-single',
+            policy=asdict(self.policy), strict=True,
+            parent_source=self._repair['source'] if self._repair is not None else None)
 
     def declaration(self):
-        return json_value(dict(schema='single-candidate-coder-v1', context=self._context,
-            context_hash=self._hash, policy=asdict(self.policy), prompt=PROMPT,
-            prompt_hash=code_hash(PROMPT), max_candidates=1, repairs=0,
-            planner=False, parallel_samples=False, template_fallback=False,
-            mechanical_rewrite=False, source_author='model'))
+        return generation_declaration(self._context, self.policy)
 
     def _check_frozen(self):
         disk = json.loads((self.llm.call_budget.root / 'generation-context.json').read_text())
+        _, prompt, _, _ = generation_mode(self._context)
         if (disk != self._context or digest(self._context) != self._hash
-                or asdict(self.policy) != self._policy or code_hash(PROMPT) != self._prompt_hash):
+                or asdict(self.policy) != self._policy or code_hash(prompt) != self._prompt_hash
+                or self._context.get('calling_convention') != wrapper_calling_convention(
+                    self._context['input_metadata'])):
             raise ValueError('frozen generation declaration drift')
         disk_declaration = json.loads((self.llm.call_budget.root / 'generation-declaration.json').read_text())
         if disk_declaration != self.declaration():
@@ -357,14 +480,23 @@ class SingleCandidateCoder:
         if self._attempted:
             raise LLMCallRefused('single candidate already attempted; no retry')
         self._attempted = True
-        messages = [{'role': 'system', 'content': PROMPT},
+        _, prompt, caller, repairs = generation_mode(self._context)
+        messages = [{'role': 'system', 'content': prompt},
                     {'role': 'user', 'content': json.dumps(self._context, ensure_ascii=False)}]
+        shared = self._shared_context(task, sketch, test_inputs)
+        request = generation_request(self.llm, messages, caller=caller,
+                                     temperature=0.1, max_tokens=self.policy.max_output_tokens)
         outcome = dict(schema='model-code-lineage-v1', context_hash=self._hash,
                        source_author='model', status='failed')
+        if repairs:
+            from .bounded_repair import repair_lineage
+            outcome['repair'] = repair_lineage(self._context['repair'])
+            if 'repair_diagnosis' in self._context:
+                outcome['repair_diagnosis_hash'] = self._context['repair_diagnosis']['hash']
         stage, reason = 'model_call', 'model_call_failed'
         try:
             result = self.llm.chat_json(messages, temperature=0.1,
-                max_tokens=self.policy.max_output_tokens, caller_tag='SingleCandidateCoder')
+                max_tokens=self.policy.max_output_tokens, caller_tag=caller)
             stage, reason = 'envelope', 'invalid_code_envelope'
             if (set(result) != {'code', 'rationale'} or type(result['code']) is not str
                     or not result['code'].strip() or '```' in result['code']
@@ -376,6 +508,14 @@ class SingleCandidateCoder:
             outcome.update(candidate_hash=code_hash(code), code=code, rationale=result['rationale'])
             stage, reason = 'precheck', 'static_precheck_failed'
             precheck(code, self._context['input_metadata'])
+            if repairs:
+                from .bounded_repair import source_change
+                change = source_change(self._context['repair']['source'], code)
+                outcome['repair_change'] = change
+                if change['change'] == 'identical_source':
+                    raise PrecheckRefused('repair_unchanged_source')
+                if change['change'] == 'same_ast':
+                    raise PrecheckRefused('repair_no_structural_change')
             # The model does not own task/sketch: check them after the call, too.
             stage, reason = 'context', 'generation_context_drift'
             self._check_frozen()
@@ -393,3 +533,11 @@ class SingleCandidateCoder:
         finally:
             self.last_generation = copy.deepcopy(outcome)
             atomic_json(self.llm.call_budget.root / 'candidate.json', outcome, readonly=True)
+            status = ('prechecked' if outcome['status'] == 'prechecked' else
+                      'precheck_failed' if stage == 'precheck' else
+                      'model_failed' if stage == 'model_call' else 'generation_failed')
+            record = make_candidate_record(shared, outcome.get('code'), request=request,
+                status=status, reason=outcome.get('failure'))
+            self.candidate_records.append(record)
+            self.last_candidate_record = record
+            atomic_json(self.llm.call_budget.root / 'candidate-record.json', record, readonly=True)

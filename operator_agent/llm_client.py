@@ -5,7 +5,9 @@ LLM 客户端 - 统一的 LLM 调用封装
 通过环境变量配置:
   LLM_BASE_URL  - API 地址 (必填, 仓库内不保存真实地址)
   LLM_API_KEY   - API Key (可选)
+  LLM_API_KEY_FILE - 仓库外密钥文件；显式密钥和 LLM_API_KEY 优先
   LLM_MODEL     - 模型名称 (默认 Qwen3.8-27B)
+  LLM_THINKING_PARAMETER - chat_template_kwargs (默认) 或 enable_thinking
   HY_API_KEY    - Fallback 模型 API Key (可选)
 
 === 成本监控 Harness (Usage Tracker) ===
@@ -24,10 +26,28 @@ import urllib.parse
 import hashlib
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from .llm_budget import LLMCallBudget, LLMCallRefused, strict_object, validated_usage
 from .llm_transport import dispatch as bounded_dispatch
+
+
+def _resolve_api_key(api_key: Optional[str]) -> str:
+    """Resolve an explicit key, environment value, or file without mutating the environment."""
+    key = api_key or os.environ.get("LLM_API_KEY", "")
+    if key:
+        return key
+    key_file = os.environ.get("LLM_API_KEY_FILE")
+    if not key_file:
+        return ""
+    try:
+        key = Path(key_file).expanduser().read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError, ValueError):
+        raise ValueError("无法读取 LLM_API_KEY_FILE 密钥文件") from None
+    if not key:
+        raise ValueError("LLM_API_KEY_FILE 密钥文件为空")
+    return key
 
 
 # ─── 常见模型的每 M tokens 参考价格 (单位: USD / 1M tokens, input / output) ───
@@ -407,6 +427,7 @@ class LLMClient:
         fallback_base_url: Optional[str] = None,
         fallback_api_key: Optional[str] = None,
         call_budget: Optional[LLMCallBudget] = None,
+        thinking_parameter: Optional[str] = None,
     ):
         # 端点不写进仓库: 由 base_url 参数或 LLM_BASE_URL 环境变量提供
         self.base_url = (base_url or os.environ.get("LLM_BASE_URL", "")).rstrip("/")
@@ -415,8 +436,12 @@ class LLMClient:
                 "未配置 LLM 端点: 请传入 base_url 或设置环境变量 LLM_BASE_URL "
                 "(形如 http://host:port/v1)。仓库内不保存真实地址。"
             )
-        self.api_key = api_key or os.environ.get("LLM_API_KEY", "")
+        self.api_key = _resolve_api_key(api_key)
         self.model = model or os.environ.get("LLM_MODEL", "Qwen3.8-27B")
+        self.thinking_parameter = (thinking_parameter if thinking_parameter is not None else
+                                   os.environ.get("LLM_THINKING_PARAMETER", "chat_template_kwargs"))
+        if self.thinking_parameter not in ("chat_template_kwargs", "enable_thinking"):
+            raise ValueError("LLM_THINKING_PARAMETER 必须为 chat_template_kwargs 或 enable_thinking")
         self.temperature = temperature
         self.max_tokens = max_tokens
         # 之前这条只写在 body 的字面量里 (硬编码 False), 于是「我方所有通过率数字都是在
@@ -468,10 +493,13 @@ class LLMClient:
             raise LLMCallRefused('invalid bounded model endpoint/identity')
 
     def _bounded_identity(self):
-        return dict(endpoint_sha256=hashlib.sha256(self.base_url.encode()).hexdigest(),
-                    model=self.model, credential_present=bool(self.api_key),
-                    enable_thinking=self.enable_thinking, timeout=self.timeout,
-                    default_temperature=self.temperature, default_max_tokens=self.max_tokens)
+        identity = dict(endpoint_sha256=hashlib.sha256(self.base_url.encode()).hexdigest(),
+                        model=self.model, credential_present=bool(self.api_key),
+                        enable_thinking=self.enable_thinking, timeout=self.timeout,
+                        default_temperature=self.temperature, default_max_tokens=self.max_tokens)
+        if self.thinking_parameter != "chat_template_kwargs":
+            identity["thinking_parameter"] = self.thinking_parameter
+        return identity
 
     def chat(
         self,
@@ -553,6 +581,9 @@ class LLMClient:
             "stream": False,
             "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
         }
+        if self.thinking_parameter == "enable_thinking":
+            body.pop("chat_template_kwargs")
+            body["enable_thinking"] = self.enable_thinking
 
         if self.call_budget is not None:
             return self._call_bounded_model(base_url, api_key, model, body, raw, caller_tag)
@@ -653,8 +684,10 @@ class LLMClient:
             raise LLMCallRefused('invalid bounded request') from None
         call, seconds = budget.reserve(self._bounded_identity(), data, caller_tag, self.timeout)
         start = time.monotonic()
-        response_text, outcome, usage_source = None, 'failed', None
+        response_text, outcome, usage_source, usage = None, 'failed', None, None
         try:
+            if not budget.strict_response:
+                budget.mark_dispatched(call)
             response_text = bounded_dispatch(dict(url=base_url + '/chat/completions',
                 key=api_key, body_text=data, timeout=seconds,
                 max_response_bytes=budget.limits.max_response_bytes), seconds)
@@ -663,12 +696,19 @@ class LLMClient:
                 response_text = None  # Never retain an unbounded transport result.
                 raise ValueError('response_size_limit')
             result = strict_object(response_text)
+            if not budget.strict_response:
+                try:
+                    usage, usage_source = validated_usage(result.get('usage'))
+                except (ValueError, TypeError):
+                    usage_source = 'invalid_api_usage'
+                    raise
             choices = result['choices']
             if not isinstance(choices, list) or len(choices) != 1:
                 raise ValueError('exactly one response choice required')
             choice = choices[0]
             content = choice['message'].get('content')
-            usage, usage_source = validated_usage(result.get('usage'))
+            if budget.strict_response:
+                usage, usage_source = validated_usage(result.get('usage'))
             norm = parse_usage(usage)
             self.cost_tracker.record(model=model,
                 prompt_tokens=norm['prompt_tokens'] if usage_source == 'api_usage' else _estimate_tokens_from_text(data),
@@ -677,7 +717,8 @@ class LLMClient:
                 cached_prompt_tokens=norm['cached_prompt_tokens'], cache_semantics=norm['cache_semantics'],
                 reported_model=result.get('model'), temperature=body['temperature'],
                 max_tokens=body['max_tokens'], enable_thinking=self.enable_thinking)
-            if (result.get('model') != model or choice.get('finish_reason') != 'stop'
+            if ((budget.strict_response and (result.get('model') != model
+                                             or choice.get('finish_reason') != 'stop'))
                     or type(content) is not str or not content.strip()
                     or norm['completion_tokens'] > body['max_tokens']
                     or time.monotonic() - start > seconds):
@@ -686,10 +727,16 @@ class LLMClient:
             # No reasoning substitution, JSON repair or mechanical code rewrite.
             return content if raw else content.strip()
         except Exception:
+            if not budget.strict_response and budget.remaining_seconds() <= 0:
+                budget._exhausted('task_wall_clock', 'task deadline exhausted during model request',
+                                  before_dispatch=False)
             raise LLMCallRefused('bounded model call failed; no fallback/retry') from None
         finally:
-            budget.finish(call, response=response_text, outcome=outcome,
+            fields = dict(response=response_text, outcome=outcome,
                           wall_seconds=time.monotonic() - start, usage_source=usage_source)
+            if not budget.strict_response:
+                fields['usage'] = usage
+            budget.finish(call, **fields)
 
     def chat_json(
         self,
@@ -702,10 +749,16 @@ class LLMClient:
         text = self.chat(messages, temperature, max_tokens, caller_tag=caller_tag)
         if self.call_budget is not None:
             try:
-                return strict_object(text)
+                result = (strict_object(text) if self.call_budget.strict_response
+                          else self._extract_json(text))
+                if not isinstance(result, dict):
+                    raise ValueError('JSON object required')
+                return result
             except (ValueError, TypeError):
                 self.call_budget.abort('invalid_json')
-                raise LLMCallRefused('strict JSON output required; no repair/retry') from None
+                message = ('strict JSON output required; no repair/retry' if self.call_budget.strict_response
+                           else 'invalid production JSON; reservation retained')
+                raise LLMCallRefused(message) from None
         return self._extract_json(text)
 
     # ── 内部方法 ──────────────────────────────────────────

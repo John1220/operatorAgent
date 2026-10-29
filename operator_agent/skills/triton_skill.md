@@ -1,8 +1,10 @@
 # Triton Kernel Development Skill Specification
 
-> Version: 1.0 | Applies to: CoderAgent, DesignerAgent, SearchAgent
+> Version: 1.1 | Applies to: CoderAgent, DesignerAgent, SearchAgent
 > This document encodes expert-level GPU kernel optimization knowledge as structured constraints.
 > Agents MUST follow all rules below when generating, analyzing, or optimizing Triton code.
+> ABI, layout, precision and reduction semantics come from the automatically injected
+> operator-generation-spec and frozen calling_convention; examples here do not override them.
 
 ---
 
@@ -27,8 +29,8 @@
 - NO dynamic shape assumptions: kernel MUST work for any valid input dimensions within the tiling constraints
 
 ### 1.3 Kernel Structure
-- NO missing `def kernel(A, B)` wrapper function
-- NO wrapper that takes non-tensor arguments as primary inputs
+- NO missing Python `kernel` wrapper with the actual declared keyword inputs
+- NO invented wrapper parameters; preserve scalar inputs when explicitly declared by the caller
 - NO `if __name__ == "__main__"` block
 - NO class definitions
 
@@ -43,7 +45,7 @@ import triton.language as tl
 import torch
 ```
 
-### 2.2 Kernel Function Signature
+### 2.2 GEMM Helper Example (only for a declared GEMM task)
 ```python
 @triton.jit
 def <name>_kernel(
@@ -54,17 +56,14 @@ def <name>_kernel(
 - All tile size parameters MUST use `tl.constexpr` type annotation
 - Pointer parameters come first, then dimensions, then strides, then constexpr block sizes
 
-### 2.3 Wrapper Function Signature
-```python
-def kernel(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
-```
-- MUST accept `torch.Tensor` inputs and return a single `torch.Tensor`
-- MUST extract shape and stride from input tensors
-- MUST compute grid using `triton.cdiv()`
-- MUST use `torch.empty()` for output allocation
-- MUST pass strides explicitly to kernel
+### 2.3 Wrapper Interface
+- Follow the shared generation spec and the current dynamic calling_convention
+- Choose a launch grid for the actual operator; use `triton.cdiv()` when division into tiles is needed
+- Output allocation must match the declared shape, dtype and device
 
-### 2.4 Core Kernel Logic Pattern (HIGH-PERFORMANCE)
+### 2.4 GEMM Example (conditional, not a reduction or elementwise template)
+This example assumes nonzero dimensions and positive strides. Apply such assumptions
+only if the task establishes them; zero-stride or empty inputs need their declared handling.
 ```python
 # Step 1: L2 cache optimized block ordering
 pid = tl.program_id(axis=0)
@@ -104,7 +103,7 @@ for k in range(0, tl.cdiv(K, BLOCK_K)):
     b_ptrs += BLOCK_K * stride_bk
 
 # Step 5: Cast and store with mask
-c = accumulator.to(tl.float16)
+c = accumulator.to(c_ptr.dtype.element_ty)
 offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
 offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
@@ -112,14 +111,13 @@ c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 tl.store(c_ptrs, c, mask=c_mask)
 ```
 
-**CRITICAL - Performance Techniques (MUST ALL apply):**
-1. **1D grid + GROUP_SIZE_M**: Never use 2D grid `(M, N)`. Always use 1D grouped ordering for L2 cache reuse.
-2. **tl.assume hints**: Add `pid_m >= 0`, `pid_n >= 0`, and all stride `> 0` assumptions. This enables compiler to optimize address arithmetic.
-3. **Modulo for M/N bounds**: Use `% M` and `% N` instead of `< M` and `< N`. When dimensions are power-of-2, compiler converts to bitwise AND.
-4. **Pointer advancement**: Initialize pointers before K-loop, then `ptr += BLOCK_K * stride` inside loop. Never recompute full addresses each iteration.
-5. **3-arg tl.dot**: Use `tl.dot(a, b, accumulator)` not `accumulator += tl.dot(a, b)`. This generates fused FMA instructions.
-6. **K-mask optimization**: Use `offs_k < K - k * BLOCK_K` not `(k_start + offs_k) < K`. Simpler arithmetic.
-7. **fp32 accumulator**: Always accumulate in fp32, cast to target dtype only at final store.
+**GEMM optimization options, subject to the task and measured evidence:**
+1. Grouped ordering may improve L2 reuse; select launch dimensions for the workload.
+2. Compiler assumptions require proven task preconditions.
+3. Modulo-based loads require nonzero dimensions and correct masked stores.
+4. Pointer advancement and the three-argument `tl.dot` are implementation options.
+5. K-tail masks must preserve the full declared domain.
+6. Precision and casts follow the shared generation spec and frozen semantics.
 
 ---
 
@@ -151,7 +149,7 @@ Apply these LAST, only when Priority 1 and 2 are exhausted:
 
 | Optimization | Description | When to Apply |
 |---|---|---|
-| Mixed Precision | Use fp16/bf16 for accumulation where numerical error is acceptable | When target precision allows |
+| Mixed Precision | Use only arithmetic modes explicitly permitted by the frozen contract | Never infer accumulation precision from input/output dtype |
 | Double Buffering | Pre-load next tile while computing current tile | When shared memory is underutilized |
 | Prefetching | Load data ahead of time using software pipelining | For memory-bound kernels |
 | Instruction-Level Parallelism | Rearrange independent operations to fill pipeline | As final micro-optimization |
@@ -160,23 +158,23 @@ Apply these LAST, only when Priority 1 and 2 are exhausted:
 
 ## 4. Tile Size Selection Guidelines
 
-### 4.1 Default Tile Sizes by Kernel Type
+### 4.1 Initial Tile Candidates (not universal constraints)
 
 | Kernel | BLOCK_M | BLOCK_N | BLOCK_K | Notes |
 |---|---|---|---|---|
 | Matmul (FP32) | 64 | 64 | 32 | Balanced for most GPUs |
 | Matmul (FP16/BF16) | 128 | 128 | 32 | Larger tiles for tensor cores |
 | Attention (QK^T) | 128 | 128 | 32 | Flash attention style |
-| Softmax | 1024 | 1 | 1 | Full row reduction |
-| LayerNorm | 1024 | 1 | 1 | Full row reduction |
+| Softmax | task-dependent | task-dependent | N/A | Compare whole-row/chunked layouts |
+| LayerNorm | task-dependent | task-dependent | N/A | Compare whole-row/chunked layouts |
 | Element-wise | 1024 | 1 | N/A | Vectorized map |
 | Conv2d | 128 | 128 | 16 | Depends on filter size |
 
 ### 4.2 Tile Size Constraints
-- BLOCK_M * BLOCK_N * BLOCK_K should not exceed hardware shared memory limits
-- BLOCK_M, BLOCK_N should be multiples of warp_size (typically 32)
-- For small matrices (M, N, K < 256), reduce tile sizes to avoid out-of-bounds
-- BLOCK_M must be <= M, BLOCK_N must be <= N, BLOCK_K must be <= K
+- Estimate actual buffers using their dtypes, stages and the backend's resource limits
+- GEMM tile/warp choices do not apply automatically to reductions or elementwise operators
+- Padded tiles may exceed logical dimensions only with correct masks and declared empty-input behavior
+- Preserve caller-owned tiling and search budgets
 
 ---
 
@@ -184,17 +182,17 @@ Apply these LAST, only when Priority 1 and 2 are exhausted:
 
 ### 5.1 Matrix Multiplication (Matmul / GEMM)
 ```
-Required techniques (ALL mandatory for high performance):
+Possible techniques when task preconditions and budgets permit:
 1. tl.dot() for Tensor Core accumulation — 3-arg form: tl.dot(a, b, accumulator)
 2. 1D grid + GROUP_SIZE_M grouped ordering for L2 cache optimization
 3. Pointer advancement: init ptrs outside K-loop, increment inside
-4. tl.assume() hints for pid and stride bounds
+4. tl.assume() hints only for established pid and stride bounds
 5. Modulo-based M/N bounds (% M, % N) instead of comparison
 6. K-mask with remaining K (K - k * BLOCK_K) instead of absolute offset
-7. fp32 accumulator with final cast to target dtype
+7. accumulation and output casts according to the frozen precision contract
 Pattern: tiled matmul with BLOCK_M x BLOCK_K and BLOCK_K x BLOCK_N tiles
 Key: Ensure correct stride calculation for both row-major and column-major layouts
-Config: Include autotune with 8+ configs covering tile sizes 32-256, BLOCK_K 32-128
+Config: Autotuning is allowed only when explicitly included in the task's search budget
 ```
 
 ### 5.2 Attention (QK^T V)
@@ -206,16 +204,14 @@ Key: Use row-wise max and exp-sum for numerical stability
 
 ### 5.3 Softmax
 ```
-Required: Online softmax (two-pass: max then sum-exp)
-Pattern: Load full row, compute max, compute exp-sum, normalize
-Key: Numerical stability via max subtraction
+Semantics: Use the shared generation spec's softmax rules, not LayerNorm variance
+Layout: Choose whole-row or chunked/online processing for the workload and resources
 ```
 
 ### 5.4 Layer Normalization
 ```
-Required: Single-pass mean/variance computation
-Pattern: Load full row, compute mean, compute variance, normalize
-Key: Use warp reductions for efficiency
+Semantics: Use the shared generation spec's LayerNorm rules, not softmax normalization
+Layout: Choose a stable reduction algorithm and whole-row/chunked layout for the task
 ```
 
 ---
@@ -225,16 +221,14 @@ Key: Use warp reductions for efficiency
 Before finalizing any kernel, verify ALL items:
 
 - [ ] `import triton` and `import triton.language as tl` are present
-- [ ] `@triton.jit` decorator is applied to kernel function
+- [ ] `@triton.jit` decorates a differently named compute helper, not the Python wrapper
 - [ ] BLOCK_M, BLOCK_N, BLOCK_K use `tl.constexpr` type annotation
 - [ ] `tl.program_id(axis)` is used for block indexing
 - [ ] `tl.arange` is used for intra-block offsets
 - [ ] `tl.load` / `tl.store` are used for memory access
-- [ ] `tl.zeros` is used for accumulator initialization
-- [ ] `def kernel(A, B)` wrapper exists and returns a tensor
-- [ ] Grid is computed with `triton.cdiv()`
-- [ ] Strides are passed explicitly (not relying on default layout)
-- [ ] Output tensor is allocated with `torch.empty()`
+- [ ] The shared ABI, layout, precision and reduction requirements are satisfied
+- [ ] The Python wrapper uses the actual dynamic calling_convention and returns its declared output
+- [ ] Grid and allocation match this operator's declared inputs and outputs
 - [ ] No markdown fences. Docstrings (≤12 lines) and Chinese line comments on key logic are NOT forbidden but are actually encouraged
 - [ ] Code starts with `import` and ends with the wrapper return
 - [ ] No hardcoded dimensions (works for any valid input size)

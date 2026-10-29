@@ -576,6 +576,21 @@ def _collect_time(artifact: Any) -> List[str]:
     return out
 
 
+def _candidate_origin_lines(artifact: Any) -> List[str]:
+    """候选来源那一行。**只在轮次真的带这个键时才输出。**
+
+    WHY 不是无条件输出: `Conductor` 那条路的 artifact 不带 `candidate_origin`, 无条件加行
+    会改动既有报告(含 golden 产物), 而那条路的「谁写的核」本来就不是这一格要回答的问题 ——
+    它要回答的是 HITL 路径上「外层裸写的核」与「内层生成的核」事后分不分得开
+    (`docs/design/hitl-generation-boundary.md` §4)。
+    """
+    for round_ in reversed(_rounds(artifact)):
+        if "candidate_origin" in round_:
+            return [f"- 候选来源: `{round_['candidate_origin']}` "
+                    "(调用方**声明**的归因, 不进判据; `undeclared` = 没声明)", ""]
+    return []
+
+
 def build_report(*, artifact: Any, task: Any = None,
                  observations: Optional[Sequence[dict]] = None,
                  refusals: Optional[Sequence[str]] = None,
@@ -593,6 +608,7 @@ def build_report(*, artifact: Any, task: Any = None,
              f"- kernel_id: `{getattr(artifact, 'kernel_id', '')}`",
              f"- 轮数: {len(_rounds(artifact))}",
              ""]
+    lines += _candidate_origin_lines(artifact)
     lines += _claim_level_lines(m)
     lines += _best_known_good(artifact, m)
     lines += _search_objective_lines(artifact)

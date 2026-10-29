@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from .generation_spec import GENERATION_SPEC
+
 
 # SKILL.md 中各 section 对应的 Agent 角色映射
 # key = section 编号, value = 该 section 注入给哪些 Agent
@@ -177,7 +179,13 @@ class PromptManager:
             val = kwargs[key]
             return str(val) if val is not None else ""
 
-        return re.sub(r"\{\{(.+?)\}\}", replacer, template)
+        rendered = re.sub(r"\{\{(.+?)\}\}", replacer, template)
+        # Template names also cover callers which do not pass _agent_role
+        # (notably Fixer); no new placeholder or per-call opt-in is required.
+        if (name.startswith(("designer_", "planner_", "coder_", "fixer_", "search_"))
+                or agent_role in ("designer", "planner", "coder", "fixer", "search")):
+            return GENERATION_SPEC + "\n\n" + rendered
+        return rendered
 
     def reload(self, name: Optional[str] = None):
         if name:

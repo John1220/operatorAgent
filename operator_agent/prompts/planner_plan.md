@@ -18,8 +18,8 @@
 输出一个 JSON 对象 (不要代码块、不要解释文字)，字段如下:
 {
   "algorithm": "算法名",
-  "kernel_signature": "wrapper 签名，如 def kernel(A, B) -> torch.Tensor",
-  "jit_signature": "@triton.jit kernel 签名 (triton DSL 时填写，否则为空字符串)",
+  "kernel_signature": "wrapper 签名；由实际 calling_convention 确定，缺少输入名时不猜测",
+  "jit_signature": "不同名 @triton.jit helper 的签名 (triton DSL 时填写，否则为空字符串)",
   "steps": ["实现步骤1", "实现步骤2", "..."],
   "tiling": {"block_m": 64, "block_n": 64, "block_k": 32},
   "risks": ["风险点1", "风险点2"],

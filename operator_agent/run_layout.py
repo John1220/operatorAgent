@@ -53,20 +53,55 @@ run_root/
   （§22.2 清单里的编译超时 / 运行超时 / watchdog / quota / 网络关闭 / 进程树清理 /
   artifact 大小限制**都还没落地**）。
 - **生产调用点只覆盖一部分驱动**：`Conductor(run_root=...)` 默认 `""`（不传就不建布局），
-  今天传它的是三个真机驱动 —— `benchmarks/harness_pass_rate.py`、
-  `benchmarks/agent_action_h20.py`、`benchmarks/smoke_spine_h20.py`（都经 `new_run_root`
-  一次运行一个新根）。**过门**的候选随之真的落进 `candidate/` 那一格
-  （`Conductor._materialize_candidate` 走 `write_for` 这唯一入口，被 §21 拒掉的候选一个
-  字符都不留）。⚠️ 没搬进布局的是**其余产物**（`report` / `measurements` / `kernel_db`），
-  而「候选被挡住」这件事仍然证不了（同 uid，见上一条）⇒ 当前形态是
-  「**候选源码有权限位 + 驱动有调用点**」，不是「线上已经在拦」。
+  生产驱动与插件无人值守入口显式提供根目录。**过门**的当前候选落进 `candidate/`，
+  S1 轮次历史另经 candidate/oracle/report_writer 各自的 `write_for` 留存源码、
+  完整判定和报告。被 §21 拒掉的候选只留哈希，不保存其执行源码。
+  最终 ArtifactStore、kernel_db 等既有产物仍沿用原来的位置；这不声称远端或同 UID
+  敌意代码已被隔离。
 """
 
 import itertools
 import os
 import stat
+import uuid
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, Optional, Tuple
+
+
+def write_once_artifact(path, data: bytes) -> None:
+    """Create ordinary tool evidence once, without opening protected write windows.
+
+    HITL evidence directories are already reserved by their owner. O_EXCL keeps
+    existing artifacts (including symlinks) intact; no chmod or replacement is
+    performed. Protected RunLayout roles still require write_for().
+    """
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o400)
+    with os.fdopen(descriptor, 'wb') as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def create_private_mutable_file_once(path) -> None:
+    """Reserve an ordinary private database path exclusively, never a write window.
+
+    Intended for mutable control databases outside protected RunLayout roles.
+    The caller owns the directory; existing files and symlinks are refused.
+    """
+    descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    os.close(descriptor)
+
+
+def publish_once_artifact(path, data: bytes) -> None:
+    """Atomically publish a complete create-only lifecycle control record."""
+    final = os.fspath(path)
+    temporary = final + '.pending-' + uuid.uuid4().hex
+    try:
+        write_once_artifact(temporary, data)
+        os.link(temporary, final)  # Fails on an existing file; never replaces it.
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 # ─── 闭合词汇 ①：七个目录格 ──────────────────────────────────
 #: 一次运行的七个角色目录（顺序即设计原文里的顺序）。

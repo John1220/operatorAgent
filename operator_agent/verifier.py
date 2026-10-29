@@ -12,6 +12,7 @@ import time
 import dataclasses
 import copy
 import hashlib
+import re
 import numpy as np
 from typing import Mapping, Optional
 from .schemas import (
@@ -26,6 +27,7 @@ from .reference_contract import as_reference, validate_receipt
 from .bench_cases import BenchCaseError
 from .input_fidelity import InputFidelityError, describe_inputs, check_readback
 from .source_lang import classify
+from .compile_evidence import validate_compile_failure
 
 
 def _reference_array(value, dtype):
@@ -55,7 +57,7 @@ from .interface_contract import check_kernel_interface, input_key_sets
 from . import tolerance
 from . import measurement
 from .measurement import (GATE_PARAM_KEYS, PERF_CRITERION_ABSOLUTE_GFLOPS,
-                          PERF_CRITERION_SPEEDUP, TRANSPORT_KEY, TRANSPORT_UNKNOWN, aggregate_l2_readings,
+                          PERF_CRITERION_SPEEDUP, TRANSPORT_KEY, TRANSPORT_UNKNOWN, TRANSPORT_ANSWERED, aggregate_l2_readings,
                           aggregate_note, single_ruler, transport_outcome_of_result)
 from .hardware_caps import (
     detect_hardware_caps, device_key_of, measured_peak_record,
@@ -317,11 +319,29 @@ class Verifier:
         self._caps = frozenset(backend.capabilities)
         # 编译缓存: sha256(code) -> 通过标记, 相同代码重复验证时跳过编译
         self._compile_cache: dict[str, bool] = {}
+        # 输入「能不能按 seed 物化」的判定缓存: case 身份 -> spec | None
+        # (2026-10-20: L2 的输入不再整份传字节; 判据见 `_seed_spec_for`)
+        self._seed_spec_cache: dict = {}
         # baseline 缓存: (算子, 输入签名) -> 耗时, 避免多轮验证重复测量
         self._baseline_cache: dict = {}
         # 硬件理论峰值缓存 (延迟探测)
         self._theoretical_peak: Optional[dict] = None
         self._reference_bindings = {}
+        self.on_level_complete = None
+
+    def _timed_level(self, fn, source, audit_task, previous, *args, **kwargs):
+        if self.on_level_complete is None:
+            return fn(*args, **kwargs)
+        from .task_clock import monotonic
+        started_utc, started = time.time(), monotonic()
+        result = fn(*args, **kwargs)
+        timing = dict(started_at=started_utc, completed_at=time.time(),
+                      started_monotonic=started, completed_monotonic=monotonic())
+        result.metrics = dict(result.metrics or {}, execution_timing=timing)
+        # An audit write error stops the audited call. It must not leave an
+        # unaudited success that a campaign could count as complete.
+        self.on_level_complete(source, audit_task, result, [*previous, result], timing)
+        return result
 
     def verify(
         self,
@@ -361,22 +381,24 @@ class Verifier:
         if preflight is not None:
             return [preflight]
 
-        l1 = self._verify_compile(kernel_code, task.target.dsl,
-                                  input_key_sets(test_inputs))
+        l1 = self._timed_level(self._verify_compile, kernel_code, task, results,
+                              kernel_code, task.target.dsl, input_key_sets(test_inputs))
         results.append(l1)
         if not l1.passed:
             return results
         if stop_after is VerificationLevel.L1_COMPILE:
             return results
 
-        l2 = self._verify_function(kernel_code, test_inputs, expected_output, task)
+        l2 = self._timed_level(self._verify_function, kernel_code, task, results,
+                              kernel_code, test_inputs, expected_output, task)
         results.append(l2)
         if not l2.passed:
             return results
         if stop_after is VerificationLevel.L2_FUNCTION:
             return results
 
-        l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
+        l3 = self._timed_level(self._verify_performance, kernel_code, task, results,
+                                      kernel_code, test_inputs, target_gflops, task,
                                       environment_drift=environment_drift,
                                       heartbeat=heartbeat,
                                       heartbeat_expected=heartbeat_expected,
@@ -421,7 +443,8 @@ class Verifier:
             return [preflight]
         if task.constraints.reference_contract is not None and correctness_verified is not True:
             return [self._reference_unknown("v2 L3 必须携带已通过的 L2 凭据", VerificationLevel.L3_PERFORMANCE)]
-        l3 = self._verify_performance(kernel_code, test_inputs, target_gflops, task,
+        l3 = self._timed_level(self._verify_performance, kernel_code, task, [],
+                                      kernel_code, test_inputs, target_gflops, task,
                                       environment_drift=environment_drift,
                                       heartbeat=heartbeat,
                                       heartbeat_expected=heartbeat_expected,
@@ -478,10 +501,9 @@ class Verifier:
                          "backend": str(self.backend),
                          **_guard_metrics},
             )
-        # 资源可行性预检 (LeetCUDA bench/utils.cu 的 smem 预检同款):
-        # 这套 BLOCK 放不下时, 真启动只会给一句 `out of resource`, 看不出是哪个
-        # BLOCK_*; 一次 SSH 往返 ~2.6s, 而这里只是正则。宁可漏拦 (超限 20% 内放行)
-        # 也不误拦 —— 但拦下来的反馈必须带上 BLOCK 形状。
+        # Source shape/dtype is not physical shared storage. Preserve an explicit
+        # unknown report, then let the normal compiler decide; never turn a
+        # skipped proxy into a compile pass.
         try:
             from .resource_check import check_resource_feasibility
             caps = getattr(self, "_l1_caps", "unset")
@@ -491,22 +513,22 @@ class Verifier:
                 except Exception:  # noqa: BLE001
                     caps = None
                 self._l1_caps = caps
-            if caps is not None:
-                rep = check_resource_feasibility(kernel_code, caps, "")
-                if not rep.feasible:
-                    msg = rep.as_message()
-                    print(f"  [Verifier] L1 FAILED: {msg}")
-                    return VerificationResult(
-                        level=VerificationLevel.L1_COMPILE, passed=False,
-                        message=f"编译失败: {msg}",
-                        error_log=msg,
-                        metrics={"compile_status": "resource_infeasible",
-                                 "backend": str(self.backend),
-                                 "estimated_smem_bytes": rep.estimated_smem_bytes,
-                                 "smem_limit_bytes": rep.limit_bytes},
-                    )
-        except Exception:  # noqa: BLE001 — 预检自身出错不挡主流程
-            pass
+            rep = check_resource_feasibility(kernel_code, caps, "")
+            _guard_metrics['resource_precheck'] = rep.as_dict()
+            if not rep.feasible:
+                msg = rep.as_message()
+                print(f"  [Verifier] L1 FAILED: {msg}")
+                return VerificationResult(
+                    level=VerificationLevel.L1_COMPILE, passed=False,
+                    message=f"编译失败: {msg}", error_log=msg,
+                    metrics={"compile_status": "resource_infeasible",
+                             "backend": str(self.backend),
+                             "estimated_smem_bytes": rep.estimated_smem_bytes,
+                             "smem_limit_bytes": rep.limit_bytes, **_guard_metrics})
+        except Exception as exc:  # noqa: BLE001 — fail unknown, never prove fit
+            _guard_metrics['resource_precheck'] = dict(assessment='unknown',
+                estimated_smem_bytes=None, evidence_kind=None,
+                notes=[f'Resource precheck unavailable: {type(exc).__name__}'])
         import hashlib
         cache_key = hashlib.sha256(kernel_code.encode("utf-8")).hexdigest()
         if cache_key in self._compile_cache:
@@ -945,6 +967,51 @@ class Verifier:
             cols_all_bad=int((mask.sum(axis=0) == n_rows).sum()),
             has_nonfinite=has_nonfinite)
 
+    def _seed_spec_for(self, task: TaskSchema, inputs) -> Optional[dict]:
+        """这组输入是「契约里某条 case 物化出来的那份」吗？是就返回 seed spec。
+
+        为什么要有这一层：L2 的输入原先整份 base64 过线（fp16 4096³ 两个张量 ≈ 90 MB，
+        实测链路 ~0.28 MB/s ⇒ 一次 L2 光传输 570 s）。契约本来就拥有 seed/shape/dtype，
+        所以可以只传描述 + digest，远端按同一规则重新物化。
+
+        **判据不因此变松**：这里在控制端先物化一遍、逐字节比 digest；只有完全一致才
+        允许替换。远端还会再核一次 digest，任意一侧不一致就退回「传字节」（见
+        `SSHExecutor.verify_function` 的 `input_seed_mismatch` 分支）。
+
+        带标量/非 ndarray 的输入一律返回 None —— spec 表示不了它们，别硬塞。
+        """
+        if not isinstance(inputs, dict) or not inputs:
+            return None
+        if any(not isinstance(v, np.ndarray) for v in inputs.values()):
+            return None
+        try:
+            key = case_key(inputs)
+        except Exception:                       # noqa: BLE001 — 判不了就不走这条
+            return None
+        if key in self._seed_spec_cache:
+            return self._seed_spec_cache[key]
+        spec = None
+        try:
+            from .bench_cases import case_spec, cases_from_shapes
+            from .remote_input_fidelity import seed_input_digest
+            shapes = tuple(getattr(task.constraints, "shapes", ()) or ())
+            dtype = getattr(task.constraints.precision, "value", None) or "fp32"
+            entries = tuple((tuple(int(d) for d in s), 1.0) for s in shapes)
+            cases = cases_from_shapes((task.source.kernel_type or "").strip(), entries,
+                                      dtype) or ()
+            for case in cases:
+                if case.key() != key:
+                    continue
+                expected = case.materialize()
+                if set(expected) == set(inputs) and \
+                        seed_input_digest(expected) == seed_input_digest(inputs):
+                    spec = case_spec(case)
+                break
+        except Exception:                       # noqa: BLE001 — 出任何事都退回传字节
+            spec = None
+        self._seed_spec_cache[key] = spec
+        return spec
+
     def _verify_single_set(self, kernel_code: str, inputs: dict, expected_output, task: TaskSchema) -> VerificationResult:
         """对单组输入执行功能验证
         metrics 中含 max_error 表示完成了参考比对，否则仅为可执行性验证"""
@@ -968,10 +1035,12 @@ class Verifier:
         if Cap.REMOTE_VERIFY in self._caps:
             # 候选与 reference 均在远端执行设备上比较，仅返回摘要，
             # 避免把完整张量通过 SSH 回传到控制端。
+            seed_spec = self._seed_spec_for(task, inputs)
             remote_verify = self.backend.verify_function(
                 kernel_code, inputs, task.source.kernel_type, max_allowed,
                 precision=task.constraints.precision.value,
                 reference_source=task.source.reference_source or "",
+                **({"input_seed": seed_spec} if seed_spec is not None else {}),
                 **({"reference_contract": as_reference(task.constraints.reference_contract).content_dict()}
                    if task.constraints.reference_contract is not None else {}),
             )
@@ -1078,6 +1147,32 @@ class Verifier:
                 fail_metrics.update(fidelity_metrics)
                 if remote_verify.get("reference_error"):
                     fail_metrics["reference_error"] = remote_verify["reference_error"]
+                # Typed compiler provenance is useful only after actual input
+                # readback established a known candidate failure. Exception
+                # text, reference errors and transport uncertainty cannot
+                # manufacture a compiler diagnosis.
+                if (remote_verify.get("success") is False
+                        and fidelity_metrics.get("input_fidelity_verified") is True
+                        and remote_verify.get("device") == "cuda"
+                        and (TRANSPORT_KEY not in remote_verify
+                             or remote_verify[TRANSPORT_KEY] == TRANSPORT_ANSWERED)
+                        and not remote_verify.get("reference_error")
+                        and not remote_verify.get("reference_identity_unknown")):
+                    readback = remote_verify.get("input_fidelity", {})
+                    devices = readback.get("tensor_devices")
+                    names = {name for name, spec in expected_inputs.items()
+                             if spec.get("kind") != "scalar"}
+                    cuda_readback = (readback.get("representation") == "torch-storage-v1"
+                        and names and isinstance(devices, dict) and set(devices) == names
+                        and all(type(value) is str and re.fullmatch(r"cuda:[0-9]+", value)
+                                for value in devices.values())
+                        and len(set(devices.values())) == 1)
+                    compile_failure = (validate_compile_failure(
+                        remote_verify.get("candidate_compile_failure"), kernel_code)
+                        if cuda_readback else None)
+                    if compile_failure is not None:
+                        fail_metrics["candidate_compile_failure"] = compile_failure
+                        fail_metrics["device"] = "cuda"
                 return VerificationResult(
                     level=VerificationLevel.L2_FUNCTION, passed=False,
                     message=f"远程执行失败: {head}",
@@ -1458,12 +1553,14 @@ class Verifier:
             held = dict(success=False, error=preflight.message, **preflight.metrics)
             return held, held
         if Cap.SAME_DEVICE_BASELINE in self._caps:
+            seed_spec = self._seed_spec_for(task, inputs)
             remote_bench = self.backend.benchmark_with_baselines(
                 kernel_code, inputs, task.source.kernel_type,
                 precision=task.constraints.precision.value,
                 baseline_priority=(["pytorch_eager"] if task.constraints.reference_contract is not None else
                                    baseline_plan(task.source.kernel_type, task.constraints.precision.value)),
                 reference_source=task.source.reference_source or "",
+                **({"input_seed": seed_spec} if seed_spec is not None else {}),
                 **({"reference_contract": as_reference(task.constraints.reference_contract).content_dict()}
                    if task.constraints.reference_contract is not None else {}),
             )

@@ -29,7 +29,7 @@
 1. 函数签名: `def kernel(**输入名):` —— **参数名必须与调用方传入的关键字逐一相同**
    (见下方「输入契约」)。不要写死 `def kernel(A, B)`：那是 GEMM 的输入名,
    换成 softmax/relu/norm 就会 `unexpected keyword argument`。
-   若契约给出 `X`，就是 `def kernel(X):` 或 `def kernel(**inputs):`。
+   若契约给出 `X`，使用显式 `def kernel(X):`，其余输入以实际 calling_convention 为准。
 2. 关键逻辑必须写中文注释：kernel 作用/参数、tile 加载、累加/归约、边界 mask、指针推进、softmax/因果 mask、wrapper 的 grid 与 strides 传递
 3. 允许并鼓励 kernel 顶部的 docstring，说明算法 (Flash Attention / 分块 matmul / 分块归约等)、输入尺寸、精度策略
 4. 不要使用 ``` 标记
@@ -43,8 +43,8 @@
   → 仅允许 `import torch` / `import numpy` / `import math`
   → ⚠️ **性能关键 (MUST):**
       * 绝对**不要在 Python 层写 3 层/多层 for 循环**做分块 (那会比原生慢 100~1000 倍)
-      * **直接一次性调用 `torch.matmul(A.to(torch.float32), B.to(torch.float32)).to(torch.float16)`**,
-        或 `A @ B` (fp16 matmul 后端)，让昆仑芯的 xBLAS 接管整个 GEMM -> Tensor Core 加速
+      * 若执行侧允许内置算子，使用声明精度的单次 `torch.matmul` 或 `A @ B` 交给其原生库；
+        输入、累加与输出 dtype 必须遵守冻结契约，不固定转成 fp16
       * 如果 Sketch 仍然写了分块 (BLOCK_M/BLOCK_N/BLOCK_K)，请把该分块语义理解为"参考"，
         **在代码里仍然用单次 torch.matmul**，因为 torch 内部的 xBLAS kernel 已经做了最优 tiling
 - 当 `语言` 为 `python` 时，即使硬件是 nvidia，也不要写 Triton，用纯 PyTorch/NumPy 实现

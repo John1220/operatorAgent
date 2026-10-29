@@ -628,6 +628,9 @@ class SSHExecutor(Backend):
         self.name = f"SSHExecutor@{self._ssh_target()}({platform})"
         self._deployed = False
         self._uv_setup = False
+        # Quality preflight may prove an existing environment and complete
+        # runner hashes. This opt-in path never invokes uv provisioning/sync.
+        self._verified_python: Optional[str] = None
         self._gpu_info_cache: Optional[dict] = None
         # 固定的 GPU 卡号: None=未解析, -1=解析过但不固定, >=0=固定该卡
         self._gpu_pin: Optional[int] = None
@@ -665,9 +668,15 @@ class SSHExecutor(Backend):
             # 于是「跨轮固定同一张卡」在那个平台上根本不发生 —— 不声明就是不说谎
             caps.add(Cap.GPU_PINNING)
             caps.add(Cap.REFERENCE_IDENTITY)
+            caps.add(Cap.READONLY_QUALITY_PREFLIGHT)
             if self._persistent:
                 caps.add(Cap.NATIVE_CUDA_CALIBRATION)
         return frozenset(caps)
+
+    def quality_preflight(self) -> dict:
+        self.require(Cap.READONLY_QUALITY_PREFLIGHT)
+        from .quality_preflight import _preflight_ssh
+        return _preflight_ssh(self)
 
     def _ssh_target(self) -> str:
         """连接目标。user 为空时只给 host, 用户名交由 ~/.ssh/config 的 Host 块解析。"""
@@ -742,18 +751,27 @@ class SSHExecutor(Backend):
         L1/L2/L3 落在不同卡会让加速比不可比, 故由控制端选定后下发。
         返回 None 表示不固定, 交由远端自动选择。
         """
+        required = os.environ.get('OPERATOR_AGENT_REQUIRED_GPU', '').strip()
         if self._gpu_pin is not None:
+            if required and self._gpu_pin < 0:
+                raise HardwareProbeFailed(self.name, 'required GPU selection previously failed')
             return self._gpu_pin if self._gpu_pin >= 0 else None
         self._gpu_pin = -1
         # 依赖 nvidia-smi, 非 NVIDIA 平台不适用, 交由 runner 自行选卡
         if self.platform != "nvidia":
             return None
         try:
+            fields = ('index,memory.free,utilization.gpu,uuid,name' if required else
+                      'index,memory.free,utilization.gpu')
             out = self._ssh_exec(
-                "nvidia-smi --query-gpu=index,memory.free,utilization.gpu "
+                f"nvidia-smi --query-gpu={fields} "
                 "--format=csv,noheader,nounits"
             )
             best = None
+            required_uuid = os.environ.get('OPERATOR_AGENT_REQUIRED_GPU_UUID', '').strip()
+            required_name = os.environ.get('OPERATOR_AGENT_REQUIRED_GPU_NAME', '').strip()
+            if required and (not required.isdecimal() or not required_uuid or not required_name):
+                raise ValueError('required GPU index, UUID and name must all be declared')
             for line in out.strip().splitlines():
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) < 3:
@@ -761,6 +779,11 @@ class SSHExecutor(Backend):
                 try:
                     idx, free, util = int(parts[0]), int(parts[1]), int(parts[2])
                 except ValueError:
+                    continue
+                if required:
+                    if (idx == int(required) and len(parts) >= 5 and parts[3] == required_uuid
+                            and parts[4] == required_name and free >= 1024 and 0 <= util <= 5):
+                        best = ((-util, free), idx, util, free)
                     continue
                 # 利用率优先: 显存余量大但被跑满的卡测不出可信加速比
                 key = (-util, free)
@@ -787,7 +810,11 @@ class SSHExecutor(Backend):
                             print(f"  [SSHExecutor] ⚠️ 本地设了 OPERATOR_AGENT_GPU={want}, "
                                   f"但自动选卡实际用 GPU {self._gpu_pin} —— "
                                   f"本地环境变量不影响控制端选卡, 实测卡号以上面那行为准")
+            elif required:
+                raise ValueError('required GPU missing, identity changed, busy or insufficient free memory')
         except Exception as e:
+            if required:
+                raise HardwareProbeFailed(self.name, 'required GPU preflight failed') from e
             print(f"  [SSHExecutor] 选卡失败, 交由远端自动选择: {e}")
         return self._gpu_pin if self._gpu_pin >= 0 else None
 
@@ -811,10 +838,22 @@ class SSHExecutor(Backend):
         else:
             gpu = self._pinned_gpu()
             env = f"OPERATOR_AGENT_GPU={gpu} " if gpu is not None else ""
-            remote_cmd = (
-                f"cd {self.work_dir} && {env}"
-                f"~/.local/bin/uv run python {self.remote_runner_path}"
-            )
+            verified_python = getattr(self, '_verified_python', None)
+            if verified_python is not None:
+                if verified_python != '.venv/bin/python':
+                    raise ValueError('unrecognized preflight Python command')
+                if type(gpu) is not int or gpu < 0:
+                    raise ValueError('verified environment requires the preflight GPU pin')
+                def shell_path(path):
+                    return ('"$HOME"/' + shlex.quote(path[2:]) if path.startswith('~/')
+                            else shlex.quote(path))
+                remote_cmd = (f"cd {shell_path(self.work_dir)} && CUDA_VISIBLE_DEVICES={gpu} {env}"
+                              f"{verified_python} {shell_path(self.remote_runner_path)}")
+            else:
+                remote_cmd = (
+                    f"cd {self.work_dir} && {env}"
+                    f"~/.local/bin/uv run python {self.remote_runner_path}"
+                )
         output = self._ssh_exec(remote_cmd, stdin_data=json_str)
         for line in reversed(output.split("\n")):
             line = line.strip()
@@ -858,10 +897,17 @@ class SSHExecutor(Backend):
         env = f"OPERATOR_AGENT_SESSION_TOKEN={token} "
         env += f"OPERATOR_AGENT_GPU={gpu} " if gpu is not None else ""
         # `-u` 不是可选项: 行协议上任何缓冲都会表现成「第一次调用就超时」。
-        remote_cmd = (f"cd {self.work_dir} && {env}"
-                      f"~/.local/bin/uv run python -u {self._session_server_path()}")
+        if getattr(self, '_verified_python', None) == '.venv/bin/python':
+            from .quality_preflight import _remote_path
+            remote_cmd = (f"cd {_remote_path(self.work_dir)} && {env}.venv/bin/python -u "
+                          f"{_remote_path(self._session_server_path())}")
+        else:
+            remote_cmd = (f"cd {self.work_dir} && {env}"
+                          f"~/.local/bin/uv run python -u {self._session_server_path()}")
         sess = _RemoteSession(self._session_argv(remote_cmd),
                               timeout=self.timeout, label=self.name, owner_token=token)
+        from .backend_ownership import session_starting, session_ready
+        session_starting()
         sess.start()
         self._session = sess  # Own the process even if the handshake fails.
         if not self._session_atexit_registered:
@@ -874,6 +920,11 @@ class SSHExecutor(Backend):
             hello = sess.call({"action": "ping"})
             if not hello.get("pong"):
                 raise SessionError("eof", f"服务端没有应答握手: {hello!r}")
+            required = os.environ.get('OPERATOR_AGENT_REQUIRED_GPU', '').strip()
+            if required and (type(hello.get('selected_gpu')) is not int
+                             or hello['selected_gpu'] != gpu):
+                raise SessionError('broken', '远端握手所选 GPU 不符合固定设备', phase='startup')
+            session_ready(sess.identity)
         except BaseException:
             self._session, self._pending_session = None, sess
             sess.close(grace=.2)
@@ -892,7 +943,12 @@ class SSHExecutor(Backend):
         if not sess.identity:
             return {"quiescent": False, "reason": "runner identity unavailable; no remote signal sent"}
         control = str(PurePosixPath(self.remote_runner_path).parent / "session_control.py")
-        cmd = (f"cd {self.work_dir} && ~/.local/bin/uv run --no-sync python {control} "
+        if getattr(self, '_verified_python', None) == '.venv/bin/python':
+            from .quality_preflight import _remote_path
+            prefix = f"cd {_remote_path(self.work_dir)} && .venv/bin/python {_remote_path(control)} "
+        else:
+            prefix = f"cd {self.work_dir} && ~/.local/bin/uv run --no-sync python {control} "
+        cmd = (prefix +
                f"--identity {shlex.quote(json.dumps(sess.identity))} "
                f"--token {shlex.quote(sess.owner_token)} --grace {max(.01, grace * .5)}")
         try:
@@ -1062,7 +1118,7 @@ class SSHExecutor(Backend):
         if self.platform == "nvidia":
             # Exact L2 JSON/storage codecs are shared sources, before their consumer.
             files.extend((repo_root / "operator_agent" / name, f"{remote_dir}/{name}")
-                         for name in ("input_fidelity.py", "remote_input_fidelity.py", "session_inputs.py", "cuda_ruler_profile.py", "cuda_calibration.py"))
+                         for name in ("input_fidelity.py", "remote_input_fidelity.py", "session_inputs.py", "cuda_ruler_profile.py", "cuda_calibration.py", "compile_evidence.py"))
             files.append((repo_root / "remote_scripts" / "session_control.py",
                           f"{remote_dir}/session_control.py"))
             files.extend((repo_root / "operator_agent" / name, f"{remote_dir}/{name}")
@@ -1116,6 +1172,33 @@ class SSHExecutor(Backend):
 
     def deploy(self) -> bool:
         """部署 runner 及其同级依赖到远程服务器 (逐文件按内容 hash 判断是否需要更新)"""
+        if os.environ.get('OPERATOR_AGENT_EXISTING_REMOTE_ONLY') == '1':
+            # Frozen S4 admission: inspect the existing environment, never mkdir,
+            # install, sync or overwrite remote files. A mismatch is a hard stop.
+            from .quality_preflight import _remote_path
+            if self.platform != 'nvidia' or self._pinned_gpu() is None:
+                raise HardwareProbeFailed(self.name, 'existing remote requires a pinned NVIDIA GPU')
+            self._ssh_exec(f'test -x {_remote_path(self.work_dir)}/.venv/bin/python')
+            files = self._remote_files()
+            expected = {remote: hashlib.sha256(Path(local).read_bytes()).hexdigest()
+                        for local, remote in files}
+            paths = list(expected)
+            source = ('import hashlib,os\n'
+                      f'for p in {paths!r}:\n'
+                      ' try:\n'
+                      '  with open(os.path.expanduser(p),"rb") as f: print(p,hashlib.sha256(f.read()).hexdigest())\n'
+                      ' except OSError: print(p, "")\n')
+            output = self._ssh_exec('python3 -c '+shlex.quote(source))
+            actual = {}
+            for line in output.splitlines():
+                pieces = line.rsplit(' ', 1)
+                if len(pieces) == 2:
+                    actual[pieces[0]] = pieces[1]
+            if not expected or any(actual.get(path) != digest for path, digest in expected.items()):
+                raise HardwareProbeFailed(self.name, 'existing runner files missing or changed')
+            self._verified_python = '.venv/bin/python'
+            self._uv_setup = self._deployed = True
+            return True
         if not self._setup_uv_env():
             print(f"  [SSHExecutor] 环境配置失败，跳过部署")
             return False
@@ -1377,26 +1460,38 @@ class SSHExecutor(Backend):
 
     def verify_function(self, kernel_code: str, inputs: dict, kernel_type: str,
                         max_error: float, precision: str = "",
-                        reference_source: str = "", reference_contract=None) -> dict:
+                        reference_source: str = "", reference_contract=None,
+                        input_seed=None) -> dict:
         """Compare candidate/reference on the remote GPU and return a compact summary.
 
         `reference_source` 非空时, 远端用它做参考 (新架构算子), 不再按 kernel_type
         查内建表。空串 = 保持旧行为。
+
+        `input_seed`（2026-10-20）是**可选**的「这组输入可以从 seed 复算」凭据：
+        给了就只传描述 + digest，远端物化后核 digest；**核不过**就自动退回传字节，
+        并在回包里留 `input_seed_fallback=True`。所以它是纯优化，不改判定语义。
         """
         try:
-            # L2 must verify these values/layouts, not generated lookalikes. Keep
-            # the legacy shape/seed protocol for L3 and unsupported XPU runners.
-            wire_inputs = (self._exact_inputs(inputs) if self.platform == "nvidia"
-                           else self._serialize_inputs(inputs))
             if not self._deployed:
                 self.deploy()
-            return self._ssh_exec_json({
-                "action": "verify", "code": kernel_code,
-                "inputs": wire_inputs, "kernel_type": kernel_type,
+            base = {
+                "action": "verify", "code": kernel_code, "kernel_type": kernel_type,
                 "max_error": max_error, "precision": precision,
                 "reference_source": reference_source or "",
                 **({"reference_contract": reference_contract} if reference_contract is not None else {}),
-            })
+            }
+            if input_seed is not None:
+                # 只传描述：正常情况比传字节少几个数量级（90 MB → 几百字节）。
+                seeded = self._ssh_exec_json({**base, "inputs_spec": input_seed})
+                if not (isinstance(seeded, dict) and seeded.get("input_seed_mismatch")):
+                    return seeded
+            # 退回老路：L2 must verify these values/layouts, not generated lookalikes.
+            wire_inputs = (self._exact_inputs(inputs) if self.platform == "nvidia"
+                           else self._serialize_inputs(inputs))
+            out = self._ssh_exec_json({**base, "inputs": wire_inputs})
+            if isinstance(out, dict) and input_seed is not None:
+                out = {**out, "input_seed_fallback": True}
+            return out
         except InputFidelityError as e:
             return {"success": False, "error": str(e), "input_fidelity_error": str(e)}
         except Exception as e:
@@ -1435,25 +1530,38 @@ class SSHExecutor(Backend):
                                  kernel_type: str, warmup: int = 10,
                                  repeat: int = 30, precision: str = "",
                                  baseline_priority=None,
-                                 reference_source: str = "", reference_contract=None) -> dict:
+                                 reference_source: str = "", reference_contract=None,
+                                 input_seed=None) -> dict:
         """Time candidate vs one interleaved baseline on the same remote device.
 
         `baseline_priority` 是控制端的有序偏好, 远端只测第一个能跑的基线 —— 谁公平
         是个策略问题 (fp16 候选该比 cuBLAS fp16), 但「能不能跑」只有远端知道。
-        `reference_source` 同 `verify_function`。
+        `reference_source` 同 `verify_function`；`input_seed` 同 `verify_function`
+        （传描述而不是字节，核不过 digest 就回退）。
         """
         try:
             if not self._deployed:
                 self.deploy()
-            return self._ssh_exec_json({
+            base = {
                 "action": "benchmark_with_baselines", "code": kernel_code,
-                "inputs": (self._exact_inputs(inputs) if reference_contract is not None
-                           else self._serialize_inputs(inputs)), "kernel_type": kernel_type,
+                "kernel_type": kernel_type,
                 "warmup": warmup, "repeat": repeat, "precision": precision,
                 "baseline_priority": list(baseline_priority or []),
                 "reference_source": reference_source or "",
                 **({"reference_contract": reference_contract} if reference_contract is not None else {}),
+            }
+            if input_seed is not None:
+                seeded = self._ssh_exec_json({**base, "inputs_spec": input_seed})
+                if not (isinstance(seeded, dict) and seeded.get("input_seed_mismatch")):
+                    return seeded
+            out = self._ssh_exec_json({
+                **base,
+                "inputs": (self._exact_inputs(inputs) if reference_contract is not None
+                           else self._serialize_inputs(inputs)),
             })
+            if isinstance(out, dict) and input_seed is not None:
+                out = {**out, "input_seed_fallback": True}
+            return out
         except Exception as e:
             return _transport_failure(e)   # 带「有没有听到回答」那一格 (见 _transport_failure)
 
@@ -1903,6 +2011,16 @@ class RemoteExecutor(Backend):
     def get_hardware_info(self) -> dict:
         return self.backend.get_hardware_info()
 
+    def quality_preflight(self) -> dict:
+        return self.backend.quality_preflight()
+
+    def close(self, grace: float = 10.0) -> dict:
+        """Close only a resolved provider; cleanup must not initialize SSH."""
+        if self._backend is None:
+            return {"quiescent": True, "session_created": False,
+                    "backend_resolved": False, "scope": "owned_backend_sessions"}
+        return self._backend.close(grace=grace)
+
     def ensure_environment(self, required_pips: Optional[list] = None) -> tuple:
         """前置环境自检 + 自动配置。**只转发**
 
@@ -1946,7 +2064,8 @@ class RemoteExecutor(Backend):
 
     def verify_function(self, kernel_code: str, inputs: dict, kernel_type: str,
                         max_error: float, precision: str = "",
-                        reference_source: str = "", reference_contract=None) -> Optional[dict]:
+                        reference_source: str = "", reference_contract=None,
+                        input_seed=None) -> Optional[dict]:
         """远端紧凑比对协议。**只转发, 不判断内层有没有这个方法**
 
         旧写法是 `fn = getattr(self.backend, "verify_function", None); return fn(...) if fn else None`,
@@ -1956,7 +2075,7 @@ class RemoteExecutor(Backend):
         """
         with _get_exec_lock(self._lock_key()):
             return self.backend.verify_function(kernel_code, inputs, kernel_type, max_error,
-                                                precision=precision,
+                                                precision=precision, input_seed=input_seed,
                                                 reference_source=reference_source,
                                                 **({"reference_contract": reference_contract} if reference_contract is not None else {}))
 
@@ -1972,7 +2091,8 @@ class RemoteExecutor(Backend):
                                  kernel_type: str, warmup: int = 10,
                                  repeat: int = 30, precision: str = "",
                                  baseline_priority=None,
-                                 reference_source: str = "", reference_contract=None) -> Optional[dict]:
+                                 reference_source: str = "", reference_contract=None,
+                                 input_seed=None) -> Optional[dict]:
         """同机同卡基准协议。同上: 只转发"""
         with _get_exec_lock(self._lock_key()):
             return self.backend.benchmark_with_baselines(

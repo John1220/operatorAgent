@@ -27,9 +27,9 @@
 1. **文件开头**: `import torch` 和 `from torch.utils.cpp_extension import load_inline`
 2. **C++ 源码字符串**: 用三引号字符串 `_CPP_SOURCE = r"""..."""` 包裹完整的 C++ 算子代码
 3. **JIT 编译**: 调用 `load_inline(name="...", cpp_sources=_CPP_SOURCE, functions=[...], verbose=False)` 编译
-4. **Python 入口函数**: `def kernel(A, B):` 调用编译好的 C++ 扩展函数
+4. **Python 入口函数**: 使用动态 calling_convention 中的显式输入名，调用编译好的 C++ 扩展函数
 
-### C++ 代码规范
+### C++ GEMM 示例（仅示意声明为 GEMM 且输入/输出 dtype 相同的任务）
 
 ```cpp
 #include <torch/extension.h>
@@ -43,15 +43,15 @@ torch::Tensor matmul_xpu_kernel(torch::Tensor A, torch::Tensor B) {
     int K = A.size(1);
     int N = B.size(1);
 
-    // 精度处理: fp16 -> fp32 累加 -> fp16 输出
+    // 示例采用 fp32 中间计算；实际累加精度必须遵守冻结契约
     auto A_f32 = A.to(torch::kFloat32);
     auto B_f32 = B.to(torch::kFloat32);
 
     // 核心计算: 调用 torch::matmul, 底层由 xblas Tensor Core 加速
     auto C_f32 = torch::matmul(A_f32, B_f32);
 
-    // 结果转回 fp16
-    return C_f32.to(torch::kHalf);
+    // 示例声明输出与输入 dtype 相同；其他任务使用其明确声明的输出 dtype
+    return C_f32.to(A.scalar_type());
 }
 ```
 
@@ -66,15 +66,14 @@ torch::Tensor matmul_xpu_kernel(torch::Tensor A, torch::Tensor B) {
 
 ### 精度策略
 
-- FP16 输入: 先 `.to(torch::kFloat32)` 提升精度
-- FP32 累加: 中间计算用 float32
-- FP16 输出: 最后 `.to(torch::kHalf)` 转回
-- 对于 reduce 类算子 (softmax/layernorm): 必须 FP32 累加
+- 输入、累加、输出 dtype 按共享生成规约和冻结契约分别处理
+- 不因为示例是 GEMM 或输入为 fp16 就固定输出 fp16
+- LayerNorm 与 Softmax 使用各自的稳定归约语义，不套用同一组方差步骤
 
 ## 严格要求 (违反任意一条都会导致失败)
 
 1. 文件必须以 `import` 开头
-2. 必须包含 `def kernel(A, B):` 入口函数
+2. 必须包含名为 `kernel`、签名遵循实际 calling_convention 的入口函数
 3. C++ 源码在 `_CPP_SOURCE` 变量中，用 `r"""..."""` 包裹
 4. 必须调用 `load_inline(...)` JIT 编译
 5. `load_inline` 的 `functions` 参数必须列出 C++ 中定义的算子函数名

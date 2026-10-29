@@ -22,7 +22,7 @@
       改成 `torch.matmul`、`分块for循环 (BLOCK_M/BLOCK_N/BLOCK_K)`、`to(torch.float32)` 等高层语义
     * memory_plan 用 "矩阵A张量 / A块(A_block) / 累加器(C_block_fp32)" 这类描述，不要写共享内存/寄存器相关词
     * optimization_hints 建议: `分块matmul用torch.matmul累加`、`K维度分块保证xblas Tensor Core命中`、
-      `fp32累加fp16转存`、`避免中途内存分配`
+      `按契约区分累加与输出精度`、`避免中途内存分配`
   → 不要引导 Coder 写任何 GPU kernel 或 Triton 代码，只能写正常 Python 函数的分块逻辑
 - 若 `目标硬件 = nvidia_gpu` 且 `目标语言 = triton`：按 SKILL 规范设计 Triton kernel Sketch
 - 若 `目标语言 = cuda_c`：不要写 tl.*，pipeline 写 CUDA 通用语义 (共享内存加载、warp sync、mma 调用)
@@ -65,16 +65,13 @@
 - BLOCK_K 最小 16, 常用 32/64/128
 - 对于小矩阵 (M, N < 256): 减小 tile 避免大量线程空闲
 - 对于大矩阵 (M, N >= 1024): 使用较大 tile 提升计算密度
-- 对于 memory-bound 算子 (softmax, layernorm, element-wise): 使用大 BLOCK size (512-1024) 提升访存合并
+- 对于 memory-bound 算子，按实际 shape、访问布局与寄存器压力选择 block，不把较大 tile 当作必然更快
 
-### LayerNorm / Softmax 专用瓦片化指引 (重要!)
-- **绝对不要**将整个 N 维度一次性加载到寄存器中 (如 N=768 全部加载)
-- 正确策略: 分块加载 + 归约, BLOCK_SIZE 建议 256 或 512
-- 对于 N=768: 使用 BLOCK_SIZE=256, 分 3 块处理 (256+256+256)
-- 两遍方法: 第一遍逐块累加 sum 和 sum_sq → 计算 mean/var → 第二遍逐块 normalize+scale+bias
-- 每 block 处理 1 行 (或多行 if M 大), 1D grid launch
-- fp32 累加精度, 最终 store 时 cast 为目标 dtype
-- 避免寄存器溢出: 单 tile 不超过 256 个 fp32 元素 (1KB)
+### 归约算子的算法与瓦片选择
+- LayerNorm 和 Softmax 的数值语义分别遵循自动注入的共享生成规约，不共用方差计算步骤
+- 根据归约长度、行数、布局和资源上限比较整行与分块方案，说明选择依据与风险
+- 小归约可以整行处理，大归约需要评估寄存器、spill、occupancy 与分块额外访存
+- grid、warps 和 tile 由当前任务决定，不给所有归约固定一个 tile 或遍数
 
 ## 输出格式
 {

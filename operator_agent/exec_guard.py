@@ -161,6 +161,145 @@ MODE_COMPILE = "compile"
 MODES: Tuple[str, ...] = (MODE_RUN, MODE_COMPILE)
 
 
+def start_background_worker(argv, *, cwd, log_path, env=None) -> subprocess.Popen:
+    """Launch a trusted harness supervisor with a lifetime independent of MCP.
+
+    This is process lifecycle plumbing, not candidate execution: it applies no
+    candidate timeout, rlimits, shielding or automatic exit cleanup. Generated
+    kernels must still use ``run_candidate``/``run_compile``. A long-running
+    trusted worker owns its status files and the caller receives its real PID.
+
+    Input is closed, output appends to the caller-owned log, unrelated file
+    descriptors are closed, and a separate session prevents the tool's session
+    shutdown from taking the worker with it. No shell or pre-exec callback is
+    accepted. Closing the parent's log descriptor does not close the child's.
+    """
+    if (not isinstance(argv, (list, tuple)) or not argv
+            or any(not isinstance(part, str) or '\x00' in part for part in argv)
+            or not argv[0]):
+        raise ValueError('background worker requires an explicit argument vector')
+    with open(os.fspath(log_path), 'ab') as log:
+        return subprocess.Popen(
+            list(argv), cwd=os.fspath(cwd), env=env,
+            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True, close_fds=True, shell=False,
+        )
+
+
+def start_task_worker(argv, *, cwd, log_path=None):
+    """Launch the trusted task worker; candidate execution still uses guards."""
+    if (not isinstance(argv, (list, tuple)) or not argv
+            or any(type(part) is not str or not part or '\x00' in part for part in argv)):
+        raise ValueError('task worker requires an explicit argument vector')
+    if log_path is not None:
+        with open(os.fspath(log_path), 'ab') as log:
+            return subprocess.Popen(list(argv), cwd=os.fspath(cwd), stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True, close_fds=True, shell=False)
+    return subprocess.Popen(list(argv), cwd=os.fspath(cwd), stdin=subprocess.DEVNULL,
+        start_new_session=True, close_fds=True, shell=False)
+
+
+class OwnedGroups(set):
+    """Observed group leaders plus start identities, so stale PGIDs aren't killed."""
+    def __init__(self, values=()):
+        super().__init__(values)
+        self.identities = dict(getattr(values, 'identities', {}))
+        self.discovery_complete = getattr(values, 'discovery_complete', True)
+
+    def update(self, values):
+        super().update(values)
+        self.identities.update(getattr(values, 'identities', {}))
+        self.discovery_complete &= getattr(values, 'discovery_complete', True)
+
+
+def _process_rows():
+    listing = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid=,lstart='],
+        capture_output=True, text=True, timeout=.5, check=True)
+    return [(int(parts[0]), int(parts[1]), int(parts[2]), ' '.join(parts[3:]))
+            for parts in (row.split() for row in listing.stdout.splitlines()) if parts]
+
+
+def process_identity(pid):
+    """Best available OS start identity; unavailable stays unknown."""
+    try:
+        return next((start for actual, _, _, start in _process_rows() if actual == pid), None)
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def task_process_groups(worker_pid):
+    """Snapshot groups whose leaders are in this worker's current tree."""
+    descendants = {worker_pid}
+    groups = OwnedGroups([worker_pid])
+    try:
+        rows = _process_rows()
+        while True:
+            added = {pid for pid, parent, _, _ in rows if parent in descendants} - descendants
+            if not added:
+                break
+            descendants.update(added)
+        groups.update(group for pid, _, group, _ in rows
+                      if pid in descendants and group in descendants)
+        groups.identities = {pid: start for pid, _, group, start in rows
+                             if pid == group and group in groups}
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        groups.discovery_complete = False
+        return groups, False
+    return groups, True
+
+
+def stop_task_worker(process, observed_groups=(), *, discover=None, graceful_s=0):
+    """Clean known task groups on every exit; expose discovery uncertainty."""
+    # S4's trusted worker may first close its own persistent SSH session. Only
+    # the held Popen is signalled; the existing group cleanup remains the fallback.
+    if graceful_s > 0 and process.poll() is None:
+        try:
+            process.send_signal(signal.SIGTERM)
+            process.wait(timeout=min(float(graceful_s), 15.0))
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            pass
+        except OSError:
+            pass
+    live = process.poll() is None
+    current, discovered = ((discover or task_process_groups)(process.pid)
+                           if live else (OwnedGroups(), True))
+    groups = OwnedGroups(observed_groups)
+    groups.update(current)
+    discovered &= groups.discovery_complete
+    try:
+        identities = {pid: start for pid, _, group, start in _process_rows() if pid == group}
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        identities, discovered = {}, False
+    skipped_reused = 0
+    # Candidate and HTTP guards create their own sessions. Kill those owned
+    # groups as well, so a blocked guard cannot outlive its local supervisor.
+    for group in groups:
+        if group != os.getpgrp():
+            expected = groups.identities.get(group)
+            actual = identities.get(group)
+            if expected and actual and expected != actual:
+                skipped_reused += 1
+                continue
+            if not (expected and expected == actual) and not (live and group == process.pid):
+                if actual is not None:  # no identity proof for a still-present group
+                    discovered = False
+                continue
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                discovered = False
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        discovered = False
+    return dict(status='observed_groups_terminated' if discovered else 'cleanup_unknown',
+        groups_observed=len(groups), worker_reaped=process.poll() is not None,
+        stale_groups_skipped=skipped_reused, all_descendants_proven=False)
+
+
 class GuardRefusal(RuntimeError):
     """候选被**受控执行器**拦下（超时 / 撞上限 / 盾命中 / 起不来）—— 不是它自己编译错了。
 

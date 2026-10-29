@@ -26,8 +26,8 @@
 
 关于剪枝的边界（与 `resource_check` 同一口径，别在这里另立一套）：
 
-* 估的是**数量级**：matmul 形态 `(BM*BK + BK*BN + BM*BN) * elem_bytes`，**不含**
-  `num_stages` 的多缓冲（真实占用是它的若干倍）⇒ 只砍「明显放不下」的点，边界交给远端；
+* 逻辑 tile、任务精度和 num_stages 不能证明物理共享存储。仅显式、身份匹配的 harness
+  shared layout / native 资源证据可摘点；缺证据保留待原生检查，不能称物理下界；
 * 宽松系数 `SMEM_SLACK = 1.2`（超限 20% 以上才拒）与 L1 预检**共用同一个常数**，
   免得「预检放行、剪枝拒绝」这种互相矛盾的两套阈值；
 * 上界取不到时**返回 None**（缺 ≠ 0 ≠ 无上限）：`smem_ok()` 的三态让调用方必须显式
@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from itertools import product
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
@@ -43,7 +44,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 from .backend_caps import Backend, Instantiation
 from .novelty import signature_of
 from .resource_check import (
-    SMEM_SLACK, estimate_matmul_smem_bytes, smem_limit_bytes,
+    SMEM_SLACK, estimate_matmul_smem_bytes, smem_limit_bytes, assess_shared_memory,
 )
 
 
@@ -506,7 +507,7 @@ class TemplateSelection:
 
 
 def template_points(space: ParamSpace, caps: Any = None,
-                    elem_bytes: int = 4) -> PruneResult:
+                    elem_bytes: int = 4, *, resource_evidence=None) -> PruneResult:
     """这一轮**真正可枚举的候选** = 参数空间的点 + 便宜代理剪枝 (§9)。
 
     为什么把它单列出来: 上游的选择器 (`selection.choose`) 必须拿**同一批**候选来做决定 ——
@@ -514,13 +515,13 @@ def template_points(space: ParamSpace, caps: Any = None,
     「实际用了哪个」分叉, 连**花哪一格预算**都会跟着错 (真机上这是常态: 剪枝常常只留一个点)。
     剪枝本身只有 `prune_by_smem` 一处实现, 这里只是「枚举 + 剪枝」这一对的名字。
     """
-    return prune_by_smem(space.points(), caps, elem_bytes)
+    return prune_by_smem(space.points(), caps, elem_bytes, resource_evidence=resource_evidence)
 
 
 def select_template_candidate(space: ParamSpace, backend: Any, *,
                               caps: Any = None, elem_bytes: int = 4,
                               order: Optional[List[TemplateCandidate]] = None,
-                              contract: Any = None) -> TemplateSelection:
+                              contract: Any = None, resource_evidence=None) -> TemplateSelection:
     """§12 的「模板产出候选」: 剪枝 → bandit 排序 → **按顺位取第一个建得出来的点**
 
     三件事刻意分开:
@@ -533,7 +534,7 @@ def select_template_candidate(space: ParamSpace, backend: Any, *,
     * 实例化**按顺位惰性进行**: 建不出来的点继续往下走 (逐条记理由), 因为「实例化器在
       某类参数上一直失败」不该让这一轮没得跑 —— 但它必须**看得见**。
     """
-    pruned = template_points(space, caps, elem_bytes)
+    pruned = template_points(space, caps, elem_bytes, resource_evidence=resource_evidence)
     if order is None:
         ranked = list(pruned.kept)
     else:
@@ -572,6 +573,8 @@ def stages_of(params: Mapping[str, Any]) -> Tuple[Optional[int], str]:
     有这一轴但值不可用 (字符串/0/布尔/负数) ⇒ `None` + 说明 —— 最后那一档**不是**
     「等于 1」: 一个改不动的值是「没观测到」, 不是「观测到了 1」。
     """
+    if not isinstance(params, Mapping):
+        return None, 'params 不是参数映射，stages 未知'
     for key in STAGE_KEYS:
         if key in params:
             value = params[key]
@@ -583,13 +586,12 @@ def stages_of(params: Mapping[str, Any]) -> Tuple[Optional[int], str]:
 
 def tile_smem_bytes(block_m: int, block_n: int, block_k: int,
                     elem_bytes: int, *, stages: Optional[int] = None) -> Optional[int]:
-    """一套 tile 的 smem 估算 (复用 `resource_check` 的公式与口径)。
+    """Legacy logical-tile proxy, never a physical shared-memory lower bound.
 
     `stages` = 软件流水的**缓冲份数** (`num_stages` 口径): A/B 那两块 tile 会被复制
     `stages` 份, 而**累加器/输出那块 (BM*BN) 不随流水翻倍** —— 所以是
     `BM*BN*elem + (BM*BK + BK*BN)*elem*stages`。`stages=None` (未观测) 按 1 份算,
-    于是这个值是**下界**; 下界超上界仍可放心摘点 (真的只会更大), 但它**不等于**
-    「放得下」(见 `prune_by_smem` 的 `stages_unobserved`)。
+    这是显式假设下的逻辑代理数值；它不证明存储位置，不能用于拒绝、剪枝或硬限制归因。
     """
     if stages is None:
         stages = 1
@@ -625,21 +627,23 @@ class PruneResult:
     no_limit: bool = False
     #: 全被摘光 ⇒ 一个都没摘 (剪枝不是「让这一轮没得跑」)。理由仍留在 `dropped` 里。
     kept_all_to_avoid_starvation: bool = False
-    #: 有几点的估算是**下界** (没有 `stages` 那一轴或值不可用 ⇒ 按 1 份缓冲算)。
-    #: 「下界」不是一个可以忽略的细节: 它意味着**没摘**的那些点里可能仍有放不下的。
+    #: 单纯记录缺失/无效的 stage 轴，绝不从它推断实际缓冲份数或共享存储下界。
     stages_unobserved: int = 0
     #: 认出来的 `stages` 取值 (用于产物/日志: 乘了几倍是可以被复算的)
     stages_seen: Tuple[int, ...] = ()
+    resource_unknown: int = 0
+    resource_reports: List[dict] = field(default_factory=list)
 
     def as_note(self) -> str:
         if self.no_limit:
             return "smem 代理剪枝: 未生效 (没有每 SM 上界)"
         suffix = ""
         if self.stages_seen and max(self.stages_seen) > 1:
-            suffix += f" [已按 stages={{{','.join(str(x) for x in sorted(set(self.stages_seen)))}}} 倍算 A/B 缓冲]"
+            suffix += f" [观察到 stages={{{','.join(str(x) for x in sorted(set(self.stages_seen)))}}}，不推定共享缓冲份数]"
         if self.stages_unobserved:
-            suffix += (f" [⚠️ {self.stages_unobserved} 点的估算**不含**多缓冲 ⇒ 是下界,"
-                       f" 没摘不等于放得下]")
+            suffix += f" [{self.stages_unobserved} 点 stages 未知]"
+        if self.resource_unknown:
+            suffix += f" [smem 代理剪枝: {self.resource_unknown} 点资源证据未知，保留待原生检查；没摘不等于放得下]"
         if not self.dropped:
             return suffix.strip()
         parts = [f"{c.params.get('BLOCK_M')}x{c.params.get('BLOCK_N')}"
@@ -650,12 +654,37 @@ class PruneResult:
         return f"smem 代理剪枝: 摘掉 {len(self.dropped)} 点 " + "/".join(parts) + suffix
 
 
+def template_resource_binding(candidate: TemplateCandidate) -> str:
+    """Exact template, backend, instantiator and full-parameter resource identity."""
+    if type(candidate) is not TemplateCandidate or not isinstance(candidate.params, Mapping):
+        raise ValueError('template resource identity requires a template parameter mapping')
+    identity = (candidate.backend, candidate.template_id, candidate.instantiator_ver)
+    if any(type(value) is not str or len(value) > 1024 for value in identity):
+        raise ValueError('invalid template resource identity')
+    if len(candidate.params) > 128:
+        raise ValueError('too many template parameters')
+    params = []
+    for key, value in candidate.params.items():
+        if type(key) is not str or len(key) > 256:
+            raise ValueError('resource parameter keys must be bounded strings')
+        if type(value) not in (str, int, bool):
+            raise ValueError('resource identity supports only string/integer/boolean parameters')
+        if ((type(value) is str and len(value) > 1024)
+                or (type(value) is int and not -(2**63) <= value < 2**63)):
+            raise ValueError('resource parameter exceeds identity bounds')
+        params.append((key, type(value).__name__, value))
+    payload = json.dumps(('template-resource-v2', identity, sorted(params)),
+                         ensure_ascii=False, sort_keys=True, allow_nan=False)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
 def prune_by_smem(points: List[TemplateCandidate], caps: Any,
-                  elem_bytes: int = 4) -> PruneResult:
+                  elem_bytes: int = 4, *, resource_evidence=None) -> PruneResult:
     """按 smem 上界摘点。**全摘光时一个都不摘**（见下）。
 
     最后那条不是防御性代码: 剪枝的目的是「少花一次冤枉测量」, 不是「让这一轮没得跑」。
-    若上界（或 elem_bytes 猜错）把邻域全砍了, 保留原集合交给远端判定, 比空手回上游好。
+    仅使用 harness 提供且绑定完整模板身份的共享存储证据。elem_bytes 为兼容参数，
+    不再把任务精度扩展成所有共享缓冲区的类型；缺证据保留待原生检查。
     """
     res = PruneResult()
     limit = smem_limit_bytes(caps)
@@ -665,24 +694,25 @@ def prune_by_smem(points: List[TemplateCandidate], caps: Any,
         return res
     kept: List[TemplateCandidate] = []
     for c in points:
-        try:
-            stages, why = stages_of(c.params)
-            est = tile_smem_bytes(c.params["BLOCK_M"], c.params["BLOCK_N"],
-                                  c.params["BLOCK_K"], elem_bytes, stages=stages)
-        except (KeyError, TypeError, ValueError):
-            kept.append(c)          # 认不出的参数轴 ⇒ 不剪 (宁可漏拦)
-            continue
+        stages, _ = stages_of(c.params)
         if stages is None:
-            # 下界口径: 没观测到多缓冲 ⇒ 这个数只会偏小 ⇒ 没摘**不是**放得下
             res.stages_unobserved += 1
         else:
-            res.stages_seen = res.stages_seen + (stages,)
-        if est is not None and est > limit * SMEM_SLACK:
-            extra = f", ×{stages} 缓冲" if stages and stages > 1 else ""
-            reason = f"≈{est / 1024:.0f}KiB>{limit / 1024:.0f}KiB{extra}"
-            if why:
-                reason += f" ({why})"
-            res.dropped.append((c, reason))
+            res.stages_seen += (stages,)
+        try:
+            binding = template_resource_binding(c)
+            evidence = (resource_evidence.get(binding) if isinstance(resource_evidence, Mapping)
+                        else None)
+            report = assess_shared_memory(evidence, caps, binding=binding)
+        except (KeyError, TypeError, ValueError, RecursionError, UnicodeError):
+            res.resource_unknown += 1
+            kept.append(c)
+            continue
+        res.resource_reports.append(dict(candidate_binding=binding, **report.as_dict()))
+        if report.assessment == 'unknown':
+            res.resource_unknown += 1
+        if not report.feasible:
+            res.dropped.append((c, report.as_message()))
         else:
             kept.append(c)
     if not kept and res.dropped:

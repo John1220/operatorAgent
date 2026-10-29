@@ -16,6 +16,8 @@ from .kernel_db import KernelDatabase
 from .prompt_manager import PromptManager
 from .fixer import FixerAgent
 from .interface_contract import broadcast_calling_convention
+from .generation_context import (build_generation_context, generation_request,
+                                 make_candidate_record)
 from .triton_opt_rules import TritonOptimizationRules
 
 
@@ -194,6 +196,8 @@ class CoderAgent:
         # 可选注入 CoderPipeline (Plan→并行采样→筛选→修复→回退)
         # 默认 None: 走 legacy 单线程生成+预检重试, 保持兼容
         self.pipeline = pipeline
+        self.candidate_records = []
+        self.last_candidate_record = None
 
     @property
     def last_finalists(self) -> list:
@@ -212,8 +216,12 @@ class CoderAgent:
 
         # 注入了 CoderPipeline 时走优化流程 (Plan→并行采样→筛选→修复→回退)
         if self.pipeline is not None:
-            code = self.pipeline.run(sketch, task, optimization_recipes=optimization_recipes,
-                                     test_inputs=test_inputs, **kwargs)
+            try:
+                code = self.pipeline.run(sketch, task, optimization_recipes=optimization_recipes,
+                                         test_inputs=test_inputs, **kwargs)
+            finally:
+                self.candidate_records = list(getattr(self.pipeline, 'candidate_records', []))
+                self.last_candidate_record = getattr(self.pipeline, 'last_candidate_record', None)
             print(f"  [Coder] Pipeline 生成代码: {len(code)} chars, language={sketch.target_dsl}")
             return code
 
@@ -227,6 +235,13 @@ class CoderAgent:
 
     def _llm_generate_code(self, sketch: UnifiedSketch, task: TaskSchema,
                            optimization_recipes=None, test_inputs=None) -> str:
+        self.candidate_records = []
+        self.last_candidate_record = None
+        context = build_generation_context(task, sketch, test_inputs,
+            producer='CoderAgent', strategy='single-with-precheck-retry',
+            policy=dict(max_attempts=self.MAX_GENERATE_ATTEMPTS, render_dsl=sketch.target_dsl),
+            prompt_manager=self.pm, agent_role=self._agent_role,
+            skill_name=self._skill_name if sketch.target_dsl == 'triton' else None)
         similar = self.kernel_db.search(algorithm=task.source.kernel_type, hardware=task.target.hardware, dsl=sketch.target_dsl)
         ref_code = similar[0].code if similar else ""
         if len(ref_code) > self.MAX_REF_CODE_CHARS:
@@ -257,16 +272,16 @@ class CoderAgent:
         # 输入名只有调用方知道。不广播的话, prompt 里唯一一处签名是 Planner 按
         # kernel_type 猜出来的 `def kernel(A, B)` ⇒ 对不上的任务只能等一次 SSH 往返抛出
         # TypeError 才知道契约长什么样。
-        calling_convention = broadcast_calling_convention(test_inputs)
+        calling_convention = context['interface']['broadcast']
 
         prompt = self.pm.render(
             template_name,
             _agent_role=self._agent_role,
             _skill_name=effective_skill,
-            kernel_type=task.source.kernel_type,
-            hardware=task.target.hardware,
+            kernel_type=context['task']['kernel_type'],
+            hardware=context['task']['hardware'],
             dsl=sketch.target_dsl,
-            precision=task.constraints.precision.value,
+            precision=context['task']['precision'],
             sketch=json.dumps(sketch.to_prompt_dict(), ensure_ascii=False, indent=2),
             ref_code=ref_code or "无",
             optimization_hints=optimization_hints,
@@ -280,9 +295,36 @@ class CoderAgent:
         feedback = ""
         code = ""
         for attempt in range(1, self.MAX_GENERATE_ATTEMPTS + 1):
-            raw = self.llm.chat([{"role": "user", "content": prompt + feedback}], temperature=0.1, max_tokens=40960, caller_tag="Coder")
-            code = self._clean_code(raw)
-            ok, issues = self._validate_code(code, sketch.target_dsl)
+            messages = [{"role": "user", "content": prompt + feedback}]
+            request = generation_request(self.llm, messages, caller='Coder', temperature=0.1, max_tokens=40960)
+            try:
+                raw = self.llm.chat(messages, temperature=0.1, max_tokens=40960, caller_tag="Coder")
+            except Exception as error:
+                record = make_candidate_record(context, None, request=request, attempt=attempt,
+                    status='model_failed', reason=type(error).__name__)
+                self.candidate_records.append(record)
+                self.last_candidate_record = record
+                raise
+            try:
+                code = self._clean_code(raw)
+            except Exception as error:
+                record = make_candidate_record(context, None, request=request, attempt=attempt,
+                    status='no_candidate', reason=type(error).__name__)
+                self.candidate_records.append(record)
+                self.last_candidate_record = record
+                raise
+            try:
+                ok, issues = self._validate_code(code, sketch.target_dsl)
+            except Exception as error:
+                record = make_candidate_record(context, code, request=request, attempt=attempt,
+                    status='precheck_failed', reason=type(error).__name__)
+                self.candidate_records.append(record)
+                self.last_candidate_record = record
+                raise
+            record = make_candidate_record(context, code, request=request, attempt=attempt,
+                status='prechecked' if ok else 'precheck_failed')
+            self.candidate_records.append(record)
+            self.last_candidate_record = record
             if ok:
                 if attempt > 1:
                     print(f"  [Coder] 第 {attempt} 次尝试通过预检")
@@ -638,10 +680,10 @@ class SearchAgent:
 
     @staticmethod
     def _prune_by_smem(sketches: list, perf_data: dict) -> tuple:
-        """按每 SM smem 上界摘掉明显放不下的邻域点; 返回 (保留的, 说明)
+        """返回候选与资源说明；raw perf_data 不提供可信 shared layout。
 
-        三态处置: 上界取不到 / 精度不知道 ⇒ **不剪**并明说「未生效」。
-        全摘光时同样一个都不摘 (剪枝是「少花冤枉钱」, 不是「让这一轮没得跑」)。
+        caps 不是存储证据，任务精度也不能补出物理 shared 字节。缺证据保留候选，
+        后续仍走原生检查和原有预算；不从用户测量字典注入权威资源回执。
         """
         points = []
         for i, s in enumerate(sketches):
@@ -652,10 +694,7 @@ class SearchAgent:
                         "BLOCK_K": t.block_k, "_idx": i}))
         # 上界的载体与口径只有一处 (`resource_check.caps_from_metrics`): 这里不再自己
         # 造一个 `_Caps`, 免得「搜索侧算出来的上界」与「预检/模板队列算出来的」两套。
-        elem = perf_data.get("elem_bytes")
-        if not isinstance(elem, int) or isinstance(elem, bool) or elem <= 0:
-            elem = 4      # 认不出来时按最窄的常见类型算: 宁可漏拦 (与预检同一条原则)
-        res = prune_by_smem(points, caps_from_metrics(perf_data), elem)
+        res = prune_by_smem(points, caps_from_metrics(perf_data))
         if res.no_limit:
             return list(sketches), ""
         kept = [sketches[c.params["_idx"]] for c in res.kept]

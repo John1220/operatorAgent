@@ -569,6 +569,19 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
             raise ContractError(f"任务声明的 cases 读不出来: {exc}") from exc
     if declared_shapes:
         derived = cases_from_shapes(kt, shape_entries, dtype_s)
+        # The trusted default profile declares one X input for these operators.
+        # The legacy layout table predates that profile and includes affine
+        # weight/bias. Keep legacy tasks unchanged, and let the checked profile
+        # own its actual input names instead of making preflight impossible.
+        from .correctness_profiles import PROFILE_VERSION
+        if (getattr(cons, "correctness_profile", None) == PROFILE_VERSION
+                and kt in ("layernorm", "softmax", "relu")):
+            if any(len(shape) != 2 for shape in declared_shapes):
+                raise ContractError("默认单输入 profile 要求二维 shape")
+            from .bench_cases import TensorSpec
+            derived = tuple(BenchmarkCase(name=kt + '-' + 'x'.join(map(str, shape)),
+                tensors=(TensorSpec("X", tuple(shape), dtype_s),), seed=0)
+                for shape in declared_shapes)
         if derived is None:
             raise ContractError(
                 f"任务声明了 shapes, 但 kernel_type={kt!r} 没有输入布局表 ⇒ 造不出具体输入"

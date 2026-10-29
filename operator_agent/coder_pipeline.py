@@ -14,7 +14,8 @@ from typing import Callable, Optional
 from .planner import PlannerAgent
 from .rule_templates import RuleTemplateCoder
 from .fixer import FixerAgent
-from .interface_contract import broadcast_calling_convention
+from .generation_context import (build_generation_context, generation_request,
+                                 make_candidate_record)
 # _extract_block_sizes 是同包 (resource_check) 的私有名, 这里直接引用是刻意的:
 # BLOCK_* 解析必须与资源预检 (I75-G1) / L1 用**同一份**实现, 两份解析器迟早漂移
 from .resource_check import check_resource_feasibility, _extract_block_sizes
@@ -83,6 +84,44 @@ class CoderPipeline:
         # 最近一次 run() 留给 Conductor 做 L1+L2 选择的决赛候选 (P1-1)。
         # ≤ L2_FINALISTS 个; 修复/模板产物算单候选; 全败为空。
         self.last_finalists: list[str] = []
+        self.generation_context = None
+        self.candidate_records: list[dict] = []
+        self.last_candidate_record = None
+        self._sample_records: list[dict] = []
+        self._finalist_records: list[dict] = []
+        self._best_failure_record = None
+        self._last_repair_record = None
+
+    def _context(self, task, sketch, test_inputs=None):
+        return build_generation_context(
+            task, sketch, test_inputs, producer='CoderPipeline',
+            strategy='parallel-sample-normalize-gate-repair-template',
+            policy=dict(sample_temperatures=list(self.SAMPLE_TEMPERATURES),
+                max_repair_rounds=self.MAX_REPAIR_ROUNDS,
+                max_output_tokens=self.GEN_MAX_TOKENS,
+                mechanical_rewrite=True, template_fallback=True,
+                render_dsl=sketch.target_dsl),
+            prompt_manager=self.pm, skill_name=self._skill_name,
+            agent_role=self._agent_role)
+
+    def _remember(self, record):
+        # Rechecking an identical local gate does not represent a model call or
+        # another proposal. Preserve its receipt once, without changing it.
+        if not any(r['record_hash'] == record['record_hash'] for r in self.candidate_records):
+            self.candidate_records.append(record)
+        return record
+
+    def _gate_receipt(self, code, ok, issues, record):
+        if record is None:
+            return None
+        parent = next((r['source'] for r in self.candidate_records
+                       if r['source_hash'] == record['parent_source_hash']), None)
+        return self._remember(make_candidate_record(
+            record['context'], code, request=record['request'],
+            attempt=record['attempt'], status='prechecked' if ok else 'precheck_failed',
+            source_author=record['source_author'], parent_source=parent,
+            transformation=record['transformation'],
+            reason=None if ok else 'compile_gate_refused'))
 
     def run(self, sketch: UnifiedSketch, task: TaskSchema, optimization_recipes=None,
             test_inputs=None, **kwargs) -> str:
@@ -91,10 +130,18 @@ class CoderPipeline:
         返回值仍是单个字符串 (默认候选 = 决赛名单第一名); 决赛名单整体暴露在
         `self.last_finalists`, 由 Conductor 逐个跑 L1+L2 做最终选择 (P1-1)。
         """
-        dsl = task.target.dsl
+        self.candidate_records = []
+        self.last_candidate_record = None
+        self._sample_records = []
+        self._finalist_records = []
+        self._best_failure_record = None
+        self._last_repair_record = None
+        self.generation_context = self._context(task, sketch, test_inputs)
+        facts = self.generation_context['task']
+        dsl = facts['dsl']
         recipes_ctx = optimization_recipes or ""
         # 三个采样线程共用同一份广播 (契约不随 temperature 变), 也避免每个线程各算一遍
-        calling_convention = broadcast_calling_convention(test_inputs)
+        calling_convention = self.generation_context['interface']['broadcast']
 
         # 1. Plan 阶段
         print(f"\n  [CoderPipeline] Plan 阶段...")
@@ -110,8 +157,13 @@ class CoderPipeline:
         # 3. 确定性机械改写 (I75 后续): prompt 层约束已被真机证明对该模型无效
         #    (无视 sketch 写 256 大 tile / fp32 不带 input_precision), 生成后
         #    机械对齐兜底 —— 不再指望模型「自觉」
-        candidates = [self._normalize_and_report(c, sketch, task)
-                      for c in candidates]
+        normalized, normalized_records = [], []
+        for index, code in enumerate(candidates):
+            record = self._sample_records[index] if index < len(self._sample_records) else None
+            code, record = self._normalize_recorded(code, sketch, task, record)
+            normalized.append(code)
+            normalized_records.append(record)
+        candidates, self._sample_records = normalized, normalized_records
 
         # 4. compile-gate 早退剪枝 (P1-1): 收集通过者而不是「首个通过即返回」
         finalists = self._prune_to_finalists(candidates, dsl, task.source.kernel_type)
@@ -119,6 +171,7 @@ class CoderPipeline:
         if finalists:
             print(f"  [CoderPipeline] {len(finalists)}/{len(candidates)} 候选通过编译剪枝 "
                   f"(决赛上限 {self.L2_FINALISTS}); 最终选择在 Conductor 侧 L1+L2")
+            self.last_candidate_record = self._finalist_records[0]
             return finalists[0]
 
         # 5. 有状态修复循环
@@ -135,6 +188,8 @@ class CoderPipeline:
         if tmpl:
             print(f"  [CoderPipeline] 规则模板已生成 ({len(tmpl)} chars)")
             self.last_finalists = [tmpl]
+            self.last_candidate_record = self._remember(make_candidate_record(
+                self.generation_context, tmpl, source_author='rule_template'))
             return tmpl
 
         # 最终兜底: 返回最优失败候选 (交由上层 Verifier 判定)
@@ -142,6 +197,7 @@ class CoderPipeline:
         self.last_finalists = []
         if best:
             print(f"  [CoderPipeline] 无模板, 返回最优失败候选")
+            self.last_candidate_record = self._best_failure_record
             return best[0]
         return ""
 
@@ -156,32 +212,45 @@ class CoderPipeline:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(self.SAMPLE_TEMPERATURES)
         ) as pool:
+            context = self.generation_context or self._context(task, sketch)
             futures = [
                 pool.submit(self._sample_one, plan_str, sketch, task, ref_code, temp,
-                            calling_convention)
-                for temp in self.SAMPLE_TEMPERATURES
+                            calling_convention, _record_context=context,
+                            _attempt=index, _with_record=True)
+                for index, temp in enumerate(self.SAMPLE_TEMPERATURES, 1)
             ]
-            results = [f.result() for f in futures]
+            outcomes = [f.result() for f in futures]
+        # Workers never mutate shared receipt state. Merge in the original
+        # temperature order, even when responses finish in another order.
+        self._sample_records = [item[1] for item in outcomes]
+        self.candidate_records.extend(self._sample_records)
+        error = next((item[2] for item in outcomes if item[2] is not None), None)
+        if error is not None:
+            raise error
+        results = [item[0] for item in outcomes]
         valid = sum(1 for c in results if c)
         print(f"  [CoderPipeline] 采样完成: {valid}/{len(results)} 非空")
         return results
 
     def _sample_one(self, plan_str: str, sketch: UnifiedSketch,
                     task: TaskSchema, ref_code: str, temperature: float,
-                    calling_convention: str) -> str:
+                    calling_convention: str, *, _record_context=None,
+                    _attempt=1, _with_record=False) -> str:
         """单次采样 (Code 阶段: 仅输出纯代码)"""
         hot = sketch.hot_hints()
         optimization_hints = "\n".join(f"- {h}" for h in hot) if hot else "无"
 
+        context = _record_context or self._context(task, sketch)
+        facts = context['task']
         prompt = self.pm.render(
             "coder_from_plan",
             _agent_role=self._agent_role,
             _skill_name=self._skill_name,
             plan=plan_str,
-            kernel_type=task.source.kernel_type,
-            hardware=task.target.hardware,
+            kernel_type=facts['kernel_type'],
+            hardware=facts['hardware'],
             dsl=sketch.target_dsl,
-            precision=task.constraints.precision.value,
+            precision=facts['precision'],
             block_m=sketch.tiling.block_m,
             block_n=sketch.tiling.block_n,
             block_k=sketch.tiling.block_k,
@@ -189,13 +258,32 @@ class CoderPipeline:
             optimization_hints=optimization_hints,
             calling_convention=calling_convention,
         )
-        raw = self.llm.chat(
-            [{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=self.GEN_MAX_TOKENS,
-            caller_tag="CoderPipeline.Coder",
-        )
-        return FixerAgent._extract_code(raw)
+        messages = [{"role": "user", "content": prompt}]
+        request = generation_request(self.llm, messages, caller='CoderPipeline.Coder',
+                                     temperature=temperature, max_tokens=self.GEN_MAX_TOKENS)
+        failure_status = 'model_failed'
+        try:
+            raw = self.llm.chat(
+                messages,
+                temperature=temperature,
+                max_tokens=self.GEN_MAX_TOKENS,
+                caller_tag="CoderPipeline.Coder",
+            )
+            failure_status = 'no_candidate'
+            code = FixerAgent._extract_code(raw)
+            record = make_candidate_record(context, code, request=request, attempt=_attempt,
+                                           status='proposed' if code else 'no_candidate')
+        except Exception as error:
+            record = make_candidate_record(context, None, request=request, attempt=_attempt,
+                                           status=failure_status, reason=type(error).__name__)
+            if _with_record:
+                return '', record, error
+            self._remember(record)
+            raise
+        if _with_record:
+            return code, record, None
+        self._remember(record)
+        return code
 
     # ─── 确定性机械改写 (I75 后续) ────────────────────────────
 
@@ -271,21 +359,28 @@ class CoderPipeline:
     def _normalize_and_report(self, code: str, sketch: UnifiedSketch,
                               task: TaskSchema) -> str:
         """normalize_candidate 的接线封装: 改写发生时打一行日志供人工复核"""
+        return self._normalize_recorded(code, sketch, task)[0]
+
+    def _normalize_recorded(self, code, sketch, task, record=None):
+        original = code
         code, notes = self.normalize_candidate(code, sketch, task)
         if notes:
             print(f"  [CoderPipeline] 机械改写: {', '.join(notes)}")
-        return code
+        if code != original and self.generation_context is not None:
+            record = self._remember(make_candidate_record(
+                self.generation_context, code,
+                attempt=record['attempt'] if record is not None else 1,
+                source_author='mechanical_transform', parent_source=original,
+                transformation=notes))
+        return code, record
 
     # ─── 编译剪枝 ────────────────────────────────────────────
 
     def _gate_check(self, code: str, dsl: str, kernel_type: str = "") -> tuple:
         """compile-gate 的两道便宜门收在一处 (I75-G1): 语法 + **资源预检**。
 
-        资源预检与 L1 用**同一份**估算 (`resource_check.check_resource_feasibility`,
-        单一真源)——不可行的 tile 在采样处就死掉, 不烧 SSH (I75 首跑: 六次 L1 全是
-        同一类 256×256 超限, 每次白烧一轮往返+环境自检)。caps 缺 ⇒ 跳过并留 note,
-        宁可漏拦。返回 (ok, issues); 资源问题的 message 会流进修复循环的反馈
-        (修代码的提示从此带着上界约束 —— I75-G3 的流程半边)。
+        与 L1 共用 check_resource_feasibility。逻辑 tile、dtype 与 num_stages 不证明
+        共享存储；无明确资源证据时交后续原生检查。unknown 不改变语法门的实际结果。
         """
         ok, issues = self.compile_fn(code, dsl)
         issues = list(issues or [])
@@ -307,14 +402,18 @@ class CoderPipeline:
              至多 L2_FINALISTS 个进入决赛, 由 Conductor 侧 L1+L2 真机定夺。
         """
         finalists = []
-        for code in candidates:
+        self._finalist_records = []
+        for index, code in enumerate(candidates):
             if len(finalists) >= self.L2_FINALISTS:
                 break
             if not code:
                 continue
             ok, issues = self._gate_check(code, dsl, kernel_type)
+            record = self._sample_records[index] if index < len(self._sample_records) else None
+            receipt = self._gate_receipt(code, ok, issues, record)
             if ok:
                 finalists.append(code)
+                self._finalist_records.append(receipt)
             elif any("资源预检" in i for i in issues):
                 # 单独说一句: 这类失败是「本地就能判死」的, 之前它烧的是真机往返
                 print(f"  [CoderPipeline] 候选被资源预检剪掉 (未动 SSH): {issues[-1][:110]}")
@@ -323,14 +422,18 @@ class CoderPipeline:
     def _best_failure(self, candidates: list, dsl: str, kernel_type: str = ""):
         """选 issues 最少的失败候选作为修复基线; 返回 (code, issues) 或 None"""
         scored = []
-        for code in candidates:
+        self._best_failure_record = None
+        for index, code in enumerate(candidates):
             if not code:
                 continue
             ok, issues = self._gate_check(code, dsl, kernel_type)
-            scored.append((len(issues), code, issues))
+            record = self._sample_records[index] if index < len(self._sample_records) else None
+            receipt = self._gate_receipt(code, ok, issues, record)
+            scored.append((len(issues), code, issues, receipt))
         if not scored:
             return None
         scored.sort(key=lambda x: x[0])
+        self._best_failure_record = scored[0][3]
         return scored[0][1], scored[0][2]
 
     # ─── 有状态修复循环 ──────────────────────────────────────
@@ -355,10 +458,12 @@ class CoderPipeline:
                 break
             # 修复产物同样过机械改写 (I75 后续): 修复的 LLM 与生成的 LLM 是同一个,
             # 一样会把 256 大 tile 写回来 —— 修完再机械对齐一次 sketch
-            fixed = self._normalize_and_report(fixed, sketch, task)
+            fixed, record = self._normalize_recorded(fixed, sketch, task, self._last_repair_record)
             # 复检也过资源门 (I75-G1): 修完又写回大 tile 的产物不许再烧 SSH
             ok, issues = self._gate_check(fixed, dsl, task.source.kernel_type)
+            receipt = self._gate_receipt(fixed, ok, issues, record)
             if ok:
+                self.last_candidate_record = receipt
                 return fixed
             base_code, base_issues = fixed, issues   # 基于修复版继续
         return None
@@ -367,6 +472,8 @@ class CoderPipeline:
                 sketch: UnifiedSketch, task: TaskSchema) -> tuple[str, str]:
         """基于预检失败 + 历史状态修复代码"""
         history = self._format_history(state)
+        context = self.generation_context or self._context(task, sketch)
+        facts = context['task']
         prompt = self.pm.render(
             "coder_repair",
             _agent_role=self._agent_role,
@@ -374,17 +481,32 @@ class CoderPipeline:
             code=code,
             issues="\n".join(f"- {i}" for i in issues),
             history=history,
-            kernel_type=task.source.kernel_type,
-            dsl=task.target.dsl,
-            precision=task.constraints.precision.value,
+            kernel_type=facts['kernel_type'],
+            dsl=facts['dsl'],
+            precision=facts['precision'],
         )
-        raw = self.llm.chat(
-            [{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=self.GEN_MAX_TOKENS,
-            caller_tag="CoderPipeline.Repair",
-        )
-        return FixerAgent._extract_code(raw), "LLM 修复"
+        messages = [{"role": "user", "content": prompt}]
+        request = generation_request(self.llm, messages, caller='CoderPipeline.Repair',
+                                     temperature=0.1, max_tokens=self.GEN_MAX_TOKENS)
+        failure_status = 'model_failed'
+        try:
+            raw = self.llm.chat(
+                messages,
+                temperature=0.1,
+                max_tokens=self.GEN_MAX_TOKENS,
+                caller_tag="CoderPipeline.Repair",
+            )
+            failure_status = 'no_candidate'
+            fixed = FixerAgent._extract_code(raw)
+            record = make_candidate_record(context, fixed, request=request, attempt=state.attempts,
+                status='proposed' if fixed else 'no_candidate', parent_source=code)
+        except Exception as error:
+            self._last_repair_record = self._remember(make_candidate_record(
+                context, None, request=request, attempt=state.attempts,
+                status=failure_status, parent_source=code, reason=type(error).__name__))
+            raise
+        self._last_repair_record = self._remember(record)
+        return fixed, "LLM 修复"
 
     @staticmethod
     def _format_history(state: RepairState) -> str:

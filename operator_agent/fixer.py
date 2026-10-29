@@ -12,7 +12,9 @@
 """
 
 import re
+import json
 import textwrap
+import copy
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from .agent_runtime import (  # §21.1 的生产者侧: 动作信封的解析只有一处
@@ -22,6 +24,8 @@ from .agent_runtime import (  # §21.1 的生产者侧: 动作信封的解析只
 )
 from .schemas import TaskSchema, VerificationResult
 from .prompt_manager import PromptManager
+from .generation_context import (build_generation_context, candidate_summary,
+                                 generation_request, make_candidate_record)
 from .kernel_db import (  # 用于回写 Reflexion 教训 + 本轮取向的归类
     FAILURE_CLASS_INTERFACE,
     FAILURE_CLASS_REFERENCE,
@@ -266,6 +270,7 @@ class FixOutcome:
     code: str
     summary: str
     envelope: ActionEnvelope
+    candidate_records: tuple = ()
 
     @property
     def asked(self) -> bool:
@@ -273,8 +278,12 @@ class FixOutcome:
         return not self.code and self.envelope.usable and self.envelope.asks_without_patch
 
     def as_dict(self) -> Dict[str, Any]:
-        return {"code_chars": len(self.code or ""), "summary": self.summary,
-                "asked": self.asked, "envelope": self.envelope.as_dict()}
+        result = {"code_chars": len(self.code or ""), "summary": self.summary,
+                  "asked": self.asked, "envelope": self.envelope.as_dict()}
+        if self.candidate_records:
+            result["candidate_records"] = [candidate_summary(record)
+                                           for record in self.candidate_records]
+        return result
 
 
 class FixerAgent:
@@ -300,6 +309,17 @@ class FixerAgent:
         # 修复代码时必须遵守与 Coder 相同的 SKILL 禁令/必需模式
         self._agent_role = "coder"
         self._skill_name = "triton_skill"
+        self.candidate_records: list[dict] = []
+        self.last_candidate_record = None
+
+    def _remember_candidate(self, context, source, *, request, attempt, status,
+                            parent_source, reason=None):
+        record = make_candidate_record(context, source, request=request,
+            attempt=attempt, status=status, source_author="model",
+            parent_source=parent_source, reason=reason)
+        self.candidate_records.append(record)
+        self.last_candidate_record = record
+        return record
 
     def run(
         self,
@@ -310,6 +330,9 @@ class FixerAgent:
         structured_evidence: str = "",
         error_shape: str = "",
         ask_answer: str = "",
+        diagnosis: Optional[dict] = None,
+        diagnosis_results: Optional[list[VerificationResult]] = None,
+        test_inputs=None,
     ) -> tuple[str, str]:
         """`run_with_action` 的**两格投影**（唯一的差别是丢掉动作信封）。
 
@@ -321,6 +344,9 @@ class FixerAgent:
             code, task, failed_results, fix_not_rewrite=fix_not_rewrite,
             structured_evidence=structured_evidence, error_shape=error_shape,
             ask_answer=ask_answer,
+            diagnosis=diagnosis,
+            **({'diagnosis_results': diagnosis_results} if diagnosis_results is not None else {}),
+            **({'test_inputs': test_inputs} if test_inputs is not None else {}),
         )
         return outcome.code, outcome.summary
 
@@ -333,6 +359,9 @@ class FixerAgent:
         structured_evidence: str = "",
         error_shape: str = "",
         ask_answer: str = "",
+        diagnosis: Optional[dict] = None,
+        diagnosis_results: Optional[list[VerificationResult]] = None,
+        test_inputs=None,
     ) -> "FixOutcome":
         """修复失败代码 (带预检+重试闭环，和 CoderAgent._llm_generate_code 一致)
 
@@ -358,8 +387,16 @@ class FixerAgent:
         - 修复生成后走与 Coder 同一套 _validate_code 预检 (含"非 triton 禁止 Triton API")
           有问题就带反馈最多重试 MAX_FIX_ATTEMPTS 次
         """
+        self.candidate_records = []
+        self.last_candidate_record = None
         if self.llm is None:
             raise RuntimeError("LLM 未配置，无法执行修复")
+        if diagnosis is not None:
+            from .repair_diagnoser import validate_candidate_diagnosis
+            evidence = failed_results if diagnosis_results is None else diagnosis_results
+            if [r for r in evidence if not r.passed] != failed_results:
+                raise ValueError('candidate diagnosis failure-set drift')
+            validate_candidate_diagnosis(diagnosis, code, task, evidence)
 
         self._last_task = task
         self._last_failed_results = failed_results
@@ -374,6 +411,15 @@ class FixerAgent:
             self._skill_name if (task.target.dsl or "").lower() == "triton" else None
         )
         dsl = task.target.dsl
+        context = build_generation_context(task, test_inputs=test_inputs,
+            producer="Fixer", strategy="repair", parent_source=code,
+            policy=dict(max_attempts=self.MAX_FIX_ATTEMPTS,
+                        max_output_tokens=self.FIX_MAX_TOKENS,
+                        fix_not_rewrite=bool(fix_not_rewrite),
+                        diagnosis_hash=diagnosis.get("hash") if diagnosis is not None else None),
+            prompt_manager=self.pm, skill_name=effective_skill,
+            agent_role=self._agent_role)
+        facts = context["task"]
 
         # 渲染前两样都要算好: 级别进模板当「本轮是谁报的失败」, 归类当第三路的分流键,
         # 取向由这两者一起决定。归类在这里算而不是让 `stage_directive` 自己去看文案:
@@ -387,10 +433,10 @@ class FixerAgent:
             "fixer_repair",
             _agent_role=self._agent_role,
             _skill_name=effective_skill,
-            kernel_type=task.source.kernel_type,
-            hardware=task.target.hardware,
+            kernel_type=facts["kernel_type"],
+            hardware=facts["hardware"],
             dsl=dsl,
-            precision=task.constraints.precision.value,
+            precision=facts["precision"],
             failure_stage=levels or "未知",
             stage_directive=stage_directive(level_set, failure_cls,
                                             fix_not_rewrite=fix_not_rewrite),
@@ -401,6 +447,11 @@ class FixerAgent:
             error_shape=error_shape or "(这一轮没有确立误差形态)",
             ask_answer=ask_answer,
         )
+        if diagnosis is not None:
+            from .repair_diagnoser import DIAGNOSED_REPAIR_INSTRUCTION
+            base_prompt += ('\n\n## Source-bound repair diagnosis\n'
+                            + DIAGNOSED_REPAIR_INSTRUCTION
+                            + json.dumps(diagnosis, ensure_ascii=False, allow_nan=False))
 
         feedback = ""
         fixed = ""
@@ -408,30 +459,53 @@ class FixerAgent:
         envelope = ActionEnvelope(status=ENVELOPE_ABSENT, reason="一次 LLM 调用都没成功")
         asked = False
         for attempt in range(1, self.MAX_FIX_ATTEMPTS + 1):
-            raw = self.llm.chat(
-                [{"role": "user", "content": base_prompt + feedback}],
-                temperature=0.1,
-                max_tokens=self.FIX_MAX_TOKENS,
-                caller_tag="Fixer",
-            )
+            messages = [{"role": "user", "content": base_prompt + feedback}]
+            request = generation_request(self.llm, messages, caller="Fixer",
+                temperature=0.1, max_tokens=self.FIX_MAX_TOKENS)
+            try:
+                raw = self.llm.chat(
+                    messages,
+                    temperature=0.1,
+                    max_tokens=self.FIX_MAX_TOKENS,
+                    caller_tag="Fixer",
+                )
+            except Exception as exc:
+                self._remember_candidate(context, None, request=request, attempt=attempt,
+                    status="model_failed", parent_source=code, reason=type(exc).__name__)
+                raise
             # 先取信封再提代码: 信封那一段**被切掉**了, 于是代码提取只看得到源码
-            envelope, body = parse_action_envelope(raw)
-            fixed = self._extract_code(body)
+            try:
+                envelope, body = parse_action_envelope(raw)
+                fixed = self._extract_code(body)
+            except Exception as exc:
+                self._remember_candidate(context, None, request=request, attempt=attempt,
+                    status="no_candidate", parent_source=code, reason=type(exc).__name__)
+                raise
             if envelope.usable and envelope.asks_without_patch:
                 # 「不改候选」的那几类 (解释 / 请求观测)。**这一轮没有候选** ——
                 # 不重试、也不抛: 它不是一次失败的修复, 是一次提问。响应它 (答/拒)
                 # 是 Conductor 的事 (`_answer_ask`), 而它决定要不要再问一次。
                 asked = True
-                if not fixed:
-                    break
-                print(f"  [Fixer] 信封是 {envelope.kind}, 同时带了代码 —— "
-                      f"按声明**不收**这份代码 (借请求之名改代码正是 §21.1 要挡的)")
+                if fixed:
+                    print(f"  [Fixer] 信封是 {envelope.kind}, 同时带了代码 —— "
+                          f"按声明**不收**这份代码 (借请求之名改代码正是 §21.1 要挡的)")
                 fixed = ""
+                self._remember_candidate(context, None, request=request, attempt=attempt,
+                    status="no_candidate", parent_source=code, reason="ask_without_patch")
                 break
             if not fixed:
                 issues = ["Fixer 未能从 LLM 回复中提取有效代码"]
             else:
-                _, issues = self._validate_code(fixed, dsl)
+                try:
+                    _, issues = self._validate_code(fixed, dsl)
+                except Exception as exc:
+                    self._remember_candidate(context, fixed, request=request, attempt=attempt,
+                        status="precheck_failed", parent_source=code, reason=type(exc).__name__)
+                    raise
+            self._remember_candidate(context, fixed or None, request=request, attempt=attempt,
+                status="prechecked" if not issues else ("precheck_failed" if fixed else "no_candidate"),
+                parent_source=code, reason=None if not issues else (
+                    "static_precheck_failed" if fixed else "missing_code"))
             if not issues:
                 succeeded = True
                 if attempt > 1:
@@ -463,7 +537,8 @@ class FixerAgent:
                        f"({levels}): {envelope.kind}")
             print(f"  [Fixer] 收到动作信封 {envelope.kind} (无候选): "
                   f"{envelope.rationale[:80] or '(未写理由)'}")
-            return FixOutcome(code="", summary=summary, envelope=envelope)
+            return FixOutcome(code="", summary=summary, envelope=envelope,
+                              candidate_records=tuple(copy.deepcopy(self.candidate_records)))
 
         summary = f"基于 {len(failed_results)} 个失败结果修复 ({levels})"
         print(f"  [Fixer] LLM 修复完成: {len(fixed)} chars")
@@ -471,7 +546,8 @@ class FixerAgent:
         if succeeded:
             self._last_fixed_code = fixed
             self._last_fix_summary = summary
-        return FixOutcome(code=fixed, summary=summary, envelope=envelope)
+        return FixOutcome(code=fixed, summary=summary, envelope=envelope,
+                          candidate_records=tuple(copy.deepcopy(self.candidate_records)))
 
     def produce_reflexion(self) -> Optional[FailureRecord]:
         """Reflexion: 修复后让 LLM 生成结构化自我反思并封装为 FailureRecord。

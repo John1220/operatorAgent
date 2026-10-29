@@ -39,7 +39,7 @@
 
 ## 资源超限的修法 (若错误信息含「资源预检 / 共享内存放不下」)
 - 按 message 给出的 smem 上限, **只改 BLOCK_* 常数** (如 256→128 或 →64), kernel 结构/索引/掩码一律不动
-- 修完自查: (BM*BK + BK*BN + BM*BN) × 4B ≤ message 的上限 —— 改不小会再次被拦, 白烧一轮
+- 修完按任务 dtype、实际缓冲区与后端回执核对 smem，不固定把每个元素都算作 4B
 - 若错误是数值精度 (如 max_error 超容差): 检查 tl.dot 的 input_precision (fp32 容差 1e-4 需要
   `input_precision="ieee"`, 默认 TF32 会差 ~3e-3 被拦)
 

@@ -52,6 +52,8 @@ class Cap(str, Enum):
     SAME_DEVICE_BASELINE = "same_device_baseline"
     #: 固定原生 CUDA 参照；复用生产 event/交错计时，不允许 CPU 心跳替代
     NATIVE_CUDA_CALIBRATION = "native_cuda_calibration"
+    #: 不安装依赖、不部署runner的质量评测预检，失败或未知时不允许调用模型。
+    READONLY_QUALITY_PREFLIGHT = "readonly_quality_preflight"
     #: `ensure_environment`: 能自检并 provision 自己的运行环境
     ENV_PROVISION = "env_provision"
     #: `deploy`: 能把 runner 及其依赖同步到执行侧
@@ -74,6 +76,7 @@ OPTIONAL_CAP_METHODS = {
     Cap.REFERENCE_IDENTITY: "reference_identity",
     Cap.SAME_DEVICE_BASELINE: "benchmark_with_baselines",
     Cap.NATIVE_CUDA_CALIBRATION: "calibration_probe",
+    Cap.READONLY_QUALITY_PREFLIGHT: "quality_preflight",
     Cap.ENV_PROVISION: "ensure_environment",
     Cap.DEPLOY: "deploy",
     Cap.DEP_ANALYSIS: "analyze_dependencies",
@@ -274,6 +277,18 @@ class Backend(ABC):
 
     def calibration_probe(self, *args, **kwargs):
         raise CapabilityMissing(Cap.NATIVE_CUDA_CALIBRATION, self)
+
+    def quality_preflight(self):
+        raise CapabilityMissing(Cap.READONLY_QUALITY_PREFLIGHT, self)
+
+    def close(self, grace: float = 10.0) -> dict:
+        """Default providers own no persistent execution session to close.
+
+        This is a scoped lifecycle fact, not proof that one-shot remote work or
+        unrelated device processes are quiescent. Session providers override it.
+        """
+        return {"quiescent": True, "session_created": False,
+                "scope": "owned_backend_sessions"}
 
     def ensure_environment(self, *args, **kwargs):
         raise CapabilityMissing(Cap.ENV_PROVISION, self)

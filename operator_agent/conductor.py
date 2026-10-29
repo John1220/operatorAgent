@@ -26,6 +26,8 @@ from .schemas import (
 )
 from .agents import DesignerAgent, CoderAgent, SearchAgent
 from .fixer import FixerAgent, failure_class
+from .generation_context import (build_generation_context, make_candidate_record,
+                                 records_cursor, records_since, without_candidate_source)
 from .verifier import COMPILE_FACT_KEYS, Verifier
 from .kernel_db import (
     KernelDatabase, FailureDatabase, FailureRecord, FAILURE_CLASS_REFERENCE,
@@ -38,6 +40,7 @@ from .remote_executor import RemoteExecutor
 from .llm_client import LLMClient
 from .prompt_manager import PromptManager
 from .artifact_store import ArtifactStore
+from .tool_evidence import persist_conductor_round
 from .environment import EnvironmentDrift, compare_fingerprints, fingerprint_of
 from .bandit import Bandit
 from .exhaustion import (FROM_LLM_ON_DEMAND, FROM_TEMPLATE_SPACE,
@@ -591,6 +594,92 @@ class Conductor:
         self._run_binding = None
         self._run_binding_dir = None
         self._resume_candidate_once = False
+        self.candidate_records = []
+        self._oracle_budget_refused = False
+
+    @staticmethod
+    def _validation_units(test_inputs):
+        # A verifier dispatch can process several caller input groups. This
+        # reserves a conservative batch allowance, not GPU launches or seconds.
+        return max(1, len(test_inputs)) if isinstance(test_inputs, list) else 1
+
+    def _verification_budget_snapshot(self):
+        snapshot = self._budget.as_dict()
+        finite = self._budget.plan.oracle_total is not None
+        snapshot.update(unit=('candidate_verification_dispatch_per_input_group' if finite
+                              else 'legacy_l3_observation_batch'),
+                        reservation_policy=('pre_dispatch_non_refundable' if finite else
+                                            'legacy_completed_l3_accounting'),
+                        calibration_policy='observe_only_may_exceed_total',
+                        raw_gpu_launch_cap=False, gpu_seconds_cap=False)
+        if finite:
+            caps = self._budget.caps
+            snapshot['remaining'] = dict(
+                total=max(0, self._budget.plan.oracle_total - self._budget.spent_all),
+                non_confirm=max(0, self._budget.plan.oracle_total - caps['confirm']
+                                - self._budget.spent_all),
+                confirm=max(0, caps['confirm'] - self._budget.spent['confirm']))
+        return snapshot
+
+    def _persist_verification_budget(self):
+        root = self.run_root or self._run_binding_dir
+        if root and self._budget.plan.oracle_total is not None:
+            run_contract.atomic_json(Path(root) / 'verification-budget.json',
+                                     self._verification_budget_snapshot())
+
+    def _oracle_refuse(self, kind):
+        self._budget.oracle_refuse(kind)
+        self._persist_verification_budget()
+
+    def _reserve_validation(self, kind, test_inputs):
+        if self._budget.plan.oracle_total is None:
+            return True
+        units = self._validation_units(test_inputs)
+        if not self._budget.oracle_may(kind, units):
+            self._oracle_budget_refused = True
+            self._oracle_refuse(kind)
+            return False
+        # Durable before any verifier/transport side effect. Failure or a
+        # partially evaluated suite never refunds the reservation.
+        self._budget.oracle_spend(kind, units)
+        self._persist_verification_budget()
+        return True
+
+    def _note_validation_refusal(self, state, detail, results=()):
+        from .eligibility import ALL_FALSE
+        # An empty verifier list is not success. A local non-dispatch receipt
+        # keeps all_passed=False without pretending a GPU measurement happened.
+        state.all_verification_results = list(results) + [VerificationResult(
+            level=VerificationLevel.L3_PERFORMANCE, passed=False, message=detail,
+            metrics=dict(budget_dispatch=False, measurement_validity='uninformative',
+                         measurement_can_gate=False, eligibility=ALL_FALSE.as_dict()))]
+
+    def _record_candidates(self, records, *, selected_source=None):
+        """Keep generation receipts separate from verification and selection."""
+        self.candidate_records.extend(without_candidate_source(record) for record in records)
+        root = self.run_root or self._run_binding_dir
+        if root and self.candidate_records:
+            try:
+                run_contract.atomic_json(Path(root) / 'generation-records.json', {
+                    'schema': 'operator-generation-trace-v1',
+                    'candidate_records': self.candidate_records,
+                    'selected_source_hash': (run_contract.code_hash(selected_source)
+                                             if selected_source is not None else None),
+                })
+            except (OSError, ValueError, TypeError) as exc:
+                # A failed evidence write must not replace a model/transport error.
+                print(f'[Generation] receipt write failed: {type(exc).__name__}')
+
+    def _call_generator(self, producer, call, *args, _test_inputs=None, **kwargs):
+        cursor = records_cursor(producer)
+        outcome = None
+        if isinstance(producer, FixerAgent) and _test_inputs is not None:
+            kwargs['test_inputs'] = _test_inputs
+        try:
+            outcome = call(*args, **kwargs)
+            return outcome
+        finally:
+            self._record_candidates(records_since(producer, cursor, outcome=outcome))
 
     #: 循环出口的词汇表。**每个词都要有写者** —— 多一个没写者的词就是「算了没人读」的副本,
     #: `tests/test_stop_reason.py` 按差集钉这条。
@@ -639,22 +728,16 @@ class Conductor:
 
         三条输入各自的出处:
           * 条件 1: `self._verdict_tail` —— 由 `verdict()` 那一个点写入, 只含 valid 轮;
-          * 条件 2: `smem_bound_evidence` —— 今天唯一有量具的硬限制。估的**不是 sketch 的
-            tiling 而是那一轮被测量的代码**: 走 `check_resource_feasibility` (与 L1 预检
-            **同一个估算器**、同一份产物), 否则「证据」与「预检」会是两套算法, 而 sketch
-            与 LLM 真正出的码今天本来就允许不一致;
+          * 条件 2: 与 L1 共用资源证据评估。源码逻辑 tile 不证明 shared 存储，unknown
+            不生成 smem/occupancy 硬限制证据；已有其他可靠限制由各自量具判定。
           * 条件 3: planner 选中 ∩ 未 applied/未 disabled 的配方 = 还剩的结构方向。
         """
-        caps_kb = metrics.get("shared_mem_per_sm_kb") or 0
+        resource_caps = caps_from_metrics(metrics)
+        caps_kb = resource_caps.shared_mem_per_sm_kb
         limits = ()
         if caps_kb and current_code:
-            # `check_resource_feasibility` 只读 caps 的这一个字段 ⇒ shim 就够,
-            # 不必为了归因再去解析一份 HardwareCaps (那会引入第二个真源)。
-            class _CapsKB:
-                shared_mem_per_sm_kb = int(caps_kb)
-
             rep = check_resource_feasibility(
-                current_code, _CapsKB(),
+                current_code, resource_caps,
                 getattr(getattr(task, "source", None), "kernel_type", "") or "")
             limits = smem_bound_evidence(rep.estimated_smem_bytes, rep.limit_bytes)
             # §10.3 条件 2 的第二把量具 (占用率上限)。输入全部取自**已测指标**,
@@ -721,8 +804,8 @@ class Conductor:
         * **没有 `run_root` 就什么都不做**：那是今天的另一档形态（判据活在「声明」那一档），
           不是「默认建一个相对 CWD 的布局」。
 
-        每轮的源码哈希与 patch 都在 `iteration_history` 里，所以同一个路径**每轮覆盖**是
-        被接受的语义（这个文件回答的是「这一轮的候选在哪」，不是历史版本库）。
+        该路径回答当前候选，允许每轮覆盖；S1 的独立轮次证据另行保留过门源码与完整判定，
+        不把此工作文件充当历史版本库。
 
         Returns:
             写入的绝对路径；没有布局时返回 `None`。
@@ -814,7 +897,7 @@ class Conductor:
 
     def _answer_ask_and_retry(self, outcome: "FixOutcome", *, repair_base: str,
                               task: TaskSchema, failed_results, route,
-                              evidence: str, record: dict) -> "FixOutcome":
+                              evidence: str, record: dict, test_inputs=None) -> "FixOutcome":
         """响应一次「不改候选」的动作，并**有界**地再要一次补丁（§21.1 生产者侧）
 
         三类询问各有各的答法，但只有两种结局 —— **答得出**与**答不出**，而且必须说清
@@ -854,8 +937,9 @@ class Conductor:
         record["ask_field"] = env.kind
         record["ask_turns"] = 1
         print(f"  [Conductor] 响应动作信封 {env.kind} → {record['ask_answer_kind']}")
-        second = self.fixer.run_with_action(
+        second = self._call_generator(self.fixer, self.fixer.run_with_action,
             repair_base, task, failed_results,
+            _test_inputs=test_inputs,
             fix_not_rewrite=route.fix_not_rewrite,
             structured_evidence=evidence,
             error_shape=(getattr(route, "error_shape", "") or ""),
@@ -1027,6 +1111,8 @@ class Conductor:
         epoch = self._heartbeat_epoch
         window = f"hb-{epoch}"
         self._heartbeat_ran_for = nxt
+        self._budget.note_calibration_run()
+        self._persist_verification_budget()
         try:
             # CUDA 测量不能被远端 CPU 小 matmul 心跳认证。缺原生能力时失败关闭。
             if (self.cuda_ruler_profile is not None or
@@ -1047,10 +1133,8 @@ class Conductor:
                   f"{type(exc).__name__}: {exc} —— 本次按 RULER_BROKEN 处理")
             return None, True
         self._last_heartbeat = result
-        # §10.2 的 5% 预检标定: 心跳就是那个「预检」, 花掉的是一次机时预算。
-        # **只记账、不被拦** —— 让预算饿死标定, 等于把「尺子有没有坏」变成一件可以因为
-        # 缺钱而跳过的事 (§10.5-5 的同族病)。超支由 `calibration_over_plan` 留痕。
-        self._budget.note_calibration_run()
+        # Calibration was charged before dispatch, including failed heartbeats.
+        # It is observe-only: calibration_over_plan retains any overspend.
         verdict = "OK" if result.ok else "RULER_BROKEN"
         print(f"[Heartbeat] 第 {nxt} 次测量前标定 ({window}): {verdict} "
               f"好核比值={result.known_good_ratio:.3g} "
@@ -1059,7 +1143,7 @@ class Conductor:
         return result, True
 
     def _select_finalist(self, current_code: str, finalists: list,
-                         task, input_sets, expected_output) -> tuple:
+                         task, input_sets, expected_output, *, phase='explore') -> tuple:
         """P1-1 (generation-side-review): 决赛候选逐个跑 L1+L2, 用真机正确性定胜负
 
         选择权在验证侧: compile-gate 只决定谁能进决赛 (≤ CoderPipeline.L2_FINALISTS)。
@@ -1084,7 +1168,10 @@ class Conductor:
         from .verifier import VerificationLevel
         default_results = None
         l2_runs = 0
+        self._oracle_budget_refused = False
         for i, cand in enumerate(finalists):
+            if not self._reserve_validation(phase, input_sets):
+                return current_code, default_results, True, l2_runs
             if self._run_binding is not None:
                 self._check_run_binding(task, input_sets)
             sel = self.verifier.verify(
@@ -1161,6 +1248,8 @@ class Conductor:
         self._reference_hold_rounds = 0
         self._run_binding = None
         self._run_binding_dir = None
+        self.candidate_records = []
+        self._oracle_budget_refused = False
         self._resume_candidate_once = False
         self._resume_status = None
         self._environment = {"fingerprint": {}, "drift": None}
@@ -1168,6 +1257,7 @@ class Conductor:
         # 少花钱。起始时刻一起在这里取 —— 墙钟预算量的是**这一次运行**。
         self._budget = BudgetLedger(self.budget_plan)
         self._run_started = time.monotonic()
+        self._persist_verification_budget()
         # §10.3 升级门的运行态: 判决词尾巴 (只进 valid 轮) 与逐轮裁决日志
         self._verdict_tail = []
         self._escalation_log = []
@@ -1187,6 +1277,9 @@ class Conductor:
         # （同一个 Conductor 跑多个任务时，上一轮的目录不许被下一轮接着用）。
         # `run_root` 为空时**不建**：空串不是「默认布局」，而是「这一档还没开」。
         self.layout = run_layout(self.run_root) if self.run_root.strip() else None
+        if self.layout is not None:
+            from .execution_audit import install_level_recorder
+            install_level_recorder(self.verifier, self.run_root, layout=self.layout)
         with capture_execution(
             task_id=task.task_id,
             operator=operator_name,
@@ -1430,7 +1523,8 @@ class Conductor:
             task_id=task.task_id,
             language=task.target.dsl,  # python | triton | ...
         )
-        artifact.metadata = {"run_binding": self._run_binding}
+        artifact.metadata = {"run_binding": self._run_binding,
+                             "candidate_records": self.candidate_records}
         all_verification_results = []
         current_sketch = None
         current_code = ""
@@ -1679,17 +1773,19 @@ class Conductor:
             _why = (f"墙钟预算用尽 ({_elapsed:.1f}s >= "
                     f"{self._budget.plan.wall_clock_s}s) ⇒ 不再开新的一轮")
             print(f"\n[Budget] {_why}")
-            self._budget.oracle_refuse("explore")
-            self._record_stop(state.artifact, round_num, "wall_clock_exhausted", _why)
+            self._oracle_refuse("explore")
+            self._note_validation_refusal(state, _why, state.all_verification_results)
+            self._record_stop(state.artifact, round_num, 'wall_clock_exhausted', _why)
             return _ROUND_STOP
-        if not self._budget.oracle_may("explore", 1):
+        if not self._budget.oracle_may("explore", self._validation_units(state.input_sets)):
             _plan = self._budget.plan
             _why = (f"真值测量预算用尽 (已花 {self._budget.spent_all}/"
                     f"{_plan.oracle_total}, 其中 {self._budget.caps['confirm']} 次"
                     f"留给最终确认不许挪用) ⇒ 不再开新的一轮")
             print(f"\n[Budget] {_why}")
-            self._budget.oracle_refuse("explore")
-            self._record_stop(state.artifact, round_num, "budget_exhausted", _why)
+            self._oracle_refuse("explore")
+            self._note_validation_refusal(state, _why, state.all_verification_results)
+            self._record_stop(state.artifact, round_num, 'budget_exhausted', _why)
             return _ROUND_STOP
 
 
@@ -1838,7 +1934,7 @@ class Conductor:
                         _room = self._budget.as_dict()["phase_room"]
                         _why = (f"探索/精修两格的计划额度都用完了 (剩余 {_room}) 且"
                                 "邻域队列里没有符合模式的候选 ⇒ 不再开新的一轮")
-                        self._budget.oracle_refuse("explore")
+                        self._oracle_refuse("explore")
                         self._record_stop(state.artifact, round_num, "budget_exhausted", _why)
                         return _ROUND_STOP
                     state.current_sketch = _nsel.chosen
@@ -2010,7 +2106,7 @@ class Conductor:
                 _why = (f"探索与精修两格的计划额度都用完了 (剩余 {_room}) ⇒ 不再开"
                         "新的一轮")
                 print(f"\n[Template] {_why}")
-                self._budget.oracle_refuse("explore")
+                self._oracle_refuse("explore")
                 self._record_stop(state.artifact, round_num, "budget_exhausted", _why)
                 return _ROUND_STOP
             # `chosen_label` 是「想选谁」的人读名字 (臂是去重键,留给 bandit 的统计);
@@ -2092,6 +2188,10 @@ class Conductor:
             # 「控制器自动切换成『LLM / 模板产出候选』」那一半)。action 单列一个值,
             # 于是「这一轮是模板产出的」在血缘里可分辨, 不必从源码去猜。
             state.current_code = template_choice.source
+            self._record_candidates([make_candidate_record(
+                build_generation_context(state.task, state.current_sketch, state.input_sets,
+                    producer='Conductor', strategy='declared-template-space'),
+                state.current_code, source_author='rule_template')])
             action = "template"
             print(f"\n[Conductor] 模板候选 (跳过 Coder): "
                   f"{point_label(template_choice.candidate)}")
@@ -2129,7 +2229,7 @@ class Conductor:
                 print(f"\n[Planner] 本轮无新增优化配方")
 
             print(f"\n[Coder] 根据 Sketch + 优化配方生成代码 (v{state.current_sketch.version})...")
-            state.current_code = self.coder.run(
+            state.current_code = self._call_generator(self.coder, self.coder.run,
                 state.current_sketch, state.task,
                 optimization_recipes=current_recipes_text,
                 test_inputs=(state.input_sets if self._single_candidate_coder is not None
@@ -2152,7 +2252,13 @@ class Conductor:
                 (state.current_code, selected_l1_l2, l1_l2_is_final,
                  round_l2_runs) = self._select_finalist(
                     state.current_code, finalists, state.task, state.input_sets, expected_output,
+                    phase=round_phase,
                 )
+                if self._oracle_budget_refused:
+                    _budget_note = '决赛候选验证预算不足；保留最终确认预留，不继续派发'
+                    self._note_validation_refusal(state, _budget_note, selected_l1_l2 or ())
+                    self._record_stop(state.artifact, round_num, 'budget_exhausted', _budget_note)
+                    return _ROUND_STOP
 
         # ---- 候选新颖度观测 (doc 47) ----
         # 只做两件事: 把结构签名写进 iteration_history (它会被序列化进 result.json,
@@ -2265,6 +2371,11 @@ class Conductor:
             print(f"\n[Verifier] 复用候选选择中的 L1+L2 失败结果 (不重跑真机)...")
             verify_results = selected_l1_l2
         else:
+            if not self._reserve_validation(round_phase, state.input_sets):
+                _budget_note = '候选验证预算不足；保留最终确认预留，不继续派发'
+                self._note_validation_refusal(state, _budget_note, selected_l1_l2 or ())
+                self._record_stop(state.artifact, round_num, 'budget_exhausted', _budget_note)
+                return _ROUND_STOP
             heartbeat, heartbeat_expected = self._heartbeat_for_next_measurement()
             if selected_l1_l2 is not None:
                 print(f"\n[Verifier] 执行 L3 验证 (L1+L2 已在候选选择中通过)...")
@@ -2326,13 +2437,11 @@ class Conductor:
         # 于是同一扇窗的参照对不会被反复重跑 (见 `_heartbeat_ran_for`)。
         if l3_result is not None:
             self._true_measurements += 1
-            # §10.2 的记账与这个计数**同点**发生 (一个地方决定「什么算一次真值测量」)。
-            # 放在这里而不是放在门那边: 门是「该不该花」, 这是「花了」—— 两者分开才
-            # 使得同一次测量不可能出现「记了两次」或「花了没记」。
-            # 花的是**这一相**那一格 (§10.3 的分相): 相位由这一轮的候选决定 ——
-            # 未观测的候选花「探索」, 已观测的花「精修」。`oracle_spend` 只记账不拦,
-            # 计划格子被突破时账本里 `over_plan` 会涨 (与标定超支同一处置)。
-            self._budget.oracle_spend(round_phase)
+            # Unlimited compatibility callers retain completed-L3 accounting.
+            # Finite task budgets were reserved before each verifier dispatch;
+            # charging again here would count the same dispatch twice.
+            if self._budget.plan.oracle_total is None:
+                self._budget.oracle_spend(round_phase)
 
         # 这一轮造成的**永久后果** —— 供设计 §14-9 的资格审计对照实验离线统计。
         #
@@ -2449,6 +2558,10 @@ class Conductor:
         # 取会依赖「中间没有第二次 append」, 那个前提将来被人破坏时不会响, 只会把
         # 带宽记到别人的轮上。
         _round_rec = state.artifact.iteration_history[-1]
+        if self.layout is not None:
+            _round_rec['evidence'] = persist_conductor_round(
+                self.layout, state.task, state.current_code, verify_results, round_num,
+                admitted=_action_verdict.accepted)
 
         # Applies to L1/L2 AND L3: unknown benchmark execution is not a slow
         # candidate. Stop before tuning, stagnation, another finalist or learning.
@@ -2777,8 +2890,9 @@ class Conductor:
                     # §21.1 生产者侧: 修复这一步现在**同时**取回模型交上来的动作信封。
                     # `run` 保留给不关心信封的调用方, 而这里用的是带信封的那一个 ——
                     # 于是「动作是谁写的」在内侧就分得开。
-                    _outcome = self.fixer.run_with_action(
+                    _outcome = self._call_generator(self.fixer, self.fixer.run_with_action,
                         repair_base, state.task, failed_results,
+                        _test_inputs=state.input_sets,
                         fix_not_rewrite=route.fix_not_rewrite,
                         structured_evidence=_evidence,
                         error_shape=(getattr(route, "error_shape", "") or ""),
@@ -2792,6 +2906,7 @@ class Conductor:
                             failed_results=failed_results, route=route,
                             evidence=_evidence,
                             record=_fix_action_record,
+                            test_inputs=state.input_sets,
                         )
                     fixed_code, fix_note = _outcome.code, _outcome.summary
                     # 信封交给**下一轮**的判据点 (它就是这份候选的来路)。只有改候选的
@@ -3034,6 +3149,10 @@ class Conductor:
                 state.artifact.metadata["llm_cost"] = cost_summary
 
         # 保存产物到文件系统
+        state.artifact.metadata['budget'] = self._verification_budget_snapshot()
+        state.artifact.metadata['candidate_records'] = self.candidate_records
+        state.artifact.metadata['selected_source_hash'] = run_contract.code_hash(state.artifact.code)
+        self._record_candidates([], selected_source=state.artifact.code)
         if self.llm is not None and getattr(self.llm, 'call_budget', None) is not None:
             state.artifact.metadata['llm_call_budget'] = self.llm.call_budget.summary()
         if self._single_candidate_coder is not None:
@@ -3113,7 +3232,13 @@ class Conductor:
         }
         # §10.2 的账本同样落盘: 「计划是多少 / 花了多少 / 谁被挡住了」必须能被读到,
         # 否则预算就是一个只在 `print` 里活过的装置。
-        state.artifact.metadata["budget"] = self._budget.as_dict()
+        state.artifact.metadata["budget"] = self._verification_budget_snapshot()
+        self._persist_verification_budget()
+        result_path = Path(saved_dir) / 'result.json'
+        result_data = json.loads(result_path.read_text(encoding='utf-8'))
+        result_data['budget'] = run_contract.audit_value(state.artifact.metadata['budget'])
+        result_data['stop'] = state.artifact.metadata['stop']
+        run_contract.atomic_json(result_path, result_data)
         # §10.3 的逐轮裁决: 门是**判据**, 判过什么必须留痕 (否则「没升级」与
         # 「没接门」在下游看起来一样)。
         state.artifact.metadata["escalation"] = self._escalation_log
@@ -3485,6 +3610,23 @@ class Conductor:
                         or receipt.get("manifest_hash") != self._run_binding["manifest"]["hash"]):
                     raise run_contract.RunBindingError("confirmation candidate/evidence mismatch")
         metrics_1 = artifact.benchmark_data or {}
+        wall_expired = not self._budget.within_wall_clock(time.monotonic() - self._run_started)
+        if wall_expired:
+            self._oracle_refuse('confirm')
+        if wall_expired or not self._reserve_validation('confirm', input_sets):
+            reason = ('wall_clock_exhausted' if wall_expired else 'budget_exhausted')
+            artifact.remeasure = ConfirmRecord(ok=False, independent=False,
+                reason='最终确认未派发：墙钟或确认预留不足')
+            round_num = artifact.iteration_history[-1]['round'] if artifact.iteration_history else 0
+            self._record_stop(artifact, round_num, reason, artifact.remeasure.reason)
+            self._persist_verification_budget()
+            if artifact.saved_dir:
+                from dataclasses import asdict
+                run_contract.atomic_json(Path(artifact.saved_dir) / 'confirmation.json',
+                    run_contract.audit_value({'first_binding': metrics_1.get('run_binding'),
+                        'second_binding': None, 'confirmation': asdict(artifact.remeasure),
+                        'second_metrics': {}}))
+            return
         # 重测也是一条 L3 读数, 所以同样过尺子检查 —— 否则「决定永久记忆的那一次测量」
         # 恰好是唯一没被检查过的那一次。到期就用本层的判据 (不额外计数: 循环已结束,
         # 计数的作用是循环内的节奏)。
@@ -3505,9 +3647,10 @@ class Conductor:
             if self._run_binding is not None:
                 self._check_run_binding(task, input_sets)
                 self._bind_results(results, artifact.code)
-            # §10.2 的「最后 10% 不可挪用」: 这一次重测花的是**预留**那一格。记账放在
-            # 调用之后 (它已经花了机时), 而且花的是 confirm —— 非 confirm 的开销碰不到它。
-            self._budget.oracle_spend("confirm")
+            # Finite budgets reserved the confirm pool before dispatch. Legacy
+            # unlimited callers retain the historical post-observation count.
+            if self._budget.plan.oracle_total is None:
+                self._budget.oracle_spend("confirm")
             second = results[0] if results else None
         except run_contract.RunBindingError:
             raise

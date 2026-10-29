@@ -152,32 +152,36 @@ class BenchmarkCase:
         """这条 case 的身份 —— 与 `case_key(inputs)` **同一个函数**（就地调它，不另写一份）"""
         return case_key({t.name: t for t in self.tensors if isinstance(t, TensorSpec)})
 
+    def seed_spec(self) -> dict:
+        """可以**过线**的那份描述：seed + 每个张量的名字/形状/dtype。
+
+        2026-10-20 起，远端按它重新物化输入并核 digest，不再整份传字节（fp16 4096³
+        两个张量 ≈ 90 MB 文本，实测链路要 570 s，见评估文档 §9.8.1）。
+        """
+        from .remote_input_fidelity import SEED_PROTOCOL
+        return {"protocol": SEED_PROTOCOL, "seed": int(self.seed),
+                "tensors": [{"name": t.name, "shape": list(t.shape), "dtype": t.dtype}
+                            for t in self.tensors]}
+
     def materialize(self) -> dict:
         """按声明造出这一组输入。**确定性**：同一份声明（含 seed）任何时候都是同一组数组。
 
         数值语义：浮点用 `standard_normal`（不是全 1/全 0 —— 全 1 的输入会把「索引写错」这类
         错误掩盖成正确），整数用 `integers(1, 8)`。dtype 不在表里 ⇒ 抛 `BenchCaseError`
         （**不悄悄降级**：降级会让读数与声明不符，而这种不符没人看得出来）。
-        """
-        import numpy as np
 
+        ⚠️ 具体抽取规则**不在这里**：它和远端物化共用 `remote_input_fidelity.
+        materialize_seed_inputs`（一个实现两处调用）。两份实现分家之日，就是「控制端以为
+        在验 A、远端实际在验 B」之时。
+        """
         errs = self.validate()
         if errs:
             raise BenchCaseError("case 声明不可判定: " + "; ".join(errs))
-        rng = np.random.default_rng(int(self.seed))
-        out: dict = {}
-        for t in self.tensors:
-            np_name = _NP_DTYPES.get(t.dtype)
-            if np_name is None:
-                raise BenchCaseError(
-                    f"tensor[{t.name!r}] 的 dtype={t.dtype!r} 造不出张量（没有 numpy dtype）"
-                    f" ⇒ 拒绝 materialize（不降级）")
-            dt = np.dtype(np_name)
-            if dt.kind == "f":
-                out[t.name] = rng.standard_normal(t.shape).astype(dt)
-            else:
-                out[t.name] = rng.integers(1, 8, size=t.shape).astype(dt)
-        return out
+        from .remote_input_fidelity import InputFidelityError, materialize_seed_inputs
+        try:
+            return materialize_seed_inputs(self.seed_spec())
+        except InputFidelityError as exc:
+            raise BenchCaseError(str(exc)) from exc
 
     def content_dict(self) -> dict:
         """进**契约 hash** 的内容（`to_dict()` 里去掉审计格 + 张量按名字规范化）
@@ -343,3 +347,15 @@ def known_layouts() -> tuple:
     """有布局表的 kernel_type（**只读**；报表/诊断用它说清「为什么这条算子没有 case」）"""
     return tuple(sorted(_CASE_LAYOUTS))
 
+
+
+def case_spec(case: "BenchmarkCase") -> dict:
+    """控制端下发的完整 spec：`seed_spec()` + 物化后的 digest。
+
+    digest 由**控制端先算一遍**（并与真实 inputs 比对，见 `Verifier._seed_spec_for`），
+    远端再算一遍；两侧一致才使用物化的那份。
+    """
+    from .remote_input_fidelity import seed_input_digest
+    spec = case.seed_spec()
+    spec["digest"] = seed_input_digest(case.materialize())
+    return spec

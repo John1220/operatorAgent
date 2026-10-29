@@ -92,13 +92,8 @@ def _grain(values: Sequence[int], cap: Optional[int]) -> Tuple[int, ...]:
 
 def param_space(smem_limit_bytes: Optional[int] = None,
                 elem_bytes: int = 4) -> ParamSpace:
-    """§12 的参数空间。上界只用来**缩格**，不用来摘点（摘点是 `prune_by_smem` 的活）"""
+    """§12 参数空间；任务 dtype/tile 不证明 shared layout，不据此缩格。"""
     cap_m = cap_n = cap_k = None
-    if smem_limit_bytes is not None:
-        # 粗口径: 单块 tile 至少要放得下 (BM*BK + BK*BN) 一份 —— 精确判定仍在剪枝那侧
-        cap = int((smem_limit_bytes / max(elem_bytes, 1)) ** 0.5)
-        cap_m = cap_n = max(16, cap)
-        cap_k = max(16, smem_limit_bytes // max(elem_bytes * 16, 1))
     return ParamSpace(
         template_id=TEMPLATE_ID,
         axes={"BLOCK_M": _grain(DEFAULT_BM, cap_m), "BLOCK_N": _grain(DEFAULT_BN, cap_n),

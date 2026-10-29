@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -46,13 +47,29 @@ import numpy as np
 from .backend_caps import Cap
 from .contract import freeze_from_task
 from .failure_route import Route, classify
+from .generation_spec import generation_spec_identity
+from .generation_context import candidate_summary
+from .run_contract import code_hash
 from .intent_parser import IntentParser
-from .report import write_report
+from .report import build_report
+from .tool_evidence import RoundEvidence, verification_data
+from .execution_audit import install_level_recorder
 from .schemas import (ConstraintSpec, KernelArtifact, Precision, TaskSchema,
                       VerificationLevel, VerificationResult)
 from .verifier import Verifier
 
-TOOL_VERSION = 1
+#: 工具面的契约版本。**加/删工具或改回包形状就要 +1** —— 外层宿主会把这个数记进
+#: 自己的配置与报告，同一份 `tool_version` 必须指同一套语义。
+#: 2: 新增 `operator_bench`（探索级批量测量；回包刻意不含裁决字段）。
+#: 3: `verify`/`repair` 的回包多了 `candidate_origin`（`repair` 另有
+#:    `final_candidate_origin`）—— 候选来源的**归因格**，不进判据。
+#: 4: repair 返回统一候选摘要、最终源码哈希，完整记录保存在 evidence。
+#: 5: run 使用有限任务预算，status 返回预算用量、配置及停止原因。
+#: 6: verify/repair/bench 独立留存原始源码与完整判定，回包引用不可覆盖的 evidence。
+#: 7: invocation 绑定的取消入口、取消终态与可中断的 MCP 长调用。
+#: 8: 资源预检按明确共享存储证据裁决，L1 保留未知/来源，不再从逻辑 tile 猜物理占用。
+#: 9: repair 有限任务预算、独立模型/验证账本和监督截止；新增阶段/usage 审计元数据。
+TOOL_VERSION = 9
 
 #: 允许进 `declaration` 的键（§6.3 的白名单）。**没列在这里的一律拒绝** ——
 #: 「先收下、以后再判断」是这一层最不能有的形状：它等于给未来开了一个没说出口的口子。
@@ -90,6 +107,29 @@ _BACKENDS = ("mock", "local", "ssh")
 _STOP_AFTER = {"L1": VerificationLevel.L1_COMPILE,
                "L2": VerificationLevel.L2_FUNCTION,
                "L3": VerificationLevel.L3_PERFORMANCE}
+
+#: 候选来源（**闭合词表**）。判定层看不出源码是谁写的 ⇒ 这一格只能由调用方声明；
+#: 但「没声明」本身是要记的事实，所以缺省值是 `undeclared` 而**不是省略这一格** ——
+#: 省略就等于把「这个核走了哪条路」重新变成猜（`docs/design/hitl-generation-boundary.md` §4）。
+#:
+#: ⚠️ 它**不是判据**：任何取值都不改 `levels`/`route`/`eligibility`/`conflict`/`passed`，
+#: 也不进契约（`prepare` 按 `unknown_parameter` 拒收，所以它不可能影响 `contract_hash`）。
+#: 声明式的归因只和调用方的诚实一样可靠 —— 它治的是「看不见」，不治「说谎」。
+CANDIDATE_ORIGINS = ("outer", "inner_fixer", "inner_coder")
+#: 未声明时记进回包与报告的值。
+UNDECLARED_ORIGIN = "undeclared"
+
+
+def _origin_of(value: Any) -> str:
+    """把调用方给的来源收敛成词表里的一个值；不在词表里就拒（**可归因地**拒）。"""
+    if value is None or value == "":
+        return UNDECLARED_ORIGIN
+    if value not in CANDIDATE_ORIGINS:
+        raise ToolError(
+            "unknown_candidate_origin",
+            f"candidate_origin 只能是 {' / '.join(CANDIDATE_ORIGINS)} 之一"
+            f"（或省略 = {UNDECLARED_ORIGIN}）；收到 {value!r}")
+    return str(value)
 
 #: 回给外层的 metrics 只留这几项 —— 把整份 metrics 丢出去会让「读哪个数」变成猜。
 _METRIC_KEYS = (
@@ -238,9 +278,11 @@ def _backend(name: str, *, host: Optional[str] = None, port: Optional[int] = Non
         raise ToolError("host_required",
                         "backend=ssh 需要 host（~/.ssh/config 的别名即可）；"
                         "本层不提供 auto 降级")
-    return RemoteExecutor(mode="ssh", host=host, port=port, user=user,
+    from .backend_ownership import register_backend
+    return register_backend(RemoteExecutor(mode="ssh", host=host, port=port, user=user,
                           key_path=key_path, work_dir=work_dir,
-                          timeout=int(timeout), persistent=bool(persistent))
+                          timeout=int(timeout), persistent=bool(persistent)),
+                          persistent=bool(persistent))
 
 
 def _make_backend(name: str, **options):
@@ -402,6 +444,7 @@ def prepare(declaration: dict, run_dir: str | Path, *, now: Optional[float] = No
         "run_dir": str(run),
         "run_id": run.name,
         "contract_hash": contract.hash,
+        "generation_spec": generation_spec_identity(),
         "cases": [_case_summary(c) for c in contract.cases],
         "required_cases": list(contract.required_cases),
         "inputs": {name: {"shape": list(arr.shape), "dtype": str(arr.dtype)}
@@ -432,10 +475,16 @@ def verify(run_dir: str | Path, code: str, *, stop_after: Any = None,
            user: Optional[str] = None, key_path: Optional[str] = None,
            work_dir: Optional[str] = None, timeout: int = 300,
            persistent: bool = False,
+           candidate_origin: Optional[str] = None,
            now: Optional[float] = None) -> dict:
-    """对**这一回合**的候选源码做判定；不做候选生成、不做修复、不做搜索。"""
+    """对**这一回合**的候选源码做判定；不做候选生成、不做修复、不做搜索。
+
+    `candidate_origin` 只是**归因**：记这份源码自称是谁写的（见 `CANDIDATE_ORIGINS`）。
+    它不参与任何判定，省略时记为 `undeclared`。
+    """
     if not isinstance(code, str) or not code.strip():
         raise ToolError("code_required", "verify 需要候选源码文本")
+    origin = _origin_of(candidate_origin)
     run = Path(run_dir)
     decl_path = run / "declaration.json"
     if not decl_path.is_file():
@@ -457,74 +506,265 @@ def verify(run_dir: str | Path, code: str, *, stop_after: Any = None,
             "recorded_hash": recorded, "current_hash": contract.hash,
         }
 
-    inputs = contract.cases[0].materialize()
-    # ⚠️ 后端构造/解析**也会 print**（`[RemoteExecutor] SSH 连接成功: …`）。2026-10-18
-    # 第一次真机 L1 就撞上了：那行跑到 stdout，把整份 JSON 变成不可解析（真事）。
-    # 所以这里与 verify 同一条纪律：库的 stdout 一律收进日志，不进协议流。
-    (backend_obj, resolution), backend_log = _quiet(_make_backend,
-                                                    backend, host=host, port=port,
-                                                    user=user, key_path=key_path,
-                                                    work_dir=work_dir, timeout=timeout,
-                                                    persistent=persistent)
-    verifier = Verifier(backend_obj)
+    from .s5_verify_client import enabled, delegated_verify
+    if enabled():
+        try:
+            return delegated_verify(run_dir, code, recorded_hash=recorded,
+                stop_after=stop_after, backend=backend, host=host, port=port, user=user,
+                key_path=key_path, work_dir=work_dir, persistent=persistent,
+                target_gflops=target_gflops)
+        except (OSError, ValueError) as exc:
+            raise ToolError('s5_development_refused', str(exc)) from exc
     level = _level_of(stop_after)
-    results, verify_log = _quiet(verifier.verify, code, task, inputs, None,
-                                 float(target_gflops), None, level)
-    log = backend_log + verify_log
+    with RoundEvidence(run, "verify", declaration, contract, tool_version=TOOL_VERSION,
+                       stop_after=level.value if level else None, now=now) as evidence:
+        run = evidence.run
+        source = evidence.source("candidate.py", code)
+        evidence.binding["source_hash"] = source["source_hash"]
+        inputs = contract.cases[0].materialize()
+        # ⚠️ 后端构造/解析**也会 print**（`[RemoteExecutor] SSH 连接成功: …`）。2026-10-18
+        # 第一次真机 L1 就撞上了：那行跑到 stdout，把整份 JSON 变成不可解析（真事）。
+        # 所以这里与 verify 同一条纪律：库的 stdout 一律收进日志，不进协议流。
+        (backend_obj, resolution), backend_log = _quiet(_make_backend,
+                                                        backend, host=host, port=port,
+                                                        user=user, key_path=key_path,
+                                                        work_dir=work_dir, timeout=timeout,
+                                                        persistent=persistent)
+        verifier = Verifier(backend_obj)
+        install_level_recorder(verifier, evidence.path)
+        results, verify_log = _quiet(verifier.verify, code, task, inputs, None,
+                                     float(target_gflops), None, level)
+        log = backend_log + verify_log
 
-    route = classify(results)
-    eligibility = _eligibility_of(results)
-    validity = _validity_of(results)
-    conflict = _conflict(route, eligibility, validity)
+        route = classify(results)
+        eligibility = _eligibility_of(results)
+        validity = _validity_of(results)
+        conflict = _conflict(route, eligibility, validity)
 
-    index = len(list(run.glob("verify-*.json"))) + 1
-    stamp = now if now is not None else time.time()
-    (run / f"verify-{index}.log").write_text(log, encoding="utf-8")
+        index = evidence.index
+        evidence.write_text("execution.log", log)
 
-    l3 = next((r for r in results if r.level is VerificationLevel.L3_PERFORMANCE), None)
-    artifact = KernelArtifact(
-        kernel_id=f"{run.name}-v{index}",
-        task_id=getattr(task, "task_id", ""),
-        code=code,
-        language="triton" if "import triton" in code else "python",
-        verification_results=list(results),
-        benchmark_data=dict(getattr(l3, "metrics", None) or {}) if l3 else {},
-        iteration_history=[{
+        l3 = next((r for r in results if r.level is VerificationLevel.L3_PERFORMANCE), None)
+        artifact = KernelArtifact(
+            kernel_id=f"{run.name}-v{index}",
+            task_id=getattr(task, "task_id", ""),
+            code=code,
+            language="triton" if "import triton" in code else "python",
+            verification_results=list(results),
+            benchmark_data=dict(getattr(l3, "metrics", None) or {}) if l3 else {},
+            iteration_history=[{
+                "round": index,
+                "action": "verify",
+                "candidate_origin": origin,
+                "levels_passed": {r.level.value: r.passed for r in results},
+                "speedup": (getattr(l3, "metrics", None) or {}).get("speedup_vs_baseline")
+                if l3 else None,
+                "gflops": (getattr(l3, "metrics", None) or {}).get("gflops") if l3 else None,
+                "stop_after": level.value if level else None,
+            }],
+        )
+        report_path = evidence.write_text("report.md", build_report(artifact=artifact, task=task))
+
+        payload = {
+            "ok": True,
+            "run_id": run.name,
             "round": index,
-            "action": "verify",
-            "levels_passed": {r.level.value: r.passed for r in results},
-            "speedup": (getattr(l3, "metrics", None) or {}).get("speedup_vs_baseline")
-            if l3 else None,
-            "gflops": (getattr(l3, "metrics", None) or {}).get("gflops") if l3 else None,
+            "contract_hash": contract.hash,
+            "backend": backend,
+            "backend_resolution": resolution,
             "stop_after": level.value if level else None,
-        }],
-    )
-    report_path = write_report(run, artifact=artifact, task=task)
+            "candidate_origin": origin,
+            "levels": {r.level.value: bool(r.passed) for r in results},
+            "passed": all(r.passed for r in results),
+            "verdicts": [{"level": r.level.value, "passed": bool(r.passed),
+                          "message": (r.message or "")[:600],
+                          "metrics": _selected_metrics(getattr(r, "metrics", None) or {})}
+                         for r in results],
+            "route": route.as_dict(),
+            "eligibility": eligibility,
+            "validity": validity,
+            "conflict": conflict,
+            "report": str(report_path),
+            "log": str(run / f"verify-{index}.log"),
+            "evidence": str(evidence.path / "result.json"),
+            **source,
+            "notes": _judgement_notes(contract, getattr(l3, "metrics", None) or {}) if l3 else [],
+        }
+        evidence.finish({**payload, "verdicts": verification_data(results)},
+                        legacy_payload=payload, legacy_log=log)
+        return payload
 
-    payload = {
-        "ok": True,
-        "run_id": run.name,
-        "round": index,
-        "contract_hash": contract.hash,
-        "backend": backend,
-        "backend_resolution": resolution,
-        "stop_after": level.value if level else None,
-        "levels": {r.level.value: bool(r.passed) for r in results},
-        "passed": all(r.passed for r in results),
-        "verdicts": [{"level": r.level.value, "passed": bool(r.passed),
-                      "message": (r.message or "")[:600],
-                      "metrics": _selected_metrics(getattr(r, "metrics", None) or {})}
-                     for r in results],
-        "route": route.as_dict(),
-        "eligibility": eligibility,
-        "validity": validity,
-        "conflict": conflict,
-        "report": str(report_path),
-        "log": str(run / f"verify-{index}.log"),
-        "notes": _judgement_notes(contract, getattr(l3, "metrics", None) or {}) if l3 else [],
-    }
-    _write_json(run / f"verify-{index}.json", {**payload, "created_at": stamp})
-    return payload
+
+# ── 动作 6: bench —— 探索级批量测量（**结构上不可裁决**）────────────────────
+#: 回包里的分级标记。`verify` 的读数不带这个键；带了就说明它不能当裁决依据。
+BENCH_GRADE = "exploration"
+#: 一批最多几个候选。不是性能上限，是**窗口长度**上限：一块卡上批次越长，邻居插队的
+#: 机会越多，而逐臂配对只能治「臂与臂之间」的漂移，治不了「整批一起漂」。
+BENCH_MAX_CANDIDATES = 16
+
+
+def _s5_development_only():
+    from .s5_verify_client import enabled
+    if enabled():
+        raise ToolError('s5_development_only',
+                        'This experiment permits prepare/verify only; revise source in the outer agent.')
+
+
+def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
+          target_gflops: float = 0.0,
+          host: Optional[str] = None, port: Optional[int] = None,
+          user: Optional[str] = None, key_path: Optional[str] = None,
+          work_dir: Optional[str] = None, timeout: int = 300,
+          persistent: bool = True,
+          max_candidates: int = BENCH_MAX_CANDIDATES,
+          deadline_s: float = 120.0,
+          now: Optional[float] = None) -> dict:
+    """对**多个**候选只跑 L3 的批量测量。读数**探索级**，不可裁决。
+
+    为什么需要它（`docs/design/hitl-bench-sweep.md` §0）：唯一能出数的 `verify` 是裁决级
+    重调用 —— deploy + 环境自检 + 重测基线 + 15 条 L2 case，一次 40~60 s，还要求一个回合
+    一个新 run_dir。而调优要几十到几百次测量，于是测量被迫搬到宿主 shell 里手搓
+    （实测：79 次调用里插件只占 5 次，45 次是手搓的 ssh 扫描）。
+
+    三条不变量，与 `verify` 共享、不许放宽：
+
+    1. **契约不许漂**：`contract.json` 的 hash 必须等于按当前声明重算的 hash，否则本批
+       拒绝（与 `verify` 同一条纪律：判据在回合之间被改过 ⇒ 不可比）。
+    2. **每臂各自与基线同窗配对**：逐臂走 `Verifier.verify_l3_only`，它内部是
+       `_bench_pair_interleaved` 的**一次窗口一条臂**。所以每臂都带自己的
+       `validity`/`validity_reasons`，而不是「一批共用一个窗」—— 后者会把整批的漂移
+       平摊到每臂身上，且看不出来源。
+    3. **回包没有 levels / route / eligibility / passed**：这不是省略，是设计。
+       资格位是「这个数能不能当依据」的闸门；一旦 `bench` 能出，调用方就会拿它替代
+       `verify` —— 那正是本函数存在的动机，也正好是它必须挡住的那条路。
+
+    `persistent=True` 默认：一次部署、一个常驻会话，逐臂之间只付测量本身。
+    """
+    _s5_development_only()
+    run = Path(run_dir)
+    decl_path = run / "declaration.json"
+    if not decl_path.is_file():
+        raise ToolError("run_not_prepared", f"{decl_path} 不存在；先 prepare")
+
+    if not isinstance(candidates, list) or not candidates:
+        raise ToolError("candidates_required", "bench 需要至少一个候选")
+    cap = max(1, int(max_candidates))
+    if len(candidates) > cap:
+        raise ToolError(
+            "too_many_candidates",
+            f"一批最多 {cap} 个候选（收到 {len(candidates)}）—— 批次越长，"
+            f"同一块卡上的测量窗口越长，邻居插队的机会越多；先粗筛，再对 survivors 细测")
+
+    normalized = []
+    for index, item in enumerate(candidates):
+        if not isinstance(item, dict):
+            raise ToolError("bad_candidate", f"第 {index} 个候选不是对象")
+        code, code_file = item.get("code"), item.get("code_file")
+        if bool(code) == bool(code_file):
+            raise ToolError("code_source_ambiguous",
+                            f"第 {index} 个候选必须给且只给 code / code_file 中的一个")
+        if code_file:
+            code = Path(code_file).read_bytes().decode("utf-8")
+        if not isinstance(code, str) or not code.strip():
+            raise ToolError("code_required", f"第 {index} 个候选源码为空")
+        normalized.append({"name": str(item.get("name") or f"arm{index + 1}"), "code": code})
+
+    declaration = json.loads(decl_path.read_text(encoding="utf-8"))
+    recorded = json.loads((run / "contract.json").read_text(encoding="utf-8"))["hash"]
+    task = build_task(declaration)
+    try:
+        contract = freeze_from_task(task)
+    except ValueError as exc:
+        raise ToolError("contract_refused", str(exc)) from exc
+    if contract.hash != recorded:
+        return {
+            "ok": False, "error": "contract_drift",
+            "detail": "run 目录里的契约与当前声明重新冻结出来的哈希不同 —— 判据在回合之间被改过",
+            "recorded_hash": recorded, "current_hash": contract.hash,
+        }
+
+    with RoundEvidence(run, "bench", declaration, contract,
+                       tool_version=TOOL_VERSION, now=now) as evidence:
+        run = evidence.run
+        sources = [dict(name=item["name"], **evidence.source(f"candidates/{i+1}.py", item["code"]))
+                   for i, item in enumerate(normalized)]
+        evidence.binding["candidate_hashes"] = [source["source_hash"] for source in sources]
+        inputs = contract.cases[0].materialize()
+        (backend_obj, resolution), backend_log = _quiet(
+            _make_backend, backend, host=host, port=port, user=user,
+            key_path=key_path, work_dir=work_dir, timeout=timeout, persistent=persistent)
+        verifier = Verifier(backend_obj)
+        install_level_recorder(verifier, evidence.path)
+
+        deadline = time.monotonic() + float(deadline_s)
+        arms, logs, partial = [], [backend_log], False
+        arm_evidence = []
+        for candidate_index, item in enumerate(normalized):
+            if time.monotonic() > deadline:
+                # 截断的批次**不许**当完整结果：`measured < requested` 本身就是回包的一部分。
+                partial = True
+                break
+            results = []
+            try:
+                results, arm_log = _quiet(verifier.verify_l3_only,
+                                          item["code"], inputs, float(target_gflops), task,
+                                          None, None, False, None, None)
+                metrics = dict(getattr(results[0], "metrics", None) or {}) if results else {}
+                arm_error = None
+            except Exception as exc:
+                # 一个臂炸了**不许毁掉整批**：候选在运行时抛异常（NameError、CUDA OOM、
+                # 编译期崩溃）是扫描里的常态，它们该变成「这个臂没有数」，而不是让
+                # 已经测完的那几个臂白测。异常原文留在臂上，别猜。
+                metrics, arm_error = {}, f"{type(exc).__name__}: {exc}"
+                arm_log = arm_error
+            logs.append(f"### arm {item['name']}\n{arm_log}")
+            arm_evidence.append({"name": item["name"], **sources[candidate_index],
+                                 "verdicts": verification_data(results), "error": arm_error})
+            arms.append({
+                "name": item["name"],
+                "error": arm_error,
+                "median_ms": metrics.get("median_time_ms"),
+                "baseline_ms": metrics.get("baseline_time_ms"),
+                "baseline_type": metrics.get("baseline_type"),
+                "speedup": metrics.get("speedup_vs_baseline"),
+                "gflops": metrics.get("gflops"),
+                # 有效性是**测量**的性质，不是裁决：不给它，调用方就分不清「慢」和「没测准」。
+                # 所以这两格必须在，而 `passed` 一定不在。
+                "validity": metrics.get("measurement_validity"),
+                "validity_reasons": list(metrics.get("measurement_validity_reasons") or []),
+            })
+
+        if not arms:
+            raise ToolError("bench_produced_nothing",
+                            "一个候选都没测到（deadline 太短或后端不可用）")
+
+        usable = [a for a in arms if a["validity"] == "valid" and a["speedup"] is not None]
+        best = max(usable, key=lambda a: a["speedup"])["name"] if usable else None
+
+        index = evidence.index
+        log = "\n".join(logs)
+        evidence.write_text("execution.log", log)
+        payload = {
+            "ok": True,
+            "run_id": run.name,
+            "batch": index,
+            "contract_hash": contract.hash,
+            "backend": backend,
+            "backend_resolution": resolution,
+            # ↓ 分级标记：有它 = 探索级
+            "grade": BENCH_GRADE,
+            "evidence": str(evidence.path / "result.json"),
+            "arms": arms,
+            "best": best,
+            "requested": len(normalized),
+            "measured": len(arms),
+            "partial": partial,
+            "note": ("探索级读数：不可裁决、不入库、不晋级。要交付结论，"
+                     "请对 survivors 调 operator_verify"),
+        }
+        evidence.finish({**payload, "candidate_sources": sources, "arm_evidence": arm_evidence},
+                        legacy_payload=payload, legacy_log=log)
+        return payload
 
 
 # ── 动作 0（只读）: capabilities ─────────────────────────────────────────
@@ -583,17 +823,43 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
            host: Optional[str] = None, port: Optional[int] = None,
            user: Optional[str] = None, key_path: Optional[str] = None,
            work_dir: Optional[str] = None, timeout: int = 300,
-           persistent: bool = False, target_gflops: float = 0.0) -> dict:
+           persistent: bool = False, target_gflops: float = 0.0,
+           candidate_origin: Optional[str] = None, wall_clock_s: float = 1800.0,
+           max_llm_calls: int = 24, oracle_total: int = 20) -> dict:
     """「判 → 读处方 → 调 Fixer → 再判」最多 N 轮。**判据全在既有模块里**。
 
     与 `verify` 的分工：`verify` 只判一次；这里会把处方喂给内层模型去改。
     与 `operator_run` 的分工：那条路是**从零生成**；这里是**从一份给定的核开始**。
+
+    `candidate_origin` 描述**传进来的那份**源码。回包另有 `final_candidate_origin`：
+    只要有哪一轮真的改了源码（`action="fixed"`），最终那份就是内层 Fixer 写的 ——
+    这一格是**派生的**，不由调用方声明。
     """
+    _s5_development_only()
+    from .task_budget import TaskBudgetConfig, snapshot, stopped_reason
+    from .task_clock import monotonic
+    from .tool_calls import repair_context
+    from .budget import BudgetLedger, BudgetPlan
+    from .s5_inner_budget import production_budget
+    from .task_cancellation import partial_artifacts, publish_json
+    try:
+        policy = TaskBudgetConfig(wall_clock_s=wall_clock_s,
+            max_llm_calls=max_llm_calls, oracle_total=oracle_total)
+    except (TypeError, ValueError) as exc:
+        raise ToolError('invalid_task_budget', str(exc)) from exc
+    if type(max_rounds) is not int or max_rounds < 1:
+        raise ToolError('invalid_task_budget', 'max_rounds must be a positive integer')
+    context = repair_context(run_dir)
+    if context and context['task_budget'] != policy.as_dict():
+        raise ToolError('invalid_task_budget', 'Repair worker budget differs from its supervisor.')
+    started_monotonic = context['started_monotonic'] if context else monotonic()
+    deadline = context['deadline'] if context else started_monotonic + policy.wall_clock_s
     problem = _llm_problem()
     if problem:
         raise ToolError("llm_not_configured", problem)
     if not isinstance(code, str) or not code.strip():
         raise ToolError("code_required", "repair 需要候选源码文本")
+    origin = _origin_of(candidate_origin)
     run = Path(run_dir)
     decl_path = run / "declaration.json"
     if not decl_path.is_file():
@@ -610,43 +876,198 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
                 "detail": "判据在回合之间被改过 —— 拒绝在旧回合上继续",
                 "recorded_hash": recorded, "current_hash": contract.hash}
 
-    inputs = contract.cases[0].materialize()
-    backend_obj, resolution = _quiet(_make_backend, backend, host=host, port=port,
-                                     user=user, key_path=key_path, work_dir=work_dir,
-                                     timeout=timeout, persistent=persistent)[0]
-    verifier = Verifier(backend_obj)
-    from .fixer import FixerAgent
-    from .llm_client import LLMClient
-    from .repair_loop import repair as run_repair
+    level = _level_of(stop_after)
+    with RoundEvidence(run, "repair", declaration, contract, tool_version=TOOL_VERSION,
+                       stop_after=level.value if level else None) as evidence:
+        run = evidence.run
+        source = evidence.source("candidate.py", code)
+        evidence.binding["source_hash"] = source["source_hash"]
+        evidence.write_json('task-budget.json', dict(task_budget=policy.as_dict(),
+            started_monotonic=started_monotonic, deadline=deadline,
+            enforcement=('supervised_local_worker' if context else 'cooperative_library_deadline')))
+        if context:
+            publish_json(Path(context['directory'])/'repair-evidence.json', dict(
+                invocation_id=context['invocation_id'], evidence=str(evidence.path)))
+        validation_budget = BudgetLedger(BudgetPlan(oracle_total=policy.oracle_total,
+                                                    wall_clock_s=policy.wall_clock_s))
+        budget_stop = None
 
-    index = len(list(run.glob("repair-*.json"))) + 1
-    llm = LLMClient(max_tokens=4096, timeout=120)
-    result = run_repair(code, task, inputs, verifier, FixerAgent(llm=llm),
-                        max_rounds=int(max_rounds),
-                        target_gflops=float(target_gflops),
-                        stop_after=_level_of(stop_after))
+        def persist_validation_budget():
+            value = validation_budget.as_dict()
+            caps = validation_budget.caps
+            value.update(unit='candidate_verification_dispatch_per_input_group',
+                reservation_policy='pre_dispatch_non_refundable',
+                raw_gpu_launch_cap=False, gpu_seconds_cap=False,
+                remaining=dict(non_confirm=max(0, policy.oracle_total-caps['confirm']
+                                                -validation_budget.spent_all),
+                               confirm=max(0, caps['confirm']-validation_budget.spent['confirm'])))
+            _write_json(evidence.path/'verification-budget.json', value)
 
-    (run / f"repair-{index}.log").write_text(result.pop("log") or "", encoding="utf-8")
-    final_code = result["code"]
-    (run / f"repair-{index}.py").write_text(final_code, encoding="utf-8")
+        def budget_audit():
+            value = snapshot(evidence.path, policy, started_monotonic)
+            value['wall_clock']['scope'] = ('supervised_local_worker_lifetime' if context
+                                            else 'repair_library_cooperative_deadline')
+            return value
 
-    for entry in result["rounds"]:
-        entry["prescription"] = str(entry.get("prescription") or "")[:240]
-        entry["fix_summary"] = str(entry.get("fix_summary") or "")[:160] or None
-    payload = {
-        "ok": True,
-        "run_id": run.name,
-        "attempt": index,
-        "passed": result["passed"],
-        "rounds": result["rounds"],
-        "final_code": str(run / f"repair-{index}.py"),
-        "log": str(run / f"repair-{index}.log"),
-        "backend": backend,
-        "backend_resolution": resolution,
-        "contract_hash": contract.hash,
-    }
-    _write_json(run / f"repair-{index}.json", payload)
-    return payload
+        def reserve_verification(index, current):
+            nonlocal budget_stop
+            phase = 'explore' if index == 1 else 'refine'
+            if monotonic() >= deadline:
+                budget_stop = 'budget_wall_clock'
+                validation_budget.oracle_refuse(phase)
+                persist_validation_budget()
+                return False
+            if index == 1 and pre_reserved:
+                pre_reserved.clear()
+                return True
+            n = len(inputs) if isinstance(inputs, list) else 1
+            if not validation_budget.oracle_may(phase, n):
+                budget_stop = 'verification_budget_exhausted'
+                validation_budget.oracle_refuse(phase)
+                persist_validation_budget()
+                return False
+            validation_budget.oracle_spend(phase, n)
+            persist_validation_budget()
+            return True
+
+        persist_validation_budget()
+
+        def retain_verification(index, current, results, log):
+            with RoundEvidence(evidence.path, "step", declaration, contract,
+                               tool_version=TOOL_VERSION,
+                               stop_after=level.value if level else None) as step:
+                retained = step.source("candidate.py", current)
+                step.binding["source_hash"] = retained["source_hash"]
+                step.write_text("execution.log", log)
+                l3 = next((r for r in results if r.level is VerificationLevel.L3_PERFORMANCE), None)
+                report = step.write_text("report.md", build_report(artifact=KernelArtifact(
+                    code=current, verification_results=results,
+                    benchmark_data=dict(l3.metrics or {}) if l3 else {}), task=task))
+                payload = dict(round=index, **retained,
+                    levels={r.level.value: r.passed for r in results},
+                    evidence=str(step.path / "result.json"), report=report,
+                    log=str(step.path / "execution.log"))
+                step.finish({**payload, "verdicts": verification_data(results)})
+                return payload
+
+        inputs = contract.cases[0].materialize()
+        pre_reserved = set()
+        backend_log, resolution, llm, runtime_error = '', None, None, None
+
+        def stopped_result(reason):
+            refusal = VerificationResult(level=VerificationLevel.L1_COMPILE, passed=False,
+                message='修复验证未派发：' + reason,
+                metrics=dict(budget_dispatch=False, budget_reason=reason))
+            return dict(code=code, passed=False, rounds=[], results=[refusal], log='',
+                        initial_full_l2_passed=None, final_full_l2_passed=None,
+                        candidate_records=[], selected_source_hash=code_hash(code),
+                        stopped_reason=reason)
+
+        index = evidence.index
+        if not reserve_verification(1, code):
+            result = stopped_result(budget_stop)
+        else:
+            # Reserve before backend construction: resolving SSH is already an
+            # external action, not a free step preceding the verification gate.
+            pre_reserved.add(1)
+            try:
+                from .fixer import FixerAgent
+                from .llm_client import LLMClient
+                from .repair_loop import repair as run_repair
+                ledger = production_budget(policy.llm_limits(min(120., policy.wall_clock_s)),
+                                           evidence.path/'model-journal', deadline=deadline)
+                llm = LLMClient(max_tokens=4096, timeout=min(120., policy.wall_clock_s),
+                                call_budget=ledger)
+                if monotonic() >= deadline:
+                    budget_stop = 'budget_wall_clock'
+                    result = stopped_result(budget_stop)
+                else:
+                    (backend_obj, resolution), backend_log = _quiet(_make_backend, backend,
+                        host=host, port=port, user=user, key_path=key_path, work_dir=work_dir,
+                        timeout=timeout, persistent=persistent)
+                    verifier = Verifier(backend_obj)
+                    install_level_recorder(verifier, evidence.path)
+                    result = run_repair(code, task, inputs, verifier, FixerAgent(llm=llm),
+                        max_rounds=max_rounds, target_gflops=float(target_gflops),
+                        stop_after=level, on_verification=retain_verification,
+                        before_verification=reserve_verification)
+            except Exception as exc:
+                from .measurement import safe_error_text
+                runtime_error = dict(error=type(exc).__name__, detail=safe_error_text(exc))
+                result = stopped_result('repair_failed')
+        audit = budget_audit()
+        budget_stop = (stopped_reason(audit) or budget_stop or result.get('stopped_reason'))
+        if budget_stop:
+            result['passed'] = False
+
+        log = backend_log + (result.get("log") or "")
+        final_code = result["code"]
+        evidence.source("final.py", final_code)
+        evidence.binding["final_source_hash"] = code_hash(final_code)
+        evidence.write_text("execution.log", log)
+        final_results = result.get("results", [])
+        l3 = next((r for r in final_results if r.level is VerificationLevel.L3_PERFORMANCE), None)
+        report_path = evidence.write_text("report.md", build_report(artifact=KernelArtifact(
+            code=final_code, verification_results=final_results,
+            benchmark_data=dict(l3.metrics or {}) if l3 else {}), task=task))
+        # 派生而非声明：`action="fixed"` 的那一轮把 `current` 换成了 Fixer 的产出
+        # （`repair_loop.repair` 的 anti-fake-fix 已经挡掉「原样返回/只改注释」）。
+        final_origin = ("inner_fixer"
+                        if any(e.get("action") == "fixed" for e in result["rounds"])
+                        else origin)
+        payload = {
+            "ok": runtime_error is None,
+            "run_id": run.name,
+            "attempt": index,
+            "passed": result["passed"],
+            "candidate_origin": origin,
+            "final_candidate_origin": final_origin,
+            "initial_full_l2_passed": result.get("initial_full_l2_passed"),
+            "full_l2_passed": result.get("final_full_l2_passed"),
+            "generation_spec": generation_spec_identity(),
+            "rounds": result["rounds"],
+            "candidate_records": result.get("candidate_records", []),
+            "selected_source_hash": result.get("selected_source_hash"),
+            "final_code": str(run / f"repair-{index}.py"),
+            "log": str(run / f"repair-{index}.log"),
+            "backend": backend,
+            "backend_resolution": resolution,
+            "contract_hash": contract.hash,
+            "evidence": str(evidence.path / "result.json"),
+            "report": report_path,
+            "task_budget": policy.as_dict(),
+            "budget": audit,
+            "stopped_reason": budget_stop,
+            "partial_artifacts": dict(partial_artifacts(run), repair_evidence=str(evidence.path)),
+            "budget_enforcement": ('supervised_local_worker' if context
+                                   else 'cooperative_library_deadline'),
+            **source,
+        }
+        if runtime_error:
+            payload.update(runtime_error)
+        tracker = getattr(llm, 'cost_tracker', None)
+        if tracker is not None and hasattr(tracker, 'summary'):
+            payload['llm_cost'] = tracker.summary()
+        evidence.finish({**payload, "verdicts": verification_data(final_results)},
+                        legacy_payload=payload, legacy_log=log, legacy_source=final_code)
+        # Preserve complete source sites and algebra witnesses on disk, while the
+        # MCP response carries compact bindings and actionable repair obligations.
+        compact = json.loads(json.dumps(payload, ensure_ascii=False))
+        compact['candidate_records'] = [candidate_summary(r) for r in compact['candidate_records']]
+        for row in compact["rounds"]:
+            row["prescription"] = str(row.get("prescription") or "")[:240]
+            row["fix_summary"] = str(row.get("fix_summary") or "")[:160] or None
+            if 'candidate_records' in row:
+                row['candidate_record_hashes'] = [r['record_hash'] for r in row.pop('candidate_records')]
+            diagnosis = row.get("diagnosis")
+            if isinstance(diagnosis, dict):
+                row["diagnosis"] = {
+                    key: diagnosis[key] for key in ("schema", "state", "reason", "hash", "bindings")
+                    if key in diagnosis}
+                row["diagnosis"]["findings"] = [
+                    {key: finding[key] for key in ("kind", "repair_obligations") if key in finding}
+                    for finding in diagnosis.get("findings", [])]
+        return compact
 
 
 # ── 动作 3: 整段自动化（Phase 3）───────────────────────────────────────────
@@ -686,52 +1107,109 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
                    port: Optional[int] = None, user: Optional[str] = None,
                    key_path: Optional[str] = None, work_dir: Optional[str] = None,
                    timeout: int = 300, persistent: bool = False,
-                   target_gflops: float = 0.0) -> dict:
+                   target_gflops: float = 0.0, wall_clock_s: float = 1800.0,
+                   max_llm_calls: int = 24, oracle_total: int = 20) -> dict:
     """起一次**无人值守**的整段运行（`Conductor` 自己设计/写核/修/搜索）。
 
     与 `verify` 的分工：`verify` 判**外层给的**候选；这里把整条循环交回本仓。
     进程分离（`start_new_session`）的理由见 `operator_agent/autonomous.py` 的 docstring。
     """
+    _s5_development_only()
+    from .task_budget import TaskBudgetConfig
+    try:
+        task_budget = TaskBudgetConfig(wall_clock_s=wall_clock_s,
+            max_llm_calls=max_llm_calls, oracle_total=oracle_total).as_dict()
+    except (TypeError, ValueError) as exc:
+        raise ToolError('invalid_task_budget', str(exc)) from exc
     problem = _llm_problem()
     if problem:
         raise ToolError("llm_not_configured", problem)
-    prepared = prepare(declaration, run_dir)
-    run = Path(run_dir)
+    from .task_cancellation import launch_identity
+    run = Path(run_dir).resolve()
+    if any((run/name).exists() for name in (CONFIG_FILE, STATUS_FILE, SUMMARY_FILE,
+                                           'worker-result.json', 'launch.json')):
+        raise ToolError('run_already_started', 'Use a fresh run directory; existing runs are preserved.')
+    run.mkdir(parents=True, exist_ok=True)
+    invocation_id = uuid.uuid4().hex
+    try:
+        launch_identity(run, invocation_id, kind='autonomous', backend=backend,
+                        task_budget=task_budget)
+    except FileExistsError as exc:
+        raise ToolError('run_already_started', 'This run directory already has a launch identity.') from exc
+    try:
+        prepared = prepare(declaration, run)
+    except Exception:
+        _write_json(run / STATUS_FILE, dict(phase='failed', invocation_id=invocation_id,
+            stopped_reason='prepare_failed', pid=None, finished_at=time.time()))
+        raise
     config = {
         "backend": backend, "max_rounds": int(max_rounds),
         "host": host, "port": port, "user": user, "key_path": key_path,
         "work_dir": work_dir, "timeout": int(timeout),
         "persistent": bool(persistent), "target_gflops": float(target_gflops),
+        "task_budget": task_budget,
+        "invocation_id": invocation_id,
         "started_at": time.time(),
     }
     _write_json(run / CONFIG_FILE, config)
     log_path = run / "autonomous.log"
-    with open(log_path, "ab") as log:
-        proc = subprocess.Popen(
+    from .exec_guard import start_background_worker
+    _write_json(run / STATUS_FILE, dict(phase='running', stage='starting', pid=None,
+        invocation_id=invocation_id, started_at=config['started_at'], task_budget=task_budget))
+    try:
+        proc = start_background_worker(
             [sys.executable, "-m", "operator_agent.autonomous", str(run)],
-            cwd=str(Path(__file__).resolve().parents[1]),
-            stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-            start_new_session=True, close_fds=True,
+            cwd=str(Path(__file__).resolve().parents[1]), log_path=log_path,
         )
+    except OSError:
+        _write_json(run / STATUS_FILE, dict(phase='failed', invocation_id=invocation_id,
+            stopped_reason='supervisor_start_failed', pid=None, finished_at=time.time()))
+        raise
+    from .task_cancellation import publish_json
+    from .exec_guard import process_identity
+    publish_json(run/'supervisor.json', dict(invocation_id=invocation_id, pid=proc.pid,
+                                           pid_identity=process_identity(proc.pid)))
     return {
         "ok": True, "phase": "running", "pid": proc.pid, "run_id": run.name,
         "run_dir": str(run), "contract_hash": prepared["contract_hash"],
         "backend": backend, "max_rounds": int(max_rounds),
+        "task_budget": task_budget,
+        "invocation_id": invocation_id,
         "status": str(run / STATUS_FILE), "log": str(log_path),
         "hint": "用 operator_status 轮询；不要用 verify 的 run_dir 混用",
     }
 
 
-def autonomous_status(run_dir: str | Path) -> dict:
-    """查一次无人值守运行的相位。**三态**：running / done / failed / lost。"""
+def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) -> dict:
+    """Query autonomous/foreground invocation; missing owners are explicitly lost."""
     run = Path(run_dir)
+    from .task_cancellation import read_json, cancellation, partial_artifacts, valid_invocation
+    if invocation_id is not None:
+        if not valid_invocation(invocation_id):
+            return dict(ok=False, error='invocation_mismatch', detail='Invalid invocation identity.')
+        if (read_json(run/'launch.json') or {}).get('invocation_id') != invocation_id:
+            run = run/'tool-calls'/str(invocation_id)
+            if (read_json(run/'launch.json') or {}).get('invocation_id') != invocation_id:
+                return dict(ok=False, error='invocation_mismatch', detail='No matching invocation.')
     status_path = run / STATUS_FILE
     if not status_path.is_file():
+        calls = sorted((run/'tool-calls').glob('*/run-status.json'))
+        if calls and invocation_id is None:
+            return dict(ok=True, phase='tool_calls', calls=[autonomous_status(p.parent) for p in calls])
         return {"ok": False, "error": "run_not_started",
                 "detail": f"{status_path} 不存在（还没调用 operator_run）"}
     status = json.loads(status_path.read_text(encoding="utf-8"))
+    if not status.get('pid'):
+        owner = read_json(run/'supervisor.json') or {}
+        if owner.get('invocation_id') == status.get('invocation_id'):
+            status.update(pid=owner.get('pid'), pid_identity=owner.get('pid_identity'))
     phase = str(status.get("phase") or "unknown")
-    alive = _pid_alive(status.get("pid")) if phase == "running" else None
+    alive = (_pid_alive(status.get("pid")) if phase == "running" and status.get('pid') else None)
+    if alive and status.get('pid_identity'):
+        from .exec_guard import process_identity
+        actual = process_identity(status['pid'])
+        if actual and actual != status['pid_identity']:
+            alive = False  # reused PID is not this task's owner
     if phase == "running" and alive is False:
         # 进程没了但没写终态：**不许读成"还在跑"**，也不许猜成"失败" —— 单独一档。
         phase = "lost"
@@ -739,7 +1217,7 @@ def autonomous_status(run_dir: str | Path) -> dict:
     if (run / SUMMARY_FILE).is_file():
         summary = json.loads((run / SUMMARY_FILE).read_text(encoding="utf-8"))
     tail = []
-    log_path = run / "autonomous.log"
+    log_path = run / ("execution.log" if status.get('kind') == 'tool_call' else "autonomous.log")
     if log_path.is_file():
         try:
             tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
@@ -747,10 +1225,28 @@ def autonomous_status(run_dir: str | Path) -> dict:
             tail = []
     return {
         "ok": True, "phase": phase, "process_alive": alive,
+        "invocation_id": status.get('invocation_id'), "stage": status.get('stage'),
         "pid": status.get("pid"), "started_at": status.get("started_at"),
         "finished_at": status.get("finished_at"),
         "duration_s": status.get("duration_s"),
         "backend": status.get("backend"), "max_rounds": status.get("max_rounds"),
         "error": status.get("error"), "detail": status.get("detail"),
+        "generation_evidence": (status.get('generation_evidence')
+                                or (summary or {}).get('generation_evidence')),
+        "task_budget": status.get('task_budget') or (summary or {}).get('task_budget'),
+        "budget": status.get('budget') or (summary or {}).get('budget'),
+        "stopped_reason": status.get('stopped_reason') or (summary or {}).get('stopped_reason'),
+        "cleanup": status.get('cleanup') or (dict(status='cleanup_unknown',
+            remote_execution='unknown', provider_call='unknown') if phase == 'lost' else None),
+        "partial_artifacts": status.get('partial_artifacts') or partial_artifacts(run),
+        "cancellation": status.get('cancellation') or cancellation(run, status.get('invocation_id')),
         "summary": summary, "log_tail": tail,
     }
+
+
+def cancel_task(run_dir: str | Path, invocation_id: str) -> dict:
+    from .task_cancellation import request_cancel
+    try:
+        return request_cancel(run_dir, invocation_id)
+    except ValueError as exc:
+        raise ToolError('cancellation_refused', str(exc)) from exc
