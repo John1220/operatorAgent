@@ -156,6 +156,10 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
 若要 `valid`，需要放开 seed 路径的单 tensor 上限（例如允许 512 MiB），或换一个
 天然更慢/更大的 memory-bound 形状。
 
+补充：seed 修好后也重试了 16384×6144（402 MB），L2 仍在传输前被 256 MiB/tensor
+上限拒绝（`logical tensor 超过输入字节上限`）。所以这个上限不是 JSON-only 的，
+16384×3800 是当前 cap 内能跑的最大档；要 `valid` 必须改 cap，而不是再调 seed。
+
 ## 3. 未执行与永久边界
 
 - **S5 正式 24 格（P3）未启动**。P2 仍未证明模型网络唯一出口与远端候选执行隔离；
@@ -167,8 +171,9 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
   对小于 1 ms 的核偏紧，但它只作诊断，不影响 validity —— 记为后续调整项。
 - **v2 LayerNorm 参考未跑**：环境 torch 2.14/driver 580 与 `PINNED_RUNTIME` 表面一致，
   但没有执行 attestation；不能声称 v2 可用。
-- **Memory-bound valid L3 未取得**：seed 修复后重跑能完成（§2.7），但 launch 11.2%
-  → `degraded`；256 MiB/tensor 上限阻止更大 shape，没有靠放慢核去凑 `valid`。
+- **Memory-bound valid L3 未取得**：seed 修复后 16384×3800 能完成（§2.7），但 launch
+  11.2% → `degraded`；16384×6144 被 256 MiB/tensor 上限在传输前拒绝。没有靠放慢核
+  去凑 `valid`。
 - **多卡/并发/UI**：未做。
 
 H20 释放后**永久不可做**：新增真机证据、memory-bound 算子的 valid L3、常量再标定、
@@ -202,13 +207,14 @@ S5 正式批次、跨卡对照。
 | `layernorm16384x3800-v2/verify-1/result.json` | `cb559dbdb828b3a021f6738ebaca9ae813f74d216c9709095a47e5ccd24e1300` |
 | `layernorm16384x3800-v2/verify-1/report.md` | `0c0e0f052503204ef40d4a8cd131c74249792b40684047acd3e3a5004864ca9b` |
 | `layernorm16384x3800-v2/summary.json` | `73df202ac7786c9f7adf3a309de4f3c81f2f22301d66353f0aaf1045b5088a62` |
-| `summary.json` | `2d72a8c297a00e3b5d1f53f378fada107b89ef8aa10c13a72f65ffd1cef01ab1` |
+| `layernorm16384x6144-v2/verify-1/result.json` | `ce579f30ab6adf57303b68d44160c7c2b2f960c1cb5704008ab26e2c8a481752` |
+| `summary.json` | `60c09b6e2c826e5841b2f959064ad1b02ee0e094252598b5d7134d8c81ded098` |
 | `cancellation/cancel.json` | `8bb39852d9791bfd6176e1724ba7a79b95e9bf43dca738fa66f1f7e82eab7396` |
 | `cancellation/status.json` | `9c5471ceb2130bd97cc764a6b3ba13354be64b68c6d908437783c2854b44f70c` |
 | `environment.txt` | `5a37dfb43fbb80aef62cb162d0300b6a787dfe0768240cae3056a564fbefd4ce` |
 
 打包：`output/plugin_completion/20261030-gpu-freeze-evidence.tar.gz`
-（SHA256 `e6df9ca83e759411966f42cd1d51017b4de267a0548bad199eb3cf16ab32d788`）。
+（SHA256 `c0745d0b6e7e7434e6c960f682e2d76831bf8c2e85cf4ccfa6ccd598a01f98cd`）。
 
 完整清单：`output/plugin_completion/20261030-gpu-freeze/SHA256SUMS`。复核：
 
