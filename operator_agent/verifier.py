@@ -25,7 +25,8 @@ from .correctness_boundaries import has_boundary_policy, lint_coverage
 from .correctness_profiles import profile_check
 from .reference_contract import as_reference, validate_receipt
 from .bench_cases import BenchCaseError
-from .input_fidelity import InputFidelityError, describe_inputs, check_readback
+from .input_fidelity import (InputFidelityError, MAX_SEED_STORAGE_BYTES,
+                             describe_inputs, check_readback)
 from .source_lang import classify
 from .compile_evidence import validate_compile_failure
 
@@ -1038,9 +1039,14 @@ class Verifier:
                 return preflight
         expected_inputs = None
         fidelity_metrics = {}
+        # Seed spec 要在 describe 之前算：能走 seed 的输入不再整份过 JSON/字节，
+        # 因此可放宽单 tensor 上限（JSON 路径仍是 MAX_STORAGE_BYTES）。
+        seed_spec = (self._seed_spec_for(task, inputs)
+                     if Cap.REMOTE_VERIFY in self._caps else None)
         if task.constraints.correctness_suite is not None:
             try:
-                expected_inputs = describe_inputs(inputs)
+                expected_inputs = describe_inputs(
+                    inputs, limit=(MAX_SEED_STORAGE_BYTES if seed_spec is not None else None))
             except InputFidelityError as exc:
                 return VerificationResult(
                     VerificationLevel.L2_FUNCTION, False,
@@ -1051,7 +1057,6 @@ class Verifier:
         if Cap.REMOTE_VERIFY in self._caps:
             # 候选与 reference 均在远端执行设备上比较，仅返回摘要，
             # 避免把完整张量通过 SSH 回传到控制端。
-            seed_spec = self._seed_spec_for(task, inputs)
             remote_verify = self.backend.verify_function(
                 kernel_code, inputs, task.source.kernel_type, max_allowed,
                 precision=task.constraints.precision.value,

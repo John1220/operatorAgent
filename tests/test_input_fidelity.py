@@ -78,6 +78,17 @@ def test_storage_and_logical_size_caps_are_checked(monkeypatch):
         decode_inputs(packet)
 
 
+def test_seed_path_can_opt_into_a_larger_explicit_limit(monkeypatch):
+    import operator_agent.input_fidelity as fidelity
+    monkeypatch.setattr(fidelity, "MAX_STORAGE_BYTES", 32)
+    monkeypatch.setattr(fidelity, "MAX_SEED_STORAGE_BYTES", 128)
+    inputs = {"X": np.ones(20, dtype=np.float32)}      # 80 B: 过 seed 上限, 不过 JSON 上限
+    with pytest.raises(InputFidelityError, match="上限"):
+        describe_inputs(inputs)
+    observed = describe_inputs(inputs, limit=fidelity.MAX_SEED_STORAGE_BYTES)
+    assert observed["X"]["storage_bytes"] == 80
+
+
 @pytest.mark.parametrize("executor", ["fork", "subprocess"])
 @pytest.mark.parametrize("layout", ["strided", "broadcast"])
 def test_guard_child_receipt_describes_actual_inputs_in_both_executors(executor, layout):

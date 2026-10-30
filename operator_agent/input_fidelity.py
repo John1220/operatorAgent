@@ -15,13 +15,17 @@ import numpy as np
 
 PROTOCOL = "numpy-storage-v1"
 MAX_STORAGE_BYTES = 256 * 1024 * 1024
+# 仅 seed 传输路径用：值已经在控制端/远端各物化一次，不再走 JSON 字节，
+# 所以可以放宽到 512 MiB；JSON 编码/解码仍受 MAX_STORAGE_BYTES 约束。
+MAX_SEED_STORAGE_BYTES = 512 * 1024 * 1024
 
 
 class InputFidelityError(ValueError):
     """Cannot preserve these inputs; do not silently make contiguous copies."""
 
 
-def _storage(array):
+def _storage(array, limit=None):
+    limit = MAX_STORAGE_BYTES if limit is None else limit
     if type(array) is not np.ndarray or array.dtype.kind not in "biufc":
         raise InputFidelityError("只支持无对象的数值 ndarray（不降级 subclass/object dtype）")
     root = array
@@ -34,11 +38,12 @@ def _storage(array):
         raise InputFidelityError("无法定位 contiguous backing storage，不猜 offset")
     start = int(root.__array_interface__["data"][0])
     offset = int(array.__array_interface__["data"][0]) - start
-    _validate_view(array.shape, array.strides, offset, array.dtype, root.nbytes)
+    _validate_view(array.shape, array.strides, offset, array.dtype, root.nbytes, limit=limit)
     return root, offset, (start, int(root.nbytes))
 
 
-def _validate_view(shape, strides, offset, dtype, storage_bytes):
+def _validate_view(shape, strides, offset, dtype, storage_bytes, limit=None):
+    limit = MAX_STORAGE_BYTES if limit is None else limit
     if len(shape) != len(strides) or type(offset) is not int:
         raise InputFidelityError("shape/strides/offset 声明无效")
     if any(type(d) is not int or d < 0 for d in shape):
@@ -47,7 +52,7 @@ def _validate_view(shape, strides, offset, dtype, storage_bytes):
         raise InputFidelityError("strides 必须是字节整数")
     if dtype.kind not in "biufc" or dtype.hasobject:
         raise InputFidelityError("不支持对象/结构化 dtype")
-    if math.prod(shape) * dtype.itemsize > MAX_STORAGE_BYTES:
+    if math.prod(shape) * dtype.itemsize > limit:
         raise InputFidelityError("logical tensor 超过输入字节上限")
     if any(d == 0 for d in shape):
         low = high = offset
@@ -64,7 +69,8 @@ def _scalar(value):
     return isinstance(value, np.generic) and value.dtype.kind in "biufc"
 
 
-def _describe(inputs, include_storage):
+def _describe(inputs, include_storage, limit=None):
+    limit = MAX_STORAGE_BYTES if limit is None else limit
     if not isinstance(inputs, Mapping) or any(type(k) is not str for k in inputs):
         raise InputFidelityError("输入必须是字符串键映射")
     storages, tensors, scalars, observed = [], {}, {}, {}
@@ -73,10 +79,10 @@ def _describe(inputs, include_storage):
     for name in sorted(inputs):
         value = inputs[name]
         if isinstance(value, np.ndarray):
-            root, offset, identity = _storage(value)
+            root, offset, identity = _storage(value, limit=limit)
             if identity not in groups:
                 size += int(root.nbytes)
-                if size > MAX_STORAGE_BYTES:
+                if size > limit:
                     raise InputFidelityError("backing storage 总量超过输入字节上限")
                 data = root.tobytes(order="A")
                 groups[identity] = (len(groups), hashlib.sha256(data).hexdigest())
@@ -104,9 +110,13 @@ def encode_inputs(inputs):
     return _describe(inputs, True)[0]
 
 
-def describe_inputs(inputs):
-    """Read actual values/layout; never echo a transport declaration as evidence."""
-    return _describe(inputs, False)[1]
+def describe_inputs(inputs, limit=None):
+    """Read actual values/layout; never echo a transport declaration as evidence.
+
+    `limit` 只给 seed 传输路径用（输入不再整份过 JSON）；默认仍是
+    `MAX_STORAGE_BYTES`。
+    """
+    return _describe(inputs, False, limit=limit)[1]
 
 
 def decode_inputs(payload):
