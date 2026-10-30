@@ -18,7 +18,7 @@
 | [探索性 A/C v1](../status/dsh-operator-s5-cooperative-study-20261029.md) | 首轮 A/C 各 6/6，第二轮中断；C 未实际调用插件 verify | 报告已有对照和未能归因的事实，不使用调用数差异证明插件收益 |
 | [探索性 A/C v2](../status/dsh-operator-s5-cooperative-study-v2-20261030.md) | 首格因验证实现运行中变动而 unknown，余下 23 格未执行 | 展示版本一致性与设施失败判定；不是模型数值失败样本 |
 
-本次规划已读取插件入口 audit、修复 recovery summary，并核对现有 S4 脱敏 ZIP 哈希。原始目录仍在 Git 忽略的 `output/` 下；这不等于已经完成独立备份。
+本次规划已读取插件入口 audit、修复 recovery summary，并核对现有 S4 脱敏 ZIP 哈希。原始目录在 Git 忽略的 `output/` 下，且只有本机同一文件系统的一份副本，不存在独立备份；**用户已决定接受单副本**，本文 P0 第 2 项的「副本」按本机归档口径理解，异地保存不作收尾条件。
 
 ## 3. 执行优先级
 

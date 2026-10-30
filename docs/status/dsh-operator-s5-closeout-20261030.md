@@ -28,6 +28,8 @@
 
 旧 ABC v6 目录名含 `formal`，不代表满足正式对照标准。历史校准和接线中断（包括插件限定首次 `execution-v1` 在真实模型/GPU 启动前中断）仍保留在原目录，不混入上述有效执行批次。预检 v2 的冻结材料也不计为真实已执行格。
 
+上表只收正确率口径的对照批次。另有[性能 A/C 实测](dsh-operator-s5-kernel-performance-results-20261030.md)（2026-10-30，GPU2 与 GPU7；首轮 4 格加两次 follow-up 共预留 138 次模型调用）属性能口径，**不计入上表分母**，同样 `formal_s5_credit=false`。它补充的是本项目此前缺失的两项读数：唯一一次同条件 A/C 性能配对（GPU7 LayerNorm，C 快 0.24% 即 `1.0024×`；首轮差 1.34% 即 `1.0134×`，均低于预注册的 1.05× 交付目标，且 C 终稿 SHA256 `df189e4c…e0fd` 与共同起始 seed 相同），以及历次批次中第一次真机观测到 `operator_bench`（3 次成功）与 `operator_verify` 在同一 DSH 会话内实际生效。两个口径分别保留，不合并成同一个正确率或增益结论。
+
 ## 3. 对照能说明什么
 
 [合作环境 v1](dsh-operator-s5-cooperative-study-20261029.md)首轮 A/C 均 6/6，模型调用分别 76、46，墙钟分别 2571.281、2016.817 秒。C 六格均发现过 capabilities，但七次开发验证全部走公共 `check.py`，没有 `operator_verify`。一次重复、未完成分母及工具实际选择，使这些成本差异不足以归因于插件验证能力，不能用于“减少调用 X%”的简历表述。
@@ -64,14 +66,14 @@ S4 的 [四任务与非连续布局修复](../design/dsh-operator-s6-case-demo-2
 本轮 P0 工件在 [20261030-s5-closeout-v1](../../output/plugin_completion/20261030-s5-closeout-v1/) 内生成，由主任务的最终交付清单确认状态：
 
 - 完整实现已冻结为独立只读快照，780 文件；[源码清单](../../output/plugin_completion/20261030-s5-closeout-v1/private/source-manifest.json)绑定逐文件 SHA256。源码归档 `private/complete-source.tar.gz` 为 5,032,677 bytes。保留未提交工作区内容，不把当前 Git HEAD 当作全部交付身份。
-- [历史证据清单](../../output/plugin_completion/20261030-s5-closeout-v1/private/historical-evidence-manifest.json)与 `private/historical-evidence-private.tar.gz` 保存 24,405 文件、413,398,274 原始 bytes，归档大小 156,873,522 bytes；28 个 symlink 别名跳过并留记。归档已逐文件验证，**这是同一文件系统上的本地归档副本，不是异地备份**。原始档案可能含连接/路径元数据，须私密保存。
+- [历史证据清单](../../output/plugin_completion/20261030-s5-closeout-v1/private/historical-evidence-manifest.json)与 `private/historical-evidence-private.tar.gz` 保存 24,405 文件、413,398,274 原始 bytes，归档大小 156,873,522 bytes；28 个 symlink 别名跳过并留记。归档已逐文件验证。**副本位置为单份本地副本，与原件在同一文件系统；用户已于 2026-10-30 决定接受单副本，异地备份不列为待办**。已知残余风险：H20 与昆仑芯 P800 均已下线，这些读数不可再生，故单副本失效等于全部原始证据失效。原始档案可能含连接/路径元数据，须私密保存。
 - 已离线构建 wheel `0.6.0` 与插件 `0.1.9`。版本号沿用现有仓库，工件由本轮 SHA256 区分；尚未发布，不能与旧同版本包互换验收。
 - 当前工件在仓库外的临时干净 venv/npm prefix 离线安装通过；`pip check`、CLI capabilities、真实 MCP 握手/8 工具发现、Python/mock 完整 L2 均通过。实际 DSH runtime/SDK 配合已安装插件的宿主契约检查为 **9 passed、0 skipped**，见 [CPU 安装摘要](../../output/plugin_completion/20261030-s5-closeout-v1/installation/cpu-acceptance.json)。初次 CPU fixture 将 Python 矩阵乘法错声明为 Triton，被反作弊拒绝的记录独立保留，修正声明后通过；未修改判据或产品源码。
 - [脱敏插件案例 ZIP](../../output/plugin_completion/20261030-s5-closeout-v1/shareable/s5-plugin-cases.zip)已生成，16,193 bytes、14 文件；SHA256 `e74e0e621f2fbbad87de6488b1fa43bedb2efce26c5b0991a4b7e7375929bb8d`。包含两条历史 LayerNorm 案例、四份候选源码、有限 L2/反馈投影、原始交付失败与追加终评事实。标准库核验器在仓库外 `python -I -S` 通过，相关正常/篡改拒绝测试 9 项通过；不执行候选或 GPU。只分享这个脱敏 ZIP，私有原始档案另存。
 - **[P1 当前安装包真实 H20 MCP 验收已通过](dsh-operator-s5-installed-gpu-acceptance-20261030.md)**：仓库外使用已安装 MCP 命令提交一个历史通过候选，完整 L2 12/12 通过，111.481 秒，新增模型 0、验证 1。安装树与 15 个远端 runner 文件执行前后稳定，候选/契约/complete receipt 相符。这是当前工件的标准客户端入口验收，不是新的 DSH 模型会话、修复或 A/C 实验。
 - 完整 A/C 重复对照后移。S6 已按用户调整后的范围完成安装、打包和演示材料准备；录制视频未做，完整对照的未完成状态原样保留。详见 [S6 验收](dsh-operator-s6-acceptance-20261030.md)。
 
-`output/` 被 Git 忽略。交付包应在 GPU/远端访问结束前复制到持久存储并核对哈希；本报告的本地文件存在不等于已完成异地保存。三分钟回放及简历口径见 [演示脚本](../design/dsh-operator-s5-resume-demo-20261030.md)。
+`output/` 被 Git 忽略，交付包因此不在版本控制与公开仓内。副本位置按 §5 记为单份本地副本：用户已决定接受，不再要求复制到其它存储，「本地文件存在不等于异地保存」在这里是**已接受的决定**，不是待补项。三分钟回放及简历口径见 [演示脚本](../design/dsh-operator-s5-resume-demo-20261030.md)。
 
 ## 6. 本报告如何复核
 
