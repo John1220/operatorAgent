@@ -93,7 +93,7 @@ def test_projection_omits_untrusted_free_text(tmp_path):
                    remote_backend_executed=True, mock_only=False,
                    private_url='https://secret.invalid/api')
     raw = dict(source_hash=sha(candidate), contract_hash=CONTRACT, implementation_stable=True,
-               private_path='/Users/person/private', verdicts=[dict(level='L2',
+               private_path='/Users/…/private', verdicts=[dict(level='L2',
                message='secret text', metrics=dict(input_fidelity_verified=True,
                correctness=dict(suite_hash='a'*64, verdict='failed', cases=[dict(
                    case_id='case-1', verdict='not_run', reason='Bearer secret-value')])) )])
