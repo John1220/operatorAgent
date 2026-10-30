@@ -1,4 +1,4 @@
-"""`tests/test_recheck_arxiv_anchors.py::TestResponseVsFetchFailure` 那张变异表的可执行形态
+"""`tests/unit/test_recheck_arxiv_anchors.py::TestResponseVsFetchFailure` 那张变异表的可执行形态
 
 这一片修的是**检查器自己的两格**（doc 60 §七）：
 
@@ -22,7 +22,7 @@ from benchmarks.mutation_calibrate import Row  # noqa: E402
 
 FILES = {"rc": "benchmarks/recheck_arxiv_anchors.py"}
 
-TARGETS = ["tests/test_recheck_arxiv_anchors.py"]
+TARGETS = ["tests/unit/test_recheck_arxiv_anchors.py"]
 
 ROWS = [
     Row("R1 带正文的 404 被记成取数失败 (整条 remedy 不走)", "rc",

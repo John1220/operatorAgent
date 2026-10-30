@@ -18,8 +18,8 @@
      的布局, `token_budget` 是真的上限); 写不出理由就退回 harness 那一份;
      「解释 / 请求观测」这三类终于有生产者 —— 答得出就答, 答不出就**说答不出**
 
-可执行文档 (与本文一一对应): `tests/test_agent_runtime.py`(49 条) /
-`tests/test_agent_runtime_wiring.py`(11 条) / `tests/test_llm_action_producer.py`(24 条);
+可执行文档 (与本文一一对应): `tests/unit/test_agent_runtime.py`(49 条) /
+`tests/unit/test_agent_runtime_wiring.py`(11 条) / `tests/unit/test_llm_action_producer.py`(24 条);
 变异表 27 行 (`agent_action_gate.py`) + 16 行 (`llm_action_producer.py`):
 
     python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/agent_action_gate.py

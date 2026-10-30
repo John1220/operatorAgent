@@ -1,6 +1,6 @@
 """§21.3 生产者 + §21.4 依赖基线那张变异表的**可执行**形态
 
-靶子是 `tests/test_structured_evidence.py` 与两张既有用例表 (wiring / agent_runtime)。
+靶子是 `tests/unit/test_structured_evidence.py` 与两张既有用例表 (wiring / agent_runtime)。
 为什么把计数与产它的锚点放在一起: 文档里的「N/N 拦住」不可复现就等于没有 (I15/I11 那一族)。
 
 witness 一栏按 doc 57 §二 第 1 条分两类:
@@ -37,10 +37,10 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_structured_evidence.py",
-    "tests/test_agent_runtime.py",
-    "tests/test_agent_runtime_wiring.py",
-    "tests/test_harness_pass_rate.py",
+    "tests/unit/test_structured_evidence.py",
+    "tests/unit/test_agent_runtime.py",
+    "tests/unit/test_agent_runtime_wiring.py",
+    "tests/unit/test_harness_pass_rate.py",
 ]
 
 ROWS = [

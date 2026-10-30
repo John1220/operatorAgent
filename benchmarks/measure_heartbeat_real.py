@@ -42,7 +42,7 @@ from operator_agent.kernel_templates import (  # noqa: E402
 # 这里曾经是一份**手抄**的核: 与模板语义相同、签名被重新折行 ⇒ 逐字比较抓不到,
 # 而注释写着"取自 rule_templates.py"。模板一改, 这个量具就会静静地量另一个核,
 # 注释继续撒谎。现在改为由单一真源派生, 派生关系由
-# tests/test_template_single_source.py 盯着。
+# tests/unit/test_template_single_source.py 盯着。
 
 TRITON_BODY = jit_kernel_source(MATMUL_TRITON)
 

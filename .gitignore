@@ -24,7 +24,11 @@ Thumbs.db
 .trae-html-share-packages/
 
 # ─── 运行期产物 (本项目) ───
+# `output/` 指向仓外证据目录（见 docs/research/evidence-location.json）。
+# 末尾带斜杠的规则只匹配**目录**，而 2026-10-31 之后仓内的 output 是符号链接，
+# 于是 `git status` 会把它当成未跟踪项 —— 多写一行不带斜杠的规则盖住链接本身。
 output/
+output
 logs/
 debug/
 # tests/golden_registry.json —— 2026-09-29 起**入库**（#73）。它以前被 ignore，

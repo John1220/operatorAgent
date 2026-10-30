@@ -86,7 +86,7 @@ python test_nvidia_matmul.py
 的符号链接。为什么这样：那些证据既不可 diff，也不该被 `git status`/`rg`/`find` 每次扫过，
 而 `.gitignore` 让任何提交都不会提醒它正在膨胀。位置、重建方式与注意事项见
 [docs/research/evidence-location.json](docs/research/evidence-location.json)；
-布局由 [tests/test_repo_layout.py](tests/test_repo_layout.py) 守住（根目录白名单、
+布局由 [tests/hygiene/test_repo_layout.py](tests/hygiene/test_repo_layout.py) 守住（根目录白名单、
 平铺目录条目预算、缓存与产物禁止入库、证据目录只能是链接）。
 
 ## 代码怎么读
@@ -148,7 +148,7 @@ operatorAgent/
 ## 仓库纪律（改代码前请读）
 
 - **凭据不进仓**：真实主机名 / IP / 用户名 / 密钥路径一律走 `~/.ssh/config` 与环境变量。
-  [tests/test_repo_hygiene.py](tests/test_repo_hygiene.py) 会机械扫描所有已跟踪文件里的凭据形态
+  [tests/hygiene/test_repo_hygiene.py](tests/hygiene/test_repo_hygiene.py) 会机械扫描所有已跟踪文件里的凭据形态
   （含家目录绝对路径与真实端口），命中即红。
 - **`config.yaml` 不进仓**：它含真实值，已被 `.gitignore` 忽略；模板是 `config.example.yaml`。
 - **根目录的 `_*.py` 是临时脚本**：由 `.gitignore` 的 `/_*.py` 忽略，**不要 `git add -f`**

@@ -31,7 +31,7 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_inventory_intent_resend.py",
+    "tests/unit/test_inventory_intent_resend.py",
 ]
 
 ROWS = [

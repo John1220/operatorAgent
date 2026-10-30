@@ -134,7 +134,7 @@ def kernel(A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
 
 # 单一真源: kernel_templates.py。此处曾与 rule_templates._SOFTMAX_TRITON 逐字重复
 # （675 字符），两份都在跑而没有任何断言让它们同源。
-# 见 tests/test_template_single_source.py。
+# 见 tests/unit/test_template_single_source.py。
 _TRITON_SOFTMAX_CODE = SOFTMAX_TRITON
 
 _TRITON_ATTENTION_CODE = """import triton

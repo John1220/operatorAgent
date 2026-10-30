@@ -1,7 +1,7 @@
 """§3.5「长期记忆的独立确认」不变量那张变异表的**可执行**形态
 
-靶子是 `tests/test_spine_wiring.py::TestTheDoubleConfirmationIsAnInvariant`（四条行为守卫
-+ 一条源码守卫）与 `tests/test_kernel_db_persistence.py`（那条门的结果决定落盘的线）。
+靶子是 `tests/unit/test_spine_wiring.py::TestTheDoubleConfirmationIsAnInvariant`（四条行为守卫
++ 一条源码守卫）与 `tests/unit/test_kernel_db_persistence.py`（那条门的结果决定落盘的线）。
 
 为什么单独一张表: 这一片修的是「**默认关的安全装置等于不存在**」那类缺陷 (CHECKLOG I79)，
 而这类缺陷的特点是**守卫会把错的行为钉成正确行为** —— 翻转前有三条用例正在断言
@@ -35,8 +35,8 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_spine_wiring.py",
-    "tests/test_kernel_db_persistence.py",
+    "tests/unit/test_spine_wiring.py",
+    "tests/unit/test_kernel_db_persistence.py",
 ]
 
 ROWS = [

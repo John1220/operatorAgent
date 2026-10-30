@@ -168,7 +168,7 @@ class TritonTemplateSSHExecutor:
     (继承基类的 `param_space()` ⇒ None), 而模板模块只有空间与实例化器。两者都在真机上
     存在之后, 缺的正是这一个**显式组合**。
 
-    刻意**不**用 `getattr/isinstance` 嗅探 (那会被 `tests/test_backend_caps.py` 的 AST
+    刻意**不**用 `getattr/isinstance` 嗅探 (那会被 `tests/unit/test_backend_caps.py` 的 AST
     守卫拦下, 也是本项目反复禁的): 这里只有两个明确的覆写, 其余方法按名字转发给被包住的
     执行后端。`param_space`/`instantiate` 来自模板模块 —— 一个后端要么声明了空间并实现了
     实例化, 要么两者都没有, 不许只声明一半。

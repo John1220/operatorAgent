@@ -352,7 +352,7 @@ def instantiator_available(backend: Any) -> bool:
         return True
     # 实例级替换: 测试假件 (`DeclaredFakeBackend`) 是把方法挂到**实例**上的。
     # ⚠️ 这里刻意不用 `getattr(backend, …)`: `operator_agent/` 里禁止按方法名嗅探能力
-    # (`tests/test_backend_caps.py::TestNoCapabilitySniffing` 按 AST 拦它, doc 49 §4.1
+    # (`tests/unit/test_backend_caps.py::TestNoCapabilitySniffing` 按 AST 拦它, doc 49 §4.1
     # 第 3 条)。`vars()` 读的是实例字典, 不是「试一下这个方法在不在」。
     try:
         own = vars(backend).get("instantiate")

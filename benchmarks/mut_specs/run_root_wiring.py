@@ -1,6 +1,6 @@
 """「§22.1 的布局根真的有生产调用点、过门的候选真的落盘」那张变异表的**可执行**形态
 
-靶子是 `tests/test_run_root_wiring.py`（切片 C 的守卫：根的唯一性 / 落盘内容与权限位 /
+靶子是 `tests/unit/test_run_root_wiring.py`（切片 C 的守卫：根的唯一性 / 落盘内容与权限位 /
 被拒的不留痕 / 唯一写入口有调用者 / 真机驱动在传 run_root）。
 
 为什么单独一张表: `benchmarks/mut_specs/run_layout_doors.py` 钉的是**权限位与角色判据**
@@ -24,7 +24,7 @@ FILES = {
     "hp": "benchmarks/harness_pass_rate.py",
 }
 
-TARGETS = ["tests/test_run_root_wiring.py"]
+TARGETS = ["tests/unit/test_run_root_wiring.py"]
 
 ROWS = [
     Row("M1 「一次运行一个新根」退回第一版 (秒级时间戳 + pid)", "rl",

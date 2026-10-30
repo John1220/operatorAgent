@@ -19,7 +19,7 @@ Actions:
   benchmark_with_baselines - L3 candidate vs one baseline chosen by the control side
 
 action 名与每个 action 读的 payload 键必须和 NVIDIA 的 run_kernel.py 一致, 由
-tests/test_runner_contract.py 从两边的源码里解析出来对照。
+tests/unit/test_runner_contract.py 从两边的源码里解析出来对照。
 """
 
 import sys

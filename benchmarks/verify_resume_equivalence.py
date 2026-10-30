@@ -94,7 +94,7 @@ def llm_from_config():
     """从 config.yaml 读自建端点。值只进环境变量, **不打印**。"""
     if DRY:
         # 脚本化 LLM 只用于标定量具; 它**不是**被测对象 (doc 48 §6.5 那条纪律)
-        from tests.test_resume_integrity import _ScriptedLLM
+        from tests.unit.test_resume_integrity import _ScriptedLLM
         return _ScriptedLLM()
     import yaml
     cfg_path = Path(__file__).resolve().parents[1] / "config.yaml"

@@ -1358,7 +1358,7 @@ class Verifier:
         # AND 要置坏点需两条同时为真, 而参考非有限时 `abs_error` 或 `rel_error` 必有一个是
         # NaN、比较恒假 —— 那些元素在加掩码之前就已经不是坏点了。牙齿在分母与上报那三处
         # (变异 R2/R3/R5/R6 全部拦下)。留着它的理由: 判据形状一改 (AND→任一侧超标) 它立刻
-        # 变成承重墙, 而那一步今天由 `tests/test_l2_tolerance.py` 的行为用例把守。
+        # 变成承重墙, 而那一步今天由 `tests/unit/test_l2_tolerance.py` 的行为用例把守。
         bad = (abs_error > atol) & (rel_error > rtol) & comparable
         has_nonfinite = bool((~np.isfinite(actual_f)).any())
         passed, matched_ratio = tolerance.evaluate(

@@ -10,7 +10,7 @@
   · `dev`   —— 允许当 few-shot / 进配方库
   · `test`  —— holdout, 禁止进 prompt/RAG, 只做最终评分
 
-反污染纪律 (机械守卫在 `tests/test_leetcuda_bench.py`):
+反污染纪律 (机械守卫在 `tests/unit/test_leetcuda_bench.py`):
   · **同一个 reference 函数不许跨 split** —— 公式一样只换 shape 就是泄漏
     (softmax 两题、sgemm 两题必须同侧);
   · 家族可以跨 (relu 与 hardshrink 公式不同, 同属 activation 不算泄漏);

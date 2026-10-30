@@ -15,7 +15,7 @@
      同时经 `write_for` 的正当写入是好的（否则上面那些「拦住了」没有意义）
   4. **同源**：§21.5 的判据拿**真路径**仍然逐格命中，而且判据与布局读**同一个对象**
 
-可执行文档: `tests/test_run_layout.py`(32 条); 变异表 8 行:
+可执行文档: `tests/unit/test_run_layout.py`(32 条); 变异表 8 行:
 
     python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/run_layout_doors.py
 

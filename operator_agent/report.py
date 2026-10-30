@@ -348,7 +348,7 @@ def _tri(value: Any) -> str:
     """三态显示：`True`/`False`/`None` ⇒ `是`/`否`/`未确立`（形状不对也按未确立印）
 
     与判据侧同一条纪律：`None` = **未确立**，不许印成「否」—— 报告里一个「否」会被读成
-    「量过、没有越限」，而那是另一件事（`tests/test_implementation_decision.py` 钉住）。
+    「量过、没有越限」，而那是另一件事（`tests/unit/test_implementation_decision.py` 钉住）。
     """
     if value is True:
         return "是"

@@ -1,7 +1,7 @@
 """「§4.4 的声明等级 + §22.3 的覆盖上限真的会影响 ClaimLevel 与 promotion」那张表的**可执行**形态
 
-靶子: `tests/test_claim_level.py`（阶梯 / 上限 / 三态 / 同一个数 / 报告）与
-`tests/test_kernel_db_persistence.py::TestGateWiring`（生产路径那一根线:
+靶子: `tests/unit/test_claim_level.py`（阶梯 / 上限 / 三态 / 同一个数 / 报告）与
+`tests/unit/test_kernel_db_persistence.py::TestGateWiring`（生产路径那一根线:
 `Conductor._save_to_db` 写进去的上限真的决定了落盘）。
 
 为什么单独一张表: 这一片修的是「**覆盖数据有生产者、零消费者**」——
@@ -28,7 +28,7 @@ FILES = {
     "cf": "operator_agent/confirm.py",
 }
 
-TARGETS = ["tests/test_claim_level.py", "tests/test_kernel_db_persistence.py"]
+TARGETS = ["tests/unit/test_claim_level.py", "tests/unit/test_kernel_db_persistence.py"]
 
 ROWS = [
     Row("M1 regex_only 不再压级 (文本规则也当看得穿源码)", "el",

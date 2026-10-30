@@ -27,8 +27,8 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_transport_error_mask.py",
-    "tests/test_transport_outcome_cell.py",
+    "tests/unit/test_transport_error_mask.py",
+    "tests/unit/test_transport_outcome_cell.py",
 ]
 
 ROWS = [

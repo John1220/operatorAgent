@@ -1,7 +1,7 @@
 """「静态反作弊的白名单不许被任务字段改写」那张变异表的**可执行**形态
 
-靶子是 `tests/test_anticheat_bypass.py`（白名单那一组 + 运行时屏蔽的结构守卫）、
-`tests/test_lib_fallback_producer.py` 与 `tests/test_m1_hardening.py`（运行时盾的行为）。
+靶子是 `tests/unit/test_anticheat_bypass.py`（白名单那一组 + 运行时屏蔽的结构守卫）、
+`tests/unit/test_lib_fallback_producer.py` 与 `tests/unit/test_m1_hardening.py`（运行时盾的行为）。
 
 为什么单独一张表: CHECKLOG I80 的硬伤一是**可被非人化输入关掉的安全门** ——
 `verifier` 把 `task.target.hardware` 传给 `anticheat.static_audit`, 而白名单当时是
@@ -36,9 +36,9 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_anticheat_bypass.py",
-    "tests/test_lib_fallback_producer.py",
-    "tests/test_m1_hardening.py",
+    "tests/unit/test_anticheat_bypass.py",
+    "tests/unit/test_lib_fallback_producer.py",
+    "tests/unit/test_m1_hardening.py",
 ]
 
 ROWS = [
@@ -74,8 +74,8 @@ ROWS = [
         "        yield\n"
         "        return",
         "**具体输入**: `with shield_torch():` 里调一次 `torch.matmul` ⇒ 不再抛 "
-        "`CheatDetectedError` ⇒ `tests/test_lib_fallback_producer.py` 与 "
-        "`tests/test_m1_hardening.py` 里那几条 `assertRaises(CheatDetectedError)` 红"),
+        "`CheatDetectedError` ⇒ `tests/unit/test_lib_fallback_producer.py` 与 "
+        "`tests/unit/test_m1_hardening.py` 里那几条 `assertRaises(CheatDetectedError)` 红"),
     Row("M5 生产调用点给 shield 传了声明 (python 执行路径)", "mgpu",
         "            with shield_torch():\n                local_ns = {}",
         "            with shield_torch(vendor_torch_ok=True):\n                local_ns = {}",

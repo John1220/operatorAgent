@@ -394,7 +394,7 @@ def new_run_root(base_dir: str, label: str = "run") -> str:
     * **唯一性**：微秒时间戳 + 进程内单调序号 + pid，三者合起来保证「同一进程连续两次
       调用」与「同一秒内两个进程」都不会拿到同一个根。第一版只有「秒级时间戳 + pid」——
       同一秒内连续两次调用返回同一个路径，正是本函数自己注释里要防的「上一轮候选被
-      覆盖」（守卫 `tests/test_run_root_wiring.py::TestTheRunRootConstructor` 当场抓到）。
+      覆盖」（守卫 `tests/unit/test_run_root_wiring.py::TestTheRunRootConstructor` 当场抓到）。
 
     `label` 会被收成 `[A-Za-z0-9_-]`（只影响可读性，不参与判据）；取不到 base_dir 时抛
     `LayoutError`（空基目录等于把根落到 CWD —— 与 `run_layout` 拒绝空 run_root 同一条理由）。

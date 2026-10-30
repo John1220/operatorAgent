@@ -1,8 +1,8 @@
 """「§17.1 实现裁决: 三条门槛只许由**确立的**证据打开」那张表的可执行形态
 
-靶子: `tests/test_implementation_decision.py`（阶梯闭性旁举 + 逐门）、
-`tests/test_kernel_db_persistence.py`（生产路径必须发布这一格）、
-`tests/test_report_deliverable.py`（真跑一遍以后报告里要有它）。
+靶子: `tests/unit/test_implementation_decision.py`（阶梯闭性旁举 + 逐门）、
+`tests/unit/test_kernel_db_persistence.py`（生产路径必须发布这一格）、
+`tests/unit/test_report_deliverable.py`（真跑一遍以后报告里要有它）。
 
 为什么单独一张表: 这一格的后果是**部署决定**, 而它的三条证据今天都还没有生产者
 （契约里没有 `required_cases` / `max_regression`）—— 于是这一片最大的风险不是「算错」,
@@ -27,9 +27,9 @@ FILES = {
     "rp": "operator_agent/report.py",
 }
 
-TARGETS = ["tests/test_implementation_decision.py",
-           "tests/test_kernel_db_persistence.py",
-           "tests/test_report_deliverable.py"]
+TARGETS = ["tests/unit/test_implementation_decision.py",
+           "tests/unit/test_kernel_db_persistence.py",
+           "tests/unit/test_report_deliverable.py"]
 
 ROWS = [
     Row("M1 未确立的 required_cases 被当成「全对」", "el",

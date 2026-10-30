@@ -27,7 +27,7 @@
    而不是用一个「感觉调不动了」的代理量把门撬开。
    清单本身只有一份（`GAUGES`，本模块），`agent_runtime` 也读它 —— 于是「有量具的瓶颈」
    在门与动作协议两侧是同一句话，不可能一边多一把量具。
-   ⚠️ 这份清单**必须跟着代码走**（`tests/test_escalation.py::TestGaugeInventory` 钉住它）：
+   ⚠️ 这份清单**必须跟着代码走**（`tests/unit/test_escalation.py::TestGaugeInventory` 钉住它）：
    量具清单写 stale 的代价不是"少一句话"，而是读者（含外部评审）会据此得出
    「这一层今天到不了」的结论。
 3. **SLOW 不算平台化**：退步是「还在动」（而且它自己有一条出路：禁用配方），
@@ -73,7 +73,7 @@ class Gauge:
 
 
 #: 设计 §10.3 条件 2 明列的四类硬限制。**唯一一份清单**，两个读者：
-#:   * `tests/test_escalation.py::TestGaugeInventory` —— 核「函数在不在」与「docstring 提没提」；
+#:   * `tests/unit/test_escalation.py::TestGaugeInventory` —— 核「函数在不在」与「docstring 提没提」；
 #:   * `agent_runtime` —— 判「动作声明的预期瓶颈是不是一个**存在**的能力」（§21.4 第 7 条）。
 #: 为什么会多出第二个读者：把一个没有量具的瓶颈写进动作，就是设计 §21.4 点名的
 #: 「引用不存在的能力」，而它必须在**零 GPU 时间**上被拦住。清单只留一份，

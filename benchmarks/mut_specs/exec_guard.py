@@ -1,6 +1,6 @@
 """「§22.2 本地受控执行：跑飞要拦得住，设不上要说得清」那张变异表的**可执行**形态
 
-靶子是 `tests/test_exec_guard.py`（32 条）+ `tests/test_demo_exec_guard.py`（演示自称的读数），
+靶子是 `tests/unit/test_exec_guard.py`（32 条）+ `tests/unit/test_demo_exec_guard.py`（演示自称的读数），
 另有两行落在外面的旧守卫上（跨进程带回 `lib_fallback` 证据那条）。
 
 为什么单独一张表: §22.2 这一片有**两个**容易被读大的地方 ——
@@ -24,8 +24,8 @@ FILES = {
     "mg": "operator_agent/mock_gpu.py",
 }
 
-TARGETS = ["tests/test_exec_guard.py", "tests/test_demo_exec_guard.py",
-           "tests/test_lib_fallback_producer.py"]
+TARGETS = ["tests/unit/test_exec_guard.py", "tests/unit/test_demo_exec_guard.py",
+           "tests/unit/test_lib_fallback_producer.py"]
 
 ROWS = [
     Row("M1 超时只杀直接子进程, 不杀进程组 (孙子进程变孤儿)", "eg",
@@ -125,7 +125,7 @@ ROWS = [
         "**具体输入**: `Limits(file_size_bytes=1MB, artifact_bytes=8MB)` ⇒ 不再抛 "
         "`ValueError` ⇒ `test_the_two_budgets_cannot_contradict_each_other` 红。"
         "⚠️ 2026-10-04 实测过这条路径的后果: 子进程写到 FSIZE 上限被截断，父侧只读到一句 "
-        "`UnpicklingError: pickle data was truncated`（`tests/test_leetcuda_bench.py` "
+        "`UnpicklingError: pickle data was truncated`（`tests/unit/test_leetcuda_bench.py` "
         "三条红），看起来像「候选坏了」—— 可判定的组合必须在构造期失败"),
     Row("M12 MockGPU 不再走受控入口 (`_execute_python` 直接 exec)", "mg",
         "        guard = run_candidate(kernel_code, inputs,\n"
@@ -139,7 +139,7 @@ ROWS = [
         "        guard.executor, guard.status = \"in-process\", \"ok\"\n"
         "        guard.kind, guard.error, guard.detail = None, None, \"\"",
         "**具体输入**: 一份会改 harness 状态的候选（改 `np.zeros` / 环境变量 / cwd）"
-        "⇒ 进程内 exec 会让那些改动**留在 harness 里**（`tests/test_exec_guard.py` 的"
+        "⇒ 进程内 exec 会让那些改动**留在 harness 里**（`tests/unit/test_exec_guard.py` 的"
         "「候选改不动 harness」那组用例红）。合法候选那一趟它看不出来（两边返回值一样），"
         "所以这一条同时还要靠接线断言（`_execute_python` 里不许有 `exec`）",
         behavioral=True),
@@ -149,7 +149,7 @@ ROWS = [
             metrics = lib_fallback_metrics(remote_error=bare)''',
         '''        metrics = {}''',
         "**具体输入**: `getattr(torch, \"mat\"+\"mul\")` 这种静态看不见的作弊候选 ⇒ "
-        "`tests/test_lib_fallback_producer.py::..."
+        "`tests/unit/test_lib_fallback_producer.py::..."
         "test_verifier_l2_runtime_shield_hit_metrics` 与 "
         "`test_mock_gpu_execute_produces_metrics` 红（盾现在装在子进程里，证据必须带回来 —— "
         "否则 eligibility 规则 4 会在「唯一真正需要它的那条路径」上恒 False，正是 P1-4 那个洞）"),

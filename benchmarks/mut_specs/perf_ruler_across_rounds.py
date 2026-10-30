@@ -18,9 +18,9 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_perf_ruler_across_rounds.py",
-    "tests/test_cross_round_ruler.py",
-    "tests/test_bound_axis_gate.py",
+    "tests/unit/test_perf_ruler_across_rounds.py",
+    "tests/unit/test_cross_round_ruler.py",
+    "tests/unit/test_bound_axis_gate.py",
 ]
 
 ROWS = [

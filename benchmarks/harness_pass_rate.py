@@ -282,7 +282,7 @@ def cost_from_metadata(metadata):
 
     键名必须与 `LLMUsageTracker.summary()` 一致: 是 **`total_cost_usd`** 而不是
     `cost_usd`。第一版读错了键, 于是整场测量的成本一律报成 $0.0 —— 540114 tokens
-    配一个 0 美元, 安静得像是对的。`tests/test_harness_pass_rate.py` 里有一条机械守卫
+    配一个 0 美元, 安静得像是对的。`tests/unit/test_harness_pass_rate.py` 里有一条机械守卫
     直接对着真的 `summary()` 查这几个键在不在, 键名再漂移就会红。
     """
     c = (metadata or {}).get("llm_cost") or {}
@@ -296,7 +296,7 @@ def sampling_from_metadata(metadata):
 
     空表和 None 在两处读者眼里必须不同: 空表读起来像「这次跑没发任何请求」,
     None 读起来才是「这份报表的产出者没记这件事」。键名 `sampling` 的机械守卫在
-    `tests/test_llm_sampling_knobs.py` —— 与上面那条 `total_cost_usd` 键名守卫同族。
+    `tests/unit/test_llm_sampling_knobs.py` —— 与上面那条 `total_cost_usd` 键名守卫同族。
     """
     c = (metadata or {}).get("llm_cost") or {}
     return c.get("sampling") or None

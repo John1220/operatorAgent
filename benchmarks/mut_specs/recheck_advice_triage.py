@@ -1,4 +1,4 @@
-"""`tests/test_recheck_arxiv_anchors.py::TestAdviceIsTriaged` 那张变异表的可执行形态
+"""`tests/unit/test_recheck_arxiv_anchors.py::TestAdviceIsTriaged` 那张变异表的可执行形态
 
 这一片修的是**检查器自己给错建议**：五篇里有一篇瞬时取回失败时，`recheck_arxiv_anchors.py`
 的读数会掉到 22/36，而收尾那句无条件写着「要改的是文档里那张表」——照做就把一次网络抖动
@@ -17,7 +17,7 @@ from benchmarks.mutation_calibrate import Row  # noqa: E402
 
 FILES = {"rc": "benchmarks/recheck_arxiv_anchors.py"}
 
-TARGETS = ["tests/test_recheck_arxiv_anchors.py"]
+TARGETS = ["tests/unit/test_recheck_arxiv_anchors.py"]
 
 ROWS = [
     Row("R1 分诊整条不走 (永远说「改表」)", "rc",

@@ -1,6 +1,6 @@
 """「§6.2 的目标函数与逐 case 账本」那张表的可执行形态
 
-靶子: `tests/test_case_ledger.py`（契约权重/口径 + 聚合三态 + 账本 + 真跑一遍 + 结构）。
+靶子: `tests/unit/test_case_ledger.py`（契约权重/口径 + 聚合三态 + 账本 + 真跑一遍 + 结构）。
 
 为什么单独一张表: 这一片让**目标函数**第一次成为一个可查的数，而它最容易写歪的地方是
 **默认值**与**分母**: 没声明权重被读成「等权」、没声明口径被读成「加权几何平均」、
@@ -26,7 +26,7 @@ FILES = {
     "ve": "operator_agent/verifier.py",
 }
 
-TARGETS = ["tests/test_case_ledger.py"]
+TARGETS = ["tests/unit/test_case_ledger.py"]
 
 ROWS = [
     Row("M1 没声明权重被读成「等权」", "el",

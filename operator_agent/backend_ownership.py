@@ -6,6 +6,8 @@ must remain unknown; this is not isolation against hostile same-UID code.
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
+import signal
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +15,36 @@ from pathlib import Path
 from .task_cancellation import publish_json, valid_invocation
 
 _scope = None
+
+
+def owned_persistent_ssh(options, *, persistent_default=False):
+    """Use bounded owned teardown whenever a supervised SSH session is persistent."""
+    return (options.get('backend') == 'ssh'
+            and options.get('persistent', persistent_default) is True)
+
+
+@contextmanager
+def owned_worker_scope(directory, invocation_id):
+    """Unwind the trusted worker before its supervisor falls back to local kill."""
+    begin_scope(directory, invocation_id)
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, terminate)
+    try:
+        yield
+    finally:
+        # A second cooperative stop must not interrupt the ownership checks.
+        # SIGKILL/machine failure still leave cleanup unknown to the supervisor.
+        for sig in previous:
+            signal.signal(sig, signal.SIG_IGN)
+        try:
+            finish_scope()
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
 
 
 def begin_scope(directory, invocation_id):
@@ -61,7 +93,9 @@ def finish_scope(grace=10.0):
             result = backend.close(grace=remaining) if remaining > 0 else None
             rows.append(dict(persistent=persistent,
                 quiescent=(result.get('quiescent') if isinstance(result, dict) else None)))
-        except Exception:
+        except BaseException:
+            # One failing close must not abandon other owned sessions or turn
+            # an interrupted teardown into a false quiescence receipt.
             rows.append(dict(persistent=persistent, quiescent=None))
     if scope['started'] != scope['ready']:
         # A signal during subprocess startup may arrive before the backend can

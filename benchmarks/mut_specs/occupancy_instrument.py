@@ -13,7 +13,7 @@ M = [
  ("M5 不写出处", """+ HardwareCaps.max_threads_per_sm""", ""),
 ]
 def run():
-    p = subprocess.run([sys.executable, "-m", "pytest", "tests/test_occupancy_instrument.py", "-q"],
+    p = subprocess.run([sys.executable, "-m", "pytest", "tests/unit/test_occupancy_instrument.py", "-q"],
                        cwd=str(R), capture_output=True, text=True)
     return p.returncode, (p.stdout.strip().splitlines() or [""])[-1]
 rows = []

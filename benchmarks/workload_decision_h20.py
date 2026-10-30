@@ -2,7 +2,7 @@
 
 Safe default (local only, no input allocation, SSH or upload)::
     python3 -B benchmarks/workload_decision_h20.py
-    python3 -B -m pytest -q -p no:cacheprovider tests/test_workload_decision_driver.py
+    python3 -B -m pytest -q -p no:cacheprovider tests/unit/test_workload_decision_driver.py
 
 ONLY after separate authorization to use the existing remote runtime::
     python3 -B benchmarks/workload_decision_h20.py --execute --host algorithm-h20 \

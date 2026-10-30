@@ -1,4 +1,4 @@
-"""`tests/test_llm_sampling_knobs.py` 那张变异表的**可执行**形态 (每行带 kill witness)
+"""`tests/unit/test_llm_sampling_knobs.py` 那张变异表的**可执行**形态 (每行带 kill witness)
 
 为什么要在仓里有一份 (而不是一段 /tmp 脚本): 同一个理由在 doc 41 与 CHECKLOG I29 各撞过一次 ——
 写在文档里的「N/N 拦住」如果产它的锚点不在仓里，那个数就不可复现，而下一个人只能重猜。
@@ -22,8 +22,8 @@ FILES = {
     "hrn": "benchmarks/harness_pass_rate.py",
 }
 
-TARGETS = ["tests/test_llm_sampling_knobs.py", "tests/test_harness_pass_rate.py",
-           "tests/test_llm_reported_model.py", "tests/test_llm_usage_semantics.py"]
+TARGETS = ["tests/unit/test_llm_sampling_knobs.py", "tests/unit/test_harness_pass_rate.py",
+           "tests/unit/test_llm_reported_model.py", "tests/unit/test_llm_usage_semantics.py"]
 
 ROWS = [
     # ── L 组: 账本必须记「真发出去的那一份」 ──

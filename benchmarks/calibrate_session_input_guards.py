@@ -49,7 +49,7 @@ def run(output):
                 shutil.copytree(ROOT / folder, root / folder,
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
             (root / "tests").mkdir()
-            shutil.copy2(ROOT / "tests/test_session_inputs.py", root / "tests/test_session_inputs.py")
+            shutil.copy2(ROOT / "tests/unit/test_session_inputs.py", root / "tests/unit/test_session_inputs.py")
             if name != "clean":
                 path = root / rel
                 source = path.read_text()
@@ -58,7 +58,7 @@ def run(output):
                 path.write_text(source.replace(old,new,1))
             env = dict(os.environ, PYTHONPATH=str(root), OPERATOR_AGENT_LOG_DIR=str(root / "logs"),
                        OPERATOR_AGENT_OUTPUT_DIR=str(root / "output"))
-            result = subprocess.run([sys.executable,"-m","pytest","tests/test_session_inputs.py","-q"],
+            result = subprocess.run([sys.executable,"-m","pytest","tests/unit/test_session_inputs.py","-q"],
                 cwd=root,env=env,capture_output=True,text=True,timeout=90)
             log = result.stdout + result.stderr
             accepted = (result.returncode == 0 if name == "clean" else

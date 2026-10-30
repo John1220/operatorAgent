@@ -1,4 +1,4 @@
-"""`tests/test_attributable_evidence_gate.py` 那张变异表的可执行形态 (#103 第 1 片)
+"""`tests/unit/test_attributable_evidence_gate.py` 那张变异表的可执行形态 (#103 第 1 片)
 
 这一片把 HarnessLens 行 1050 那句做法搬过来 —— **两条规则算在同一份存量证据上, 什么都不重新
 执行**：metric-only（配对口径 Δ>0 就接受）与可归因门（要有正证据且零回归），再点名变坏的 case。
@@ -21,7 +21,7 @@ FILES = {
     "hp": "benchmarks/harness_pass_rate.py",
 }
 
-TARGETS = ["tests/test_attributable_evidence_gate.py"]
+TARGETS = ["tests/unit/test_attributable_evidence_gate.py"]
 
 ROWS = [
     Row("A1 preservation 也算正证据（行 880 那句被反写）", "ms",

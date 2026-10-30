@@ -1,6 +1,6 @@
 """「§22.1 目录权限位：越权写入必须在写的那一刻失败」那张变异表的**可执行**形态
 
-靶子是 `tests/test_run_layout.py`（形状 / 角色矩阵 / 裸写 / 同源 / 单门 / 接线）。
+靶子是 `tests/unit/test_run_layout.py`（形状 / 角色矩阵 / 裸写 / 同源 / 单门 / 接线）。
 
 为什么单独一张表: §22.1 的主张不是「有七个目录」，而是**违反时写入必须失败**。
 这句话有两层（权限位 + 唯一入口的角色判据），变异表每行拆掉一层，看守卫是不是真的
@@ -23,7 +23,7 @@ FILES = {
     "cu": "operator_agent/conductor.py",
 }
 
-TARGETS = ["tests/test_run_layout.py"]
+TARGETS = ["tests/unit/test_run_layout.py"]
 
 ROWS = [
     Row("M1 唯一入口不再判角色 (Python 那层拆掉)", "rl",

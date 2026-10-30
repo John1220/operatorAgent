@@ -16,8 +16,8 @@
 
     python3 benchmarks/smoke_spine_h20.py
 
-可执行文档 (与本文一一对应): tests/test_oracle.py / tests/test_l3_provenance.py /
-tests/test_spine_wiring.py / tests/test_calibration.py
+可执行文档 (与本文一一对应): tests/unit/test_oracle.py / tests/unit/test_l3_provenance.py /
+tests/unit/test_spine_wiring.py / tests/unit/test_calibration.py
 """
 from __future__ import annotations
 

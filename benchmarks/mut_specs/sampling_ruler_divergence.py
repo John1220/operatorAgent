@@ -1,4 +1,4 @@
-"""`tests/test_sampling_ruler_divergence.py` 那张变异表的可执行形态 (#80 第 1 片)
+"""`tests/unit/test_sampling_ruler_divergence.py` 那张变异表的可执行形态 (#80 第 1 片)
 
 与前几张同一条理由: 计数要连着产它的锚点一起存放 (doc 41 那个「13/13」里有两行锚点查不到)。
 
@@ -23,11 +23,11 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_sampling_ruler_divergence.py",
-    "tests/test_gate_single_ruler.py",
-    "tests/test_cross_round_ruler.py",
-    "tests/test_reference_nonfinite.py",
-    "tests/test_l2_tolerance.py",
+    "tests/unit/test_sampling_ruler_divergence.py",
+    "tests/unit/test_gate_single_ruler.py",
+    "tests/unit/test_cross_round_ruler.py",
+    "tests/unit/test_reference_nonfinite.py",
+    "tests/unit/test_l2_tolerance.py",
 ]
 
 ROWS = [

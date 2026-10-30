@@ -13,7 +13,7 @@
     acc += tl.dot(a, b)，只要能在对齐 shape 上跑起来。
   两者承担的角色不同，合并任何一个都会改掉另一个的语义。
 
-"单一真源"在这里是被机械强制的：tests/test_template_single_source.py
+"单一真源"在这里是被机械强制的：tests/unit/test_template_single_source.py
 会扫 operator_agent/ 里有没有第二份逐字相同的副本，并把这条守卫本身反向标定。
 """
 

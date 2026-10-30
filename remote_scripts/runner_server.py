@@ -23,7 +23,7 @@
 缺陷：「超时」与「核跑完了但输出不对」同形）。
 
 只服务端认得的 action：`ping`（存活 + 报钉住的卡）/ `shutdown`（干净退出）。
-**不放进 `run_kernel.run_action` 的分派链** —— `tests/test_runner_contract.py` 按 action
+**不放进 `run_kernel.run_action` 的分派链** —— `tests/unit/test_runner_contract.py` 按 action
 集合对照两个平台的 kernel runner，加进去会让它以为 kernel runner 也支持 `ping`。
 
 stdout 只许走协议行：处理请求期间把 `sys.stdout` 换成 stderr，免得任何库的 `print`

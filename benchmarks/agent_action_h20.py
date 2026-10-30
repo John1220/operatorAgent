@@ -8,7 +8,7 @@
     —— 有这个基线, 「被拒的候选一次都没出现」才有内容;
   * **内容级否证**: 那份带 `import torch` 的候选 (由脚本给定的修复产物) 在**全部**后端调用
     载荷里搜不到一次。比次数强: 次数会被生成侧自己的编译剪枝搅进来, 而「这份源码到没到过
-    后端」不会被搅 (与 `tests/test_agent_runtime_wiring.py` 同一口径);
+    后端」不会被搅 (与 `tests/unit/test_agent_runtime_wiring.py` 同一口径);
   * **产物事实**: 被拒那一轮末条 L1 是**合成的拒绝** (`compile_status=agent_action_refused`),
     该轮 `measurement_wall_s is None` (没有真值测量), 与「别的轮有真读数」形成对照。
 

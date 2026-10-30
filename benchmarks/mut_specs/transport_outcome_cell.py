@@ -1,4 +1,4 @@
-"""`tests/test_transport_outcome_cell.py` 那张变异表的可执行形态 (#102 第 1 片)
+"""`tests/unit/test_transport_outcome_cell.py` 那张变异表的可执行形态 (#102 第 1 片)
 
 这片给执行侧加一格「听到回答 / 没听到回答」(Limbo `2609.29095v1` 行 220-232 的观测等价),
 **只观测不改判决**。判据散在五个文件里, 所以变异表也跨五个文件打 —— 每一行都对应一种
@@ -30,7 +30,7 @@ FILES = {
     "hp": "benchmarks/harness_pass_rate.py",
 }
 
-TARGETS = ["tests/test_transport_outcome_cell.py"]
+TARGETS = ["tests/unit/test_transport_outcome_cell.py"]
 
 ROWS = [
     Row("T1 分类器不看远端 rc (`remote_rc == 255` 那一支废掉)", "ms",

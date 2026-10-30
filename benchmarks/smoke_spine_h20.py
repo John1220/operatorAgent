@@ -1,6 +1,6 @@
 """真机 §14 冒烟 —— 在 H20 上把「标定标定器本身」那一半跑出来
 
-设计 §14 八条的 MockGPU 等价物已经绿了 (`tests/test_stage1_acceptance.py`); 这份脚本补
+设计 §14 八条的 MockGPU 等价物已经绿了 (`tests/unit/test_stage1_acceptance.py`); 这份脚本补
 **真机**那一半。与上一版最大的不同有两条, 都是被实测打出来的:
 
 1. **走生产链路**。上一版自己拼 `oracle.evaluate(...)`, 亲手写 `validity="valid"` ——

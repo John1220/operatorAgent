@@ -57,7 +57,7 @@ def run(output):
                 path.write_text(source.replace(old, new, 1))
             env = dict(os.environ, PYTHONPATH=str(root), OPERATOR_AGENT_LOG_DIR=str(root / "logs"),
                        OPERATOR_AGENT_OUTPUT_DIR=str(root / "output"))
-            result = subprocess.run([sys.executable, "-m", "pytest", "tests/test_run_contract.py", "-q"],
+            result = subprocess.run([sys.executable, "-m", "pytest", "tests/unit/test_run_contract.py", "-q"],
                 cwd=str(root), env=env, capture_output=True, text=True, timeout=120)
             log = result.stdout + result.stderr
             # Collection/import errors don't count as assertion kills.

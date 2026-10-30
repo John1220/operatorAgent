@@ -1073,7 +1073,7 @@ def _check_new_dependency(patch: Patch, ctx: ActionContext) -> CheckOutcome:
     new_imports = set(DependencyAnalyzer.extract_imports(patch.new_source))
     old_imports = set(DependencyAnalyzer.extract_imports(baseline))
     # 复用现成的「哪些是外部依赖」判据: `to_pip_names` 会**剔掉内置模块**, 且有一份
-    # 映射表与用例 (`tests/test_environment.py::test_builtins_excluded_from_pip`)。
+    # 映射表与用例 (`tests/unit/test_environment.py::test_builtins_excluded_from_pip`)。
     # 于是「新增依赖」= 新出现的 **pip 名**, 而不是「新增了一行 import」——
     # 后者会把 `import math` 也算成新依赖, 那是误拦截。
     added = [p for p in DependencyAnalyzer.to_pip_names(sorted(new_imports - old_imports))

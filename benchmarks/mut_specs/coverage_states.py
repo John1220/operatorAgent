@@ -1,8 +1,8 @@
 """「§21.4 的三态不许互相借名: 「没有量具」与「没有对象」必须分开记、且覆盖缺口有人读」那张表的**可执行**形态
 
-靶子: `tests/test_agent_runtime.py`（capability 源码半边的状态 / 没有对象不进覆盖表）、
-`tests/test_agent_runtime_wiring.py`（真跑一轮之后血缘里的覆盖表）、
-`tests/test_report_deliverable.py`（覆盖缺口的**人类可读下游**）。
+靶子: `tests/unit/test_agent_runtime.py`（capability 源码半边的状态 / 没有对象不进覆盖表）、
+`tests/unit/test_agent_runtime_wiring.py`（真跑一轮之后血缘里的覆盖表）、
+`tests/unit/test_report_deliverable.py`（覆盖缺口的**人类可读下游**）。
 
 为什么单独一张表: 这一片修的是「同一份数据被记成两件事」——
 `not_applicable`（这一份候选没有这个对象）与 `unknown`（有对象、没量具）此前并进同一个
@@ -26,8 +26,8 @@ FILES = {
     "rp": "operator_agent/report.py",
 }
 
-TARGETS = ["tests/test_agent_runtime.py", "tests/test_agent_runtime_wiring.py",
-           "tests/test_report_deliverable.py"]
+TARGETS = ["tests/unit/test_agent_runtime.py", "tests/unit/test_agent_runtime_wiring.py",
+           "tests/unit/test_report_deliverable.py"]
 
 ROWS = [
     Row("M1 源码级「幻觉 API」又被记成「没有对象」", "ar",

@@ -2,7 +2,7 @@
 
 d66c430 提交说明自己明写「本片还没有变异矩阵 (下一轮补)」—— 这就是那一轮。
 目标只有一个类: 组合层。每一行对应一种**组合会静默失效**的写法, 不是抽象的
-「代码被改了」; 证人全部是 `tests/test_triton_template_backend.py` 里的具体输入:
+「代码被改了」; 证人全部是 `tests/unit/test_triton_template_backend.py` 里的具体输入:
 
     M1 param_space 拿执行那一半的答案      M5 label 丢了模板身份
     M2 instantiate 拿执行那一半的答案      M6 capabilities 拿模板那一半的空集
@@ -23,7 +23,7 @@ from benchmarks.mutation_calibrate import Row  # noqa: E402
 
 FILES = {"tmt": "operator_agent/triton_matmul_template.py"}
 
-TARGETS = ["tests/test_triton_template_backend.py"]
+TARGETS = ["tests/unit/test_triton_template_backend.py"]
 
 ROWS = [
     Row("M1 param_space 拿执行那一半的答案 (嗅探形状回归)", "tmt",

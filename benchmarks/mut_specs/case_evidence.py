@@ -1,8 +1,8 @@
 """「§6.2 条款 2/3 的证据生产者」那张表的可执行形态
 
-靶子: `tests/test_case_evidence.py`（case 身份 + 声明进契约 + 两条判据的三态 + 真跑一遍）、
-`tests/test_implementation_decision.py`（调用点不许自己写证据值）、
-`tests/test_report_deliverable.py`（报告里那两格的三态）。
+靶子: `tests/unit/test_case_evidence.py`（case 身份 + 声明进契约 + 两条判据的三态 + 真跑一遍）、
+`tests/unit/test_implementation_decision.py`（调用点不许自己写证据值）、
+`tests/unit/test_report_deliverable.py`（报告里那两格的三态）。
 
 为什么单独一张表: 这一片的后果是**部署建议**（`use_custom` 第一次可达），而它的两条证据
 是「本次评过哪条 case」与「这条 case 上的正确性/回退」。风险全在**三态被抹平**上:
@@ -27,9 +27,9 @@ FILES = {
     "cu": "operator_agent/conductor.py",
 }
 
-TARGETS = ["tests/test_case_evidence.py",
-           "tests/test_implementation_decision.py",
-           "tests/test_report_deliverable.py"]
+TARGETS = ["tests/unit/test_case_evidence.py",
+           "tests/unit/test_implementation_decision.py",
+           "tests/unit/test_report_deliverable.py"]
 
 ROWS = [
     Row("M1 读不到形状被写成 0（把不确定当确定）", "ct",
@@ -92,7 +92,7 @@ ROWS = [
         '            evaluated = {case: self._l2_verdict(artifact)} if case else {}',
         '            evaluated = {case: True} if case else {}',
         "**具体输入**: 今天**行为不可区分**: 裁决只在 `all_passed` 那一支写（L2 必然通过）"
-        " ⇒ 只有结构守卫杀得掉 —— `tests/test_case_evidence.py::TestOneProducerPerFact`"
+        " ⇒ 只有结构守卫杀得掉 —— `tests/unit/test_case_evidence.py::TestOneProducerPerFact`"
         " 钉住「这条 case 的正确性必须由 `_l2_verdict` 这一处读」（§4.4 的"
         " `correctness_verified` 与条款 2 读的是同一份 L2 结果）",
         behavioral=False),

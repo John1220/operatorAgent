@@ -171,7 +171,7 @@ GATE_PARAM_KEYS: tuple = ("atol", "rtol", "required_matched_ratio")
 #     永不开, 见上面 `REFERENCE_CEILING_PCT` 那段)。
 #: 绑定轴那个键的名字与它的占位值。**这里定义一次**, 因为「`unknown` 不算一个读数」这条
 #: 规则必须和键名待在一起 —— 抄两份字符串, 将来改键名时那条规则会安静地失去作用。
-#: ⚠️ 本模块因此成为 `bound_type` 的一个**读者** (tests/test_bound_axis_gate.py 那张读者
+#: ⚠️ 本模块因此成为 `bound_type` 的一个**读者** (tests/unit/test_bound_axis_gate.py 那张读者
 #: 清单会因此报红, 那是它该做的); 这里拿它做什么 = **只把它当尺的身份比较, 不据此选轴**,
 #: 而 `"unknown"` 正是它必须认识的那个第三态 (见 `l3_ruler_reading`)。
 BOUND_AXIS_KEY = "bound_type"
@@ -448,7 +448,7 @@ def l3_ruler_reading(l3_metrics) -> dict:
     走的其实是三条比对路之外的第四条」—— 因为 `perf_criterion` 是**各条路自己声明**的。
     新增一条比对路而忘了声明, 那一轮就退成 `unreported` (看得见), 但如果它**照抄了别人的
     字符串** 就看不见。所以那几个字符串住在本模块、由用例逐条钉住 (不放在 verifier 里就地
-    写), 而 `tests/test_perf_ruler_across_rounds.py` 里有一条 AST 守卫: `_verify_performance`
+    写), 而 `tests/unit/test_perf_ruler_across_rounds.py` 里有一条 AST 守卫: `_verify_performance`
     里**凡报 `min_speedup_required` 的那个字面量**都必须同时报 `perf_criterion`, 且值必须是
     `PERF_CRITERION_*` 常量 (查字面量而不是查 `return` 是因为三条路都在 `metrics.update`
     里填名字, `return` 那一段里根本没有它 —— 第一版按 return 查, 五个 L3 出口一个都不命中)。
@@ -1079,7 +1079,7 @@ class MeasurementAssessment:
         另一件事 (真机 §14-8 抓到的正是这个形状)。
 
         分支顺序与 `l3_pass_is_refused` 一致; 两者**同时有内容/同时为空**由用例钉住
-        (`tests/test_measurement_validity.py`), 免得将来加了第四个成因只改一处。
+        (`tests/unit/test_measurement_validity.py`), 免得将来加了第四个成因只改一处。
         """
         causes = []
         if self.ruler_identity_error:

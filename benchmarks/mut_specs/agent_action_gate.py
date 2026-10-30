@@ -31,11 +31,11 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_agent_runtime.py",
-    "tests/test_agent_runtime_wiring.py",
-    "tests/test_budget_gate.py",
-    "tests/test_harness_pass_rate.py",
-    "tests/test_escalation.py",
+    "tests/unit/test_agent_runtime.py",
+    "tests/unit/test_agent_runtime_wiring.py",
+    "tests/unit/test_budget_gate.py",
+    "tests/unit/test_harness_pass_rate.py",
+    "tests/unit/test_escalation.py",
 ]
 
 ROWS = [

@@ -189,22 +189,12 @@ def _main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) == 5 and argv[0] == '--worker':
         run = Path(argv[1]).resolve()
-        graceful = (os.environ.get('OPERATOR_AGENT_S4_GRACEFUL_CLEANUP') == '1'
-                    and (json.loads((run/CONFIG).read_text()).get('backend') == 'ssh')
-                    and bool(json.loads((run/CONFIG).read_text()).get('persistent')))
+        from .backend_ownership import owned_persistent_ssh, owned_worker_scope
+        graceful = owned_persistent_ssh(json.loads((run/CONFIG).read_text()))
         if not graceful:
             return _worker_main(run, float(argv[2]), float(argv[3]), argv[4])
-        from .backend_ownership import begin_scope, finish_scope
-        begin_scope(run, argv[4])
-        previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-        try:
+        with owned_worker_scope(run, argv[4]):
             return _worker_main(run, float(argv[2]), float(argv[3]), argv[4])
-        finally:
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            try:
-                finish_scope()
-            finally:
-                signal.signal(signal.SIGTERM, previous)
     if len(argv) != 1:
         print('usage: python -m operator_agent.autonomous <run_dir>', file=sys.stderr)
         return 2
@@ -265,8 +255,8 @@ def _main(argv=None) -> int:
     from .exec_guard import OwnedGroups
     observed_groups = OwnedGroups([process.pid])
     reason = event_at = None
-    graceful_remote = (os.environ.get('OPERATOR_AGENT_S4_GRACEFUL_CLEANUP') == '1'
-                       and cfg.get('backend') == 'ssh' and bool(cfg.get('persistent')))
+    from .backend_ownership import owned_persistent_ssh
+    graceful_remote = owned_persistent_ssh(cfg)
     try:
         while process.poll() is None:
             remaining = deadline-monotonic()

@@ -1,6 +1,6 @@
 """「§3.4 契约拥有输入 + case 身份一个空间」那张表的可执行形态
 
-靶子: `tests/test_bench_cases.py`（声明与身份 / 布局表 / 契约字段与收紧 lint / 任务渠道 /
+靶子: `tests/unit/test_bench_cases.py`（声明与身份 / 布局表 / 契约字段与收紧 lint / 任务渠道 /
 真跑一遍 / 结构）。
 
 为什么单独一张表: 这一片把「评的是什么输入」放进契约，最容易写歪的正是**声明**与**真输入**
@@ -32,7 +32,7 @@ FILES = {
     "co": "operator_agent/conductor.py",
 }
 
-TARGETS = ["tests/test_bench_cases.py"]
+TARGETS = ["tests/unit/test_bench_cases.py"]
 
 ROWS = [
     Row("M1 身份改成人读的名字", "bc",

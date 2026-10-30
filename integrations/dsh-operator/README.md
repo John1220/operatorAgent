@@ -298,7 +298,7 @@ npm test        # 58 条：注册面/行为/格式化契约（真 CLI fixture）
 会拒绝不合规的命令定义与返回值；元数据那几条更只认**真模块解析器 + `exports` 映射**。
 
 **给插件配「脸」的三个资源**（宿主 `readPluginMeta` 读的就是这三样，规则已在
-`tests/test_packaging.py::TestTheDshPluginFace` 里镜像一份）：
+`tests/hygiene/test_packaging.py::TestTheDshPluginFace` 里镜像一份）：
 
 - `"./package.json"` **必须**在 `exports` 里——宿主拿裸包名走真解析器读 manifest；少了这条，
   manifest 读不到 ⇒ 卡片标题退化成 `dsh-operator-agent`，`icon` 也永远声明不了（静默，不报错）。
@@ -323,7 +323,7 @@ python -m pip wheel . --no-deps -w dist/
 版本号 `0.1.10`，可以发布；实际执行顺序是 Python 包（PyPI）→ npm 壳
 （`npm publish`）→ README 里补一行 `dsh plugin add dsh-operator-agent`。
 工具契约仍是 **9**，本次没有改工具行为。逐字节副本与发版形态由
-`tests/test_packaging.py::TestTheDshReleaseShape` 和 CI 的 `release-shape` 作业守住
+`tests/hygiene/test_packaging.py::TestTheDshReleaseShape` 和 CI 的 `release-shape` 作业守住
 （`.github/workflows/ci.yml`）。若将来把 `operator-dev-agent-design/` 的静态资源打进
 发布物，记得把 `THIRD_PARTY_NOTICES.md` 也列进 `files`。
 

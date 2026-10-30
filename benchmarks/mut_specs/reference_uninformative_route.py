@@ -1,4 +1,4 @@
-"""`tests/test_reference_uninformative_route.py` 那张变异表的**可执行**形态 (#94 第 2 片)
+"""`tests/unit/test_reference_uninformative_route.py` 那张变异表的**可执行**形态 (#94 第 2 片)
 
 与另两张 (`fixer_stage_branch.py` / `llm_sampling_knobs.py`) 同一个理由: 计数要连着产它的
 锚点一起存放, 否则文档里那个「N/N」不可复现 (doc 41 的「13 行、13/13」有两行锚点查不到)。
@@ -33,11 +33,11 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_reference_uninformative_route.py",
-    "tests/test_fixer_stage_branch.py",
-    "tests/test_failure_memory.py",
-    "tests/test_reference_nonfinite.py",
-    "tests/test_kernel_db_persistence.py",
+    "tests/unit/test_reference_uninformative_route.py",
+    "tests/unit/test_fixer_stage_branch.py",
+    "tests/unit/test_failure_memory.py",
+    "tests/unit/test_reference_nonfinite.py",
+    "tests/unit/test_kernel_db_persistence.py",
 ]
 
 ROWS = [

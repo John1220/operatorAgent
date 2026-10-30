@@ -1,6 +1,6 @@
 """「§16 收口: 目标函数进门槛」那张表的可执行形态（切片 J / CHECKLOG I95）
 
-靶子: `tests/test_performance_verdict.py`（纯判据 / 真过门 / 三态与来源 / 报告那一行 / 结构）。
+靶子: `tests/unit/test_performance_verdict.py`（纯判据 / 真过门 / 三态与来源 / 报告那一行 / 结构）。
 
 为什么单独一张表: 这一片把「性能面的成功标准」从**一行比较**变成一个判决，最容易写歪的正是
 判决与门之间的那一层 —— 声明了目标函数却把「未确立」放行（M1）、把「没声明」也当成声明
@@ -31,7 +31,7 @@ FILES = {
     "rp": "operator_agent/report.py",
 }
 
-TARGETS = ["tests/test_performance_verdict.py"]
+TARGETS = ["tests/unit/test_performance_verdict.py"]
 
 ROWS = [
     Row("M1 声明了目标函数, 未确立也放行", "el",

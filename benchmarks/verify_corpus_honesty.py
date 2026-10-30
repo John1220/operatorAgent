@@ -30,7 +30,7 @@
   · **注入的两个语料实例就是被写的那两个, 且落点在临时目录** —— 这条是第一版探针缺的,
     它因此把 7 条探针记录写进了仓库语料而自己全绿: `FailureDatabase` 有 `__len__`, 空实例
     是 falsy 的, 而 `Conductor.__init__` 写的是 `failure_db or FailureDatabase()` (已修,
-    `is None` 判断 + `tests/test_kernel_db_persistence.py::TestInjectedCorpusIsTheOneWritten`)
+    `is None` 判断 + `tests/unit/test_kernel_db_persistence.py::TestInjectedCorpusIsTheOneWritten`)
   · 每条真实失败落库时 `fixed is False`, id 是 `cx-{task_id}:{签名}` (内容派生, 不是插入序号)
   · 签名里不含 `/` 或 `\\` —— 它是跨运行语料的键, 带路径就等于把那台机器写进仓库
   · 同一条失败以两个 task_id 各记一次 ⇒ `recurrence()` 对该签名数到 **2** (复发门的前提)

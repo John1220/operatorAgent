@@ -5,7 +5,7 @@
     ssh <host> "cd ~/operator_agent && ~/.local/bin/uv run python <远端临时文件>"
 
     (刻意的: 不写死任何本机或远端固定路径 —— 共享主机上写固定 scratch 路径会被
-     `tests/test_shared_host_scratch_paths.py` 的棘轮判红, 那是 doc 52 的落点纪律。)
+     `tests/unit/test_shared_host_scratch_paths.py` 的棘轮判红, 那是 doc 52 的落点纪律。)
 
 
 为什么要有它: 控制端的 L1 只有 4 个键 (backend/compile_status/static_guards/

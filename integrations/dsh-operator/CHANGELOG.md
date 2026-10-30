@@ -8,7 +8,7 @@
   只声明 `license` 字段、不带许可正文，安装方拿不到条文。
 - `private` 由 `true` 改为 `false`，可 `npm publish`；版本号从 `0.1.9` 前进到 `0.1.10`，
   避免「同版本号、不同内容」——0.1.9 那两份本地构建继续用各自 SHA256 区分。
-- 两份许可文件是仓库根目录的**逐字节副本**，由 `tests/test_packaging.py` 守卫，防止改一处忘另一处。
+- 两份许可文件是仓库根目录的**逐字节副本**，由 `tests/hygiene/test_packaging.py` 守卫，防止改一处忘另一处。
 
 ## 0.1.9
 
@@ -198,7 +198,7 @@
 - README 补「2.3 卸载 / 禁用」：GUI 插件页 / CLI / 纯手工三条路，并点明 CLI 那条是**透传
   给 pnpm** 的（`add` / `remove` 都会顺带同步 `dsh.profile.bundles` —— 见 0.1.4 的更正）。
 - 守卫：`test/host-contract.test.mjs` 用**真 `readPluginMeta`** 经 `node_modules` 符号链接
-  读一遍元数据（去掉任一条 exports 都会红，已用变异验证）；`tests/test_packaging.py`
+  读一遍元数据（去掉任一条 exports 都会红，已用变异验证）；`tests/hygiene/test_packaging.py`
   新增 `TestTheDshPluginFace` 把宿主的 locale/icon 规则镜像一份（不需要装 DSH）。
   合计 JS 26 条 / Python 侧 64 条通过。
 

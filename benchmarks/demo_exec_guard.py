@@ -15,7 +15,7 @@
   4. **哪一项没设上，如实报** —— 本机（macOS）`RLIMIT_AS` 内核 EINVAL，内存那一档
      只能报 `not_enforced` ＋原始原因；「设不上」不许被读成「没有内存上限」
 
-可执行文档: `tests/test_exec_guard.py`(32 条) 与 `tests/test_demo_exec_guard.py`；
+可执行文档: `tests/unit/test_exec_guard.py`(32 条) 与 `tests/unit/test_demo_exec_guard.py`；
 变异表 7 行（只标定、不改源）:
 
     python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/exec_guard.py

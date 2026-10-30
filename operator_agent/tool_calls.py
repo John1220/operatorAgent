@@ -50,9 +50,9 @@ class ToolCall:
         if not isinstance(arguments, dict) or not arguments.get('run_dir'):
             raise ToolError('run_dir_required', f'{name} requires run_dir')
         self.run = Path(arguments['run_dir']).resolve()
-        self.graceful_remote = (os.environ.get('OPERATOR_AGENT_S4_GRACEFUL_CLEANUP') == '1'
-                                and arguments.get('backend') == 'ssh'
-                                and arguments.get('persistent') is True)
+        from .backend_ownership import owned_persistent_ssh
+        self.graceful_remote = owned_persistent_ssh(
+            arguments, persistent_default=name == 'operator_bench')
         self.repair_policy = None
         self.deadline = None
         if name == 'operator_repair':
@@ -261,27 +261,15 @@ def main(argv=None):
     from .mcp_server import handle_message
     # Any noisy library output belongs to execution.log, never the protocol pipe.
     sys.stdout = sys.stderr
-    graceful = (os.environ.get('OPERATOR_AGENT_S4_GRACEFUL_CLEANUP') == '1'
-                and (request.get('arguments') or {}).get('backend') == 'ssh'
-                and (request.get('arguments') or {}).get('persistent') is True)
-    previous = None
-    if graceful:
-        from .backend_ownership import begin_scope
-        begin_scope(directory, launch['invocation_id'])
-        previous = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-    try:
+    from contextlib import nullcontext
+    from .backend_ownership import owned_persistent_ssh, owned_worker_scope
+    graceful = owned_persistent_ssh(request.get('arguments') or {},
+                                  persistent_default=request.get('name') == 'operator_bench')
+    with (owned_worker_scope(directory, launch['invocation_id']) if graceful else nullcontext()):
         response = handle_message(dict(jsonrpc='2.0', id=1, method='tools/call', params=request))
         publish_json(directory/'worker-result.json', dict(invocation_id=launch['invocation_id'],
             finished_monotonic=monotonic(), response=response['result']))
         return 0
-    finally:
-        if graceful:
-            from .backend_ownership import finish_scope
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            try:
-                finish_scope()
-            finally:
-                signal.signal(signal.SIGTERM, previous)
 
 
 if __name__ == '__main__':

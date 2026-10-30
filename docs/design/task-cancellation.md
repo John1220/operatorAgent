@@ -66,6 +66,8 @@ MCP 读入线程只读取协议行，主循环处理状态/取消并轮询 worke
 
 取消不会删除、修改或退还派发前的模型/验证预留。终态保留取消时可得的账本、部分产物路径和清理回执；缺失账本保持未知，不补零。前台 HITL 工具没有因此获得一份虚构的自主任务总账本。
 
-本机 worker 回收与远端/服务商停止是不同事实：`cleanup.remote_execution=unknown`、`cleanup.provider_call=unknown`，自主任务预算仍保留 `remote_cancellation_proven=false`。杀掉本机 SSH/HTTP 进程不证明远端 GPU 已静默，也不证明服务商停止推理或计费。S2 的离线测试只验证本机行为；真实远端清理按后续 S4 受控真机验收，不在这里宣称完成。
+本机 worker 回收与远端/服务商停止是不同事实。自 2026-10-30 起，CLI/MCP 与自主运行的 **persistent SSH** 默认在 worker 退出前关闭本次拥有的会话：远端关闭共用最多 10 秒，监督者在取消/总时限到达时给 worker 最多 12 秒清理机会，再进入既有本机终止流程。无需 S4 专用环境开关。只有所有已启动会话握手完整且各自的精确进程身份清理得到静默回执，`cleanup.remote_execution` 才为 `quiescent`；启动身份不完整、清理失败或超时仍为 `unknown`。一次性 SSH、其它后端、SIGKILL 和机器故障不获得该保证。
+
+`cleanup.provider_call=unknown`、`all_descendants_proven=false` 与自主预算的 `remote_cancellation_proven=false` 继续保留：本次持有的远端 runner 退出不能证明服务商停止推理/计费，也不能证明任意子孙进程都已停止。只杀本机 SSH/HTTP 进程仍不构成远端静默证据。GPU2 的真实执行中取消、RPC 超时及两次后续完整 L2 验收见[中断与恢复验收](../status/gpu-interrupt-recovery-20261030.md)。S2 的历史离线结果不被升级为 GPU 证据。
 
 不实现暂停/恢复、取消后的自动重试或任务目录复用。重新运行使用新任务目录；历史产物保留。Q1 外内层对照的暂停决定仍按 [HITL 边界 §7](hitl-generation-boundary.md#7-我无法确立的事) 执行。

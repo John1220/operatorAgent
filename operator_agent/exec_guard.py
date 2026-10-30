@@ -47,7 +47,7 @@
 
 ## 可证 / 不可证
 
-**可以声称（有守卫 `tests/test_exec_guard.py` + 演示 `benchmarks/demo_exec_guard.py`）**：
+**可以声称（有守卫 `tests/unit/test_exec_guard.py` + 演示 `benchmarks/demo_exec_guard.py`）**：
 1. 墙钟超时会**杀掉整个进程组**（含孙子进程），不留孤儿，并给出 `timeout` + 用了多少 ms；
 2. `SIGXCPU`（CPU 时间）/ EFBIG（单文件大小）/ `EAGAIN`+`BlockingIOError`（进程数）/
    `MemoryError`（内存）四档在**返回值里分得开**，且带读数；
@@ -354,7 +354,7 @@ class Limits:
     #: 8MB 会把**合法**的大产物判成失败 —— `benchmarks/leetcuda_*.py` 的 fixture 直接返回
     #: 64MB 的张量（`1024x1024xfp64`，pickle 后 67MB），于是 L2 报「产物超上限」而不是
     #: 那个核真正的对错，三条用例因此红。这一格的作用是**给失控收口**，不是给内存做预算；
-    #: 真正需要小上限的调用方显式传（`tests/test_exec_guard.py` 就是这么钉的）。
+    #: 真正需要小上限的调用方显式传（`tests/unit/test_exec_guard.py` 就是这么钉的）。
     artifact_bytes: int = 256 * 1024 * 1024
     #: 父侧保留的候选 stdout/stderr 尾巴（字节）。只是日志，不是判据。
     log_bytes: int = 8192
@@ -946,7 +946,7 @@ def _fork_child(job_path: str, workdir: str, log_path: str) -> None:
     try:
         os.chdir(workdir)
         # 用内建 `open` 而不是 `os.open(..., O_CREAT)`：§22.1 有一条结构守卫
-        # （`tests/test_run_layout.py::TestOnlyOneDoorInTheHarness`）钉着「`operator_agent/`
+        # （`tests/unit/test_run_layout.py::TestOnlyOneDoorInTheHarness`）钉着「`operator_agent/`
         # 里打开写窗的能力只有 `run_layout.py` 一处」。日志文件不是那条纪律的对象，
         # 但**不要**为了自己方便去撞别人的不变量 —— 这里就按同样的方式开。
         with open(log_path, "ab") as log_fh:

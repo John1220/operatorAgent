@@ -1,8 +1,8 @@
 """「§21.1 动作信封：LLM 交上来的那一份」那张变异表的**可执行**形态
 
-靶子是 `tests/test_llm_action_producer.py`（三态 / 切段 / 模型写意图 / harness 写数字与
+靶子是 `tests/unit/test_llm_action_producer.py`（三态 / 切段 / 模型写意图 / harness 写数字与
 路径 / 三个 ask 种类的响应与上界 / 续跑的取舍 / 模板与词汇表不漂），外加
-`tests/test_agent_runtime.py`（§21.4 的判据本身）与 `tests/test_fixer.py`（投影入口）。
+`tests/unit/test_agent_runtime.py`（§21.4 的判据本身）与 `tests/unit/test_fixer.py`（投影入口）。
 
 为什么单独一张表: 这一片的主张不是「能读一个 JSON」，而是**判据第一次遇到一个真正
 不可靠的生产者**。每行拆掉一层保护，看守卫是不是真的在守：
@@ -30,8 +30,8 @@ FILES = {
     "pm": "operator_agent/prompts/fixer_repair.md",
 }
 
-TARGETS = ["tests/test_llm_action_producer.py", "tests/test_agent_runtime.py",
-           "tests/test_fixer.py"]
+TARGETS = ["tests/unit/test_llm_action_producer.py", "tests/unit/test_agent_runtime.py",
+           "tests/unit/test_fixer.py"]
 
 ROWS = [
     # ── 读: 三态与切段 ───────────────────────────────────────────
@@ -150,7 +150,7 @@ ROWS = [
         """        outcome = self._run_with_action_unused(""",
         "**具体输入**: 同一个模型回复分别走 `run` 与 `run_with_action` —— 两条路要给出"
         "同一个 `(code, summary)` ⇒ `test_an_ask_that_comes_with_code_loses_the_code` "
-        "的第二半红（`AttributeError` 也会让 `tests/test_fixer.py` 那条入口结构守卫红）。"
+        "的第二半红（`AttributeError` 也会让 `tests/unit/test_fixer.py` 那条入口结构守卫红）。"
         "这一行保证「接线有没有改修复行为」这个问句永远答得出来"),
     Row("M13 信封跨轮泄漏 (消费时不清)", "cu",
         """                _model_envelope = self._pending_action_envelope

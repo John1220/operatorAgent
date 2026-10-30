@@ -580,7 +580,7 @@ def _error_shape_torch(bad, *, n_bad: int, total: int, has_nonfinite: bool):
     与本地路径 (`verifier._error_shape_of`) 的分工完全对称: 归约在各自的数组后端上做
     (这里 torch, 那面 numpy), **分类规则只有一份** (`tolerance.classify_error_shape`,
     `deploy()` 会把同一个 tolerance.py 推到远端)。两边传进去的东西必须一样 ——
-    这一点由 `tests/test_tolerance_error_shape.py` 的一致性用例钉住。
+    这一点由 `tests/unit/test_tolerance_error_shape.py` 的一致性用例钉住。
 
     形状折叠成二维 (除最后一维外全部折叠), 于是 (M,N) 与 (B,H,S,D) 用同一套规则。
     """
@@ -1755,7 +1755,7 @@ def run_action(payload: dict) -> dict:
     1.09 s + CUDA 上下文 ~0.44 s + ssh 握手 0.57 s), 见 doc 62。抄第二套分派的代价
     是两边慢慢漂开, 所以宁可把这份链整段搬进来, 也不在服务里再写一个 if 链。
 
-    每个 action 用到的键都在自己那一支里读, 不提到分派之前: tests/test_runner_contract.py
+    每个 action 用到的键都在自己那一支里读, 不提到分派之前: tests/unit/test_runner_contract.py
     按「这一支读了哪些键」对照两个 runner, 提到外面会让所有 action 都算成读了全部键。
     """
     # 确保使用自动选择的最优 GPU

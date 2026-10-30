@@ -143,7 +143,7 @@ def prescribe(err_text: str) -> Optional[tuple[str, str]]:
 #      (仓库现存 `output/failure_db.jsonl` 里那 2 条 L3 是更早版本/探针留下的, 现在没有
 #       写者: 全仓 grep 不到任何生产代码写出这句 error_summary。)
 #   所以这一句今天是**死文字**, 留着是因为它两条通道各自只被一条结构约束挡着, 而那两条
-#   约束都各有一条守卫钉住 (`tests/test_fixer_stage_branch.py`: `verify()` 早退的 AST 用例
+#   约束都各有一条守卫钉住 (`tests/unit/test_fixer_stage_branch.py`: `verify()` 早退的 AST 用例
 #   + `conductor` 那道 `l1_l2_failed` 门的用例)。任一松掉, 性能文本就会进到取向要裁决的
 #   地方, 这句是唯一说清「本轮不为它优化」的位置。这不是「算了没人读」的观测 —— 它是
 #   一条明标的保险, 且它没有替任何未通过的判定说话。

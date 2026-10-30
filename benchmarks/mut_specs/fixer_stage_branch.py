@@ -1,4 +1,4 @@
-"""`tests/test_fixer_stage_branch.py` 那张变异表的**可执行**形态 (每行带 kill witness)
+"""`tests/unit/test_fixer_stage_branch.py` 那张变异表的**可执行**形态 (每行带 kill witness)
 
 为什么要在仓里有一份 (而不是一段 /tmp 脚本): 本会话刚撞过一次 —— doc 41 里写的「13 行、13/13」
 有两行的锚点在任何文件里都查不到 ⇒ 那个数字不可复现。计数要连着产它的锚点一起存放。
@@ -29,12 +29,12 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_fixer_stage_branch.py",
-    "tests/test_prompt_placeholder_contract.py",
-    "tests/test_fixer.py",
-    "tests/test_failure_memory.py",
-    "tests/test_interface_contract.py",
-    "tests/test_kernel_db_persistence.py",
+    "tests/unit/test_fixer_stage_branch.py",
+    "tests/unit/test_prompt_placeholder_contract.py",
+    "tests/unit/test_fixer.py",
+    "tests/unit/test_failure_memory.py",
+    "tests/unit/test_interface_contract.py",
+    "tests/unit/test_kernel_db_persistence.py",
 ]
 
 ROWS = [

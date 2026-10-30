@@ -25,9 +25,9 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_improvement_band_drift.py",
-    "tests/test_measurement_validity.py",
-    "tests/test_perf_ruler_across_rounds.py",
+    "tests/unit/test_improvement_band_drift.py",
+    "tests/unit/test_measurement_validity.py",
+    "tests/unit/test_perf_ruler_across_rounds.py",
 ]
 
 ROWS = [
@@ -138,6 +138,6 @@ ROWS = [
         "ms", 'LINEAGE_BAND_KEY = "l3_improvement_band"', 'LINEAGE_BAND_KEY = "l3_ruler"',
         "存在具体条件可观察, 但证人不在本片的文件里: 本片的用例一律通过常量读写这一格 ⇒ 全部照过; "
         "真跑那组里同一轮记录上的性能尺那一格 (`LINEAGE_PERF_RULER_KEY = \"l3_ruler\"`) 被判决现场"
-        "后写的浮点覆盖 ⇒ `tests/test_perf_ruler_across_rounds.py` 那批真跑用例红。留这一行是因为"
+        "后写的浮点覆盖 ⇒ `tests/unit/test_perf_ruler_across_rounds.py` 那批真跑用例红。留这一行是因为"
         "它证明跨表覆盖真实存在: 两个读者共用一个键名时, 只有另一个读者会响 (与 P6 同一条, 方向反过来)", True),
 ]

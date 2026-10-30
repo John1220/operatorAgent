@@ -1,4 +1,4 @@
-"""变异表: §21.3 对照实验的接线与结论边界 (靶子 = `tests/test_evidence_ablation.py`)
+"""变异表: §21.3 对照实验的接线与结论边界 (靶子 = `tests/unit/test_evidence_ablation.py`)
 
 ⚠️ 这张表由**主 agent 串行标定** (`python3 -B -m benchmarks.mutation_calibrate --spec ...`)。
 `--check-only` 只核锚点唯一性与 witness 字段, 不动盘。
@@ -14,10 +14,10 @@ from benchmarks.mutation_calibrate import Row
 
 FILES = {
     "ab": "benchmarks/evidence_ablation_h20.py",
-    "te": "tests/test_evidence_ablation.py",
+    "te": "tests/unit/test_evidence_ablation.py",
 }
 
-TARGETS = ["tests/test_evidence_ablation.py"]
+TARGETS = ["tests/unit/test_evidence_ablation.py"]
 
 ROWS = [
     Row("M1 两臂多出第二处差异 (轮数随开关变)", "ab",

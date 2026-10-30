@@ -325,9 +325,9 @@ class RunState:
         `_run_round` 时才现形的: 它们在**同一轮里先读后写**, 所以必须有值从上一轮传进来 ——
         在原作用域里这是隐形的, 搬成方法后第一轮就是 UnboundLocalError。后两位的形状更隐蔽:
         赋值在 if 这一支、读在 elif 的另一支 —— 光比行号顺序看不出来, 要按「可能未绑定就读取」
-        的数据流分析才现形 (所以判据也照数据流写, 见 tests/test_run_state_single_source.py)。它们**不在快照里**:
+        的数据流分析才现形 (所以判据也照数据流写, 见 tests/unit/test_run_state_single_source.py)。它们**不在快照里**:
         进程重启后回到 setup 初值 (既有行为, 此处只让它可见)。
-    `tests/test_run_state_single_source.py` 把这三条都钉成了断言 —— 少一个字段,
+    `tests/unit/test_run_state_single_source.py` 把这三条都钉成了断言 —— 少一个字段,
     或加一个没人读的字段, 都会变红。
 
     只读上下文那一组: 绑定在整次运行里不变, 但值本身可能是可变的累积器
@@ -423,7 +423,7 @@ class Conductor:
         # 等于不存在」那条纪律的反例 —— 默认配置下单次读数就能进语料。现在它是
         # **无条件**的: `all_passed` 的产物先补一次独立重测 (`_produce_remeasure`),
         # 再过 `admit_to_corpus` 的两次确认那道门。消融 (§14-9 要的「关掉资格审计的后果」
-        # 那一臂) 只能在 harness 侧 patch, 见 `tests/test_spine_wiring.py` 里那条用例
+        # 那一臂) 只能在 harness 侧 patch, 见 `tests/unit/test_spine_wiring.py` 里那条用例
         # —— §3.5 规则 3: 能一键关掉的尺子会先被用在无人值守的夜里。
         # 设计 §10.2 的三种预算 (`operator_agent/budget.py`)。**默认全关**: 没设上限
         # 就不拦, 也不假装拦过 —— 「本轮要不要花这次钱」是任务级的决定, 不是模块能替
@@ -436,7 +436,7 @@ class Conductor:
         # §21 Agent Runtime (结构化动作 + 进编译前的独立检查)。默认**自己建一个**:
         # 一个「默认没有 Runtime」的控制器会让 §21 退化成「测试里才存在的一层」，
         # 而那正是本仓最贵的缺陷类型（判据算了但没人调）。
-        # 注入的用途是替身与替身级对照（`tests/test_agent_runtime_wiring.py`）。
+        # 注入的用途是替身与替身级对照（`tests/unit/test_agent_runtime_wiring.py`）。
         agent_runtime: Optional[AgentRuntime] = None,
         # §22.1 的运行布局根。默认 `""` ⇒ **不建布局**，候选的角色路径是
         # `candidate/code.<ext>`（§21 的动作协议活在「声明」那一档）。传了真实
@@ -682,7 +682,7 @@ class Conductor:
             self._record_candidates(records_since(producer, cursor, outcome=outcome))
 
     #: 循环出口的词汇表。**每个词都要有写者** —— 多一个没写者的词就是「算了没人读」的副本,
-    #: `tests/test_stop_reason.py` 按差集钉这条。
+    #: `tests/unit/test_stop_reason.py` 按差集钉这条。
     STOP_REASONS = ("passed", "stagnant", "converged", "fix_error", "l1_l2_failed",
                     "search_error", "rounds_exhausted", "infra_retry", "transport_unknown_hold", "reference_identity_hold",
                     # §10.2 的两条预算出口。与 `rounds_exhausted` 分开数: 那个是
@@ -2019,7 +2019,7 @@ class Conductor:
         这是从 _execute_inner 的轮次循环体**整体**搬出来的一步。搬运方式是逐字的:
         除下面这 14 处控制流改写之外, 方法体与原来的循环体逐 AST 节点相同 (写盘前按
         AST 逐节点比对过; 搬完之后那 6 个跨轮记忆名字的判据在
-        tests/test_run_state_single_source.py):
+        tests/unit/test_run_state_single_source.py):
           13 处 break    -> return _ROUND_STOP
            1 处 continue -> return _ROUND_CONTINUE
         改过之后, 这个方法内部再没有能跳出调用者的语句 —— 「这一轮要不要终止整个
@@ -2037,7 +2037,7 @@ class Conductor:
         接口为什么是 state + round_num + 5 个关键字:
           * state 装的是**跨轮活下来**的那些值 —— 既包括收尾也要读的, 也包括循环
             自己攒的记忆 (见 RunState 类文档)。字段清单由三条既有契约钉住
-            (tests/test_run_state_single_source.py)。
+            (tests/unit/test_run_state_single_source.py)。
           * 另外 5 个是**只有这一轮才需要、而且从不被写**的只读上下文 (期望输出 /
             硬件信息 / 显存上限 / 停滞阈值 / 漂移判定)。它们刻意不进 state: 那样
             字段清单就退化成「凡是这一轮读到的都算」, 也就不再是契约了。
@@ -2868,7 +2868,7 @@ class Conductor:
                 # 的唯一证据, 换成祖先的错误信息就什么都修不了。
                 # `!= current_code` 那半句管的是同一份文本这次没过 (验证非确定: 共享卡、
                 # 容差边界) 的场合 —— 那时起点没变, 少了它就印一句「退回」的谎话。
-                # 它的证人是 `tests/test_verified_parent_retreat.py` 里用假 Verifier 造的
+                # 它的证人是 `tests/unit/test_verified_parent_retreat.py` 里用假 Verifier 造的
                 # 那个现场; 没有那一条时这个条件构造不出反例, 就会被当成死文字删掉 (M4)。
                 repair_base = state.current_code
                 if state.verified_parent is not None and state.verified_parent != state.current_code:
@@ -3042,7 +3042,7 @@ class Conductor:
         读这次运行攒下的全部东西, `_restore_state_from_snapshot` 那 11 个「快照状态」
         只是它的一个子集。正确的收敛方向是把它收成一个运行状态对象, 但那要求 1128 行的
         轮次循环也改成从那个对象读 —— 那是下一步, 不在这一版里。这一版刻意**不**动循环,
-        为的是让「行为是否变了」只由 `tests/test_execute_inner_behavior.py` 一个判据回答。
+        为的是让「行为是否变了」只由 `tests/unit/test_execute_inner_behavior.py` 一个判据回答。
         """
 
         # 循环正常走到末尾 (没被任何 break 收走) —— 这一档以前只在 stdout 上有一行 print,
@@ -3774,7 +3774,7 @@ class Conductor:
           * `correctness_verified` —— L2 的结论（没有 L2 结果 ⇒ `None`，缺证据不升 validated）；
           * `coverage_mode` —— `source_lang.classify(候选源码, 声明的 dsl)`，与 §21.4 的
             `PrecompileVerdict.coverage.mode` **同源**（守卫钉住这条等式，见
-            `tests/test_claim_level.py`）。
+            `tests/unit/test_claim_level.py`）。
         """
         from .eligibility import claim_level
         from .source_lang import classify
@@ -3824,7 +3824,7 @@ class Conductor:
             # 第 3 道门**恒开** —— 它是设计 §3.5「不允许配置」那一栏里的一项
             # (「长期记忆的独立确认」), 所以这里写死 True 而不是读某个开关:
             # 一个能一键关掉的尺子会先被用在无人值守的夜里 (§3.5 规则 3)。
-            # 消融那一臂只能在 harness 侧 patch (见 `tests/test_spine_wiring.py`)。
+            # 消融那一臂只能在 harness 侧 patch (见 `tests/unit/test_spine_wiring.py`)。
             requires_remeasure=True,
         )
         record = KernelRecord(

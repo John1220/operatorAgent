@@ -1,4 +1,4 @@
-"""§22.2 第一项「编译超时」那张变异表的**可执行**形态（靶子：`tests/test_exec_compile_guard.py`）
+"""§22.2 第一项「编译超时」那张变异表的**可执行**形态（靶子：`tests/unit/test_exec_compile_guard.py`）
 
 这一片的目标只有一句话：**编译期那一步在受控子进程里跑，且阶段级上限真的到了那里**。
 所以每一行都要能回答「去掉它，那件事还是真的吗」：
@@ -36,8 +36,8 @@ FILES = {
 }
 
 TARGETS = [
-    "tests/test_exec_compile_guard.py",
-    "tests/test_exec_guard.py",
+    "tests/unit/test_exec_compile_guard.py",
+    "tests/unit/test_exec_guard.py",
 ]
 
 ROWS = [
