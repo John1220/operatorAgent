@@ -50,6 +50,21 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
 边界：契约没有声明目标函数，报告按**主 case** 加速比 >= 1.0 判定，因此这是
 **单形状**结论，不是算子全域性能证明；也没有做独立重测与入库。
 
+### 2.1b 8192³ fp16 matmul（扩展点）
+
+同一候选、同一 GPU 7，只把 shape 放大到 8192³，走 `_LARGE_TILE`（128×128）分支：
+
+| 项 | 值 |
+|---|---|
+| L1 / L2 / L3 | 通过 / 通过 / 通过（15/15 case，最大误差 0） |
+| 加速比 | **1.0239×**（`7.822/8.010 ms`） vs cuBLAS(FP16) |
+| 吞吐 | **140,559 GFLOPS ≈ 140.56 TFLOPS**，峰值 **95.0%** |
+| launch 占比 | **0.26%** |
+| 档位 / 资格 | `valid` / `can_gate=true`，五位全 True |
+
+这证明性能链路在更大 shape 上仍给出 `valid`，但仍是 **compute-bound matmul**，
+不能替代 memory-bound 算子的证据。
+
 ### 2.2 §14 真机冒烟
 
 `benchmarks/smoke_spine_h20.py --skip-contention`，固定 GPU 7，**0 失败**：
@@ -101,6 +116,25 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
 
 这补的是 v0.6.0（S4 之后代码有变）的取消路径证据，不构成正确性或性能结论。
 
+### 2.6 Memory-bound 尝试（未成立）
+
+目标是给 LayerNorm 一个大 shape 的 `valid` L3；三次尝试都被**输入传输**挡住，
+不是 GPU 算力问题：
+
+| shape（fp32） | 字节 | 结果 |
+|---|---:|---|
+| 16384×6144 | 402,653,184 | L2 拒绝：`logical tensor 超过输入字节上限`（单 tensor 上限 256 MiB） |
+| 16384×4096 | 268,435,456 | 恰好等于 256 MiB；L2 拒绝：`JSON 输入超过字节上限`（张量 + 标量超过同一预算） |
+| 16384×3800 | 249,036,800 | 通过上限，但 seed 未被采用，回落成 249 MB base64 JSON；5.5 分钟后取消（exit 130） |
+
+第三条的根因已核对：`Verifier._seed_spec_for` 用 `cases_from_shapes` 的
+`_rows_case`，它构造 `X/weight/bias`；而本契约与 correctness suite 的输入只有
+`X` —— 集合不相等 ⇒ `_seed_spec_for` 返回 `None` ⇒ 走整份 JSON 传输。
+对 249 MB 的输入，这条路不可用。
+
+结论：**本轮没有取得 memory-bound 的 `valid` L3**。后续要补，得先修 rows-case
+的 seed 匹配（或为这类输入单独放开预算），不是再借 GPU 就能解决。
+
 ## 3. 未执行与永久边界
 
 - **S5 正式 24 格（P3）未启动**。P2 仍未证明模型网络唯一出口与远端候选执行隔离；
@@ -112,9 +146,11 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
   对小于 1 ms 的核偏紧，但它只作诊断，不影响 validity —— 记为后续调整项。
 - **v2 LayerNorm 参考未跑**：环境 torch 2.14/driver 580 与 `PINNED_RUNTIME` 表面一致，
   但没有执行 attestation；不能声称 v2 可用。
+- **Memory-bound valid L3 未取得**：三次 LayerNorm 尝试被 256 MiB 输入预算与
+  rows-case seed 不匹配挡住（§2.6）；这是输入传输问题，不是 GPU 能力问题。
 - **多卡/并发/UI**：未做。
 
-H20 释放后**永久不可做**：新增真机证据、其他 shape 的 valid L3、常量再标定、
+H20 释放后**永久不可做**：新增真机证据、memory-bound 算子的 valid L3、常量再标定、
 S5 正式批次、跨卡对照。
 
 ## 4. 清理
@@ -136,13 +172,19 @@ S5 正式批次、跨卡对照。
 | `launch-floor.log` | `2dc4aeee85972d7913fc618aa4c3bfba17a48e7f0700b18c5040d0822ab3f385` |
 | `l2-flush-effect.log` | `664939cea6100335ec83f01e28cf58430160c2c924ae3ab286015170de0cc6a4` |
 | `dispersion.log` | `49998bae441ca35c7bf8fadd347d6be7b0438d29fc016f077470b772a53e8b2e` |
-| `summary.json` | `6fe3ccc87dbf39cc5b46f4c0f32a91e8749c3dc55548a80ac6b72cd367692a1b` |
+| `matmul8192/verify-1/result.json` | `4f1b4632f363f9c21269f1d2ab1b2076aef14b8b9166e9faf3cfbb8ffa8fbab6` |
+| `matmul8192/verify-1/report.md` | `6423bb2b652a084d0bcb2018b8d7c03f6ebdaf58ac6f08dcd7545ac89fca1859` |
+| `matmul8192/summary.json` | `e0f0fb5a6d42b68e844234124f479dd65d33d9e70ea4985e457a81405b8461dc` |
+| `layernorm16384x6144/verify-1/result.json` | `15097de1720f45406fe86b7ddfaa0e6b89ad9816d4f57932f4b02f6340c67be5` |
+| `layernorm16384x4096/verify-1/result.json` | `bd72ed2335d32c732715787a86ec07359a5d6902bc33255cde826b6804657fe1` |
+| `layernorm16384x3800/status.json` | `9aae93a0133d42b316d566147381995df46234648b2c0ac557bf8981102b4826` |
+| `summary.json` | `e5f0b37c460b9b4b519282ebc25a5582ffbc4ab82eb87f4de8a5ec87fa73e03d` |
 | `cancellation/cancel.json` | `8bb39852d9791bfd6176e1724ba7a79b95e9bf43dca738fa66f1f7e82eab7396` |
 | `cancellation/status.json` | `9c5471ceb2130bd97cc764a6b3ba13354be64b68c6d908437783c2854b44f70c` |
 | `environment.txt` | `5a37dfb43fbb80aef62cb162d0300b6a787dfe0768240cae3056a564fbefd4ce` |
 
 打包：`output/plugin_completion/20261030-gpu-freeze-evidence.tar.gz`
-（SHA256 `2312cd2a05910604fa69f0e47458fe8400e2f63a5ae88c3904dcfe7a6ae9ae29`）。
+（SHA256 `7a71276e1a8e295768022673cf41e2131823ac5bb527f82c2e3e140654261fa9`）。
 
 完整清单：`output/plugin_completion/20261030-gpu-freeze/SHA256SUMS`。复核：
 
