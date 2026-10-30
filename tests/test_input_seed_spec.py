@@ -87,6 +87,30 @@ class TestControlSideOnlyReplacesBytesWhenIdentical(unittest.TestCase):
         self.assertEqual(spec["protocol"], SEED_PROTOCOL)
         self.assertEqual(spec["seed"], case.seed)
 
+    def test_rows_case_without_affine_inputs_gets_a_spec(self):
+        """layernorm 的内建 profile 只发 X；不能因为 rows-case 声明了 weight/bias 就回退字节。"""
+        task = _task(shapes=((64, 32),), precision=Precision.FP32, kernel_type="layernorm")
+        case = cases_from_shapes("layernorm", (((64, 32), 1.0),), "fp32")[0]
+        inputs = {"X": case.materialize()["X"]}
+        spec = self._verifier()._seed_spec_for(task, inputs)
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec["protocol"], SEED_PROTOCOL)
+        self.assertEqual([t["name"] for t in spec["tensors"]], ["X"])
+
+    def test_rows_case_with_affine_inputs_still_gets_a_spec(self):
+        task = _task(shapes=((64, 32),), precision=Precision.FP32, kernel_type="layernorm")
+        case = cases_from_shapes("layernorm", (((64, 32), 1.0),), "fp32")[0]
+        spec = self._verifier()._seed_spec_for(task, case.materialize())
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec["protocol"], SEED_PROTOCOL)
+
+    def test_rows_case_changed_value_still_disables_the_shortcut(self):
+        task = _task(shapes=((64, 32),), precision=Precision.FP32, kernel_type="layernorm")
+        case = cases_from_shapes("layernorm", (((64, 32), 1.0),), "fp32")[0]
+        inputs = {"X": case.materialize()["X"].copy()}
+        inputs["X"][0, 0] += 1.0
+        self.assertIsNone(self._verifier()._seed_spec_for(task, inputs))
+
     def test_a_single_changed_value_disables_the_shortcut(self):
         task = _task()
         inputs = cases_from_shapes("matmul", (((64, 64, 64), 1.0),), "fp16")[0].materialize()

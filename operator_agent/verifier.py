@@ -992,7 +992,7 @@ class Verifier:
             return self._seed_spec_cache[key]
         spec = None
         try:
-            from .bench_cases import case_spec, cases_from_shapes
+            from .bench_cases import BenchmarkCase, case_spec, cases_from_shapes
             from .remote_input_fidelity import seed_input_digest
             shapes = tuple(getattr(task.constraints, "shapes", ()) or ())
             dtype = getattr(task.constraints.precision, "value", None) or "fp32"
@@ -1000,13 +1000,29 @@ class Verifier:
             cases = cases_from_shapes((task.source.kernel_type or "").strip(), entries,
                                       dtype) or ()
             for case in cases:
-                if case.key() != key:
+                names = {t.name for t in case.tensors}
+                if case.key() == key:
+                    expected = case.materialize()
+                    if seed_input_digest(expected) == seed_input_digest(inputs):
+                        spec = case_spec(case)
+                        break
                     continue
-                expected = case.materialize()
-                if set(expected) == set(inputs) and \
-                        seed_input_digest(expected) == seed_input_digest(inputs):
-                    spec = case_spec(case)
-                break
+                # rows-case（layernorm/softmax/...）声明 X/weight/bias，但无 affine 的
+                # 内建 profile 只物化 X。集合不相等会让这条大输入回落成整份 JSON
+                # （2026-10-30 实测 249 MB 传 5.5 min 仍未完）。只在「缺的恰好是
+                # weight/bias」时按**该 case 的子集**重建，并照旧核 key 与 digest；
+                # 任何数值不一致仍返回 None（回退传字节）。
+                extra = names - set(inputs)
+                if extra and extra <= {"weight", "bias"} and set(inputs) <= names:
+                    subset = BenchmarkCase(
+                        name=case.name, seed=case.seed,
+                        tensors=tuple(t for t in case.tensors if t.name in inputs))
+                    if subset.key() != key:
+                        continue
+                    expected = subset.materialize()
+                    if seed_input_digest(expected) == seed_input_digest(inputs):
+                        spec = case_spec(subset)
+                        break
         except Exception:                       # noqa: BLE001 — 出任何事都退回传字节
             spec = None
         self._seed_spec_cache[key] = spec
