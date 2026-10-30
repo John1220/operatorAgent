@@ -67,6 +67,8 @@ python test_nvidia_matmul.py
   [DSH profile 与组合包](docs/design/dsh-profile-and-bundles.md)
   ；[内层/外层模型的分工边界](docs/design/hitl-generation-boundary.md) —— 写核与搜索为什么归内层、
   这条边界目前只是建议性的、以及启用生成工具的判据
+  ；[H20 冻结验收（2026-10-30）](docs/status/dsh-operator-gpu-freeze-20261030.md) ——
+  v0.6.0 的 4096³ `valid` L3、§14 冒烟与 launch/冲刷复标（GPU 释放前最后一轮真机证据）
 - **阅读路线**：设计规范 §0.2 给了按依赖顺序的读法；**实现状态 §五** 是一张
   **机制 → 代码位置 → 守卫**的对照表，它才是本项目的目录
 - 根目录**没有** `CLAUDE.md`：原件的规范 / 状态 / 历史混在一起，已按治理规则（§25）归档到
