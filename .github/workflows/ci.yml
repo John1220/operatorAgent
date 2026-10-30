@@ -1,0 +1,98 @@
+# 发布前的三层守卫：单元/回归、插件宿主契约、发布物形态。
+#
+# 这三层在本地都跑过，但没有人每次记得跑全部 —— 尤其是打包那一层：`private` 忘了改、
+# `LICENSE` 没进 `files`、wheel 里缺 prompts，源码树里全都看不出来，装的人才会遇到。
+# 真机（GPU / SSH / DSH 桌面宿主）不在 CI 里：那些用例在缺少宿主或真机时自行 skip，
+# 其结果不能由本工作流代签。
+name: ci
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 是声明的最低版本；3.12 代表当前主流。都不装 torch 的真机侧依赖，
+        # 只有两个测试模块在导入期需要它，用 CPU 轮子补齐。
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pytest pyyaml
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Run the suite
+        # 裸 pytest 会钻进 vendored 的 triton/ 检出，并收集根目录的真机 driver。
+        run: python -m pytest tests/ -q -rfE
+
+  plugin:
+    name: dsh plugin contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Run the plugin suite
+        # 缺少 DSH 宿主时，宿主契约那几条按设计 skip；这里不把它们算作通过。
+        working-directory: integrations/dsh-operator
+        run: node --test test/*.test.mjs
+
+  release-shape:
+    name: release artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the wheel and inspect it
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip wheel . --no-deps -w dist/
+          python - <<'PY'
+          import glob, zipfile
+          wheel, = glob.glob('dist/operator_agent-*.whl')
+          names = zipfile.ZipFile(wheel).namelist()
+          required = [
+              'operator_agent/prompts/coder_generate_triton.md',
+              'operator_agent/skills/triton_skill.md',
+          ]
+          missing = [n for n in required if n not in names]
+          assert not missing, f'wheel 缺文件: {missing}'
+          legal = [n for n in names if n.endswith(('dist-info/LICENSE', 'dist-info/NOTICE'))]
+          assert len(legal) == 2, f'wheel 必须随附 LICENSE 与 NOTICE，实际: {legal}'
+          print(wheel, len(names), 'files ok')
+          PY
+      - name: Pack the plugin and inspect the file list
+        working-directory: integrations/dsh-operator
+        run: |
+          npm pack --dry-run --json > /tmp/pack.json
+          node - <<'JS'
+          const pack = require('/tmp/pack.json')[0];
+          const names = pack.files.map((f) => f.path);
+          const required = ['index.mjs', 'cordis.patch.yml', 'icon.svg', 'locale/en.json',
+                            'README.md', 'CHANGELOG.md', 'LICENSE', 'NOTICE'];
+          const missing = required.filter((n) => !names.includes(n));
+          if (missing.length) {
+            console.error('npm 包里缺文件:', missing.join(', '));
+            process.exit(1);
+          }
+          console.log(pack.filename, names.length, 'files ok');
+          JS

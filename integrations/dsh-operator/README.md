@@ -35,7 +35,7 @@ pip install operator-agent
 
 ```bash
 python3 -m pip install numpy /path/to/operator_agent-0.6.0-py3-none-any.whl
-dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.1.9.tgz
+dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.1.10.tgz
 ```
 
 确认安装命令可见：
@@ -284,15 +284,15 @@ CLI Ctrl-C/SIGTERM 会清理本机 worker 后返回取消 JSON（退出码 130�
 ## 8. 构建与发版（维护者）
 
 ```bash
-npm test        # 38 条：注册面/行为/格式化契约（真 CLI fixture）+ 真宿主契约
+npm test        # 58 条：注册面/行为/格式化契约（真 CLI fixture）+ 真宿主契约
 ```
 
 `npm test` 里有两层守卫，别只跑一层：
 
 | 文件 | 钉住什么 | 依赖 |
 |---|---|---|
-| `test/plugin.test.mjs`（30 条） | 注册面、`/op` 行为、路径解析、超时/取消、`scrubEnv`/`normalizeConfig`、宿主日志（同类只记一次）、两个 formatter 吃**真 CLI fixture** | 无（替身 ctx + 假 CLI） |
-| `test/host-contract.test.mjs`（8 条） | 把插件注册进**装在机器上的** DSH 自己的 `cordis` + `dsh-commands` 服务真执行（含 `agent` 透传），并用真 `readPluginMeta` 读一遍「脸」、用真 `evaluatePluginCompatibility` 核 `engines.dsh`；最后一条用**真 MCP SDK 客户端**连真 server 验 `instructions` 到达客户端 | DSH 安装；最后一条还需要能 import 判定层的 python3。找不到就**跳过**（`DSH_APP_ROOT` / `OPERATOR_AGENT_PYTHON`） |
+| `test/plugin.test.mjs`（49 条） | 注册面、`/op` 行为、路径解析、超时/取消、`scrubEnv`/`normalizeConfig`、宿主日志（同类只记一次）、两个 formatter 吃**真 CLI fixture** | 无（替身 ctx + 假 CLI） |
+| `test/host-contract.test.mjs`（9 条） | 把插件注册进**装在机器上的** DSH 自己的 `cordis` + `dsh-commands` 服务真执行（含 `agent` 透传），并用真 `readPluginMeta` 读一遍「脸」、用真 `evaluatePluginCompatibility` 核 `engines.dsh`；最后一条用**真 MCP SDK 客户端**连真 server 验 `instructions` 到达客户端 | DSH 安装；最后一条还需要能 import 判定层的 python3。找不到就**跳过**（`DSH_APP_ROOT` / `OPERATOR_AGENT_PYTHON`） |
 
 第二层是必要的：替身 ctx 只会照单全收，而宿主的 `normalizeDefinition` / `normalizeResult`
 会拒绝不合规的命令定义与返回值；元数据那几条更只认**真模块解析器 + `exports` 映射**。
@@ -319,13 +319,17 @@ python -m pip wheel . --no-deps -w dist/
 - 从干净导出构建：`rsync -a --exclude output --exclude logs --exclude triton --exclude .git ./ /tmp/oa-src/`
   然后在 `/tmp/oa-src` 里构建。
 
-发布顺序：Python 包（PyPI）→ npm 壳（把 `private` 改成 `false`）→ README 里补一行
-`dsh plugin add dsh-operator-agent`。许可已定为 Apache-2.0；若将来把
-`operator-dev-agent-design/` 的静态资源打进发布物，记得把 `THIRD_PARTY_NOTICES.md`
-也列进 `files`。
+发布形态（2026-10-30 起）：`private` 已改为 `false`、`LICENSE`/`NOTICE` 已随包、
+版本号 `0.1.10`，可以发布；实际执行顺序是 Python 包（PyPI）→ npm 壳
+（`npm publish`）→ README 里补一行 `dsh plugin add dsh-operator-agent`。
+工具契约仍是 **9**，本次没有改工具行为。逐字节副本与发版形态由
+`tests/test_packaging.py::TestTheDshReleaseShape` 和 CI 的 `release-shape` 作业守住
+（`.github/workflows/ci.yml`）。若将来把 `operator-dev-agent-design/` 的静态资源打进
+发布物，记得把 `THIRD_PARTY_NOTICES.md` 也列进 `files`。
 
 ## 9. License
 
 **Apache-2.0**，见仓库根目录的 [`LICENSE`](../../LICENSE) 与 [`NOTICE`](../../NOTICE)
-（版权人：`the operator-agent authors`）。
+（版权人：`the operator-agent authors`）。npm 包里各带一份逐字节副本
+（[LICENSE](LICENSE)、[NOTICE](NOTICE)），因为安装方拿到的只有包内文件。
 第三方组件（ECharts / Mermaid）保留各自许可，见 [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md)。

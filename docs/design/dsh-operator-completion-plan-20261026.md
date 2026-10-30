@@ -1,6 +1,7 @@
 # 算子开发插件封版待执行计划（2026-10-26）
 
 > 状态（2026-10-30）：**S0–S4 已完成；S5 按 GPU 有限方案结项但整体贡献未建立；S6 按用户确认的无视频材料交付范围完成。** 参见 [S5 进度](../status/dsh-operator-s5-progress-20261027.md)、[S5 结项](../status/dsh-operator-s5-closeout-20261030.md)和 [S6 验收](../status/dsh-operator-s6-acceptance-20261030.md)。历史 A/C 中断批次和未完成的 24 格重复对照保留；S4 四项性能未知，之后的独立 [GPU7 冻结验收](../status/dsh-operator-gpu-freeze-20261030.md)另有可裁决 L3，不能混用版本或当作插件增益。
+> 发布形态（2026-10-30）：许可随包、`private=false`、版本号 `0.6.1`/`0.1.10`、CI 守卫与工件重建已完成，见 [发布形态补齐](../status/dsh-operator-release-readiness-20261030.md)；工具契约仍为 9，效果主张边界不变。
 > 对象：现有 `operatorAgent` 算子开发核心及 `integrations/dsh-operator/` 插件。
 > 目标：补齐可信留存、任务取消和当前入口的效果证据，达到可安装、可追溯、可评测、可演示的封版标准。
 > 本文是执行清单，不替代[设计规范](autonomous-operator-agent-design.md)、[实现状态](../status/autonomous-operator-agent-status.md)或既有实验决策。

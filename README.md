@@ -4,7 +4,7 @@
 attention 等），由 LLM agent 设计、生成、修复 Triton / CUDA 核，经三级验证
 （L1 编译 → L2 功能 → L3 性能 + Roofline）后产出**可审计**的结论。
 
-- 版本：`0.6.0`（见 [operator_agent/__init__.py](operator_agent/__init__.py)）
+- 版本：`0.6.1`（见 [operator_agent/__init__.py](operator_agent/__init__.py)）
 - 运行模式：**无人值守** —— 无人在环内裁决歧义或发现失效
 - DSL：Triton / CUDA 为主；后端接口预留模板型后端
 
@@ -46,6 +46,7 @@ python test_nvidia_matmul.py
 
 除此之外：
 
+- **长期产品路线**：[算子开发助手：价值、架构与演进路线](docs/design/operator-development-product-roadmap.md) —— 用户与需求依据、DSH/其他 Agent/独立应用的取舍、阶段推进条件与收益评价；作为长期方向，不替代技术规范或实现状态
 - **方案评审（2026-10-26）**：[算子开发方案评审](docs/design/operator-development-review-20261026.md) —— 当前入口与设计的一致性、生成质量与成本证据、后续改进优先级；评审建议不替代设计规范
 - **插件封版待执行计划**：[收尾顺序与验收清单](docs/design/dsh-operator-completion-plan-20261026.md) —— 证据留存、任务取消、资源预检、当前入口验收、整体对照及交付包
   ；[S0 固定起点验收](docs/status/dsh-operator-s0-20261026.md) —— 工作区快照、实际入口能力、历史证据清单与持久归档
@@ -70,7 +71,9 @@ python test_nvidia_matmul.py
   ；[内层/外层模型的分工边界](docs/design/hitl-generation-boundary.md) —— 写核与搜索为什么归内层、
   这条边界目前只是建议性的、以及启用生成工具的判据
   ；[H20 冻结验收（2026-10-30）](docs/status/dsh-operator-gpu-freeze-20261030.md) ——
-  v0.6.0 的 4096³ `valid` L3、§14 冒烟与 launch/冲刷复标（GPU 释放前最后一轮真机证据）
+  v0.6.0 的 4096³ `valid` L3、§14 冒烟与 launch/冲刷复标
+  ；[GPU2 中断与后续任务验收](docs/status/gpu-interrupt-recovery-20261030.md) ——
+  常驻 SSH 默认精确清理，真实执行中取消/超时后两个新任务均完整 L2 12/12 通过
 - **阅读路线**：设计规范 §0.2 给了按依赖顺序的读法；**实现状态 §五** 是一张
   **机制 → 代码位置 → 守卫**的对照表，它才是本项目的目录
 - 根目录**没有** `CLAUDE.md`：原件的规范 / 状态 / 历史混在一起，已按治理规则（§25）归档到

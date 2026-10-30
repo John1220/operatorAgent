@@ -1,0 +1,7 @@
+operator-agent
+Copyright 2026 the operator-agent authors
+
+This product includes software developed by the operator-agent authors.
+
+Third-party components bundled in this repository (Apache ECharts, Mermaid)
+retain their own licenses and are listed in THIRD_PARTY_NOTICES.md.

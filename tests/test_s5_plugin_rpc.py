@@ -91,6 +91,32 @@ def test_refused_calls_never_use_development_quota(relay,name,args):
     assert svc.snapshot()['development_used']==0
 
 
+def test_a_refusal_says_which_rule_failed_and_how_to_fix_it(relay,tmp_path):
+    """A bare "refused" cost one real model two attempts and its budget on
+    2026-10-30 (Matmul C submitted run_dir=/work twice). Every refusal now names
+    the violated rule and the accepted values, and stays inside the workspace."""
+    r,svc,config=relay
+    reply=proxy.forward(config,tool(1,'operator_verify',run_dir='work',
+                                    code=GOOD_FIXTURE,backend='ssh'))
+    text=reply['error']['message']
+    assert text.startswith('Frozen development surface refused this request: ')
+    assert 'run path refused' in text and 'verification identity refused' in text
+    assert 'task' in text and "backend='mock'" in text   # workspace-relative fix, frozen value
+    assert str(tmp_path) not in text and str(r.task_dir) not in text
+    assert svc.snapshot()['development_used']==0
+
+
+def test_a_refusal_names_rejected_arguments_and_is_ledgered(relay):
+    r,svc,config=relay
+    reply=proxy.forward(config,tool(1,'operator_verify',run_dir='task',code=GOOD_FIXTURE,
+                                    never='1',also_never='2'))
+    text=reply['error']['message']
+    assert 'verification option refused' in text and 'also_never' in text and 'never' in text
+    refused=[row for row in r.snapshot()['records'] if row['outcome']=='refused']
+    assert refused and refused[-1]['refusal']==['verification option refused']
+    assert svc.snapshot()['development_used']==0
+
+
 def test_candidate_paths_cannot_read_private_or_linked_files(relay,tmp_path):
     r,svc,config=relay
     private=tmp_path/'private.py';private.write_text(GOOD_FIXTURE)

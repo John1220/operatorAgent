@@ -235,5 +235,49 @@ class TestTheDshPluginFace(unittest.TestCase):
         self.assertIn(icon[2:], pkg["files"], "图标必须进 files，否则发出去没有")
 
 
+class TestTheDshReleaseShape(unittest.TestCase):
+    """对外发布形态：许可随包、包可发、版本号与内容一一对应。
+
+    这三条都是「源码树里看不出问题、发出去才违约」的那一类：
+    npm 只打包 `files` 里列到的东西，`license` 字段声明 Apache-2.0 而包里没有条文，
+    安装方就拿不到 Apache-2.0 §4 要求的许可副本；`private: true` 则让 `npm publish`
+    直接失败。同号不同内容会让「按版本号引用工件」变成假引用 —— 0.1.9 已有两份内容
+    不同的本地构建，靠 SHA256 区分，所以发布版的号必须往前挪。
+    """
+
+    SHIM = ROOT / "integrations" / "dsh-operator"
+    #: 必须随包分发、在包内是仓库根同名文件的逐字节副本。
+    LEGAL = ("LICENSE", "NOTICE")
+
+    def manifest(self):
+        return json.loads((self.SHIM / "package.json").read_text(encoding="utf-8"))
+
+    def test_the_shipped_legal_files_are_byte_copies_of_the_root_ones(self):
+        for name in self.LEGAL:
+            packaged = self.SHIM / name
+            self.assertTrue(packaged.is_file(), f"{name} 不在包目录里：npm 发不出去")
+            self.assertEqual(packaged.read_bytes(), (ROOT / name).read_bytes(),
+                             f"{name} 与仓库根不一致：改一处忘了另一处")
+
+    def test_the_legal_files_are_declared_in_files(self):
+        files = self.manifest()["files"]
+        for name in self.LEGAL:
+            self.assertIn(name, files, f"{name} 没进 files，npm pack 里不会有")
+
+    def test_the_package_is_publishable(self):
+        pkg = self.manifest()
+        self.assertIs(pkg.get("private"), False,
+                      "private 不为 false 时 npm publish 直接拒绝")
+        self.assertEqual(pkg["license"], "Apache-2.0")
+        self.assertRegex(pkg["version"], r"^\d+\.\d+\.\d+$")
+        self.assertNotEqual(pkg["version"], "0.1.9",
+                            "0.1.9 已被两份本地构建占用，发布版必须换号")
+
+    def test_the_changelog_opens_with_the_manifest_version(self):
+        text = (self.SHIM / "CHANGELOG.md").read_text(encoding="utf-8")
+        first = next(line for line in text.splitlines() if line.startswith("## "))
+        self.assertEqual(first.strip(), "## " + self.manifest()["version"])
+
+
 if __name__ == "__main__":
     unittest.main()

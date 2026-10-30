@@ -1,4 +1,4 @@
-"""算子开发Agent v0.6.0
+"""算子开发Agent v0.6.1
 支持 Triton DSL: 矩阵乘法/Softmax/Attention 等 GPU 算子
 模块结构:
   schemas.py            - 核心数据结构 (含 DSLEnum, TritonCompileConfig)
@@ -17,7 +17,7 @@
   prompts/              - Prompt 模板目录 (含 Triton 模板)
   output/               - 生成的算子产物 (自动创建)"""
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 from .schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,

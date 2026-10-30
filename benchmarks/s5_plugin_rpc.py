@@ -27,6 +27,45 @@ MAX_REQUEST = 262144
 MAX_REPLY = 2 * 1024 * 1024
 TOOLS = frozenset(('operator_prepare', 'operator_verify', 'operator_capabilities'))
 
+#: Refusals must stay fixable: a bare "refused" made a real model repeat the same
+#: wrong call until its budget ran out (2026-10-30 Matmul C, two `run_dir=/work`
+#: submissions).  Every reason therefore carries a hint that names the argument
+#: and the values the frozen surface accepts.  Hints never echo supervisor paths
+#: or the frozen task directory: the participant only learns its workspace-relative
+#: location, which it already owns.
+STATIC_HINTS = {
+    'invalid RPC envelope': 'send one JSON-RPC 2.0 object with only jsonrpc/id/method/params',
+    'invalid RPC id': 'use a string or integer id of at most 128 characters',
+    'invalid RPC params': 'send params as a JSON object',
+    'notification id refused': 'send notifications without an id',
+    'request id required': 'include an id on every request',
+    'method refused': 'only initialize, ping, tools/list and tools/call are available',
+    'tool refused': 'available tools: operator_prepare, operator_verify, operator_capabilities',
+    'capabilities arguments refused': 'operator_capabilities takes no arguments',
+    'prepared run required': 'run_dir is required (the task directory operator_prepare returned)',
+    'frozen declaration required': 'operator_prepare only accepts the frozen declaration from the task material',
+    'single code source required': 'pass exactly one of code or code_file',
+    'candidate invalid': 'code must be non-empty source text of at most 65536 bytes',
+    'candidate path required': 'code_file must be a non-empty path inside the workspace',
+    'regular candidate file required': 'code_file must be a regular, unlinked file inside the workspace',
+    'candidate outside workspace': 'code_file must resolve inside the workspace',
+    'candidate link refused': 'code_file must not sit under a symlink',
+    'candidate exceeds bound': 'candidate source must be at most 65536 bytes',
+}
+
+
+class Refused(ValueError):
+    """Every violated argument rule at once, so one reply is enough to fix them."""
+
+    def __init__(self, problems):
+        super().__init__('; '.join(reason for reason, _ in problems))
+        self.problems = tuple(problems)
+
+
+def refusal_text(problems):
+    return 'Frozen development surface refused this request: ' + '; '.join(
+        '%s (%s)' % (reason, hint) for reason, hint in problems)
+
 
 class _HTTP(ThreadingHTTPServer):
     daemon_threads = True
@@ -149,6 +188,26 @@ class MCPRelay:
             raise ValueError('candidate exceeds bound')
         return raw.decode('utf-8')
 
+    def _task_relative(self):
+        try:
+            return self.task_dir.relative_to(self.workspace).as_posix()
+        except ValueError:
+            return 'the task directory'
+
+    def _hint(self, reason, extra=''):
+        """Actionable text for one refusal reason; never a supervisor path."""
+        if reason == 'run path refused':
+            return 'run_dir must resolve to the prepared task directory; pass %r' % self._task_relative()
+        if reason == 'verification option refused':
+            return 'remove unsupported argument(s)' + (': ' + extra if extra else '')
+        if reason == 'verification identity refused':
+            return ("operator_verify accepts stop_after='L2', backend=%r and "
+                    '1 <= timeout <= %s' % (self.development['backend'], self.development['timeout']))
+        return STATIC_HINTS.get(reason, 'resend a request that matches the tool schema')
+
+    def _refuse(self, reason, extra=''):
+        return (reason, self._hint(reason, extra))
+
     def _validate(self, message):
         if (type(message) is not dict or message.get('jsonrpc') != '2.0'
                 or set(message) - {'jsonrpc', 'id', 'method', 'params'}):
@@ -178,32 +237,42 @@ class MCPRelay:
             if args:
                 raise ValueError('capabilities arguments refused')
             return message
+        problems = []
         run_dir = args.get('run_dir')
         if not isinstance(run_dir, str):
-            raise ValueError('prepared run required')
-        run_path = Path(run_dir)
-        run_path = run_path if run_path.is_absolute() else self.workspace/run_path
-        if run_path.is_symlink() or run_path.resolve() != self.task_dir:
-            raise ValueError('run path refused')
+            problems.append(self._refuse('prepared run required'))
+        else:
+            run_path = Path(run_dir)
+            run_path = run_path if run_path.is_absolute() else self.workspace/run_path
+            if run_path.is_symlink() or run_path.resolve() != self.task_dir:
+                problems.append(self._refuse('run path refused'))
         if name == 'operator_prepare':
             if {k:v for k,v in args.items() if k != 'run_dir'} != self.declaration:
-                raise ValueError('frozen declaration required')
+                problems.append(self._refuse('frozen declaration required'))
+            if problems:
+                raise Refused(problems)
         else:
             allowed = {'run_dir', 'code', 'code_file', 'candidate_origin', 'stop_after', 'backend', 'timeout'}
-            if set(args) - allowed:
-                raise ValueError('verification option refused')
+            unsupported = set(args) - allowed
+            if unsupported:
+                problems.append(self._refuse('verification option refused', ', '.join(sorted(unsupported))))
             if (args.get('stop_after', 'L2') != 'L2'
                     or args.get('backend', self.development['backend']) != self.development['backend']
                     or ('timeout' in args and (type(args['timeout']) is not int
                         or not 1 <= args['timeout'] <= int(self.development['timeout'])))):
-                raise ValueError('verification identity refused')
+                problems.append(self._refuse('verification identity refused'))
             if ('code' in args) == ('code_file' in args):
-                raise ValueError('single code source required')
-            args = dict(args)
-            if 'code_file' in args:
-                args['code'] = self._candidate_file(args.pop('code_file'))
+                problems.append(self._refuse('single code source required'))
+            elif 'code_file' in args:
+                try:
+                    args = dict(args)
+                    args['code'] = self._candidate_file(args.pop('code_file'))
+                except ValueError as exc:
+                    problems.append(self._refuse(str(exc)))
+            if problems:
+                raise Refused(problems)
             if not isinstance(args['code'], str) or not args['code'].strip() or len(args['code'].encode()) > 65536:
-                raise ValueError('candidate invalid')
+                raise Refused([self._refuse('candidate invalid')])
             args.setdefault('stop_after', 'L2')
             args.setdefault('backend', self.development['backend'])
         args = dict(args, run_dir=str(self.task_dir))
@@ -238,11 +307,17 @@ class MCPRelay:
         identity = message.get('id') if isinstance(message, dict) else None
         try:
             outgoing = self._validate(message)
-        except (ValueError, TypeError, OSError):
+        except (ValueError, TypeError, OSError) as exc:
+            problems = getattr(exc, 'problems', None) or (
+                self._refuse(str(exc) or type(exc).__name__),)
+            try:
+                digest = hashlib.sha256(encoded(message)).hexdigest()
+            except (TypeError, ValueError):
+                digest = None
             with self.lock:
                 self.records.append(dict(sequence=len(self.records)+1, outcome='refused',
-                    request_sha256=hashlib.sha256(encoded(message)).hexdigest()))
-            return _error(identity, -32602, 'Frozen development surface refused this request')
+                    request_sha256=digest, refusal=[reason for reason, _ in problems]))
+            return _error(identity, -32602, refusal_text(problems))
         method = outgoing['method']
         tool = outgoing.get('params', {}).get('name') if method == 'tools/call' else None
         record = dict(method=method, tool=tool, request_sha256=hashlib.sha256(encoded(message)).hexdigest(),
