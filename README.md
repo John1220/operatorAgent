@@ -79,6 +79,16 @@ python test_nvidia_matmul.py
 - 根目录**没有** `CLAUDE.md`：原件的规范 / 状态 / 历史混在一起，已按治理规则（§25）归档到
   [docs/archive/CLAUDE-md-archived.md](docs/archive/CLAUDE-md-archived.md)
 
+### 磁盘上什么在仓里、什么不在
+
+工作树约 1.0 GB，其中 905 MB 是 `triton/` 本地检出；1.0 GB 的审计证据（各批次冻结计划、
+候选、判定回执、GPU 快照）**不在仓内**，仓里只有 `output` → `~/op-agent-evidence/output`
+的符号链接。为什么这样：那些证据既不可 diff，也不该被 `git status`/`rg`/`find` 每次扫过，
+而 `.gitignore` 让任何提交都不会提醒它正在膨胀。位置、重建方式与注意事项见
+[docs/research/evidence-location.json](docs/research/evidence-location.json)；
+布局由 [tests/test_repo_layout.py](tests/test_repo_layout.py) 守住（根目录白名单、
+平铺目录条目预算、缓存与产物禁止入库、证据目录只能是链接）。
+
 ## 代码怎么读
 
 规范 §1–§19 的编号是**稳定契约**：代码注释按号引用它（想复算：
@@ -115,7 +125,8 @@ operatorAgent/
 ├── benchmarks/              # 探针与真机验证驱动（含零依赖 demo）
 ├── test_nvidia_*.py         # 真机端到端 driver：唯一的 LLM 全流程入口
 ├── docs/                    # design / status / research / user_guide
-├── output/  logs/           # 运行期产物（gitignored）
+├── output -> ~/op-agent-evidence/output   # 审计证据的**符号链接**，!不! 在仓内
+├── logs/                    # 运行期日志（gitignored）
 └── triton/                  # 本地 vendored 检出（gitignored）
 ```
 
