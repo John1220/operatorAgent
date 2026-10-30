@@ -14,7 +14,7 @@ P2 门（网络唯一出口、远端候选隔离）未通过，且 GPU 即将释
 
 | 项 | 值 |
 |---|---|
-| 代码 | `45ec9609420bae2da87043efc42f85ac27ef2cfd`，`v0.6.0` |
+| 代码 | `45ec9609420bae2da87043efc42f85ac27ef2cfd`，`v0.6.0`；§2.7 的 seed 修复跑在 `ffe471a` |
 | 控制机 | macOS，Python 3.9.6 |
 | 远端 | `algorithm-h20`（Linux 5.15，x86_64） |
 | GPU | **GPU 7**，`NVIDIA H20`，UUID `GPU-52ca6155-d8bc-a416-847a-6f0c71db1552` |
@@ -132,8 +132,29 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
 `X` —— 集合不相等 ⇒ `_seed_spec_for` 返回 `None` ⇒ 走整份 JSON 传输。
 对 249 MB 的输入，这条路不可用。
 
-结论：**本轮没有取得 memory-bound 的 `valid` L3**。后续要补，得先修 rows-case
-的 seed 匹配（或为这类输入单独放开预算），不是再借 GPU 就能解决。
+结论：seed bug 已修（`ffe471a`），第三条不再传 249 MB；但 memory-bound 的 `valid`
+仍没拿到，见 §2.7。
+
+### 2.7 Seed 修复后的重跑：能跑通，但只到 `degraded`
+
+修 `ffe471a` 后重跑 16384×3800（同一候选、同一 GPU 7）：
+
+| 项 | 值 |
+|---|---|
+| L1 / L2 / L3 | 通过 / 通过 / 通过（12/12 case，最大误差 `1.43e-06`） |
+| 加速比 | **1.4954×**（`0.1608/0.2405 ms`） vs PyTorch Eager(FP32) |
+| 吞吐 | **2,322.6 GFLOPS** |
+| launch 占比 | **11.2%**（> 10%） |
+| 档位 | **`degraded`**；`can_gate=true`、`can_tune=true`、`can_verdict=true`，但 `can_persist=false`、`can_count_progress=false` |
+| 原因 | `launch 地板占实测时间 11.2% (> 10%)：判定可用，但不得据此禁用配方或累计停滞` |
+
+为什么不是 `valid`：256 MiB/tensor 上限把最大 shape 卡在约 249 MB，候选只有
+160.8 µs；要把 launch 占比压到 10% 以下需要 >202 µs。更大的 16384×6144（402 MB）
+会超上限；把核故意写慢去跨阈值不是证据，所以**没有**这么做。
+
+结论：**memory-bound 现在端到端可跑，但本轮只有 `degraded`，没有 `valid` L3**。
+若要 `valid`，需要放开 seed 路径的单 tensor 上限（例如允许 512 MiB），或换一个
+天然更慢/更大的 memory-bound 形状。
 
 ## 3. 未执行与永久边界
 
@@ -146,8 +167,8 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
   对小于 1 ms 的核偏紧，但它只作诊断，不影响 validity —— 记为后续调整项。
 - **v2 LayerNorm 参考未跑**：环境 torch 2.14/driver 580 与 `PINNED_RUNTIME` 表面一致，
   但没有执行 attestation；不能声称 v2 可用。
-- **Memory-bound valid L3 未取得**：三次 LayerNorm 尝试被 256 MiB 输入预算与
-  rows-case seed 不匹配挡住（§2.6）；这是输入传输问题，不是 GPU 能力问题。
+- **Memory-bound valid L3 未取得**：seed 修复后重跑能完成（§2.7），但 launch 11.2%
+  → `degraded`；256 MiB/tensor 上限阻止更大 shape，没有靠放慢核去凑 `valid`。
 - **多卡/并发/UI**：未做。
 
 H20 释放后**永久不可做**：新增真机证据、memory-bound 算子的 valid L3、常量再标定、
@@ -178,13 +199,16 @@ S5 正式批次、跨卡对照。
 | `layernorm16384x6144/verify-1/result.json` | `15097de1720f45406fe86b7ddfaa0e6b89ad9816d4f57932f4b02f6340c67be5` |
 | `layernorm16384x4096/verify-1/result.json` | `bd72ed2335d32c732715787a86ec07359a5d6902bc33255cde826b6804657fe1` |
 | `layernorm16384x3800/status.json` | `9aae93a0133d42b316d566147381995df46234648b2c0ac557bf8981102b4826` |
-| `summary.json` | `e5f0b37c460b9b4b519282ebc25a5582ffbc4ab82eb87f4de8a5ec87fa73e03d` |
+| `layernorm16384x3800-v2/verify-1/result.json` | `cb559dbdb828b3a021f6738ebaca9ae813f74d216c9709095a47e5ccd24e1300` |
+| `layernorm16384x3800-v2/verify-1/report.md` | `0c0e0f052503204ef40d4a8cd131c74249792b40684047acd3e3a5004864ca9b` |
+| `layernorm16384x3800-v2/summary.json` | `73df202ac7786c9f7adf3a309de4f3c81f2f22301d66353f0aaf1045b5088a62` |
+| `summary.json` | `2d72a8c297a00e3b5d1f53f378fada107b89ef8aa10c13a72f65ffd1cef01ab1` |
 | `cancellation/cancel.json` | `8bb39852d9791bfd6176e1724ba7a79b95e9bf43dca738fa66f1f7e82eab7396` |
 | `cancellation/status.json` | `9c5471ceb2130bd97cc764a6b3ba13354be64b68c6d908437783c2854b44f70c` |
 | `environment.txt` | `5a37dfb43fbb80aef62cb162d0300b6a787dfe0768240cae3056a564fbefd4ce` |
 
 打包：`output/plugin_completion/20261030-gpu-freeze-evidence.tar.gz`
-（SHA256 `7a71276e1a8e295768022673cf41e2131823ac5bb527f82c2e3e140654261fa9`）。
+（SHA256 `e6df9ca83e759411966f42cd1d51017b4de267a0548bad199eb3cf16ab32d788`）。
 
 完整清单：`output/plugin_completion/20261030-gpu-freeze/SHA256SUMS`。复核：
 
