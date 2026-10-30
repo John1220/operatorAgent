@@ -452,7 +452,7 @@ class TestOneProducerPerFact(unittest.TestCase):
         self.assertIn("evaluated = {c: l2_verdict for c in speedups}", cu)
     def test_the_harness_declares_the_case_it_evaluates(self):
         """真实通过率驱动: 声明与输入必须来自**同一次**构造（同一个 case_key）"""
-        hp = self._src("benchmarks/harness_pass_rate.py")
+        hp = self._src("benchmarks/drivers/harness_pass_rate.py")
         self.assertIn("_case = case_key(inputs)", hp)
         self.assertIn("required_cases=(_case,)", hp)
         self.assertIn("max_regression={_case: MAX_REGRESSION}", hp)

@@ -1,4 +1,4 @@
-"""演示脚本的守卫: `benchmarks/demo_hitl_chain.py` 说得对, 而且今天仍然跑得起来
+"""演示脚本的守卫: `benchmarks/demos/demo_hitl_chain.py` 说得对, 而且今天仍然跑得起来
 
 为什么给**演示**配守卫（本仓「每句 ✅ 都要有可运行的守卫」的同一条）: 演示里每一行读数
 都是一句判断（「L2 拦住了错核」「同一条读数在两条契约下后果不同」「本机没有执行设备就
@@ -28,7 +28,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from benchmarks import demo_hitl_chain as demo  # noqa: E402
+from benchmarks.demos import demo_hitl_chain as demo  # noqa: E402
 
 _ENV_KEYS = ("OPERATOR_AGENT_OUTPUT_DIR", "OPERATOR_AGENT_LOG_DIR",
              "OPERATOR_AGENT_KERNEL_DB", "OPERATOR_AGENT_FAILURE_DB")

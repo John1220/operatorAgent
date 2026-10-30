@@ -18,9 +18,9 @@ _ROOT = dirname(dirname(dirname(abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from benchmarks.mutation_calibrate import Row  # noqa: E402
+from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
-FILES = {"rc": "benchmarks/recheck_arxiv_anchors.py"}
+FILES = {"rc": "benchmarks/experiments/misc/recheck_arxiv_anchors.py"}
 
 TARGETS = ["tests/unit/test_recheck_arxiv_anchors.py"]
 

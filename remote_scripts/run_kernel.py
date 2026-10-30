@@ -1275,7 +1275,7 @@ def _bench_pair_interleaved(cand_fn, base_fn, warmup: int, repeat: int,
               "arm_windows": {"candidate": window_id, "baseline": window_id},
               # 两臂计时当时的卡身份 + 跑完之后的复读。控制端的同卡配对检查读这里
               # (§11-2 / oracle.evaluate 的 candidate_device/baseline_device)。
-              # 放在 `paired` 而不是加第四个返回值: `benchmarks/probe_block_series.py`
+              # 放在 `paired` 而不是加第四个返回值: `benchmarks/probes/probe_block_series.py`
               # 按三元解包这个函数, 改元数会静默打断那个探针。
               "arm_identity": {"candidate": cand_ident, "baseline": base_ident,
                                "after": _arm_identity(device_is_cuda)}}

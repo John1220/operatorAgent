@@ -1,13 +1,13 @@
 import copy
 import json
 import pytest
-from benchmarks import s5_formal_run as flow,s5_minimal_tasks as tasks,s5_minimal_summary as stats
-from benchmarks.s5_outcomes import classify,fatal
+from benchmarks.experiments.s5 import s5_formal_run as flow, s5_minimal_tasks as tasks, s5_minimal_summary as stats
+from benchmarks.experiments.s5.s5_outcomes import classify,fatal
 from operator_agent.hitl_tools import prepare
 
 
 def test_new_tasks_have_disjoint_primary_specs_and_correct_operands(tmp_path):
-    from benchmarks.s5_task_manifest import manifest
+    from benchmarks.experiments.s5.s5_task_manifest import manifest
     old={(r['kernel_type'],tuple(r['shape']),r['precision'])for r in manifest()['tasks']}
     rows=tasks.manifest()['tasks'];assert len(rows)==6
     assert not any((r['kernel_type'],tuple(r['shape']),r['precision'])in old for r in rows)
@@ -66,8 +66,8 @@ def test_missing_unknown_and_duplicates_never_create_positive_inference():
 
 
 def test_repeated_runs_have_separate_evidence_and_budgets(tmp_path,monkeypatch):
-    from benchmarks import s5_verify_remote,s5_arm_env
-    from benchmarks.s5_vertical_validation import GOOD_FIXTURE
+    from benchmarks.experiments.s5 import s5_verify_remote, s5_arm_env
+    from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
     decl=dict(request='layernorm fp32',shapes=[[7,33]],hardware='mock_gpu',dsl='python',precision='fp32')
     sha=s5_verify_remote.freeze(tmp_path/'services/case',declaration=decl,backend='mock')
     p=dict(schema=flow.SCHEMA,implementation=flow.runtime_identity(),hash='repeat-test',repeats=2,

@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from benchmarks import durable_profile_h20 as driver
-from benchmarks.durable_profile_h20 import WORKLOADS, parser, receipt_errors, selected_workloads, transfer_errors
+from benchmarks.drivers import durable_profile_h20 as driver
+from benchmarks.drivers.durable_profile_h20 import WORKLOADS, parser, receipt_errors, selected_workloads, transfer_errors
 from operator_agent.confirm import ConfirmRecord
 from operator_agent.kernel_db import KernelDatabase, KernelRecord
 from operator_agent.reference_contract import check_observed, registered_reference

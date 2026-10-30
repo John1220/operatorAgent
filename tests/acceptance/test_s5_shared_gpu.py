@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from benchmarks import s5_shared_gpu as shared
+from benchmarks.experiments.s5 import s5_shared_gpu as shared
 
 
 GPU = 'GPU-13c6c4b4-45ce-8963-1122-df2b3d72fb76'

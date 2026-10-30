@@ -11,8 +11,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from benchmarks.s5_gateway_http import GatewayServer
-from benchmarks.s5_gateway_supervisor import SupervisedTransport
+from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
+from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
 from operator_agent import s5_shared_budget as budget
 from operator_agent.llm_budget import LLMCallLimits, ProductionLLMCallBudget
 from operator_agent.llm_client import LLMClient

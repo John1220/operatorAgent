@@ -3,11 +3,11 @@ import json
 import hashlib
 import shutil
 import pytest
-from benchmarks.s5_fake_http import FakeHTTPServer
-from benchmarks.s5_vertical_headless import DSH_ROOT
-from benchmarks.s5_vertical_tool_headless import run_tool_headless
-from benchmarks.s5_vertical_tool_service import MockValidationService
-from benchmarks.s5_vertical_validation import GOOD_FIXTURE
+from benchmarks.experiments.s5.s5_fake_http import FakeHTTPServer
+from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
+from benchmarks.experiments.s5.s5_vertical_tool_headless import run_tool_headless
+from benchmarks.experiments.s5.s5_vertical_tool_service import MockValidationService
+from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
 from operator_agent import s5_shared_budget as shared
 
 

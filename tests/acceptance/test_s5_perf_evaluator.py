@@ -1,4 +1,4 @@
-from benchmarks.s5_perf_evaluator import qualified_timing
+from benchmarks.experiments.s5.s5_perf_evaluator import qualified_timing
 
 
 PIN = dict(gpu_index=2, gpu_name='NVIDIA H20')

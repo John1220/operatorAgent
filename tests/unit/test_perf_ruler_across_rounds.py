@@ -313,7 +313,7 @@ class TestBothHalvesHaveReaders(unittest.TestCase):
                          "L1/L2 就死了的那轮没有性能尺读数 —— 而它绝不能被读成「与上轮同尺」")
 
     def test_the_report_prints_both_columns(self):
-        sys.path.insert(0, os.path.join(_ROOT, "benchmarks"))
+        sys.path.insert(0, os.path.join(_ROOT, "benchmarks", "drivers"))
         import importlib
         hpr = importlib.import_module("harness_pass_rate")
         # 报表有一道「分母不足就不出百分数」的门 (下限 4 次运行), 所以夹具至少四个 case;
@@ -364,10 +364,10 @@ class TestBothHalvesHaveReaders(unittest.TestCase):
     def test_the_lineage_key_name_is_not_hardcoded_in_the_report(self):
         """报表那句「测不到」要说的是**这一半**的键名; 写死 `l2_ruler` 就是两栏共用一个假出处"""
         self.assertNotIn('血缘里没有 {LINEAGE_RULER_KEY}',
-                         open(os.path.join(_ROOT, "benchmarks", "harness_pass_rate.py"),
+                         open(os.path.join(_ROOT, "benchmarks", "drivers", "harness_pass_rate.py"),
                               encoding="utf-8").read())
         self.assertIn("_measurable_lineage_key",
-                      open(os.path.join(_ROOT, "benchmarks", "harness_pass_rate.py"),
+                      open(os.path.join(_ROOT, "benchmarks", "drivers", "harness_pass_rate.py"),
                            encoding="utf-8").read())
 
 

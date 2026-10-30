@@ -3,8 +3,8 @@ import json
 import shutil
 
 import pytest
-from benchmarks import s5_vertical_mcp_trial as trial
-from benchmarks.s5_vertical_headless import DSH_ROOT
+from benchmarks.experiments.s5 import s5_vertical_mcp_trial as trial
+from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
 
 
 @pytest.mark.skipif(not shutil.which('node') or not (DSH_ROOT/'dsh/lib/bin.js').is_file()

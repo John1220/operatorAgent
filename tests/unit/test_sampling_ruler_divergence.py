@@ -23,7 +23,7 @@
 `atol`，把同一条 AND 判据套在同一窗上的第二个读数发布成 `and_form_*`，并在逐组与聚合两层
 message 里说出一致/分歧。判定式仍只有 `tolerance` 那一份 —— 这里不调形状，只多问它一次。
 
-实跑读数 (`benchmarks/probe_l2_sampling_gate.py` 臂 4, 2026-09-30 控制机): 一份常数偏移
+实跑读数 (`benchmarks/probes/probe_l2_sampling_gate.py` 臂 4, 2026-09-30 控制机): 一份常数偏移
 3e-3 的候选配大幅值参考 —— 纯绝对那条 `atol=5.00e-01` 判 **PASS**, AND 那条 `atol=1.00e-04`
 判 **FAIL**。同一个探针的臂 2 在参考幅值 0.1 与 0.01 两档上给的是同一个方向。所以「这条尺只会
 同松或更松」不是推论, 是探针今天就能印出来的两列。
@@ -175,7 +175,7 @@ class TestTheTwoPathsAreStillTellableApart(unittest.TestCase):
     """
 
     def setUp(self):
-        from benchmarks.probe_l2_sampling_gate import branch_of
+        from benchmarks.probes.probe_l2_sampling_gate import branch_of
         self.branch_of = branch_of
 
     def test_the_sampling_path_is_recognised_per_group_and_in_aggregate(self):

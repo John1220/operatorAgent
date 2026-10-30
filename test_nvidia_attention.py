@@ -314,11 +314,11 @@ def print_report(artifacts):
             print(f"      Roofline: {bound} (AI={ai:.1f} FLOP/B)")
             print(f"      带宽利用率: {bw_util:.1f}%")
 
-            # 对比之前的 benchmarks/test_attention.py 官方结果
+            # 对比之前的 benchmarks/drivers/test_attention.py 官方结果
             # B=4,H=8,S=4096,D=64: Triton 官方 ~144 TFLOPS / 0.858x SDPA
             # B=4,H=8,S=2048,D=64: Triton 官方 ~? TFLOPS
             tflops = gflops / 1000
-            print(f"\n    对比参考 (benchmarks/test_attention.py 官方 Triton):")
+            print(f"\n    对比参考 (benchmarks/drivers/test_attention.py 官方 Triton):")
             print(f"      测试形状: B=4,H=8,S=4096,D=64")
             print(f"      官方 Triton 官方峰值: 144 TFLOPS (0.858x SDPA)")
             print(f"      Agent 产出: {tflops:.1f} TFLOPS" + 
@@ -411,7 +411,7 @@ def main():
     print(f"  验证: SSH @ {ssh_label(ssh_host, ssh_port)} (不可用时直接失败, 不降级到模拟)")
     print(f"  目标: B=4, H=8, S=2048, D=64 FP16 Attention")
     print(f"  指标: L1/L2通过 + L3 ≥ 50% PyTorch SDPA 性能")
-    print(f"  对比基准: benchmarks/test_attention.py Triton官方实现")
+    print(f"  对比基准: benchmarks/drivers/test_attention.py Triton官方实现")
     print(f"  日志: logs/ 目录 (文件名含 attention_nvidia_gpu)")
     print("=" * 80)
 

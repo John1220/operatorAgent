@@ -356,7 +356,7 @@ def single_ruler(gates: list[dict]) -> tuple[dict, dict]:
 
     旧写法是 `if not gate_params: gate_params = ...` —— 第一组赢, 而它下面聚合的是跨组的量
     (`max_error` 取 max、`matched_ratio` 取 min)。于是产物里会印着「atol=1e-3」, 而那个混合值
-    其实是几把不同的尺各自判过之后再混起来的 —— 读它的人 (含 `benchmarks/probe_l2_sampling_gate.py`,
+    其实是几把不同的尺各自判过之后再混起来的 —— 读它的人 (含 `benchmarks/probes/probe_l2_sampling_gate.py`,
     它正是拿这几个键核「绝对+相对」那条门的) 会把一个不存在的统一口径当成前提。
 
     冲突时那个键**直接不发布**, 而不是挑一个: 与 #64「分母不可信时 `bound_type` 不许替它判」
@@ -566,7 +566,7 @@ def ruler_note(agg: dict, label: str = "", advice: str = "去查部署是否中�
 #
 # 上面那一族问的是「几组用的是不是同一把尺」(`single_ruler`), 这一族问的是另一件事:
 # 「聚合出来的那个数底下是**几组**」。现场是 doc 57 §三 第 3 条, 由
-# `benchmarks/probe_l2_sampling_gate.py` 的臂 0b 打出来: 旧写法把三个键用
+# `benchmarks/probes/probe_l2_sampling_gate.py` 的臂 0b 打出来: 旧写法把三个键用
 # `m.get("max_rel_error", 0.0)` / `m.get("bad_elements", 0)` / `m.get("matched_ratio", 1.0)`
 # 兜底, 于是**从没算过这三个量的那条比对路径** (声明里没有 `Cap.FULL_OUTPUT_TENSOR` 的那条,
 # 判的是纯绝对阈值) 在产物里变成了「无相对误差、零坏点、全部元素匹配」。三处细节让它比
@@ -921,7 +921,7 @@ DISPERSION_UNINFORMATIVE = 0.30
 #     layernorm 16384×6144  164 µs        239          1.86   ← util=0%, 无邻居插队
 #     matmul 4096³ fp16     980 µs         48          1.12
 #
-# 原先 benchmarks/calibrate_dispersion_thresholds.py 标定时刻意固定 30 样本/轮,
+# 原先 benchmarks/calibration/calibrate_dispersion_thresholds.py 标定时刻意固定 30 样本/轮,
 # 所以只看见第 1 层偏差 (绝对时长), 没看见第 2 层 (顺序统计量随 n 抬升) —— 那是
 # 标定脚本自身的方法缺陷。阈值保留在此, 供 reasons 里那句观察引用; 要重新赋予判据
 # 地位, 须先换成对 n 稳健的统计量。
@@ -1145,7 +1145,7 @@ def launch_dominance(launch_floor_us: Optional[float], net_time_ms: Optional[flo
     已经不含 GPU 空等 launch 命令的那一段。而用户真正付出的端到端时间是
     「launch 开销 + 净执行」, 所以占比是 `floor / (floor + net)`。
 
-    不能用 `floor / net`: 真机标定 (benchmarks/calibrate_l2_flush_effect.py, H20,
+    不能用 `floor / net`: 真机标定 (benchmarks/calibration/calibrate_l2_flush_effect.py, H20,
     torch 2.14.0+cu130 / triton 3.8.0) 显示同一个空 Triton 核
 
         不冲刷 median = 20.03 µs      冲刷 median = 4.64 µs

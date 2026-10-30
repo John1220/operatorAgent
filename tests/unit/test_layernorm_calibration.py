@@ -7,8 +7,8 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from benchmarks import calibrate_layernorm as driver
-from benchmarks import layernorm_numerics as numerics
+from benchmarks.calibration import calibrate_layernorm as driver
+from benchmarks.experiments.misc import layernorm_numerics as numerics
 from operator_agent.anticheat import static_audit
 from operator_agent.correctness_profiles import with_default_correctness
 from operator_agent.correctness_boundaries import lint_coverage

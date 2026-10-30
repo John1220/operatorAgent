@@ -7,8 +7,9 @@ import sys
 
 import pytest
 
-from benchmarks import s5_plugin_env as env, s5_plugin_probe as probe, s5_seatbelt
-from benchmarks.s5_development_service import encoded
+from benchmarks.experiments.s5 import s5_plugin_env as env, s5_plugin_probe as probe
+from benchmarks.experiments.s5 import s5_seatbelt
+from benchmarks.experiments.s5.s5_development_service import encoded
 from operator_agent.run_contract import digest
 
 READY=sys.platform=='darwin'and Path(s5_seatbelt.SANDBOX).is_file()

@@ -11,7 +11,7 @@ import subprocess
 
 import pytest
 
-from benchmarks.s5_fake_http import FakeHTTPServer
+from benchmarks.experiments.s5.s5_fake_http import FakeHTTPServer
 from operator_agent import s5_shared_budget as shared
 from operator_agent.llm_budget import LLMCallLimits, ProductionLLMCallBudget
 from operator_agent.llm_client import LLMClient

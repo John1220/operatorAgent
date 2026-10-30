@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from benchmarks import operator_quality as cli
+from benchmarks.experiments.misc import operator_quality as cli
 from operator_agent.quality_evaluation import make_plan
 from operator_agent.quality_pairing import make_paired_plan
 

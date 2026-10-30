@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from benchmarks.s5_closeout_cases import build, load, project_verification, sha, verify
+from benchmarks.experiments.s5.s5_closeout_cases import build, load, project_verification, sha, verify
 
 
 @pytest.fixture
@@ -87,7 +87,7 @@ def test_projection_omits_untrusted_free_text(tmp_path):
     (root/'task/verify-1').mkdir(parents=True)
     candidate = tmp_path/'candidate.py'
     candidate.write_text('pass\n')
-    from benchmarks.s5_closeout_cases import CONTRACT
+    from benchmarks.experiments.s5.s5_closeout_cases import CONTRACT
     service = dict(source_sha256=sha(candidate), contract_hash=CONTRACT,
                    status='failed', levels={'L1': True, 'L2': False}, full_l2_passed=False,
                    remote_backend_executed=True, mock_only=False,

@@ -1,4 +1,4 @@
-"""`benchmarks/recheck_arxiv_anchors.py` 的读者 —— 「出处可重建」这句话自己得有人重跑
+"""`benchmarks/experiments/misc/recheck_arxiv_anchors.py` 的读者 —— 「出处可重建」这句话自己得有人重跑
 
 为什么要有这个文件：上一片把抽取器进仓库，理由是「行号不在仓里就不可重建」；可**那张锚点表
 自己也没被重建过**。今天照表重跑，四篇里 `2609.30059v1` 的字节数与行数两个数都是错的
@@ -6,7 +6,7 @@
 也红了。这两件事都是**跑一次**才发现的 —— 所以这个脚本要走网络，而它自带 `--selftest`，
 两者都需要读者（CHECKLOG I28）。
 
-这套用例不打网络（真跑那条是 `python3 -B benchmarks/recheck_arxiv_anchors.py`），
+这套用例不打网络（真跑那条是 `python3 -B benchmarks/experiments/misc/recheck_arxiv_anchors.py`），
 它钉的是这台机器上就能判的三件事：
   · **解析不许空转** —— 解析出空表时后面每一条相等断言都会永真地绿 (I25 那一族)，所以既测
     「合成表解析对」也测「真实 doc 58 解析出 4 行、且散文里提到的 id 不算表行」；
@@ -25,7 +25,7 @@
     其中 R6 第一次是**假绿**：我断言 `In("doc.md")`，而变异印出的是 `['/tmp/…/doc.md']` ——
     列 repr 里也含那个子串 ⇒ 逃逸；改成同时断言「没有 `None`、没有 `['`」才杀得掉（I32 那一族）。
 
-变异标定 (每条只改一处 `benchmarks/recheck_arxiv_anchors.py`，跑完立刻逐字节复原并断言 sha256
+变异标定 (每条只改一处 `benchmarks/experiments/misc/recheck_arxiv_anchors.py`，跑完立刻逐字节复原并断言 sha256
 一致。2026-09-30 实跑，基线 22 passed，**6 杀 / 1 逃逸**):
     M1 区间不约束（整篇拼起来找）              → 3 条红  ← 这条判据的全部价值就在这
     M2 拆掉 `start < 1` 那道前置守卫           → 1 条红
@@ -69,7 +69,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.recheck_arxiv_anchors import (CITATIONS, DEFAULT_DOCS, audit,  # noqa: E402
+from benchmarks.experiments.misc.recheck_arxiv_anchors import (CITATIONS, DEFAULT_DOCS, audit,  # noqa: E402
                                               citation_in_range, closing_advice,
                                               main, parse_anchor_table, to_int)
 
@@ -90,7 +90,7 @@ def _read_default_tables() -> dict:
 
 def _table_row(arxiv_id: str, body: bytes = BODY) -> str:
     """按真实值造一行表 —— 「ok」那一侧要有样本，不能只测不匹配"""
-    from benchmarks.arxiv_html_to_lines import to_lines
+    from benchmarks.experiments.misc.arxiv_html_to_lines import to_lines
     n = len(to_lines(body.decode()))
     return f"| x | `{arxiv_id}` | {len(body):,} | {n} |"
 
@@ -275,7 +275,7 @@ class TestAdviceIsTriaged(unittest.TestCase):
         import io
         import contextlib
         from unittest import mock
-        from benchmarks import recheck_arxiv_anchors as rc
+        from benchmarks.experiments.misc import recheck_arxiv_anchors as rc
 
         def _boom(*a, **kw):
             raise OSError("模拟：端点不可达")
@@ -298,7 +298,7 @@ class TestAdviceIsTriaged(unittest.TestCase):
     def test_main_actually_asks_for_the_advice(self):
         """函数写了没人调 = 本仓反复反对的那一种 (变异表里同款一行)"""
         import ast
-        src = (REPO / "benchmarks/recheck_arxiv_anchors.py").read_text(encoding="utf-8")
+        src = (REPO / "benchmarks/experiments/misc/recheck_arxiv_anchors.py").read_text(encoding="utf-8")
         mfn = next(n for n in ast.walk(ast.parse(src))
                    if isinstance(n, ast.FunctionDef) and n.name == "main")
         self.assertIn("closing_advice", ast.dump(mfn),
@@ -342,8 +342,8 @@ class TestResponseVsFetchFailure(unittest.TestCase):
             argv = ["--doc", path] if only_one_doc else []
             docs = (path,) if not only_one_doc else DEFAULT_DOCS
             with mock.patch.object(urllib.request, "urlopen", side_effect=side_effect), \
-                 mock.patch("benchmarks.recheck_arxiv_anchors.CITATIONS", citations), \
-                 mock.patch("benchmarks.recheck_arxiv_anchors.DEFAULT_DOCS", docs), \
+                 mock.patch("benchmarks.experiments.misc.recheck_arxiv_anchors.CITATIONS", citations), \
+                 mock.patch("benchmarks.experiments.misc.recheck_arxiv_anchors.DEFAULT_DOCS", docs), \
                  contextlib.redirect_stdout(io.StringIO()) as buf:
                 code = main(argv)
             return code, buf.getvalue()
@@ -424,7 +424,7 @@ class TestResponseVsFetchFailure(unittest.TestCase):
 
 
 def _table_counts(body: bytes) -> tuple:
-    from benchmarks.arxiv_html_to_lines import to_lines
+    from benchmarks.experiments.misc.arxiv_html_to_lines import to_lines
     return len(body), len(to_lines(body.decode()))
 
 

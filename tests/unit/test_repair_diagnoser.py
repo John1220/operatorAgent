@@ -8,7 +8,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from benchmarks import repair_diagnosis as offline, workload_codegen_h20 as driver
+from benchmarks.experiments.misc import repair_diagnosis as offline
+from benchmarks.drivers import workload_codegen_h20 as driver
 from operator_agent import llm_client as lc
 from operator_agent.bounded_repair import source_change
 from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused, strict_object

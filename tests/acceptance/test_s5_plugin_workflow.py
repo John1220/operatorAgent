@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from benchmarks import s5_formal_run, s5_plugin_probe, s5_plugin_workflow as workflow
+from benchmarks.experiments.s5 import s5_formal_run, s5_plugin_probe
+from benchmarks.experiments.s5 import s5_plugin_workflow as workflow
 from operator_agent.run_contract import digest
 
 
@@ -341,7 +342,7 @@ def test_study_freezes_exact_prospective_24_slots_and_shared_limits(tmp_path, mo
 
 
 def test_explicit_exploratory_plan_preserves_budget_and_limits_without_claiming_formal_pass(tmp_path, monkeypatch):
-    from benchmarks.s5_study_readiness import require_study_readiness, EXPLORATORY_POLICY
+    from benchmarks.experiments.s5.s5_study_readiness import require_study_readiness, EXPLORATORY_POLICY
     output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study', exploratory=True)
     assert workflow.load_plan(output / 'plan.json') == plan
     facts = require_study_readiness(plan)
@@ -353,7 +354,7 @@ def test_explicit_exploratory_plan_preserves_budget_and_limits_without_claiming_
 
 @pytest.mark.parametrize('change', ['claim_isolation', 'hash', 'policy'])
 def test_exploratory_dispatch_requires_explicit_consistent_scope(tmp_path, monkeypatch, change):
-    from benchmarks.s5_study_readiness import require_study_readiness, FormalReadinessRefused
+    from benchmarks.experiments.s5.s5_study_readiness import require_study_readiness, FormalReadinessRefused
     _, plan = freeze_fixture(tmp_path, monkeypatch, mode='study', exploratory=True)
     if change == 'claim_isolation': plan['exploratory_limitations']['network_only_gateway'] = True
     if change == 'hash': plan['hash'] = 'foreign'
@@ -402,12 +403,12 @@ def test_study_resource_observation_and_verifier_must_use_same_frozen_device(tmp
 
 
 def test_study_formal_gate_refuses_before_resources_credentials_or_output(tmp_path, monkeypatch):
-    from benchmarks import s5_study_readiness
+    from benchmarks.experiments.s5 import s5_study_readiness
     output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
     def deny(plan): raise ValueError('formal readiness unavailable')
     monkeypatch.setattr(s5_study_readiness, 'require_formal_readiness', deny)
     monkeypatch.setattr(workflow, 'resources', lambda p: pytest.fail('GPU observation before gate'))
-    from benchmarks import s5_workflow_preflight
+    from benchmarks.experiments.s5 import s5_workflow_preflight
     monkeypatch.setattr(s5_workflow_preflight, 'credential', lambda: pytest.fail('credential before gate'))
     with pytest.raises(ValueError, match='formal readiness'):
         workflow.execute(output / 'plan.json', plan['hash'], tmp_path / 'execution')
@@ -416,7 +417,7 @@ def test_study_formal_gate_refuses_before_resources_credentials_or_output(tmp_pa
 
 @pytest.mark.parametrize('mode', [None, 'ac', 'study'])
 def test_direct_study_run_cannot_bypass_formal_gate_by_removing_mode(tmp_path, monkeypatch, mode):
-    from benchmarks.s5_study_readiness import FormalReadinessRefused
+    from benchmarks.experiments.s5.s5_study_readiness import FormalReadinessRefused
     _, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
     if mode is None: plan.pop('mode')
     else: plan['mode'] = mode
@@ -432,7 +433,7 @@ def test_direct_study_run_cannot_bypass_formal_gate_by_removing_mode(tmp_path, m
 @pytest.mark.parametrize('stop_at', [None, 7])
 def test_study_offline_executor_keeps_24_slots_and_stops_only_on_infrastructure(
         tmp_path, monkeypatch, stop_at):
-    from benchmarks import s5_study_readiness
+    from benchmarks.experiments.s5 import s5_study_readiness
     output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
     # This test proves scheduling only; bypass is explicit and no real transport is constructed.
     monkeypatch.setattr(s5_study_readiness, 'require_formal_readiness', lambda p: {'test_only': True})
@@ -467,7 +468,7 @@ def test_study_run_one_uses_same_final_extraction_without_development_history_an
         tmp_path, monkeypatch, malformed):
     import time
     from types import SimpleNamespace
-    from benchmarks import s5_study_readiness
+    from benchmarks.experiments.s5 import s5_study_readiness
     from operator_agent.run_contract import code_hash
     output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
     case = plan['cases'][0]

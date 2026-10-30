@@ -796,7 +796,7 @@ def _mm_tma(a_ptr, b_ptr, c_ptr, M, N, K,
 
   ⚠️ **与 R-MATMUL-02 的 autotune 配置表直接冲突**：现有 12 组 config 里有 8 组是
   `num_warps=8`，在 Hopper 上会让 warp spec 静默失效。两条一起用时必须把 config
-  收敛到 `num_warps=4`。`benchmarks/triton_autotune_matmul.py` 是同一份表的拷贝，
+  收敛到 `num_warps=4`。`benchmarks/drivers/triton_autotune_matmul.py` 是同一份表的拷贝，
   要同步改。
 
   attention 场景 tutorial 06 还额外过滤掉 cc9.0 上 `BLOCK_M*BLOCK_N < 128*128

@@ -2,8 +2,8 @@
 import json
 import hashlib
 import pytest
-from benchmarks import s5_vertical_tool_evidence as evidence
-from benchmarks.s5_vertical_validation import GOOD_FIXTURE
+from benchmarks.experiments.s5 import s5_vertical_tool_evidence as evidence
+from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
 from operator_agent.run_contract import code_hash
 
 

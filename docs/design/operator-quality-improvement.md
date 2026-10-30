@@ -36,10 +36,10 @@ MCP 返回紧凑诊断和证据文件位置；完整位置、见证及逐轮反�
 
 任务清单固定 shape、dtype、pattern、layout、种子、参考契约和套件身份。种子与具体输入值不进入生成请求；种子在可复现清单中公开，不能视为秘密测试集。该有限集合的结果不代表所有形状或工作负载。
 
-`benchmarks/operator_quality.py` 默认只生成计划，既不请求模型，也不执行候选：
+`benchmarks/experiments/misc/operator_quality.py` 默认只生成计划，既不请求模型，也不执行候选：
 
 ```bash
-python3 benchmarks/operator_quality.py --output /tmp/quality-plan.json
+python3 benchmarks/experiments/misc/operator_quality.py --output /tmp/quality-plan.json
 ```
 
 默认每任务最多 2 次模型调用、每次预留 4096 输出 token、2 次候选验证。生成和 Fixer 共用持久调用账本，失败、缺失响应和无效修复都计入成本。请求/响应字节、调用超时和模型调用活动时间也有上限。这些限制不等于精确账单上限、整个任务的硬超时或 GPU 时间上限。
@@ -49,20 +49,20 @@ python3 benchmarks/operator_quality.py --output /tmp/quality-plan.json
 离线回放输入是「任务 ID → 原始模型响应字符串列表」的 JSON。首条响应格式为严格 JSON `{"code": "完整源码", "rationale": "说明"}`；修复响应沿用 Fixer 的代码块格式。回放执行 Python/NumPy 候选，token 成本为带 `replay_fixture` 标签的合成零值，不能用于估算真实模型成本。
 
 ```bash
-python3 benchmarks/operator_quality.py --replay /tmp/responses.json \
+python3 benchmarks/experiments/misc/operator_quality.py --replay /tmp/responses.json \
   --strategy baseline --output /tmp/quality-baseline
-python3 benchmarks/operator_quality.py --replay /tmp/responses.json \
+python3 benchmarks/experiments/misc/operator_quality.py --replay /tmp/responses.json \
   --strategy diagnosis --output /tmp/quality-diagnosis
-python3 benchmarks/operator_quality.py --compare \
+python3 benchmarks/experiments/misc/operator_quality.py --compare \
   /tmp/quality-baseline/report.json /tmp/quality-diagnosis/report.json
 ```
 
 真实运行必须显式选择 SSH、冻结模型配置与主机别名，再执行计划。凭据沿用环境变量或仓库外的密钥文件，不进入计划：
 
 ```bash
-python3 benchmarks/operator_quality.py --backend ssh --host <ssh-alias> \
+python3 benchmarks/experiments/misc/operator_quality.py --backend ssh --host <ssh-alias> \
   --model "$LLM_MODEL" --strategy diagnosis --output /tmp/quality-real-plan.json
-python3 benchmarks/operator_quality.py --execute /tmp/quality-real-plan.json \
+python3 benchmarks/experiments/misc/operator_quality.py --execute /tmp/quality-real-plan.json \
   --host <ssh-alias> --output /tmp/quality-real-run
 ```
 

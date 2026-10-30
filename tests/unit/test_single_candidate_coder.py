@@ -152,7 +152,7 @@ def test_disclosed_context_has_no_tensor_values_or_scalar_values():
 
 def test_trusted_layernorm_template_is_inside_narrow_static_mode():
     # Static test only; use its source as an example, not a generated credential.
-    from benchmarks.workload_llm_search_h20 import source
+    from benchmarks.drivers.workload_llm_search_h20 import source
     assert precheck(source(8), [{'X': dict(shape=[8192, 15360], dtype='float16')}]) is None
 
 

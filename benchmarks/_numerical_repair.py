@@ -44,7 +44,7 @@ def check_files(root, hashes):
 
 def load_parent(root, task):
     # Import at call time: the driver also imports this pure helper.
-    from benchmarks import workload_codegen_h20 as d
+    from benchmarks.drivers import workload_codegen_h20 as d
     root = Path(root).absolute()
     hashes = {}
     total = 0

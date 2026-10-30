@@ -23,7 +23,7 @@ _ROOT = dirname(dirname(dirname(abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from benchmarks.mutation_calibrate import Row  # noqa: E402
+from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
     "guard": "operator_agent/exec_guard.py",
@@ -32,7 +32,7 @@ FILES = {
     "ver": "operator_agent/verifier.py",
     "kdb": "operator_agent/kernel_db.py",
     "cond": "operator_agent/conductor.py",
-    "vch": "benchmarks/verify_corpus_honesty.py",
+    "vch": "benchmarks/verify/verify_corpus_honesty.py",
 }
 
 TARGETS = [

@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from benchmarks import s5_l2_evaluator as evaluator
+from benchmarks.experiments.s5 import s5_l2_evaluator as evaluator
 from operator_agent import quality_suite
 from operator_agent.run_contract import code_hash, digest
 

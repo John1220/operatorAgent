@@ -12,7 +12,7 @@ import json
 import unittest
 from pathlib import Path
 
-from benchmarks.harness_pass_rate import (MIN_DENOM, aggregate, compare_runs,
+from benchmarks.drivers.harness_pass_rate import (MIN_DENOM, aggregate, compare_runs,
                                           cost_from_metadata, device_record,
                                           fisher_exact, first_pass_round,
                                           format_comparison, format_report,
@@ -273,7 +273,7 @@ class TestCostIsPerRunNotCumulative(unittest.TestCase):
 
     def test_run_one_does_not_accept_a_shared_llm(self):
         import inspect
-        from benchmarks.harness_pass_rate import run_one
+        from benchmarks.drivers.harness_pass_rate import run_one
         params = list(inspect.signature(run_one).parameters)
         self.assertNotIn("llm", params,
                          f"run_one 又接收共享 client 了, 账单会跨运行累加: {params}")
@@ -375,7 +375,7 @@ class TestLineageIsNotWhitelisted(unittest.TestCase):
 
     def test_the_fixtures_cover_every_real_key(self):
         """假记录少一个键, 聚合逻辑就在那个键上从没被验过 —— 白名单正是这样隐形的"""
-        bench = (REPO_ROOT / "benchmarks" / "harness_pass_rate.py").read_text(encoding="utf-8")
+        bench = (REPO_ROOT / "benchmarks" / "drivers" / "harness_pass_rate.py").read_text(encoding="utf-8")
         record = _dict_keys_in(bench, {"case", "ok", "rounds"})
         self.assertEqual(1, len(record), f"run_one 的记录字典认出 {len(record)} 处")
         self.assertEqual(set(), _real_lineage_keys() - set(_round(1)),
@@ -638,7 +638,7 @@ class TestReportNeverReadsTheEnvForTheDevice(unittest.TestCase):
     """源码级守卫: 那个环境变量的读取只能活在 `device_record` 里当**对照**, 不能当来源"""
 
     def test_only_device_record_reads_it(self):
-        source = (REPO_ROOT / "benchmarks" / "harness_pass_rate.py").read_text(
+        source = (REPO_ROOT / "benchmarks" / "drivers" / "harness_pass_rate.py").read_text(
             encoding="utf-8")
         self.assertEqual(["device_record"], _env_lookup_sites(source),
                          "又有一处把本地环境变量当成了实际用卡")

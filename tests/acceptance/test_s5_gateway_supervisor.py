@@ -5,8 +5,8 @@ import time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 
 import pytest
-from benchmarks.s5_gateway_supervisor import SupervisedTransport
-from benchmarks.s5_gateway_transport import UpstreamError
+from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
+from benchmarks.experiments.s5.s5_gateway_transport import UpstreamError
 
 SECRET='fixture-worker-secret'
 FIRST=b'data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}\n\n'
@@ -193,7 +193,7 @@ def test_failure_snapshot_is_a_copy_and_deadline_cleanup_is_recorded():
     {'stage':'response_headers','code':'http_status','http_status':503,'message':SECRET},
 ])
 def test_untrusted_worker_diagnostic_cannot_add_raw_fields_or_labels(value):
-    from benchmarks.s5_gateway_transport import failure_detail
+    from benchmarks.experiments.s5.s5_gateway_transport import failure_detail
     report=failure_detail(value)
     assert report==dict(stage='unknown',code='unexpected_error',http_status=None)
     assert SECRET not in json.dumps(report)

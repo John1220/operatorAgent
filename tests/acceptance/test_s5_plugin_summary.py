@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-from benchmarks import s5_plugin_summary as stats
+from benchmarks.experiments.s5 import s5_plugin_summary as stats
 
 
 def grid():

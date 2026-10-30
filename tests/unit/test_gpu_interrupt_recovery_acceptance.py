@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-from benchmarks.gpu_interrupt_recovery import active_witness, terminal_errors, SLOW
+from benchmarks.experiments.misc.gpu_interrupt_recovery import active_witness, terminal_errors, SLOW
 from operator_agent.anticheat import static_audit
 from operator_agent.measurement import TRANSPORT_UNKNOWN
 

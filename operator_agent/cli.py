@@ -17,7 +17,7 @@
         --shapes 64,64,64 --run-dir "$op_workspace/run"
     python -m operator_agent verify --run-dir "$op_workspace/run" --code-file cand.py --stop-after L2
 
-与 `benchmarks/demo_hitl_chain.py` 的关系：那个演示给人看；这个 CLI 给程序调。
+与 `benchmarks/demos/demo_hitl_chain.py` 的关系：那个演示给人看；这个 CLI 给程序调。
 """
 
 from __future__ import annotations

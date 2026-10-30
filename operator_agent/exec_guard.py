@@ -47,7 +47,7 @@
 
 ## 可证 / 不可证
 
-**可以声称（有守卫 `tests/unit/test_exec_guard.py` + 演示 `benchmarks/demo_exec_guard.py`）**：
+**可以声称（有守卫 `tests/unit/test_exec_guard.py` + 演示 `benchmarks/demos/demo_exec_guard.py`）**：
 1. 墙钟超时会**杀掉整个进程组**（含孙子进程），不留孤儿，并给出 `timeout` + 用了多少 ms；
 2. `SIGXCPU`（CPU 时间）/ EFBIG（单文件大小）/ `EAGAIN`+`BlockingIOError`（进程数）/
    `MemoryError`（内存）四档在**返回值里分得开**，且带读数；

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from benchmarks import correctness_profiles_h20 as d
+from benchmarks.drivers import correctness_profiles_h20 as d
 from operator_agent.anticheat import static_audit
 from operator_agent.correctness import as_suite
 from operator_agent.correctness_profiles import default_policy

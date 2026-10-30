@@ -182,7 +182,7 @@ _PEAK_SOURCE: dict[str, str] = {
 _PEAK_SOURCE_DEFAULT = "⚠️出处未记录"
 
 # 「这台机器实际达得到什么」不进这张表, 也不立第二张表。
-# 因为它不是一个标量: 2026-09-26 用 benchmarks/calibrate_achievable_peak.py 在 H20 GPU2
+# 因为它不是一个标量: 2026-09-26 用 benchmarks/calibration/calibrate_achievable_peak.py 在 H20 GPU2
 # 上量到的阶梯是 fp16 从 2048² 的 116.3 TFLOPS 爬到 6144² 的 140.3 (跨 20.7%), D2D 带宽
 # 从 8 MB 的 1196 GB/s 爬到 4 GB 的 3357 GB/s (跨 2.8 倍)。按 shape 桶查它需要知道当前
 # 张量落在哪个桶 —— 那件事的正确归宿是持久化的每-shape 记录 (缺口 2), 而不是又一堆
@@ -561,7 +561,7 @@ class Verifier:
             # 既没有墙钟也没有上限，它根本不会有），不写出来就成了「无名编译失败」。
             # 取值单独一族（`compile_*`）：`compile_status` 的既有消费者做的是**相等判据**
             # （`interface_mismatch` / `resource_infeasible` / `cached` / `success`），
-            # 加一个新取值不会让它们误判；`benchmarks/verify_corpus_honesty.py` 的
+            # 加一个新取值不会让它们误判；`benchmarks/verify/verify_corpus_honesty.py` 的
             # `origin_of()` 已同步认这一族是**本地**失败。
             if isinstance(e, GuardRefusal):
                 metrics["compile_status"] = f"compile_{e.status}"
@@ -1452,7 +1452,7 @@ class Verifier:
         `tolerance.error_ratio` 那里, 包括「这三个阈是别人语料上的数」那句警告)。
 
         与 AND 那条的差别值得再说一遍: AND 比「候选 vs 参考」, 条带是绝对 atol ⇒ 参考幅值一小
-        就看不见任何东西 (`benchmarks/probe_l2_sampling_gate.py` 臂 1/2 拍到的全零核 PASS)。
+        就看不见任何东西 (`benchmarks/probes/probe_l2_sampling_gate.py` 臂 1/2 拍到的全零核 PASS)。
         这把尺的分母是**参考自己到真值的距离**, 条带自动随幅值缩放。
 
         三种拿不到读数的情况都**不造一个数** (缺证据不是通过, 也不是 0):

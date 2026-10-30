@@ -6,10 +6,11 @@ import time
 
 import pytest
 
-from benchmarks import s5_arm_env as arms, s5_formal_run
-from benchmarks.s5_fake_responses_upstream import FakeResponsesUpstream
-from benchmarks.s5_gateway_http import GatewayServer
-from benchmarks.s5_gateway_supervisor import SupervisedTransport
+from benchmarks.experiments.s5 import s5_arm_env as arms
+from benchmarks.experiments.s5 import s5_formal_run
+from benchmarks.experiments.s5.s5_fake_responses_upstream import FakeResponsesUpstream
+from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
+from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
 from operator_agent import s5_shared_budget as budget
 
 READY = bool(arms.NODE) and (arms.DSH_ROOT / 'dsh/lib/bin.js').is_file()
@@ -101,7 +102,7 @@ def test_known_host_timeout_diagnostic_is_not_a_claim_about_provider_root_cause(
 
 
 def test_idle_timeout_is_an_infrastructure_fault_not_call_budget_exhaustion():
-    from benchmarks.s5_outcomes import classify
+    from benchmarks.experiments.s5.s5_outcomes import classify
     record=dict(status='unknown',execution_state='interrupted',
         development_audit=dict(complete=True),development=dict(records=[]),
         gateway_diagnostics=dict(schema='s5-upstream-failures-v1',failures=[],truncated=False),

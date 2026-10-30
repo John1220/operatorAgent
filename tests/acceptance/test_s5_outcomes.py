@@ -1,5 +1,5 @@
 """Safe gateway failures remain infrastructure unknowns, not model failures."""
-from benchmarks.s5_outcomes import classify
+from benchmarks.experiments.s5.s5_outcomes import classify
 
 
 def base_record():

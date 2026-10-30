@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from benchmarks import workload_decision_h20 as driver
+from benchmarks.drivers import workload_decision_h20 as driver
 from operator_agent import Conductor, KernelDatabase, MockGPU
 from operator_agent.artifact_store import ArtifactStore
 from operator_agent.confirm import ConfirmRecord, confirm_metrics
@@ -513,7 +513,7 @@ def test_failed_preparation_keeps_frozen_plan_lifecycle_and_honest_summary(tmp_p
     assert {k:os.environ.get(k) for k in old} == old
 def test_dispatch_contract_uses_json_normal_form_and_still_rejects_real_drift():
     import copy
-    from benchmarks import workload_decision_h20 as driver
+    from benchmarks.drivers import workload_decision_h20 as driver
     from operator_agent.contract import freeze_from_task
     from operator_agent.run_contract import json_value
     for t in driver.tasks():

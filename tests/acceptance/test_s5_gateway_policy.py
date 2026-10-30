@@ -4,7 +4,7 @@ import json
 import threading
 
 import pytest
-from benchmarks.s5_gateway_policy import GatewayPolicy, PolicyRefused, PolicyUpstreamFailure
+from benchmarks.experiments.s5.s5_gateway_policy import GatewayPolicy, PolicyRefused, PolicyUpstreamFailure
 from operator_agent import s5_shared_budget as shared
 
 

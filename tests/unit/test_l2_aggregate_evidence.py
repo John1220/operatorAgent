@@ -1,6 +1,6 @@
 """通过那一侧的 L2 聚合不许用默认值造证据 (#81)
 
-现场 (doc 57 §三 第 3 条，`benchmarks/probe_l2_sampling_gate.py` 臂 0b 打出来的读数)：
+现场 (doc 57 §三 第 3 条，`benchmarks/probes/probe_l2_sampling_gate.py` 臂 0b 打出来的读数)：
 
     LocalExecutor (空 Cap 集): atol=— 没这个键  matched_ratio=1.00e+00  max_rel=0.00e+00  bad=0
 

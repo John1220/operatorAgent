@@ -135,7 +135,7 @@ def fake_backend(**overrides) -> DeclaredFakeBackend:
 def gpu_fake(**overrides) -> DeclaredFakeBackend:
     """带 `REAL_DEVICE` 的假件: 给「量具不许静默记录 CPU 数字」那类用例用
 
-    `require(Cap.REAL_DEVICE, …)` 的消费方 (benchmarks/harness_pass_rate.py) 靠它做
+    `require(Cap.REAL_DEVICE, …)` 的消费方 (benchmarks/drivers/harness_pass_rate.py) 靠它做
     正向对照 —— 没有真卡的控制机上, 这条声明是**假件说出来的**, 而不是探测出来的,
     所以它只能用于用例, 不能用于生产路径。
     """

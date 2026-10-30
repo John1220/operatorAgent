@@ -1,4 +1,4 @@
-"""`benchmarks/inventory_intent_resend.py` 的读者 —— 清点存量产物时「取不到」不许当「没有」
+"""`benchmarks/drivers/inventory_intent_resend.py` 的读者 —— 清点存量产物时「取不到」不许当「没有」
 
 这一片是 #102 的第 3 片 (Limbo `2609.29095v1` §3/§8 那一族: 远端/落盘的写副作用到底
 幂等不幂等)。doc 60 §四 给的形状是「先量出同一 intent 被重发的频率，再谈要不要 pin key」，
@@ -58,7 +58,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.inventory_intent_resend import (KIND_FULL, KIND_OTHER,  # noqa: E402
+from benchmarks.drivers.inventory_intent_resend import (KIND_FULL, KIND_OTHER,  # noqa: E402
                                                 KIND_STAGING, classify,
                                                 inventory, main, render,
                                                 selftest)

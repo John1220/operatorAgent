@@ -6,7 +6,7 @@ import shlex
 
 import pytest
 
-from benchmarks import s5_plugin_flow as flow
+from benchmarks.experiments.s5 import s5_plugin_flow as flow
 
 
 def marker(phase, step, turn=1):

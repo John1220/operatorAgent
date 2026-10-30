@@ -1,6 +1,6 @@
 """§21.3 对照实验的守卫: 两臂只差一个开关 / 留痕随开关变 / 结论不许越过 N
 
-`benchmarks/evidence_ablation_h20.py` 要跑真机烧 token, 所以它的**接线**必须离线可验
+`benchmarks/drivers/evidence_ablation_h20.py` 要跑真机烧 token, 所以它的**接线**必须离线可验
 (零 GPU / 零 LLM / 不联网): 接线错了却真机跑一遍, 读数会「看起来像结论」。这里钉四件事:
 
 1. **两臂只差 `structured_evidence` 一个键** —— 键差集现算, 且两臂的值必须是**原始值**
@@ -24,8 +24,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from benchmarks import evidence_ablation_h20 as ab            # noqa: E402
-from benchmarks.harness_pass_rate import min_detectable_delta  # noqa: E402
+from benchmarks.drivers import evidence_ablation_h20 as ab            # noqa: E402
+from benchmarks.drivers.harness_pass_rate import min_detectable_delta  # noqa: E402
 from operator_agent.mock_gpu import MockGPU                    # noqa: E402
 
 #: 越界断言的形状 (不包括结论里那句「不许声称收益, 也不许声称无收益」—— 那句是**边界**本身,
@@ -230,7 +230,7 @@ class TestTheConclusionCarriesItsOwnBounds(unittest.TestCase):
         self.assertEqual(0.3, low.constraints.min_speedup)
         self.assertEqual(0.5, high.constraints.min_speedup)
         self.assertIn("--min-speedup",
-                      (ROOT / "benchmarks" / "evidence_ablation_h20.py").read_text("utf-8"))
+                      (ROOT / "benchmarks" / "drivers" / "evidence_ablation_h20.py").read_text("utf-8"))
 
     def test_identical_arms_must_say_the_ruler_cannot_tell(self):
         """两臂读数相同时, 结论句必须说出「分辨不出」, 不许沉默地留一个 0.0 pp"""
@@ -275,7 +275,7 @@ class TestTheRunOrderIsRotated(unittest.TestCase):
     """
 
     def test_the_arm_order_alternates_between_scenarios(self):
-        src = (ROOT / "benchmarks" / "evidence_ablation_h20.py").read_text(encoding="utf-8")
+        src = (ROOT / "benchmarks" / "drivers" / "evidence_ablation_h20.py").read_text(encoding="utf-8")
         self.assertIn("arms = [True, False] if (si + rep) % 2 else [False, True]", src)
         # 轮换必须真的被用上 (`arms` 造出来却不用 = 摆设)
         self.assertIn("for on in arms:", src)
@@ -354,7 +354,7 @@ class TestTheOfflineSelfCheckRuns(unittest.TestCase):
 
     def test_dry_run_prints_the_table_and_the_conclusion(self):
         proc = subprocess.run(
-            [sys.executable, "-B", "benchmarks/evidence_ablation_h20.py",
+            [sys.executable, "-B", "benchmarks/drivers/evidence_ablation_h20.py",
              "--dry-run", "--scenarios", "syntax", "--reps", "1"],
             cwd=ROOT, capture_output=True, text=True, timeout=300)
         self.assertEqual(0, proc.returncode, proc.stdout[-2000:] + proc.stderr[-2000:])
@@ -368,7 +368,7 @@ class TestTheOfflineSelfCheckRuns(unittest.TestCase):
     def test_the_run_cap_refuses_an_over_budget_plan(self):
         """token 不是免费的: 计划超过上限就在**开跑之前**拒绝"""
         proc = subprocess.run(
-            [sys.executable, "-B", "benchmarks/evidence_ablation_h20.py",
+            [sys.executable, "-B", "benchmarks/drivers/evidence_ablation_h20.py",
              "--dry-run", "--reps", "3", "--max-runs", "2"],
             cwd=ROOT, capture_output=True, text=True, timeout=300)
         self.assertNotEqual(0, proc.returncode)

@@ -13,7 +13,7 @@
 
 也就是**第一个报了值的输入组代表全部组**, 而它下面聚合的是跨组的量 (`max_error` 取 max、
 `matched_ratio` 取 min、`bad_elements` 求和)。于是产物里印着「atol=…」, 而那个聚合值其实可能
-是几把不同的尺各自判过之后再混起来的 —— `benchmarks/probe_l2_sampling_gate.py` 臂 0b 正是要拿
+是几把不同的尺各自判过之后再混起来的 —— `benchmarks/probes/probe_l2_sampling_gate.py` 臂 0b 正是要拿
 这几个键核「绝对+相对」那条门的, 读的人会把一个不存在的统一口径当成前提。
 
 ⚠️ 一条要说清楚的实话: **今天从内置的两条比对路径走, 这个冲突构造不出来** —— 一次

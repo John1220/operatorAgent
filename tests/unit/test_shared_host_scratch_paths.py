@@ -77,14 +77,30 @@ def _shared_path_hits():
     import re
     pat = re.compile(r"/tmp/[A-Za-z0-9._\-]{3,}")
     out = {}
+    # docstring 是**说明文字**，和注释同一个性质（2026-10-31：benchmarks/ 分目录后
+    # 递归扫到了 leetcuda_bench 的用法示例 `--out /tmp/r.json`，那是给人读的命令行例子，
+    # 不是运行时落点）。跳过 Module/Class/Function 的首条 Expr 字符串。
+    def _docstrings(tree):
+        ids = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", None) or []
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+                        and isinstance(body[0].value.value, str):
+                    ids.add(id(body[0].value))
+        return ids
     for d in SCAN_DIRS:
-        for p in sorted((ROOT / d).glob("*.py")):
+        # 2026-10-31 起 benchmarks/ 按用途分目录（probes/ drivers/ experiments/…），
+        # 平铺 glob 会静默漏扫 ⇒ 必须递归；漏扫一条 `/tmp/<固定名>` 的后果是它永远不红。
+        for p in sorted((ROOT / d).rglob("*.py")):
             try:
                 tree = ast.parse(io.open(p, encoding="utf-8", errors="replace").read())
             except SyntaxError as exc:            # 读不动就说读不动, 别当成「没有命中」
                 raise AssertionError(f"守卫解析失败: {p}: {exc}") from exc
+            skip = _docstrings(tree)
             found = [m.group(0) for n in ast.walk(tree)
                      if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                     and id(n) not in skip
                      for m in pat.finditer(n.value)]
             if found:
                 out[str(p.relative_to(ROOT))] = found
@@ -334,14 +350,14 @@ class TestSharedPathRatchet(unittest.TestCase):
         —— 调用退回裸 `terminate()` 时 import 行仍带着 `stop_interferer` 这个词。
         """
         want = {"private_dir", "write_private", "remote_scratch_path"}
-        for name in ("verify_interleaved_ab.py", "verify_util_decontamination.py"):
+        for name in ("verify/verify_interleaved_ab.py", "verify/verify_util_decontamination.py"):
             called = _called_names(ROOT / "benchmarks" / name)
             self.assertTrue(want <= called, f"{name} 不再从 _scratch 拿落点了: 缺 {sorted(want - called)}")
             self.assertNotIn("mkdtemp", called,
                              f"{name} 绕开 private_dir 直接用 mkdtemp, 权限不再被核")
-        called = _called_names(ROOT / "benchmarks" / "verify_interleaved_ab.py")
+        called = _called_names(ROOT / "benchmarks" / "verify" / "verify_interleaved_ab.py")
         self.assertIn("stop_interferer", called, "干扰流的拆除退回成 terminate() 了")
-        strings = _string_constants(ROOT / "benchmarks" / "verify_interleaved_ab.py")
+        strings = _string_constants(ROOT / "benchmarks" / "verify" / "verify_interleaved_ab.py")
         self.assertIn("chmod 600", strings, "远端上传后要显式收权限 (scp 保留源 mode)")
 
 
@@ -359,7 +375,12 @@ class TestSmokeBurnerArm(unittest.TestCase):
         burner 是 `python -c` 内联代码, 落点本身不在它的 argv 里 —— 所以必须
         显式把落点塞进 argv (MARK= 赋值), `pkill -f <落点>` 才指得到它。
         """
-        import smoke_spine_h20 as smoke
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "benchmarks" / "demos"))
+        try:
+            import smoke_spine_h20 as smoke
+        finally:
+            _sys.path.pop(0)
         log = "/tmp/burner-1a2b3c4d.log"
         cmd = smoke._burner_command(3, log, 30)
         self.assertIn(f'MARK="{log}"', cmd)
@@ -392,7 +413,7 @@ class TestSmokeBurnerArm(unittest.TestCase):
 
     def test_smoke_uses_the_helpers_not_ad_hoc_paths(self):
         """驱动不许绕开 helper 自己拼路径/拆除 (判据 = AST 里的调用, 非文本)"""
-        called = _called_names(ROOT / "benchmarks" / "smoke_spine_h20.py")
+        called = _called_names(ROOT / "benchmarks" / "demos" / "smoke_spine_h20.py")
         self.assertIn("remote_scratch_path", called,
                       "落点不再从 _scratch 拿随机名了")
         self.assertIn("stop_interferer", called,

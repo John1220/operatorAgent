@@ -4,9 +4,9 @@ import shutil
 
 import pytest
 
-from benchmarks import s5_arm_env, s5_preflight_plan, s5_runtime, s5_three_group_run, s5_verify_service
-from benchmarks.s5_vertical_headless import DSH_ROOT
-from benchmarks.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
+from benchmarks.experiments.s5 import s5_arm_env, s5_preflight_plan, s5_runtime, s5_three_group_run, s5_verify_service
+from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
+from benchmarks.experiments.s5.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
 
 DSH_READY = bool(shutil.which('node')) and (DSH_ROOT / 'dsh' / 'lib' / 'bin.js').is_file()
 
@@ -66,7 +66,7 @@ def test_preflight_plan_never_claims_the_formal_denominator():
 
 
 def test_task_text_matches_the_earlier_vertical_runs():
-    from benchmarks.s5_vertical_trial import TASK as vertical_task
+    from benchmarks.experiments.s5.s5_vertical_trial import TASK as vertical_task
     assert s5_preflight_plan.TASK == vertical_task
 
 

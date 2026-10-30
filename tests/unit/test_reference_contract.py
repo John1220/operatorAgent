@@ -118,7 +118,7 @@ def test_tolerance_not_loosened(error):
 
 
 def test_finite_suite_is_exact_calibration_not_passing_subset():
-    from benchmarks.calibrate_layernorm import fixtures
+    from benchmarks.calibration.calibrate_layernorm import fixtures
     actual = v2_suite()
     assert len(actual.cases) == 32
     # Multiset of dtype/shape/value/layout matches all original measurements.
@@ -310,7 +310,7 @@ def test_identity_hold_after_generation_stops_round_without_fix_search_retry_or_
     from operator_agent.artifact_store import ArtifactStore
     c.store = ArtifactStore(str(tmp_path / "artifacts"))
     c.designer.run = Mock(return_value=UnifiedSketch(algorithm="layernorm", target_dsl="triton"))
-    from benchmarks.calibrate_layernorm import candidate_source
+    from benchmarks.calibration.calibrate_layernorm import candidate_source
     c.coder = SimpleNamespace(run=lambda *a, **k: candidate_source("unfused-fp32"))
     c.fixer.run = Mock(side_effect=AssertionError("fixed"))
     c.search.run = Mock(side_effect=AssertionError("searched"))

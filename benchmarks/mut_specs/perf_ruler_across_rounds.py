@@ -8,13 +8,13 @@
 按 #83 那条不进行为分母。
 """
 
-from benchmarks.mutation_calibrate import Row
+from benchmarks.calibration.mutation_calibrate import Row
 
 FILES = {
     "ms": "operator_agent/measurement.py",
     "ver": "operator_agent/verifier.py",
     "cond": "operator_agent/conductor.py",
-    "hpr": "benchmarks/harness_pass_rate.py",
+    "hpr": "benchmarks/drivers/harness_pass_rate.py",
 }
 
 TARGETS = [

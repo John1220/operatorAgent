@@ -73,7 +73,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.harness_pass_rate import (aggregate, format_report,  # noqa: E402
+from benchmarks.drivers.harness_pass_rate import (aggregate, format_report,  # noqa: E402
                                           record_rounds)
 from operator_agent import measurement as ms  # noqa: E402
 from operator_agent.conductor import Conductor  # noqa: E402

@@ -2,13 +2,14 @@
 import json
 from pathlib import Path
 import pytest
-from benchmarks import s5_workflow_preflight as pilot, s5_formal_run as workflow, s5_arm_env
+from benchmarks.experiments.s5 import s5_workflow_preflight as pilot, s5_formal_run as workflow
+from benchmarks.experiments.s5 import s5_arm_env
 
 
 @pytest.fixture(autouse=True)
 def unit_readiness(monkeypatch):
     # These tests exercise selection/stop policy, not the OS proof validator.
-    from benchmarks import s5_isolation_probe
+    from benchmarks.experiments.s5 import s5_isolation_probe
     monkeypatch.setattr(s5_isolation_probe,'load_readiness',
                         lambda path:dict(report_path='unit-fixture',runtime={}))
 
@@ -110,7 +111,7 @@ def test_shared_gpu_pin_and_policy_are_frozen_for_all_services(tmp_path,monkeypa
     for c in plan['cases']:
         service=json.loads((tmp_path/'shared/services'/c['case_id']/'plan.json').read_text())
         assert (service['gpu_index'],service['gpu_uuid'],service['gpu_name'])==(2,gpu['uuid'],gpu['name'])
-    from benchmarks import s5_shared_gpu
+    from benchmarks.experiments.s5 import s5_shared_gpu
     observed={}
     def snapshot(pin,p,env):
         observed.update(pin=pin,policy=p);return {'shared':True}

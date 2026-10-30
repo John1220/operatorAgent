@@ -6,7 +6,7 @@
      kernels yield rho > 100."
 
 它与我方 AND 那条门的**根本差别**不是「阈值松紧」而是「比的是什么」: AND 比「候选 vs 参考」，
-条带是绝对 atol ⇒ 参考幅值一小就看不见任何东西。`benchmarks/probe_l2_sampling_gate.py` 臂 1/2
+条带是绝对 atol ⇒ 参考幅值一小就看不见任何东西。`benchmarks/probes/probe_l2_sampling_gate.py` 臂 1/2
 拍到过这个现场 —— 全零核在 scale=1e-3 / 1e-6 的输入上被判 **PASS**。这把尺的分母是**参考自己
 到 float64 真值的距离**，条带因此自动随幅值缩放。
 

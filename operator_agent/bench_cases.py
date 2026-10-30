@@ -222,7 +222,7 @@ class BenchmarkCase:
 
 # ── 形状分布 → case：kernel 级 shape 到具体张量布局的**唯一**一张表 ───────────────
 #
-# 键与 `benchmarks/harness_pass_rate.py:inputs_for` 同一套（那张表是「已经端到端跑通过的
+# 键与 `benchmarks/drivers/harness_pass_rate.py:inputs_for` 同一套（那张表是「已经端到端跑通过的
 # 输入契约」）：两处必须是同一组名字，否则 L2 的参考实现按名字逐个对上时会「找不到输入」。
 
 

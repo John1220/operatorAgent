@@ -28,8 +28,8 @@ sys.path.insert(0, str(ROOT))
 
 
 def _load():
-    """按路径加载 benchmarks/ablation_eligibility.py (benchmarks 不是包)"""
-    path = ROOT / "benchmarks" / "ablation_eligibility.py"
+    """按路径加载 benchmarks/experiments/misc/ablation_eligibility.py (benchmarks 不是包)"""
+    path = ROOT / "benchmarks" / "experiments/misc" / "ablation_eligibility.py"
     spec = importlib.util.spec_from_file_location("ablation_eligibility", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -184,7 +184,7 @@ class TestPolicy(unittest.TestCase):
     """政策守卫: 这个脚本不许长出「关掉资格审计」的开关"""
 
     def test_there_is_no_switch_to_turn_the_audit_off(self):
-        src = (ROOT / "benchmarks" / "ablation_eligibility.py").read_text(encoding="utf-8")
+        src = (ROOT / "benchmarks" / "experiments/misc" / "ablation_eligibility.py").read_text(encoding="utf-8")
         for forbidden in ("--disable", "--no-eligibility", "--bypass",
                           "OPERATOR_AGENT_DISABLE"):
             self.assertNotIn(forbidden, src,

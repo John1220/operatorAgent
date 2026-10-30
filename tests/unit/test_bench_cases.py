@@ -175,7 +175,7 @@ class TestTheShapeDistributionBuildsCases(unittest.TestCase):
     """B 组: 布局表 —— 与真机驱动的输入工厂同一套键; 未知算子不猜"""
 
     def test_the_matmul_layout_matches_the_input_factory(self):
-        from benchmarks.harness_pass_rate import inputs_for
+        from benchmarks.drivers.harness_pass_rate import inputs_for
         shape = (32, 16, 8)
         mine = cases_from_shapes("matmul", ((shape, 1.0),))[0]
         theirs = inputs_for("matmul", shape)
@@ -183,7 +183,7 @@ class TestTheShapeDistributionBuildsCases(unittest.TestCase):
                          "两处名字漂了, L2 的参考实现就找不到输入")
 
     def test_the_rows_layout_matches_the_input_factory(self):
-        from benchmarks.harness_pass_rate import inputs_for
+        from benchmarks.drivers.harness_pass_rate import inputs_for
         shape = (64, 32)
         mine = cases_from_shapes("layernorm", ((shape, 1.0),))[0]
         self.assertEqual(case_key(inputs_for("layernorm", shape)), mine.key())
@@ -424,7 +424,7 @@ class TestOneProducerPerFact(unittest.TestCase):
     def test_the_layout_table_has_one_home(self):
         self.assertEqual(1, self._src("operator_agent/bench_cases.py").count("_CASE_LAYOUTS ="));
         for rel in ("operator_agent/verifier.py", "operator_agent/conductor.py",
-                    "operator_agent/contract.py", "benchmarks/harness_pass_rate.py"):
+                    "operator_agent/contract.py", "benchmarks/drivers/harness_pass_rate.py"):
             self.assertNotIn("_CASE_LAYOUTS", self._src(rel), rel)
 
     def test_the_conductor_resolves_inputs_in_one_place(self):
@@ -445,7 +445,7 @@ class TestOneProducerPerFact(unittest.TestCase):
             self.assertNotIn(forbidden, rp, forbidden)
 
     def test_the_harness_declares_the_case_from_the_inputs_it_passes(self):
-        hp = self._src("benchmarks/harness_pass_rate.py")
+        hp = self._src("benchmarks/drivers/harness_pass_rate.py")
         self.assertIn("_declared = case_from_inputs(inputs", hp)
         self.assertIn("cases=(_declared,)", hp)
 

@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from benchmarks import operator_quality as cli
+from benchmarks.experiments.misc import operator_quality as cli
 from operator_agent import quality_evaluation as q
 from operator_agent.run_contract import code_hash
 

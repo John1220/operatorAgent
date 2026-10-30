@@ -1,7 +1,7 @@
 """Offline summary keeps planned denominators and unknowns explicit."""
 import pytest
-from benchmarks import s5_summary as s5
-from benchmarks.s5_task_manifest import manifest
+from benchmarks.experiments.s5 import s5_summary as s5
+from benchmarks.experiments.s5.s5_task_manifest import manifest
 from operator_agent.run_contract import digest
 
 

@@ -146,7 +146,7 @@ def test_conductor_rejects_ambiguous_frozen_identity_at_construction(bad):
 
 
 def test_calibrated_workload_rejects_tamper_or_gpu_drift_before_backend(tmp_path, monkeypatch):
-    from benchmarks import durable_profile_h20 as driver
+    from benchmarks.drivers import durable_profile_h20 as driver
     frozen = cc.freeze_audits([receipt("audit", "a"), receipt("audit", "b")], 2)
     path = tmp_path / "frozen.json"
     atomic_json(path, frozen)

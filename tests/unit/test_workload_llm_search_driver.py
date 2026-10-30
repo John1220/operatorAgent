@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from benchmarks import _bounded_proposals as transport
-from benchmarks import workload_llm_search_h20 as driver
+from benchmarks.drivers import workload_llm_search_h20 as driver
 from operator_agent import run_contract as rc
 
 

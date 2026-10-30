@@ -142,7 +142,8 @@ class TestWriteForHasAProductionCaller(unittest.TestCase):
                          "—— §22.1 的主张是「只有一个写入口」")
 
     def test_the_real_machine_drivers_pass_a_run_root(self):
-        drivers = ("harness_pass_rate.py", "agent_action_h20.py", "smoke_spine_h20.py")
+        drivers = ("drivers/harness_pass_rate.py", "drivers/agent_action_h20.py",
+                   "demos/smoke_spine_h20.py")
         missing = [name for name in drivers
                    if "run_root=new_run_root(" not in
                    (ROOT / "benchmarks" / name).read_text(encoding="utf-8")]

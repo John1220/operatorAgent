@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from benchmarks import s5_study_readiness as gate
+from benchmarks.experiments.s5 import s5_study_readiness as gate
 from operator_agent.run_contract import digest
 
 

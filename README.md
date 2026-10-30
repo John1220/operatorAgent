@@ -24,7 +24,7 @@ python -m pytest tests/ -q
 OPERATOR_AGENT_OUTPUT_DIR=/tmp/oa-demo/out \
 OPERATOR_AGENT_LOG_DIR=/tmp/oa-demo/log \
 OPERATOR_AGENT_KERNEL_DB=off \
-python3 benchmarks/demo_spine_local.py
+python3 benchmarks/demos/demo_spine_local.py
 
 # 真机端到端（需要 GPU + ~/.ssh/config 里的别名）
 python test_nvidia_matmul.py
@@ -121,8 +121,16 @@ operatorAgent/
 │   ├── prompts/             # Prompt 模板
 │   └── skills/              # SKILL 规范 + 优化配方库
 ├── remote_scripts/          # 远端执行载荷（run_kernel.py）
-├── tests/                   # 单元测试 + golden 回归 harness
-├── benchmarks/              # 探针与真机验证驱动（含零依赖 demo）
+├── tests/                   # 按用途分三层（见下）
+│   ├── conftest.py  fixtures/  golden_regression.py  # 共享夹具与 golden harness
+│   ├── unit/                # 208 个单模块/单机制用例
+│   ├── acceptance/          # 50 个批次验收（S4/S5/S6 协议、网关、隔离）
+│   └── hygiene/             # 仓库守卫：打包、凭据扫描、布局预算、契约冻结
+├── benchmarks/              # 按用途分目录（见下）
+│   ├── probes/  verify/  calibration/  measurement/  demos/
+│   ├── drivers/             # 真机驱动（*_h20、test_nvidia 同族）
+│   └── experiments/s4 s5 misc/   # 批次实验与服务
+│   └── _scratch.py _remote_bench.py …   # 多个驱动共用的私有辅助
 ├── test_nvidia_*.py         # 真机端到端 driver：唯一的 LLM 全流程入口
 ├── docs/                    # design / status / research / user_guide
 ├── output -> ~/op-agent-evidence/output   # 审计证据的**符号链接**，!不! 在仓内
@@ -162,8 +170,8 @@ operatorAgent/
 
 ```bash
 python tests/golden_regression.py compare   # exit 0 无回归 / 1 有回归 / 2 期望过期需人签认
-python3 benchmarks/demo_spine_local.py      # 零依赖：看脊柱判定（会写 output/，见上文 ⚠️）
-python3 benchmarks/smoke_spine_h20.py       # 真机版（要 GPU + ~/.ssh/config 别名）
+python3 benchmarks/demos/demo_spine_local.py      # 零依赖：看脊柱判定（会写 output/，见上文 ⚠️）
+python3 benchmarks/demos/smoke_spine_h20.py       # 真机版（要 GPU + ~/.ssh/config 别名）
 ```
 
 Golden 的 CPU 对照保留真实计时：matmul 比较 GFLOPS，零 GFLOPS 的内存算子比较平均延迟。

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks import s5_verify_remote as service
-from benchmarks.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
+from benchmarks.experiments.s5 import s5_verify_remote as service
+from benchmarks.experiments.s5.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
 
 DECLARATION = dict(request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',
                    dsl='python', precision='fp32')

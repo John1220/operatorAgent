@@ -170,7 +170,7 @@ def _or_dash(value):
 def format_sampling_configs(sampling: dict) -> list:
     """把 `CostTracker.sampling_configs` 的结果印成行 (#98 / doc 59 §四)
 
-    `pretty()` 与 `benchmarks/harness_pass_rate.py` 两个读者共用这一份渲染: 各印一遍就会
+    `pretty()` 与 `benchmarks/drivers/harness_pass_rate.py` 两个读者共用这一份渲染: 各印一遍就会
     各漂移各的, 而这张表的用途是让两个人对同一批数字得出同一个读数条件。
     """
     out: list = []

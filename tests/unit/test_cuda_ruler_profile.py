@@ -13,7 +13,7 @@ from operator_agent.measurement import assess, Validity
 from operator_agent.run_contract import atomic_json, protocol_identity
 from tests.unit.test_cuda_calibration import receipt, NativeBackend, change
 from tests.unit.test_oracle import _eval
-from benchmarks import durable_profile_h20 as driver
+from benchmarks.drivers import durable_profile_h20 as driver
 
 
 def profile():

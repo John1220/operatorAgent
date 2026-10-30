@@ -9,7 +9,7 @@ from operator_agent import mcp_server as mcp, s5_verify_client as client
 @pytest.mark.parametrize('content', ['Backend="ssh"; use existing task.',
     [{'type':'text','text':'Backend="ssh"; use existing task.'}]])
 def test_instruction_observation_does_not_confuse_json_escaping_with_missing_context(content):
-    from benchmarks.s5_plugin_probe import contains_message_text
+    from benchmarks.experiments.s5.s5_plugin_probe import contains_message_text
     messages=[dict(role='system',content=content)]
     assert contains_message_text(messages,'Backend="ssh"; use existing task.')
     assert not contains_message_text(messages,'Backend="mock"')

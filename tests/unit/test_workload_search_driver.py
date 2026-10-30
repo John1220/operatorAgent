@@ -3,7 +3,7 @@ import copy
 import json
 from pathlib import Path
 import pytest
-from benchmarks import workload_search_h20 as driver
+from benchmarks.drivers import workload_search_h20 as driver
 from operator_agent import run_contract as rc
 
 

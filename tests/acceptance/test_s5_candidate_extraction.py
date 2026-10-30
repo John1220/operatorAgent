@@ -1,7 +1,7 @@
 """Shared A/C final delivery rules; no execution of candidate source."""
 import pytest
 
-from benchmarks.s5_candidate_extraction import FinalSourceError, extract_final_source
+from benchmarks.experiments.s5.s5_candidate_extraction import FinalSourceError, extract_final_source
 
 
 SOURCE = 'def kernel(X):\n    return X\n'

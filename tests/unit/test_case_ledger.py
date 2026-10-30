@@ -392,7 +392,7 @@ class TestOneProducerPerFact(unittest.TestCase):
             self.assertNotIn(forbidden, rp, forbidden)
 
     def test_the_harness_declares_the_weight_of_the_case_it_evaluates(self):
-        hp = self._src("benchmarks/harness_pass_rate.py")
+        hp = self._src("benchmarks/drivers/harness_pass_rate.py")
         self.assertIn("case_weights={_case: SINGLE_CASE_WEIGHT}", hp)
         self.assertIn("aggregate=CASE_AGGREGATE", hp)
 

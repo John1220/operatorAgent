@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from benchmarks import s5_ruler_preflight as ruler
+from benchmarks.experiments.s5 import s5_ruler_preflight as ruler
 
 
 def test_freeze_and_validate_preserves_exact_declared_scope(tmp_path):

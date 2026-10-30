@@ -6,7 +6,7 @@
    与 rule_templates._SOFTMAX_TRITON (回退实现), 675 字符逐字相同, 两份都在跑。
    却没有一条断言让它们同源: 改一处, 另一处静默留在旧版。
 
-2) **手抄, 而且逐字比较抓不到**。benchmarks/measure_heartbeat_real.py 里那份 triton
+2) **手抄, 而且逐字比较抓不到**。benchmarks/measurement/measure_heartbeat_real.py 里那份 triton
    参照核是抄来的, 但签名被重新折行 ⇒ 文本不相等。它的注释写着"取自
    rule_templates.py 的 matmul 模板"。模板一改, 这个**量具**就会静静地量另一个核,
    而注释继续撒谎 —— 这正是本仓反复记的那类缺陷: 判据的出处没有机械约束。
@@ -41,7 +41,7 @@ CANONICAL = {
     "MATMUL_NUMPY": kt.MATMUL_NUMPY,
     "SOFTMAX_NUMPY": kt.SOFTMAX_NUMPY,
 }
-BENCH = REPO / "benchmarks" / "measure_heartbeat_real.py"
+BENCH = REPO / "benchmarks" / "measurement" / "measure_heartbeat_real.py"
 
 
 def _task(kernel="softmax", dsl="triton") -> TaskSchema:
@@ -138,7 +138,7 @@ class TestTheInstrumentDerivesItsKernel(unittest.TestCase):
         canon = _jit_ast(kt.MATMUL_TRITON)
         for s in _string_constants(BENCH):
             if s != kt.MATMUL_TRITON and _jit_ast(s) == canon:
-                self.fail("benchmarks/measure_heartbeat_real.py 里又出现了一份手抄的核 "
+                self.fail("benchmarks/measurement/measure_heartbeat_real.py 里又出现了一份手抄的核 "
                           "(逐字不同但 AST 相同 ⇒ 只有 AST 级守卫抓得到)")
 
 

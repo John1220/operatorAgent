@@ -169,13 +169,13 @@ class TestTheVerifierPublishesTheGuardVerdict(unittest.TestCase):
         self.assertEqual("exec_guard_refused", failure_class_of("L1", text))
 
     def test_the_corpus_honesty_probe_reads_it_as_local(self):
-        """`benchmarks/verify_corpus_honesty.py::origin_of` 的默认支是 **remote**
+        """`benchmarks/verify/verify_corpus_honesty.py::origin_of` 的默认支是 **remote**
 
         漏认这一族 ⇒ 一次本地编译超时会被那条探针读成「远端报的」，结论方向正好相反。
         """
         import importlib.util
         path = (Path(__file__).resolve().parents[2] / "benchmarks"
-                / "verify_corpus_honesty.py")
+                / "verify" / "verify_corpus_honesty.py")
         spec = importlib.util.spec_from_file_location("_verify_corpus_honesty", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)

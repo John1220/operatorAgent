@@ -10,8 +10,9 @@ import sys
 
 import pytest
 
-from benchmarks import s5_seatbelt as jail, s5_arm_env, s5_runtime
-from benchmarks.s5_vertical_headless import DSH_ROOT
+from benchmarks.experiments.s5 import s5_seatbelt as jail
+from benchmarks.experiments.s5 import s5_arm_env, s5_runtime
+from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
 
 READY = sys.platform == 'darwin' and Path(jail.SANDBOX).is_file() and s5_runtime.available()
 
@@ -43,7 +44,7 @@ def test_file_visibility_matrix_and_child_processes(tmp_path, staged, arm):
     assert jail.run(built,[sys.executable,'-c','print("PY_OK")']).stdout.strip() == 'PY_OK'
     for label, target in [('sibling',other),('fake_credentials',fake_key),('ledger',ledger),
                           ('symlink',alias),('dotdot',Path(built['work'])/'../../other-arm/candidate.py'),
-                          ('repository',jail.ROOT/'benchmarks/s5_formal_run.py')]:
+                          ('repository',jail.ROOT/'benchmarks/experiments/s5/s5_formal_run.py')]:
         # The unsandboxed control establishes that the target really exists.
         assert target.is_file()
         r=jail.run(built,['/bin/cat',str(target)])
@@ -95,11 +96,11 @@ def test_policy_or_runtime_drift_refuses_launch(tmp_path, staged):
 @pytest.mark.skipif(not READY, reason='macOS Seatbelt/runtime unavailable')
 @pytest.mark.parametrize('arm', ['A','B','C'])
 def test_actual_dsh_bootstraps_inside_outer_file_boundary(tmp_path, staged, arm):
-    from benchmarks.s5_fake_responses_upstream import FakeResponsesUpstream
-    from benchmarks.s5_gateway_supervisor import SupervisedTransport
-    from benchmarks.s5_gateway_http import GatewayServer
+    from benchmarks.experiments.s5.s5_fake_responses_upstream import FakeResponsesUpstream
+    from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
+    from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
     from operator_agent import s5_shared_budget as shared
-    from benchmarks.s5_formal_run import _final_text
+    from benchmarks.experiments.s5.s5_formal_run import _final_text
     path=tmp_path/'budget.sqlite'
     shared.create(path,task_id='boot-'+arm,max_calls=1,max_output_tokens=256,
                   total_output_tokens=256,wall_clock_s=60)
@@ -117,7 +118,7 @@ def test_actual_dsh_bootstraps_inside_outer_file_boundary(tmp_path, staged, arm)
 
 @pytest.mark.skipif(not READY, reason='macOS Seatbelt/runtime unavailable')
 def test_probe_report_binds_actual_dsh_visibility_and_feedback(tmp_path):
-    from benchmarks import s5_isolation_probe as probe
+    from benchmarks.experiments.s5 import s5_isolation_probe as probe
     from operator_agent.run_contract import digest
     report=probe.run(tmp_path/'acceptance')
     assert report['passed'] and report['real_model_calls']==report['gpu_executions']==0
@@ -144,9 +145,9 @@ def test_workspace_archive_never_follows_private_links(tmp_path,staged):
 
 @pytest.mark.skipif(not READY, reason='macOS Seatbelt/runtime unavailable')
 def test_isolated_workflow_final_evaluation_and_archive(tmp_path):
-    from benchmarks import s5_isolation_probe as probe, s5_formal_run as workflow, s5_verify_remote
-    from benchmarks.s5_fake_responses_upstream import FakeResponsesUpstream
-    from benchmarks.s5_vertical_validation import GOOD_FIXTURE
+    from benchmarks.experiments.s5 import s5_isolation_probe as probe, s5_formal_run as workflow, s5_verify_remote
+    from benchmarks.experiments.s5.s5_fake_responses_upstream import FakeResponsesUpstream
+    from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
     root=tmp_path/'run';root.mkdir()
     report=probe.run(tmp_path/'proof')
     assert report['passed']

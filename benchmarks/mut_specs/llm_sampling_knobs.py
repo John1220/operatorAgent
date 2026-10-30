@@ -15,11 +15,11 @@ _ROOT = dirname(dirname(dirname(abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from benchmarks.mutation_calibrate import Row  # noqa: E402
+from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
     "llm": "operator_agent/llm_client.py",
-    "hrn": "benchmarks/harness_pass_rate.py",
+    "hrn": "benchmarks/drivers/harness_pass_rate.py",
 }
 
 TARGETS = ["tests/unit/test_llm_sampling_knobs.py", "tests/unit/test_harness_pass_rate.py",

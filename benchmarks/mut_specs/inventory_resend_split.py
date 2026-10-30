@@ -24,10 +24,10 @@ C3/C10 是**量具自己那两个空转分支**：盲区计数不看 `result.jso
 这条分支没人走」。
 """
 
-from benchmarks.mutation_calibrate import Row
+from benchmarks.calibration.mutation_calibrate import Row
 
 FILES = {
-    "inv": "benchmarks/inventory_intent_resend.py",
+    "inv": "benchmarks/drivers/inventory_intent_resend.py",
 }
 
 TARGETS = [

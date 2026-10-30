@@ -219,7 +219,7 @@ class TargetSpec:
     #:
     #: 默认空集是有意的: 本地 mock 运行本来就没有真卡, 无条件要求 `REAL_DEVICE`
     #: 等于把整条离线链路判死。要真卡的是**量具与真机驱动**, 由它们显式声明
-    #: (`benchmarks/harness_pass_rate.py` 就是这么声明的)。
+    #: (`benchmarks/drivers/harness_pass_rate.py` 就是这么声明的)。
     required_caps: tuple = ()
 
     # 已知硬件 + 已知 DSL (允许 Router 的 _DSL_CAPABILITY 之外的值, 只做 warning)

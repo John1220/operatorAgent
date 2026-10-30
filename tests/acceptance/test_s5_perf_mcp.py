@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from benchmarks.s5_perf_mcp import PerformanceRelay
+from benchmarks.experiments.s5.s5_perf_mcp import PerformanceRelay
 
 
 def make_relay(tmp_path):

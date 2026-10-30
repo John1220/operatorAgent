@@ -5,7 +5,7 @@
 一轮**的分级结果 —— 「第 2 轮卡在 L1」与「第 2 轮卡在 L3」在产物里无法区分。
 
 这一组测试钉的是补上的两个键: `levels_passed` 与 `measurement_validity`。它们不是装饰:
-成功率量具 (`benchmarks/harness_pass_rate.py`) 的 rounds-to-pass 与「有多少轮的读数有资格
+成功率量具 (`benchmarks/drivers/harness_pass_rate.py`) 的 rounds-to-pass 与「有多少轮的读数有资格
 驱动闭环」两项, 只能从血缘里算, 因为真机跑一轮很贵、不可能为了统计再跑一遍。
 
 用 MockGPU + 假 LLM, 不碰网络也不碰 GPU。

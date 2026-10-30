@@ -5,11 +5,12 @@ import shutil
 
 import pytest
 
-from benchmarks import s5_arm_env, s5_responses_turn as turn
-from benchmarks.s5_fake_responses_upstream import FakeResponsesUpstream
-from benchmarks.s5_gateway_http import GatewayServer
-from benchmarks.s5_gateway_policy import GatewayPolicy, PolicyRefused
-from benchmarks.s5_vertical_headless import DSH_ROOT
+from benchmarks.experiments.s5 import s5_arm_env
+from benchmarks.experiments.s5 import s5_responses_turn as turn
+from benchmarks.experiments.s5.s5_fake_responses_upstream import FakeResponsesUpstream
+from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
+from benchmarks.experiments.s5.s5_gateway_policy import GatewayPolicy, PolicyRefused
+from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
 from operator_agent import s5_shared_budget as shared
 
 DSH_READY = bool(shutil.which('node')) and (DSH_ROOT / 'dsh' / 'lib' / 'bin.js').is_file()

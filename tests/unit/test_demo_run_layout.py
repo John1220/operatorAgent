@@ -1,4 +1,4 @@
-"""演示脚本的守卫: `benchmarks/demo_run_layout.py` 说得对, 而且今天仍然跑得起来
+"""演示脚本的守卫: `benchmarks/demos/demo_run_layout.py` 说得对, 而且今天仍然跑得起来
 
 为什么给**演示**配守卫（本仓「每句 ✅ 都要有可运行的守卫」的同一条）: 演示里每一行
 读数都是一句判断（「越权写被拒」「裸写抛 PermissionError」「判据拿真路径仍然命中」）。
@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks import demo_run_layout as demo  # noqa: E402
+from benchmarks.demos import demo_run_layout as demo  # noqa: E402
 from operator_agent import run_layout as rl  # noqa: E402
 
 

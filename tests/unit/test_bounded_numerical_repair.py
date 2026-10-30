@@ -9,7 +9,8 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from benchmarks import _numerical_repair as nr, workload_codegen_h20 as d
+from benchmarks import _numerical_repair as nr
+from benchmarks.drivers import workload_codegen_h20 as d
 from operator_agent import llm_client as lc
 from operator_agent.bounded_repair import repair_lineage, validate_repair
 from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused

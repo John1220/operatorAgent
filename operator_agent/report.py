@@ -12,7 +12,7 @@
     一个从不说「我测不准」的自动系统, 它的所有数字都不可信。
 
 而它此前连一个调用点都没有: `confirm.UnableToEstablish` (收集器) 早就写好了, 但全仓
-只有两个 benchmark 脚本调它 (`benchmarks/demo_spine_local.py` /
+只有两个 benchmark 脚本调它 (`benchmarks/demos/demo_spine_local.py` /
 `harness_pass_rate.py`) —— 产品链路跑完一次真实验, 只留下 JSON 与一堆 print, 没有人
 能打开一份文件回答「这一轮哪些事**没能**确立」。这与 CHECKLOG 里那一族「算了但没接上」
 是同一种缺陷, 只是这次缺的是**整件交付物**。

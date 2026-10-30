@@ -5,10 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks import (s5_preflight_plan, s5_three_group_service_run as service_run,
-                        s5_verify_remote)
-from benchmarks.s5_vertical_headless import DSH_ROOT
-from benchmarks.s5_vertical_validation import GOOD_FIXTURE
+from benchmarks.experiments.s5 import s5_preflight_plan, s5_three_group_service_run as service_run, s5_verify_remote
+from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
+from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
 
 DSH_READY = bool(shutil.which('node')) and (DSH_ROOT / 'dsh' / 'lib' / 'bin.js').is_file()
 DECLARATION = dict(request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',

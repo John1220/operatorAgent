@@ -6,7 +6,7 @@ import threading
 import time
 
 import pytest
-from benchmarks.s5_gateway_transport import UpstreamError, UpstreamTransport
+from benchmarks.experiments.s5.s5_gateway_transport import UpstreamError, UpstreamTransport
 
 
 FINISH=b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
@@ -41,7 +41,7 @@ def handler_for(status=200, body=JSON_OK, content_type='application/json', heade
 
 
 def test_responses_stream_may_end_without_a_trailing_blank_line():
-    from benchmarks.s5_gateway_transport import _valid_response
+    from benchmarks.experiments.s5.s5_gateway_transport import _valid_response
     stream=(b'event: response.created\n'
             b'data: {"type":"response.created","response":{"status":"in_progress"}}\n\n'
             b'event: response.completed\n'

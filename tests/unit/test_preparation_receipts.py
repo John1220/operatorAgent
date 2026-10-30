@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from benchmarks import _preparation as p
-from benchmarks import workload_codegen_h20 as d
+from benchmarks.drivers import workload_codegen_h20 as d
 from operator_agent.remote_executor import SSHExecutor
 from operator_agent import llm_client as lc
 from operator_agent.run_contract import atomic_json, code_hash

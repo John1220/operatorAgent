@@ -27,7 +27,7 @@ AND 而非 OR 是关键: 近零参考处 rel_err 会爆, 但只要 abs_err 在 a
 于是合法的 fp16 累加核不会被误杀; 而整体缩放 0.97 这种错误答案, 其 rel_err 处处
 等于 0.03, 只要 rtol <= 1e-2 就每一个元素都是坏点, matched_ratio = 0, 必挂。
 
-实测三门禁对照 (benchmarks/probe_gates.py):
+实测三门禁对照 (benchmarks/probes/probe_gates.py):
 
     候选                 max_abs      纯atol(0.5)  KernelBench加性  本模块AND形式
     correct_fp32acc    0.000e+00      PASS         PASS             PASS
@@ -285,7 +285,7 @@ def error_shape_from_axis_flags(*, per_row, per_col,
 #      TF32 kernels yield rho in [1,3] while algorithmically incorrect kernels yield rho > 100."
 #
 # 它与我方 AND 那条的**根本差别**: AND 比的是「候选 vs 参考」, 误差条带是**绝对**的 atol,
-# 于是参考幅值一小就看不见任何东西 (`benchmarks/probe_l2_sampling_gate.py` 臂 1/2 拍到的
+# 于是参考幅值一小就看不见任何东西 (`benchmarks/probes/probe_l2_sampling_gate.py` 臂 1/2 拍到的
 # 全零核 PASS 就是这个)。这把尺比的是「候选到真值的距离 / 参考到真值的距离」—— 分母是**参考
 # 自己的误差**, 所以条带自动随幅值缩放, 全零核在任意幅值下 ρ 都是天文数字。
 #

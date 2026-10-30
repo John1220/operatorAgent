@@ -326,7 +326,7 @@ class TestPrecompileChecks(unittest.TestCase):
     def test_new_dependency_prefers_the_admitted_baseline(self):
         """I78: 基线优先取「上一次**过门**的候选」, 不是 patch 的父代
 
-        真机一手 (见 CHECKLOG I78 / `benchmarks/agent_action_h20.py`): 修复产物夹带
+        真机一手 (见 CHECKLOG I78 / `benchmarks/drivers/agent_action_h20.py`): 修复产物夹带
         `import torch`, 第 2 轮被拒; 第 3 轮 Fixer 又交同一份 —— 那时 patch 的父代是
         **上一轮那份被拒的候选**, 于是 `torch` 不再是「新增」, 门放行、真机编译真的发生。
         这里把两种基线摆在一起判: 同一份候选在「父代=被拒的候选」下必须仍然违约。

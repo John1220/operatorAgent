@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from benchmarks.s5_fake_gateway import FakeGateway, GatewayFakeFailure, GatewayRefused
+from benchmarks.experiments.s5.s5_fake_gateway import FakeGateway, GatewayFakeFailure, GatewayRefused
 from operator_agent import s5_shared_budget as shared
 
 

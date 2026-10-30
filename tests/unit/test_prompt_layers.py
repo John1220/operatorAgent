@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from benchmarks.measure_prompt_layers import (  # noqa: E402
+from benchmarks.measurement.measure_prompt_layers import (  # noqa: E402
     CapturingLLM, EmptyDB, initial_sketch, perf_data, task)
 from operator_agent.agents import CoderAgent, SearchAgent, _clean, _hint_log  # noqa: E402
 from operator_agent.interface_contract import broadcast_calling_convention  # noqa: E402

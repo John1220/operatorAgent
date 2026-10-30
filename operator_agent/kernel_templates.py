@@ -99,7 +99,7 @@ def jit_kernel_source(source: str) -> str:
     """返回 source 里 @triton.jit 修饰的那个函数的原文（保留原格式）。
 
     存在的理由是让"取自某模板"这句话变成可派生而不是手抄：
-    benchmarks/measure_heartbeat_real.py 曾手抄一份 matmul 核（语义相同、签名被
+    benchmarks/measurement/measure_heartbeat_real.py 曾手抄一份 matmul 核（语义相同、签名被
     重新折行 ⇒ 逐字比较抓不到），注释写着"取自 rule_templates.py"。模板一改，
     那个量具就会静静地量另一个核，而注释继续撒谎。
 

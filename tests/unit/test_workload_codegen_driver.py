@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from benchmarks import workload_codegen_h20 as d
+from benchmarks.drivers import workload_codegen_h20 as d
 from operator_agent import llm_client as lc
 from operator_agent import run_contract as rc
 from operator_agent.artifact_store import ArtifactStore

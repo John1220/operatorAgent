@@ -16,12 +16,12 @@ _ROOT = dirname(dirname(dirname(abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from benchmarks.mutation_calibrate import Row  # noqa: E402
+from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
     "rl": "operator_agent/run_layout.py",
     "cu": "operator_agent/conductor.py",
-    "hp": "benchmarks/harness_pass_rate.py",
+    "hp": "benchmarks/drivers/harness_pass_rate.py",
 }
 
 TARGETS = ["tests/unit/test_run_root_wiring.py"]

@@ -1,4 +1,4 @@
-"""`benchmarks/arxiv_html_to_lines.py` 的读者 —— 调研文档里的行号必须能重建
+"""`benchmarks/experiments/misc/arxiv_html_to_lines.py` 的读者 —— 调研文档里的行号必须能重建
 
 为什么要有这个文件（不是「再补一组用例」）：抽取器自带 `--selftest`，但**全套测试里没有谁调用它**，
 所以那条 selftest 就是本仓一直反对的形状 ——「算了没人读」。doc 58 每一条「行 N」都声称由这个脚本
@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.arxiv_html_to_lines import selftest, to_lines, write_numbered  # noqa: E402
+from benchmarks.experiments.misc.arxiv_html_to_lines import selftest, to_lines, write_numbered  # noqa: E402
 
 
 class TestExtractorIsNotANoOp(unittest.TestCase):

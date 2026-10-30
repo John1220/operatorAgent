@@ -1,4 +1,4 @@
-"""演示脚本的守卫: `benchmarks/demo_agent_runtime.py` 说得对, 而且今天仍然跑得起来
+"""演示脚本的守卫: `benchmarks/demos/demo_agent_runtime.py` 说得对, 而且今天仍然跑得起来
 
 为什么给一个**演示**配守卫 (本仓「每句 ✅ 都要有可运行的守卫」的同一条):
 演示里的每一行读数都是一句判断 ("被拒的候选没到过后端" / "非标量指标进不去")。
@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks import demo_agent_runtime as demo  # noqa: E402
+from benchmarks.demos import demo_agent_runtime as demo  # noqa: E402
 from operator_agent import agent_runtime as ar  # noqa: E402
 
 

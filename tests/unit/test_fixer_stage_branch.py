@@ -26,7 +26,7 @@
 
 变异标定 (每条只改一处, 逐轮复原 + 复原后逐字节断言。2026-09-29 把**两张表合成一张**跑完。
 规格已进仓库 (`benchmarks/mut_specs/fixer_stage_branch.py`, harness 见
-`benchmarks/mutation_calibrate.py`) —— 所以下面每行的**锚点**就是括号里那句改动, 而
+`benchmarks/calibration/mutation_calibrate.py`) —— 所以下面每行的**锚点**就是括号里那句改动, 而
 「哪条用例为什么红」由脚本自己给, 不再靠这张表的手抄数):
     行为分母 (带 kill witness): 18/18 拦住   结构分母 (只有结构守卫杀得掉): 3/3 拦住
     两个分母必须分开报 —— 合成一个「21/21」会把「今天行为不可区分」那三行算成行为证据。

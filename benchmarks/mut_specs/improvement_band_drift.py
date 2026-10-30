@@ -16,12 +16,12 @@
 「跨表覆盖」的证据：共用一个键名这件事，只有另一张表会响。
 """
 
-from benchmarks.mutation_calibrate import Row
+from benchmarks.calibration.mutation_calibrate import Row
 
 FILES = {
     "ms": "operator_agent/measurement.py",
     "cond": "operator_agent/conductor.py",
-    "hpr": "benchmarks/harness_pass_rate.py",
+    "hpr": "benchmarks/drivers/harness_pass_rate.py",
 }
 
 TARGETS = [

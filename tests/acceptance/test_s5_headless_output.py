@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from benchmarks import s5_arm_env as arms
+from benchmarks.experiments.s5 import s5_arm_env as arms
 
 
 def launch(tmp_path, monkeypatch, result):
@@ -99,13 +99,13 @@ def test_installed_sdk_resource_diagnostics_reproduce_and_go_to_stderr():
 
 @pytest.mark.skipif(not READY, reason='installed DSH runtime unavailable')
 def test_actual_headless_resources_keep_jsonl_and_capture_diagnostics(tmp_path):
-    from benchmarks import s5_seatbelt, s5_runtime
+    from benchmarks.experiments.s5 import s5_seatbelt, s5_runtime
     if sys.platform != 'darwin' or not s5_runtime.available():
         pytest.skip('macOS runtime required')
-    from benchmarks.s5_gateway_http import GatewayServer
-    from benchmarks.s5_vertical_tool_provider import _sse
+    from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
+    from benchmarks.experiments.s5.s5_vertical_tool_provider import _sse
     from operator_agent import s5_shared_budget as budget
-    from benchmarks.s5_formal_run import _final_text
+    from benchmarks.experiments.s5.s5_formal_run import _final_text
     ledger=tmp_path/'budget.sqlite'
     budget.create(ledger, task_id='resource-fixture', max_calls=3, max_output_tokens=1024,
                   total_output_tokens=3072, wall_clock_s=120)

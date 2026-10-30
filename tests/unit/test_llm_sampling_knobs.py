@@ -2,7 +2,7 @@
 
 外部一手 (arXiv:2609.10226v1 行 306 / 319-320): Φ-Bench 把「单卡固定 + 禁用其他卡型 +
 reasoning effort 统一 max」整条钉死写进实验设置，理由是 **effort 与分数不单调**、低档能让
-一个模型掉 45% 的分。对照我方：`benchmarks/harness_pass_rate.py` 落盘的 knobs 六项里
+一个模型掉 45% 的分。对照我方：`benchmarks/drivers/harness_pass_rate.py` 落盘的 knobs 六项里
 **没有一项是模型侧的**，而请求体里带着 `temperature` 与 `chat_template_kwargs.enable_thinking`
 —— 所有通过率数字都是在关掉思考的配置下测出来的，这个决定既不进 `git_head` 也不进 knobs。
 报表自己写着「引用这些数字时必须带上 knobs」：它保护了配方侧，没保护模型侧。⇒ 这不是
@@ -57,7 +57,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from benchmarks.harness_pass_rate import (  # noqa: E402
+from benchmarks.drivers.harness_pass_rate import (  # noqa: E402
     MIN_DENOM, compare_runs, format_comparison, sampling_from_metadata,
     sampling_from_runs)
 from operator_agent import llm_client as lc  # noqa: E402

@@ -10,10 +10,10 @@
 `behavioral=False` 的那一行 (`M7`) 今天在行为层不可区分: 两臂顺序怎么排, 两边都会跑完,
 `pair_up` 与结论只按 (场景, 臂) 配对, 顺序不进任何读数 —— 只有读源码的那条守卫杀得掉它。
 """
-from benchmarks.mutation_calibrate import Row
+from benchmarks.calibration.mutation_calibrate import Row
 
 FILES = {
-    "ab": "benchmarks/evidence_ablation_h20.py",
+    "ab": "benchmarks/drivers/evidence_ablation_h20.py",
     "te": "tests/unit/test_evidence_ablation.py",
 }
 

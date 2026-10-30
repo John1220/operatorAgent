@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from benchmarks.input_fidelity_h20 import (AcceptanceSSH, GOOD, L2OnlyVerifier,
+from benchmarks.drivers.input_fidelity_h20 import (AcceptanceSSH, GOOD, L2OnlyVerifier,
     assess, boundary_trials, case, gpu_evidence, select_gpu, shell_path, trials, validate_scratch)
 from operator_agent.correctness import as_suite
 from operator_agent.correctness_boundaries import lint_coverage
@@ -194,7 +194,7 @@ def test_l3_regression_is_counted_and_never_runs_real_performance():
 
 
 def test_remote_cleanup_precedes_fallible_local_transport_write(monkeypatch, tmp_path):
-    import benchmarks.input_fidelity_h20 as driver
+    import benchmarks.drivers.input_fidelity_h20 as driver
     events = []
     backend = Mock(trace=[], forbidden_actions=[])
     backend.prepare.return_value = {}

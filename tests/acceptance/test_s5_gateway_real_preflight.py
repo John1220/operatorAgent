@@ -6,7 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from benchmarks import s5_gateway_real_preflight as pre
+from benchmarks.experiments.s5 import s5_gateway_real_preflight as pre
 
 
 class FakeUpstream:

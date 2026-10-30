@@ -14,7 +14,7 @@ witness 一栏按 doc 57 §二 第 1 条分两类:
 
 ⚠️ 本表里有一条是**真机抓到的洞** (M11/M12, CHECKLOG I78): 「新增依赖」的基线若取
 patch 的父代, 而父代可能是**上一轮被拒**的那份候选 ⇒ 同一份违规候选第二次提交就过门,
-真的上了远端编译 (`benchmarks/agent_action_h20.py` 第一版实测: 第 3 轮 torch 候选
+真的上了远端编译 (`benchmarks/drivers/agent_action_h20.py` 第一版实测: 第 3 轮 torch 候选
 `L1 PASSED`)。修法与守卫都在表里, 不许再退回去。
 
 跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/structured_evidence.py
@@ -26,7 +26,7 @@ _ROOT = dirname(dirname(dirname(abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from benchmarks.mutation_calibrate import Row  # noqa: E402
+from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
     "ar": "operator_agent/agent_runtime.py",

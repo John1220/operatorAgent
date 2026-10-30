@@ -4,11 +4,11 @@ import json
 import shutil
 
 import pytest
-from benchmarks.s5_fake_http import FakeHTTPServer
-from benchmarks.s5_vertical_headless import DSH_ROOT
-from benchmarks.s5_vertical_mcp_headless import run_mcp_headless
-from benchmarks.s5_vertical_mcp_provider import ScriptedMCPProvider, CALL_ID, TOOL_NAME
-from benchmarks.s5_vertical_validation import GOOD_FIXTURE
+from benchmarks.experiments.s5.s5_fake_http import FakeHTTPServer
+from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
+from benchmarks.experiments.s5.s5_vertical_mcp_headless import run_mcp_headless
+from benchmarks.experiments.s5.s5_vertical_mcp_provider import ScriptedMCPProvider, CALL_ID, TOOL_NAME
+from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
 from operator_agent import s5_shared_budget as shared
 from operator_agent.hitl_tools import prepare
 from operator_agent.run_contract import code_hash

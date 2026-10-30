@@ -466,7 +466,7 @@ class TestRefusalIsReadableInMetrics(unittest.TestCase):
     自己又留了一个算了没人读的。
 
     发现方式值得记一次: 是在真机上**试图读这几个键**时撞出来的
-    (`benchmarks/verify_provenance_gate.py`), 不是读代码读出来的。
+    (`benchmarks/verify/verify_provenance_gate.py`), 不是读代码读出来的。
     """
 
     def test_a_refusal_is_readable_without_string_matching_the_mark(self):

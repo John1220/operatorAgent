@@ -12,13 +12,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from benchmarks import s5_formal_run as workflow, s5_verify_remote, s5_arm_env, s5_runtime
-from benchmarks.s5_development_service import DevelopmentService, encoded
-from benchmarks.s5_development_evidence import audit
-from benchmarks.s5_gateway_http import GatewayServer
-from benchmarks.s5_vertical_headless import DSH_ROOT
-from benchmarks.s5_vertical_tool_provider import _sse
-from benchmarks.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
+from benchmarks.experiments.s5 import s5_formal_run as workflow
+from benchmarks.experiments.s5 import s5_verify_remote, s5_arm_env, s5_runtime
+from benchmarks.experiments.s5.s5_development_service import DevelopmentService, encoded
+from benchmarks.experiments.s5.s5_development_evidence import audit
+from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
+from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
+from benchmarks.experiments.s5.s5_vertical_tool_provider import _sse
+from benchmarks.experiments.s5.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
 from operator_agent import hitl_tools, s5_verify_client as client, s5_shared_budget as shared
 from operator_agent.run_contract import code_hash
 
@@ -327,9 +328,9 @@ def test_run_one_uses_supervised_final_and_preserves_early_exit_wall_time(tmp_pa
 
 @pytest.mark.skipif(not READY, reason='installed DSH or frozen Python deps unavailable')
 def test_medium_reasoning_and_32k_reach_the_actual_responses_upstream(tmp_path, monkeypatch):
-    from benchmarks.s5_fake_responses_upstream import FakeResponsesUpstream
-    from benchmarks.s5_gateway_supervisor import SupervisedTransport
-    from benchmarks.s5_gateway_policy import GatewayPolicy
+    from benchmarks.experiments.s5.s5_fake_responses_upstream import FakeResponsesUpstream
+    from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
+    from benchmarks.experiments.s5.s5_gateway_policy import GatewayPolicy
     observed = []
     original_request = GatewayPolicy._request_responses
     def observe(self, request, participant):
@@ -368,8 +369,8 @@ def test_medium_reasoning_and_32k_reach_the_actual_responses_upstream(tmp_path, 
 
 
 def test_long_reasoning_transport_limits_remain_bounded(tmp_path):
-    from benchmarks.s5_gateway_supervisor import SupervisedTransport
-    from benchmarks.s5_gateway_transport import MAX_RESPONSE_BYTES, MAX_WALL_SECONDS
+    from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
+    from benchmarks.experiments.s5.s5_gateway_transport import MAX_RESPONSE_BYTES, MAX_WALL_SECONDS
     transport = SupervisedTransport('http://127.0.0.1:9/v1/responses', 'placeholder',
         wall_seconds=900, max_response_bytes=64 * 1024 * 1024)
     assert transport.max_response_bytes == workflow.RESPONSE_BYTES
@@ -386,7 +387,7 @@ def test_long_reasoning_transport_limits_remain_bounded(tmp_path):
     dict(reasoning=dict(effort='medium', summary='unbounded')),
     dict(reasoning=dict(effort='medium', extra=True))])
 def test_reasoning_extensions_still_reject_unknown_fields_before_spending(tmp_path, extra):
-    from benchmarks.s5_gateway_policy import GatewayPolicy, PolicyRefused
+    from benchmarks.experiments.s5.s5_gateway_policy import GatewayPolicy, PolicyRefused
     path = tmp_path / 'budget.sqlite'
     shared.create(path, task_id='reasoning', max_calls=1, max_output_tokens=32768,
                   total_output_tokens=32768, wall_clock_s=120)

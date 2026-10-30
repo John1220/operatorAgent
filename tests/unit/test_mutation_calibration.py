@@ -28,7 +28,7 @@ import unittest
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _ROOT)
 
-from benchmarks.mutation_calibrate import (  # noqa: E402
+from benchmarks.calibration.mutation_calibrate import (  # noqa: E402
     Row, calibrate, check_shape, load_spec, main, summarize,
 )
 
@@ -162,7 +162,7 @@ class TestHarnessSeesItsOwnFailures(unittest.TestCase):
         with open(spec, "w", encoding="utf-8") as fh:
             fh.write("FILES = {'prod': 'prod.py'}\nTARGETS = ['test_mini.py']\n"
                      "import sys; sys.path.insert(0, %r)\n"
-                     "from benchmarks.mutation_calibrate import Row\n"
+                     "from benchmarks.calibration.mutation_calibrate import Row\n"
                      "ROWS = [Row('E1', 'prod', %r, %r, 'x=False 时应返 b')]\n"
                      % (_ROOT, '    return "a" if x else "b"', '    return "a"'))
         try:

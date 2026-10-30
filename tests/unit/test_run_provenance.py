@@ -26,12 +26,12 @@ from pathlib import Path
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _ROOT)
 
-from benchmarks import provenance  # noqa: E402
-from benchmarks.provenance import (  # noqa: E402
+from benchmarks.experiments.misc import provenance  # noqa: E402
+from benchmarks.experiments.misc.provenance import (  # noqa: E402
     closure, diff, local_imports, snapshot, snapshot_via_subprocess, stamp,
 )
 
-DRIVER = "benchmarks/verify_resume_equivalence.py"
+DRIVER = "benchmarks/verify/verify_resume_equivalence.py"
 
 
 class TestFingerprintsAreAbsolute(unittest.TestCase):

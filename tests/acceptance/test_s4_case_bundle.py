@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from benchmarks.s4_case_bundle import number, project_event
-from benchmarks.s4_case_bundle_verify import sensitive
+from benchmarks.experiments.s4.s4_case_bundle import number, project_event
+from benchmarks.experiments.s4.s4_case_bundle_verify import sensitive
 
 
 def test_event_projection_keeps_case_evidence_without_untrusted_free_text(tmp_path):

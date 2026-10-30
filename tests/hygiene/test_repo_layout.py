@@ -35,15 +35,23 @@ ALLOWED_ROOT = {
     ".venv",
 }
 
-#: 平铺目录的条目预算（tracked 文件数上限）。数字取「当前值 + 少量余量」：
-#: 触顶说明该目录又该分了，而不是把上限悄悄改大。
-FLAT_BUDGETS = {
-    "operator_agent": 120,   # 含 prompts/ 与 skills/，当前 114
-    "benchmarks": 185,       # 当前 179，其中 60 个是 s5_* 驱动
-    "tests": 285,            # 当前 278，其中 48 个是 test_s5_*
-    "docs/design": 62,       # 当前 57
-    "docs/research": 75,     # 当前 71
-    "docs/status": 46,       # 当前 42
+#: **单层**条目预算：一个目录里直接放多少个 tracked 文件就到头了。
+#: 2026-10-31 把 tests/（264 个平铺）与 benchmarks/（142 个平铺）按用途分了目录，
+#: 这条守卫的职责从「总量别涨」变成「别再摊回一层」。
+#: `operator_agent/` 还是 99 个平铺模块 —— 目标是 60 以内，分包的方案在
+#: docs/design/repo-slimming-20261031.md 里，尚未执行。
+DIRECTORY_BUDGETS = {
+    "tests": 6,                  # 只留 conftest/fixtures/golden 与三个子目录
+    "tests/unit": 220,
+    "tests/acceptance": 60,
+    "tests/hygiene": 10,
+    "benchmarks": 10,            # __init__ + 私有辅助 + 子目录
+    "benchmarks/experiments/s5": 70,
+    "benchmarks/drivers": 25,
+    "operator_agent": 105,       # 含 prompts/ 与 skills/，当前 114 中 99 是 .py 平铺
+    "docs/design": 62,
+    "docs/research": 75,
+    "docs/status": 46,
 }
 
 #: 绝不该出现在 `git ls-files` 里的形态：缓存、构建产物、被搬走的证据目录。
@@ -96,16 +104,17 @@ class TestRepoLayout(unittest.TestCase):
             "output/ 又是实体目录了：证据应放在仓库外并在这里留符号链接；"
             "若确实要临时重跑实验，先迁移再跑，别把 1.0 GB 重新长回工作树"))
 
-    def test_flat_directories_stay_within_their_budget(self):
+    def test_no_directory_piles_files_back_into_one_layer(self):
+        """按**直接子文件数**算，不按递归总数 —— 摊回一层正是这次要防的退化。"""
         files = tracked_files()
-        over = []
-        for directory, budget in FLAT_BUDGETS.items():
-            actual = sum(1 for name in files if name.startswith(directory + "/"))
-            if actual > budget:
-                over.append("%s: %d > %d" % (directory, actual, budget))
+        direct = {}
+        for name in files:
+            directory = name.rsplit("/", 1)[0] if "/" in name else ""
+            direct[directory] = direct.get(directory, 0) + 1
+        over = ["%s: %d > %d" % (d, direct.get(d, 0), budget)
+                for d, budget in DIRECTORY_BUDGETS.items() if direct.get(d, 0) > budget]
         self.assertEqual(over, [], (
-            "平铺目录超出预算：%s\n"
-            "正确反应是给该目录分组，而不是把预算调大" % over))
+            "这些目录又摊平了：%s\n正确反应是分组，而不是把预算调大" % over))
 
     def test_the_evidence_pointer_is_documented(self):
         """搬走之后必须留下「证据在哪、怎么重建」的说明，否则下一个人找不到。"""

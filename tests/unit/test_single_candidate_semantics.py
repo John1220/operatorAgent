@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from benchmarks import workload_codegen_h20 as driver
+from benchmarks.drivers import workload_codegen_h20 as driver
 from operator_agent import (CorrectnessCase, CorrectnessSuite, ConstraintSpec,
                             MockGPU, SourceSpec, TargetSpec, TaskSchema, Verifier)
 from operator_agent import llm_client as lc, single_candidate_coder as sc

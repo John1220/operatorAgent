@@ -106,8 +106,8 @@ pip install torch triton     # 真机执行才需要（跑 MockGPU 与单测不�
 python -m pytest tests/ -q
 
 # 单个文件 / 单个用例
-python -m pytest tests/test_p1.py -v
-python -m pytest tests/test_coder_pipeline.py::TestPlanStage::test_planner_outputs_structured_plan -v
+python -m pytest tests/unit/test_p1.py -v
+python -m pytest tests/unit/test_coder_pipeline.py::TestPlanStage::test_planner_outputs_structured_plan -v
 
 # 真机端到端（需要 GPU 与 SSH）
 python test_nvidia_matmul.py
@@ -316,7 +316,7 @@ python -m operator_agent verify --run-dir /tmp/op-run --code-file cand.py \
   --candidate-origin outer   # 归因（不进判据）：这份核是谁写的；不给则回包记 undeclared
 ```
 
-三条契约（写进守卫 `tests/test_hitl_tools.py`）：
+三条契约（写进守卫 `tests/unit/test_hitl_tools.py`）：
 
 * **stdout 只有一行 JSON**；判定层的进度输出写进 `run-dir/verify-N.log`；
 * **退出码**：`0` = 判完了（候选没过也是 0，结论在 JSON 里），`2` = 被拒绝（带 `error`/`detail`），`1` = 意外；
@@ -966,7 +966,7 @@ AMBIGUOUS   没有可比值，或档位是 uninformative（带宽比信号本身
 
 生成、修复和优化提示词共用版本化规约。DSH 的 `operator_repair` 会把与当前源码及失败反馈绑定的结构化诊断交给 Fixer，并阻止源码或 AST 未变化的重复验证；完整 L2 套件结果独立于编译与性能状态返回。
 
-固定对照入口为 `python3 benchmarks/operator_quality.py`，默认只输出 10 个任务的冻结计划，不调用模型或设备。`--replay` 验证 CPU 回放接线，`--execute` 显式执行已冻结的 SSH/模型计划，`--compare` 比较任务与预算一致的报告。当前评测范围为完整 L2，性能标记为未测量。命令、预算、报告字段和边界见[算子生成与修复质量闭环](design/operator-quality-improvement.md)。
+固定对照入口为 `python3 benchmarks/experiments/misc/operator_quality.py`，默认只输出 10 个任务的冻结计划，不调用模型或设备。`--replay` 验证 CPU 回放接线，`--execute` 显式执行已冻结的 SSH/模型计划，`--compare` 比较任务与预算一致的报告。当前评测范围为完整 L2，性能标记为未测量。命令、预算、报告字段和边界见[算子生成与修复质量闭环](design/operator-quality-improvement.md)。
 
 诊断效果评估优先用 `--paired`，两组从同一份初始源码开始，生成成本只计一次。`--preflight PLAN` 单独检查现有 GPU/运行时/runner，零模型调用；正式 SSH 评测也会先预检。预检不安装依赖、不更新 runner，缺失或漂移时停止。完整用法见[预检与同候选配对评测](design/operator-quality-paired-evaluation.md)。
 

@@ -6,8 +6,8 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from benchmarks.rpc_deadline_h20 import assess_stall, assess_numeric
-from benchmarks.input_fidelity_h20 import AcceptanceSSH
+from benchmarks.drivers.rpc_deadline_h20 import assess_stall, assess_numeric
+from benchmarks.drivers.input_fidelity_h20 import AcceptanceSSH
 
 
 def stall(mode="stopped"):
@@ -58,7 +58,7 @@ def test_failed_owned_cleanup_retains_scratch_before_directory_probe(monkeypatch
 
 
 def test_driver_cleanup_precedes_evidence_write_on_prepare_failure(tmp_path, monkeypatch):
-    import benchmarks.rpc_deadline_h20 as driver
+    import benchmarks.drivers.rpc_deadline_h20 as driver
     events = []
     backend = Mock(forbidden_actions=[])
     backend.prepare.side_effect = RuntimeError("probe failed")

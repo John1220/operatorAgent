@@ -2,8 +2,8 @@
 import json
 import urllib.request
 
-from benchmarks.s5_vertical_tool_service import MockValidationService
-from benchmarks.s5_vertical_validation import GOOD_FIXTURE
+from benchmarks.experiments.s5.s5_vertical_tool_service import MockValidationService
+from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
 
 
 def post(url, source):
@@ -24,7 +24,7 @@ def test_service_records_one_complete_mock_result_and_refuses_second(tmp_path):
 
 
 def test_unknown_source_spends_budget_but_is_never_executed(tmp_path, monkeypatch):
-    from benchmarks import s5_l2_evaluator
+    from benchmarks.experiments.s5 import s5_l2_evaluator
     monkeypatch.setattr(s5_l2_evaluator,'evaluate_mock_fixture',
                         lambda *a,**k: (_ for _ in ()).throw(AssertionError('must not execute')))
     with MockValidationService(tmp_path/'evidence') as service:

@@ -43,7 +43,7 @@ from tests.backend_fakes import fake_backend
 
 # H20 launch 开销 (空 Triton 核, CUDA event 计时, 不冲刷 L2):
 #   docs/research/01 实测 median=20.24 min=18.69 µs
-#   benchmarks/calibrate_l2_flush_effect.py 复测 median=20.03 min=18.30 µs
+#   benchmarks/calibration/calibrate_l2_flush_effect.py 复测 median=20.03 min=18.30 µs
 # 两次相差 ~1%, 取先标定的 20.24。
 #
 # ⚠️ 这个数的含义被复测修正过: 同一个空核在**冲刷 L2 后**只测得 4.64 µs, 所以
@@ -54,7 +54,7 @@ H20_FLOOR_US = 20.24
 H20_FLOOR_MIN_US = 18.69
 H20_HW_INFO = {"name": "NVIDIA H20", "device": "cuda", "compute_capability": "9.0"}
 
-# 冲刷 L2 后的真机净执行时间 (benchmarks/calibrate_l2_flush_effect.py, H20)
+# 冲刷 L2 后的真机净执行时间 (benchmarks/calibration/calibrate_l2_flush_effect.py, H20)
 NET_MS_LAYERNORM_SMALL = 0.00739      # 1024×768, 不冲刷时是 0.02192
 NET_MS_LAYERNORM_LARGE = 0.1637       # 16384×6144
 NET_MS_MATMUL_4096 = 0.97992          # 4096³ fp16, 不冲刷时是 0.99304
@@ -187,7 +187,7 @@ class TestNoNetOfFloorMetric(unittest.TestCase):
     """「扣除地板后的净值/净加速比」这个指标已被删除, 别再把它加回来
 
     它建立在「runner 报的 median 含 launch 开销」这个前提上。真机标定
-    (benchmarks/calibrate_l2_flush_effect.py) 推翻了前提: runner 现在按 Triton
+    (benchmarks/calibration/calibrate_l2_flush_effect.py) 推翻了前提: runner 现在按 Triton
     do_bench 口径每次计时前冲刷 256 MB L2, 冲刷把 GPU 填满, launch 延迟被藏在
     事件窗口之外, 所以报出来的**已经是净执行时间**。再减一次地板是重复扣除。
 
