@@ -1,6 +1,6 @@
 # S6 准备：S4 脱敏案例与离线演示
 
-状态：**案例包与离线核验已准备，不代表 S6 全部完成**。数据来自 2026-10-27 S4 的真实 CLI / H20 GPU 6 / DeepSeek 小批记录，不是新一次 GPU 测量。[隔离安装与宿主契约检查](../status/dsh-operator-s6-preparation-20261027.md)已通过；完整可移植原始证据包及交互演示仍按 S6 计划分别验收。
+状态：**S4 CLI/core 的补充演示材料**。数据来自 2026-10-27 S4 的真实 CLI / H20 GPU 6 / DeepSeek 小批记录，不是新一次 GPU 测量。本轮 S6 的主要插件案例和离线验收改用 [S5 脱敏插件案例包](../../output/plugin_completion/20261030-s5-closeout-v1/shareable/s5-plugin-cases.zip)及[三分钟演示脚本](dsh-operator-s5-resume-demo-20261030.md)；整体交付见 [S6 验收](../status/dsh-operator-s6-acceptance-20261030.md)。
 
 交付：[脱敏案例 ZIP](../../output/plugin_completion/20261027-s4/portable-case-bundle-v2.zip)，SHA256 `692e56d664ce61d4910746d5534ba48a7f1c50dbb41d391c0dbde67c8b1d484a`；展开目录为 [portable-case-bundle-v2](../../output/plugin_completion/20261027-s4/portable-case-bundle-v2/)。`output/` 被 Git 忽略，须单独备份 ZIP；原始私有记录仍在 `gpu6-8004/`，没有被覆盖。
 

@@ -29,7 +29,27 @@ pip install operator-agent
 
 装完应有两个命令：`operator-agent`（CLI）与 `operator-agent-mcp`（MCP stdio server）。
 
-### 2.2 DSH 侧
+### 2.2 从本地构建工件安装
+
+本地交付的 wheel 与 DSH `.tgz` 尚未发布到包仓库。先将 wheel 安装到 DSH 启动时可访问的 Python 环境，再把 `.tgz` 加到目标 profile：
+
+```bash
+python3 -m pip install numpy /path/to/operator_agent-0.6.0-py3-none-any.whl
+dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.1.9.tgz
+```
+
+确认安装命令可见：
+
+```bash
+command -v operator-agent
+command -v operator-agent-mcp
+```
+
+如果 DSH 从 GUI 启动，GUI 未继承安装 Python 环境的 `PATH`，应在 profile 的 `cordis.patch.yml` 中将 `mcp-operator` 与 `operator-tools` 的命令改成对应绝对路径。卸载 `.tgz` 与源码目录安装相同，见 §2.4。
+
+本次验收的工件哈希和平台边界见 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md)。本地验证保存的 NumPy wheel 仅适用于 macOS 14+ arm64 / CPython 3.9；其他平台应安装适配本机的 NumPy，不要复用该 wheel。
+
+### 2.3 DSH 侧
 
 ```bash
 # 本地目录安装（不需要发布 npm）
@@ -85,7 +105,7 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
         args: ["-m", "operator_agent.mcp_server"]
 ```
 
-### 2.3 卸载 / 禁用
+### 2.4 卸载 / 禁用
 
 三种手段，效果不一样，别混：
 

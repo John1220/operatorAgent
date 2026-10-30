@@ -52,6 +52,8 @@ python test_nvidia_matmul.py
   ；[S1 独立留存验收](docs/status/dsh-operator-s1-20261026.md) —— 每轮源码、完整判定、报告、修复/探索证据与回归记录
   ；[S2 取消与中断验收](docs/status/dsh-operator-s2-20261026.md) —— 按实例取消、MCP/CLI 中断、本机清理和预算保留
   ；[S3 资源预检修复](docs/status/dsh-operator-s3-20261026.md) —— 混合精度、配置作用域、明确存储证据与未知状态
+  ；[S5 有限范围结项](docs/status/dsh-operator-s5-closeout-20261030.md)与[三分钟演示/简历口径](docs/design/dsh-operator-s5-resume-demo-20261030.md) —— 真实插件闭环、脱敏案例及独立批次结果；完整重复对照未完成，未建立插件整体增益
+ ；[S6 安装与交付验收](docs/status/dsh-operator-s6-acceptance-20261030.md) —— 本地工件安装/卸载、离线证据包和演示材料；按用户决定不录制视频
 - **操作指南**：[docs/user_guide.md](docs/user_guide.md) —— 安装、示例、`Conductor` 参数、环境变量全表
 - **生成与修复质量**：[共享规约、诊断与固定任务对照](docs/design/operator-quality-improvement.md) —— 插件修复闭环、离线回放和真实评测入口
   ；[预检与同候选配对](docs/design/operator-quality-paired-evaluation.md) —— 模型调用前检查环境，生成一次、独立比较两种修复策略

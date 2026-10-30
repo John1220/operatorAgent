@@ -2,6 +2,8 @@
 
 后续收尾见 [S5 最小完成计划](s5-minimum-completion-plan-20261029.md)：复用既有功能验收，补齐驱动和正式运行门槛后，仅新增此前声明的 6 任务 × A/C × 2 次共 24 格；允许无明确增益或成本更高的结论。本页六格与 C-only 记录均为历史探索，不能直接充当新批次分母。
 
+当前实现进度：`study` 24 格驱动、A/C 共同源码提取和离线重算已通过 [P1 验收](../status/dsh-operator-s5-minimum-p1-20261029.md)，相关回归 252 项通过。[P2](../status/dsh-operator-s5-formal-readiness-audit-20261029.md)确认外层网络出口和远端候选执行边界仍未闭合，正式入口拒绝派发，未启动真实 24 格。
+
 状态：本地无模型接线验收已通过；A/C 六格真实批次已冻结并部分执行，3/6 格派发后遇到验证设施 unknown 而停批。当前结果为 2 格最终通过、1 格 unknown、3 格未派发，推断和正式 S5 计分均关闭。详见[本次实测记录](../status/dsh-operator-s5-plugin-only-ac-results-20261029.md)。
 
 最新补充：独立 C-only 三格诊断已全部通过最终 L2，未用于补齐上述 A/C 批次；三格均未观察到模型使用插件 `operator_verify`。详见 [C-only 实测报告](../status/dsh-operator-s5-plugin-c-diagnostic-20261029.md)。
