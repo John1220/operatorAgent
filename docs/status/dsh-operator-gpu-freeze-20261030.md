@@ -80,6 +80,9 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
 边界：§14-4 因共享机器用 `--skip-contention` 未跑；§14-5 kill 续跑需要一次
 真实 LLM 跑，未覆盖；§14-6 纯离线。
 
+最终代码（含 §2.7 三处修复）又跑了一次 `smoke-final.log`：**46 ✅ / 8 ➖ / 0 失败**，
+覆盖与边界同上，结论不变。
+
 ### 2.3 标定复标
 
 | 项 | 本轮 | 既有口径 | 结论 |
@@ -194,6 +197,7 @@ H20 释放后**永久不可做**：新增真机证据、其他 memory-bound 形�
 | `matmul4096/verify-1/complete.json` | `a4fb705fc53275673c999a2d255ce8e572cd3b0ce6f5c5a659a3f51a7e888f0b` |
 | `matmul4096/verify-1/report.md` | `1f2ebd3b319a192b28de420ddce795ec4d45596951d6f82b5ebd617ee520d1bc` |
 | `smoke.log` | `effcb1641b28d25d3f03096b6f489f1a19d1042547291097dea7299947b996fb` |
+| `smoke-final.log` | `abc8cda489f6178c00ca779c9821b38a352355706ecebf3937b42a1560547a15` |
 | `launch-floor.log` | `2dc4aeee85972d7913fc618aa4c3bfba17a48e7f0700b18c5040d0822ab3f385` |
 | `l2-flush-effect.log` | `664939cea6100335ec83f01e28cf58430160c2c924ae3ab286015170de0cc6a4` |
 | `dispersion.log` | `49998bae441ca35c7bf8fadd347d6be7b0438d29fc016f077470b772a53e8b2e` |
@@ -210,13 +214,13 @@ H20 释放后**永久不可做**：新增真机证据、其他 memory-bound 形�
 | `layernorm16384x6144-v4/verify-1/result.json` | `1b4447a981ab2e7be224d3090d82e2d082d492046ef9191f843cc02b5b26661b` |
 | `layernorm16384x6144-v4/verify-1/report.md` | `755a32b3f8a96e54b32d55a573481046a724fb7a18bf85f47301ddc0af33676b` |
 | `layernorm16384x6144-v4/summary.json` | `54bce20125ad2386eff7c8073818d7a7ca10e956ebba951d80f794cd5d9227ee` |
-| `summary.json` | `b1f3da60f243b73b3cf9052614f85bee9cdb0d78c0491646a0164704133d905a` |
+| `summary.json` | `6db94b7a12a82f35362b69bc48ec082a57ef88f0fe22045b7d5d6abcf7908940` |
 | `cancellation/cancel.json` | `8bb39852d9791bfd6176e1724ba7a79b95e9bf43dca738fa66f1f7e82eab7396` |
 | `cancellation/status.json` | `9c5471ceb2130bd97cc764a6b3ba13354be64b68c6d908437783c2854b44f70c` |
 | `environment.txt` | `5a37dfb43fbb80aef62cb162d0300b6a787dfe0768240cae3056a564fbefd4ce` |
 
 打包：`output/plugin_completion/20261030-gpu-freeze-evidence.tar.gz`
-（SHA256 `22edefb5a771f0f9f10c3db57f45a6d58e42bfd600898ecbb9f4dce4a5cc9e3b`）。
+（SHA256 `7cc2e92df420639eb16fa10e9862027ebf7f007e0e645c91b5b1331b4bb0d02a`）。
 
 完整清单：`output/plugin_completion/20261030-gpu-freeze/SHA256SUMS`。复核：
 
