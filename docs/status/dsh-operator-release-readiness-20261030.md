@@ -50,8 +50,8 @@ README §8 记的 `pip < 21.3` + `0400` 产物坑；`npm pack` 用临时缓存�
 |---|---|
 | 隔离 venv 安装 wheel（不继承 site-packages，离线 NumPy） | `pip check` 无冲突；`operator_agent.__version__ == 0.6.1`；`operator-agent capabilities` 正常返回 |
 | 临时 npm 工程安装 tgz | 安装成功；`import('dsh-operator-agent')` 导出 `apply/inject/name/normalizeConfig/runCli/scrubEnv/format*`；包内含许可两份 |
-| 全量 pytest | **6159 通过、1 跳过**；15 失败 + 4 错误全部是需要 `ps`／`sandbox-exec`／真 DSH 的集成用例，在本会话沙箱内被拒（`Operation not permitted`），已复现根因（见下） |
-| 插件 node 测试 | **58 通过、0 跳过**（含真宿主契约、真 `evaluatePluginCompatibility`） |
+| 全量 pytest | **6159 通过、1 跳过**；15 失败 + 4 错误全部是需要 `ps`／`sandbox-exec`／真 DSH 的集成用例，在本会话沙箱内被拒（`Operation not permitted`），已复现根因（见下）。同一命令在并行改动进入工作区后又跑一次，总数不变（6159/1/15+4） |
+| 插件 node 测试 | **58 通过、0 跳过**（49 + 9，含真宿主契约、真 `evaluatePluginCompatibility`） |
 | CI 定义 | YAML 可解析、3 个作业；**未在 GitHub 上真实跑过**（仓库此前无 CI 历史） |
 
 沙箱外签核**仍未完成**：我发起的一次提权重跑（`danger-full-access`）长时间未返回，已终止，没有结果。
