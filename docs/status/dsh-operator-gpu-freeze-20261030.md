@@ -81,6 +81,20 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
 `matmul4096/sanity64`：L1 通过。用于确认部署、固定 GPU 7、编译链路在正式跑之前
 是通的；不构成 L2/L3 证据。
 
+### 2.5 取消与清理（当前 HEAD）
+
+`cancellation/`：启动一次 2048³ verify（GPU 7），在 L2 阶段通过 CLI
+`cancel --invocation-id` 取消。结果：
+
+- CLI 退出码 **130**，回包 `phase=cancelled`、`stopped_reason=user_cancelled`、
+  `error=task_cancelled`；
+- `cleanup.worker_reaped=true`；`remote_execution` / `provider_call` 均为 `unknown`，
+  `all_descendants_proven=false` —— 只声明本机 worker 已回收，**不**声明远端或服务商已停；
+- 未生成 `complete.json`；`verify-1/` 保留部分候选与 `started.json`，用于复算；
+- 取消后远端无 `runner_server` / `run_kernel.py` 残留，GPU 7 `0% / 4 MiB`。
+
+这补的是 v0.6.0（S4 之后代码有变）的取消路径证据，不构成正确性或性能结论。
+
 ## 3. 未执行与永久边界
 
 - **S5 正式 24 格（P3）未启动**。P2 仍未证明模型网络唯一出口与远端候选执行隔离；
@@ -115,11 +129,13 @@ S5 正式批次、跨卡对照。
 | `smoke.log` | `effcb1641b28d25d3f03096b6f489f1a19d1042547291097dea7299947b996fb` |
 | `launch-floor.log` | `2dc4aeee85972d7913fc618aa4c3bfba17a48e7f0700b18c5040d0822ab3f385` |
 | `l2-flush-effect.log` | `664939cea6100335ec83f01e28cf58430160c2c924ae3ab286015170de0cc6a4` |
-| `summary.json` | `1f17bad42d04b5e92cdf8508cb12c011c560f4abdf597e4f6ad862bfc69912eb` |
+| `summary.json` | `d181ebed441b7f6973112946a0e6dbe1f50d0c9a2925f3308b529e7f0a7fb5d1` |
+| `cancellation/cancel.json` | `8bb39852d9791bfd6176e1724ba7a79b95e9bf43dca738fa66f1f7e82eab7396` |
+| `cancellation/status.json` | `9c5471ceb2130bd97cc764a6b3ba13354be64b68c6d908437783c2854b44f70c` |
 | `environment.txt` | `5a37dfb43fbb80aef62cb162d0300b6a787dfe0768240cae3056a564fbefd4ce` |
 
 打包：`output/plugin_completion/20261030-gpu-freeze-evidence.tar.gz`
-（SHA256 `8786bdc8ba262bedc4d8602b894e482c0a413d1c73b9b8f148779a20c8d57521`）。
+（SHA256 `06cbbe63627fbc2b1916348afa0e0fe39b2b65e26ff3024acbd1cca8a681a1ec`）。
 
 完整清单：`output/plugin_completion/20261030-gpu-freeze/SHA256SUMS`。复核：
 
