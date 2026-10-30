@@ -91,6 +91,26 @@ def test_legacy_or_b_arm_cannot_build_new_surface(tmp_path,runtime):
         env.build('A',runtime=runtime,isolation_runtime={})
 
 
+def test_performance_c_build_needs_no_public_verifier_config(tmp_path,runtime,monkeypatch):
+    monkeypatch.setattr(env,'configure',lambda built,runtime:None)
+    built=env.build('C',runtime=runtime,relay=Relay(),
+        plugin_tool_timeout_ms=690000,base_url='http://127.0.0.1:9/v1',
+        arm_dir=tmp_path/'participant',tools=True,development=None)
+    patches=[item for patch in built['patch']for item in patch.get('insert',[])]
+    mcp=next(item for item in patches if item['id']=='mcp-operator')
+    assert mcp['config']['toolCallTimeoutMs']==690000
+    assert 'OPERATOR_AGENT_S5_DEV_CONFIG' not in built['env']
+    assert not any('PYTHONPATH' in item['config'].get('env',{}) for item in patches)
+
+
+def test_plugin_timeout_must_be_explicit_without_public_verifier(tmp_path,runtime,monkeypatch):
+    monkeypatch.setattr(env,'configure',lambda built,runtime:None)
+    with pytest.raises(ValueError,match='bounded MCP tool timeout'):
+        env.build('C',runtime=runtime,relay=Relay(),
+            base_url='http://127.0.0.1:9/v1',arm_dir=tmp_path/'participant',
+            tools=True,development=None)
+
+
 @pytest.fixture(scope='module')
 def actual_proof(tmp_path_factory):
     if not READY:pytest.skip('macOS Seatbelt required')

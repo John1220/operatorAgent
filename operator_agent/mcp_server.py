@@ -319,9 +319,68 @@ def _tool_definitions() -> list[dict]:
     ]
     from .s5_verify_client import enabled
     if enabled():
-        return [tool for tool in definitions if tool['name'] in
-                ('operator_prepare', 'operator_verify', 'operator_capabilities')]
+        conf, _, timeout = _supervised_configuration()
+        selected = [tool for tool in definitions if tool['name'] in
+                    ('operator_prepare', 'operator_verify', 'operator_capabilities')]
+        for tool in selected:
+            if tool['name'] == 'operator_verify':
+                tool['description'] = (
+                    'Submit your candidate to the configured supervised L1/L2 service. '
+                    'The task is already prepared. Use its run_dir and exactly one of code/code_file. '
+                    'Backend is fixed; omit host, GPU and credentials: the supervisor owns the connection. '
+                    'Read status and feedback, then revise source yourself. Public and MCP submissions '
+                    'share the same development quota; final evaluation is separate.')
+                schema = tool['inputSchema']
+                schema['properties'] = {k:v for k,v in schema['properties'].items()
+                    if k in ('run_dir', 'code', 'code_file', 'candidate_origin', 'backend', 'stop_after', 'timeout')}
+                schema['properties']['backend'] = dict(type='string', enum=[conf['BACKEND']], default=conf['BACKEND'])
+                schema['properties']['stop_after'] = dict(type='string', enum=['L2'], default='L2')
+                schema['properties']['timeout'] = dict(type='integer', minimum=1, maximum=timeout, default=timeout)
+                schema['properties']['run_dir']['description'] = 'Existing prepared task directory supplied in the task.'
+            elif tool['name'] == 'operator_prepare':
+                tool['description'] = ('The supervised task is already prepared; normally skip this tool and '
+                    'submit candidate.py with operator_verify. Only an identical frozen declaration is accepted.')
+            else:
+                tool['description'] = ('Read configured supervised verification capabilities. '
+                    'Local runtime availability is separate from the supervisor-owned backend; no connection probe.')
+        return selected
     return definitions
+
+
+def _supervised_configuration():
+    from .s5_verify_client import configuration
+    return configuration()
+
+
+def _supervised_instructions():
+    conf, _, _ = _supervised_configuration()
+    return ('S5 supervised development experiment: the task is already prepared. '
+        'Do not call operator_prepare again. Submit candidate.py using mcp__operator__operator_verify '
+        'with the existing task run_dir, code_file="candidate.py", stop_after="L2", '
+        f'backend="{conf["BACKEND"]}" (or omit backend to use its fixed default). '
+        'Do not provide host, port, user, key_path, GPU or credentials: the supervisor owns the connection. '
+        'Missing local SSH environment, Torch or GPU does not disable this configured delegated service. '
+        'Configuration is not a connectivity probe; execution may still fail. '
+        'Read status and feedback and revise source in the outer agent. '
+        'Public and plugin submissions share one development quota. No repair/run/bench or direct GPU execution. '
+        'The final independent evaluation is separate and is not a development tool.')
+
+
+def _supervised_capabilities():
+    conf, _, timeout = _supervised_configuration()
+    local = capabilities()
+    return dict(ok=True, version=local['version'], tool_version=local['tool_version'],
+        mode='supervised_development', task_prepared=True,
+        backends={conf['BACKEND']: dict(wired=True, configured=True, delegated=True,
+            requires=[], connection_owner='supervisor', connectivity_verified=False,
+            stop_after=['L2'], timeout_seconds=timeout)},
+        local_runtime=local['runtime'], local_runtime_scope='control host only; not delegated backend readiness',
+        correctness_profiles=local['correctness_profiles'],
+        kernel_types_with_input_layout=local['kernel_types_with_input_layout'],
+        notes=['Use the existing prepared run_dir with operator_verify; do not prepare again.',
+            'Connection settings are supervisor-owned. Do not provide host or credentials.',
+            'Configured delegation is not a connectivity or GPU availability probe.',
+            'Public and MCP development submissions share one quota; independent final evaluation is separate.'])
 
 
 def _jsonrpc_ok(msg_id: Any, result: Any) -> dict:
@@ -353,7 +412,8 @@ _RUN_OPTION_KEYS = ("max_rounds", "backend", "host", "port", "user", "key_path",
 
 def _call_tool(name: str, arguments: dict) -> dict:
     if name == "operator_capabilities":
-        return _text_result(capabilities())
+        from .s5_verify_client import enabled
+        return _text_result(_supervised_capabilities() if enabled() else capabilities())
     if name == "operator_repair":
         args = dict(arguments or {})
         run_dir = args.pop("run_dir", None)
@@ -388,6 +448,11 @@ def _call_tool(name: str, arguments: dict) -> dict:
         return _text_result(prepare(args, run_dir))
     if name == "operator_verify":
         args = dict(arguments or {})
+        from .s5_verify_client import enabled
+        if enabled():
+            conf, _, _ = _supervised_configuration()
+            args.setdefault('backend', conf['BACKEND'])
+            args.setdefault('stop_after', 'L2')
         run_dir = args.pop("run_dir", None)
         code = args.pop("code", None)
         code_file = args.pop("code_file", None)
@@ -428,12 +493,7 @@ def handle_message(message: dict) -> Optional[dict]:
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             # 使用说明跟着 server 走（见 INSTRUCTIONS 的注释）：客户端渲染进上下文，
             # 于是宿主的提示段与工具描述不会各说一套。
-            "instructions": ("S5 supervised development experiment: prepare then verify with "
-                             "stop_after=L2 and the supplied backend. Verification is delegated "
-                             "to the common service; read status and feedback, revise source in "
-                             "the outer agent. No repair/run/bench or direct GPU execution. "
-                             "The final independent evaluation is not a development tool."
-                             if enabled() else INSTRUCTIONS),
+            "instructions": _supervised_instructions() if enabled() else INSTRUCTIONS,
         })
     if method == "ping":
         return _jsonrpc_ok(msg_id, {})

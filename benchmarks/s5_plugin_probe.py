@@ -34,6 +34,14 @@ CALLS=10
 SCHEMA='s5-plugin-only-readiness-v1'
 
 
+def contains_message_text(value, expected):
+    """Inspect message text without JSON escaping quotes in instructions."""
+    if isinstance(value, str):return expected in value
+    if isinstance(value, list):return any(contains_message_text(item, expected) for item in value)
+    if isinstance(value, dict):return any(contains_message_text(item, expected) for item in value.values())
+    return False
+
+
 def write(path,value):
     with Path(path).open('x',encoding='utf-8')as f:
         json.dump(value,f,indent=2,sort_keys=True,ensure_ascii=False);f.write('\n')
@@ -139,8 +147,8 @@ class BoundaryProvider:
         if number==1:
             tools={t.get('function',{}).get('name'):t.get('function',{})for t in request.get('tools',[])}
             self.schema_discovered='mcp__operator__operator_verify'in tools
-            text=json.dumps(request.get('messages'),ensure_ascii=False)
-            self.instructions_discovered=bool(self.mcp_instructions and self.mcp_instructions in text)
+            self.instructions_discovered=bool(self.mcp_instructions and
+                contains_message_text(request.get('messages'), self.mcp_instructions))
             if self.schema_discovered!=(self.arm=='C'):raise ValueError('unexpected MCP tool surface')
             if self.arm=='C':
                 actual=tools['mcp__operator__operator_verify'].get('parameters')

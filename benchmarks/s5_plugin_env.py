@@ -39,12 +39,19 @@ def verify_runtime(runtime):
         raise ValueError('plugin runtime/source drift')
 
 
-def build(arm,*,runtime,relay=None,**kwargs):
+def build(arm,*,runtime,relay=None,plugin_tool_timeout_ms=None,**kwargs):
     if arm not in ARMS:raise ValueError('only A/C are allowed')
     if arm=='C' and relay is None:raise ValueError('C requires the real MCP relay')
     if 'isolation_runtime'in kwargs:raise ValueError('legacy isolation cannot authorize plugin-only mode')
     tools=kwargs.pop('tools',True)
     if tools is not True:raise ValueError('plugin-only mode requires DSH tools')
+    development=kwargs.get('development')
+    if arm=='C':
+        if plugin_tool_timeout_ms is None:
+            if development is None:raise ValueError('C requires a bounded MCP tool timeout')
+            plugin_tool_timeout_ms=(int(development['timeout'])+30)*1000
+        if type(plugin_tool_timeout_ms)is not int or not 1<=plugin_tool_timeout_ms<=2147483647:
+            raise ValueError('invalid MCP tool timeout')
     verify_runtime(runtime)
     # Reuse identical model settings and public stdlib client from the old A
     # surface, without ever adding its B/C PYTHONPATH or core CLI shim.
@@ -70,7 +77,7 @@ def build(arm,*,runtime,relay=None,**kwargs):
             dict(id='mcp-operator',name=str(legacy.MCP_CLIENT),config=dict(
                 serverName='operator',transport='stdio',command=sys.executable,
                 args=[proxy,'--config',str(config),'--stdio'],
-                toolCallTimeoutMs=(int(kwargs['development']['timeout'])+30)*1000,
+                toolCallTimeoutMs=plugin_tool_timeout_ms,
                 failOnStartupError=True,env=dict(PYTHONNOUSERSITE='1'))),
             dict(id='operator-tools',name=plugin,config=dict(command=sys.executable,
                 args=[proxy,'--config',str(config)],env=dict(PYTHONNOUSERSITE='1')))]))
@@ -88,8 +95,10 @@ def configure(built,runtime):
     root=Path(built['home']).parent
     if root.resolve().is_relative_to(ROOT):raise ValueError('participant must be outside source repository')
     reads=[Path(legacy.DSH_ROOT).parents[1],root/'bin']
-    files=[Path(sys.executable),Path(legacy.NODE),root/'patch.json',
-           Path(built['env']['OPERATOR_AGENT_S5_DEV_CONFIG'])]
+    files=[Path(sys.executable),Path(legacy.NODE),root/'patch.json']
+    development_config=built['env'].get('OPERATOR_AGENT_S5_DEV_CONFIG')
+    if development_config:
+        files.append(Path(development_config))
     if built['arm']=='C':
         reads.append(Path(runtime['root'])/'plugin')
         files.extend([Path(runtime['root'])/'proxy.py',Path(built['mcp_client_config'])])

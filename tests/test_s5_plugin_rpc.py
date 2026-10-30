@@ -49,6 +49,16 @@ def test_actual_schema_instructions_and_immutable_feedback(relay):
     assert proxy.forward(config,dict(jsonrpc='2.0',method='notifications/initialized'))is None
     definitions=proxy.forward(config,rpc(2,'tools/list'))['result']['tools']
     assert {t['name']for t in definitions}=={'operator_prepare','operator_verify','operator_capabilities'}
+    verify=next(t for t in definitions if t['name']=='operator_verify')
+    properties=verify['inputSchema']['properties']
+    assert 'host' not in properties and properties['backend']['enum']==['mock']
+    assert properties['stop_after']['enum']==['L2']
+    assert 'already prepared' in init['result']['instructions']
+    capability=proxy.forward(config,tool(20,'operator_capabilities'))
+    body=json.loads(capability['result']['content'][0]['text'])
+    assert body['task_prepared'] and body['backends']['mock']['delegated']
+    assert body['backends']['mock']['requires']==[]
+    assert body['backends']['mock']['connectivity_verified'] is False
     for number,source in enumerate([BAD_FIXTURE,GOOD_FIXTURE],3):
         candidate=r.workspace/'candidate.py';candidate.write_text(source)
         reply=proxy.forward(config,tool(number,'operator_verify',run_dir=str(r.task_dir),

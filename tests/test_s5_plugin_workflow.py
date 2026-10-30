@@ -14,17 +14,20 @@ def fake_readiness(tmp_path):
         runtime_files_hash='b' * 64, isolation_implementation={})
 
 
-def freeze_fixture(tmp_path, monkeypatch, arms=workflow.ARMS, mode=None):
+def freeze_fixture(tmp_path, monkeypatch, arms=workflow.ARMS, mode=None, exploratory=False):
     readiness = fake_readiness(tmp_path)
     monkeypatch.setattr(s5_plugin_probe, 'load_readiness', lambda path: readiness)
 
+    declarations = {}
     def freeze_service(path, **kwargs):
         path.mkdir(parents=True)
+        declarations[str(path)] = dict(kwargs)
         return 'c' * 64
 
     monkeypatch.setattr(workflow.s5_verify_remote, 'freeze', freeze_service)
     monkeypatch.setattr(workflow.s5_verify_remote, 'load_plan',
-        lambda path, sha: dict(declaration={}, contract_hash='d' * 64))
+        lambda path, sha: dict(declarations[str(path.parent)], contract_hash='d' * 64,
+                              mode='ssh', stop_after='L2'))
     monkeypatch.setattr(s5_formal_run, '_read', lambda path: {})
     monkeypatch.setattr(s5_formal_run, 'check_task_inputs', lambda row, contract: dict(operands=[]))
     output = tmp_path / 'frozen'
@@ -34,8 +37,9 @@ def freeze_fixture(tmp_path, monkeypatch, arms=workflow.ARMS, mode=None):
     mode = mode or ('ac' if arms == workflow.ARMS else 'c-only')
     plan = workflow.freeze(output, readiness_report=readiness['report_path'], gpu=gpu,
         resource_policy=policy, arms=arms,
-        case_ids=(workflow.PLUGIN_ENTRY_CASES if mode in ('plugin-entry', 'plugin-repair')
-                  else workflow.PREFLIGHT_CASES), mode=mode)
+        case_ids=(workflow.STUDY_CASES if mode == 'study' else workflow.PLUGIN_ENTRY_CASES
+                  if mode in ('plugin-entry', 'plugin-repair') else workflow.PREFLIGHT_CASES),
+        repeats=2 if mode == 'study' else 1, mode=mode, exploratory=exploratory)
     return output, plan
 
 
@@ -312,3 +316,219 @@ def test_cli_preserves_ac_comparison_inference_flag(monkeypatch, capsys):
     workflow.main(['execute', '--plan', 'unused.json', '--plan-hash', 'frozen',
                    '--output', 'unused'])
     assert json.loads(capsys.readouterr().out)['inference_allowed'] is True
+
+
+def test_study_freezes_exact_prospective_24_slots_and_shared_limits(tmp_path, monkeypatch):
+    output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
+    loaded = workflow.load_plan(output / 'plan.json')
+    assert loaded == plan
+    assert plan['schema'] == workflow.STUDY_SCHEMA
+    assert plan['status'] == 'frozen_study_candidate'
+    assert plan['repeats'] == 2 and plan['planned_runs'] == 24
+    assert plan['manifest_hash'] == workflow.STUDY_MANIFEST_HASH
+    assert plan['model']['stream_idle_timeout_ms'] == 930000
+    assert plan['model']['stream_idle_timeout_ms'] > plan['model']['request_wall_seconds'] * 1000
+    assert plan['formal_readiness'] is None
+    assert plan['formal_s5_credit'] is False
+    assert plan['limits']['max_model_reservations'] == 576
+    assert plan['limits']['max_output_reservations'] == 18874368
+    assert plan['limits']['max_verifications'] == 72
+    keys = {(s['case_id'], s['repeat_id'], s['arm']) for s in plan['schedule']}
+    assert len(keys) == 24
+    assert [slot['arm'] for slot in plan['schedule'][:4]] == list('ACCA')
+    assert [slot['arm'] for slot in plan['schedule'][12:16]] == list('CAAC')
+    assert all('initial_candidate' not in c and 'acceptance_instruction' not in c for c in plan['cases'])
+
+
+def test_explicit_exploratory_plan_preserves_budget_and_limits_without_claiming_formal_pass(tmp_path, monkeypatch):
+    from benchmarks.s5_study_readiness import require_study_readiness, EXPLORATORY_POLICY
+    output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study', exploratory=True)
+    assert workflow.load_plan(output / 'plan.json') == plan
+    facts = require_study_readiness(plan)
+    assert facts['execution_policy'] == EXPLORATORY_POLICY
+    assert facts['formal_s5_credit'] is False
+    assert all(value is False for value in facts['limitations'].values())
+    assert plan['planned_runs'] == 24 and plan['budget'] == workflow.BUDGET
+
+
+@pytest.mark.parametrize('change', ['claim_isolation', 'hash', 'policy'])
+def test_exploratory_dispatch_requires_explicit_consistent_scope(tmp_path, monkeypatch, change):
+    from benchmarks.s5_study_readiness import require_study_readiness, FormalReadinessRefused
+    _, plan = freeze_fixture(tmp_path, monkeypatch, mode='study', exploratory=True)
+    if change == 'claim_isolation': plan['exploratory_limitations']['network_only_gateway'] = True
+    if change == 'hash': plan['hash'] = 'foreign'
+    if change == 'policy': plan['execution_policy'] = 'skip-all-checks'
+    with pytest.raises(FormalReadinessRefused): require_study_readiness(plan)
+
+
+@pytest.mark.parametrize('change', ['shape', 'precision', 'text', 'order', 'seed', 'repeat', 'schedule', 'limits', 'context', 'idle'])
+def test_study_rejects_rehashed_task_or_schedule_drift(tmp_path, monkeypatch, change):
+    output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
+    altered = copy.deepcopy(plan)
+    if change == 'shape': altered['cases'][0]['shape'][0] += 1
+    if change == 'precision': altered['cases'][0]['precision'] = 'fp32'
+    if change == 'text': altered['cases'][0]['text'] += '\nForce operator_verify.'
+    if change == 'order': altered['cases'][0]['order'] = ['C', 'A']
+    if change == 'seed': altered['cases'][0]['initial_candidate'] = 'def kernel(X): return X'
+    if change == 'repeat': altered['repeats'] = 1
+    if change == 'schedule': altered['schedule'][0]['repeat_id'] = 2
+    if change == 'limits': altered['limits']['max_model_reservations'] += 1
+    if change == 'context': altered['model']['context_window'] = 16384
+    if change == 'idle': altered['model']['stream_idle_timeout_ms'] = 300000
+    altered.pop('hash')
+    altered['hash'] = digest(altered)
+    path = output / 'altered.json'
+    path.write_text(json.dumps(altered))
+    with pytest.raises(ValueError, match='drift'):
+        workflow.load_plan(path)
+
+
+@pytest.mark.parametrize('change', ['gpu_index', 'gpu_uuid', 'host', 'timeout', 'backend'])
+def test_study_resource_observation_and_verifier_must_use_same_frozen_device(tmp_path, monkeypatch, change):
+    output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
+    altered = copy.deepcopy(plan)
+    verification = altered['verification']
+    if change == 'gpu_index': verification['gpu']['index'] = 7
+    if change == 'gpu_uuid': verification['gpu']['uuid'] = 'GPU-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+    if change == 'host': verification['host'] = 'other-host'
+    if change == 'timeout': verification['timeout'] = 1800
+    if change == 'backend': verification['backend'] = 'mock'
+    altered.pop('hash')
+    altered['hash'] = digest(altered)
+    path = output / 'altered-verification.json'
+    path.write_text(json.dumps(altered))
+    with pytest.raises(ValueError, match='GPU identity drift'):
+        workflow.load_plan(path)
+
+
+def test_study_formal_gate_refuses_before_resources_credentials_or_output(tmp_path, monkeypatch):
+    from benchmarks import s5_study_readiness
+    output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
+    def deny(plan): raise ValueError('formal readiness unavailable')
+    monkeypatch.setattr(s5_study_readiness, 'require_formal_readiness', deny)
+    monkeypatch.setattr(workflow, 'resources', lambda p: pytest.fail('GPU observation before gate'))
+    from benchmarks import s5_workflow_preflight
+    monkeypatch.setattr(s5_workflow_preflight, 'credential', lambda: pytest.fail('credential before gate'))
+    with pytest.raises(ValueError, match='formal readiness'):
+        workflow.execute(output / 'plan.json', plan['hash'], tmp_path / 'execution')
+    assert not (tmp_path / 'execution').exists()
+
+
+@pytest.mark.parametrize('mode', [None, 'ac', 'study'])
+def test_direct_study_run_cannot_bypass_formal_gate_by_removing_mode(tmp_path, monkeypatch, mode):
+    from benchmarks.s5_study_readiness import FormalReadinessRefused
+    _, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
+    if mode is None: plan.pop('mode')
+    else: plan['mode'] = mode
+    monkeypatch.setattr(workflow.s5_development_service, 'DevelopmentService',
+        lambda *a, **k: pytest.fail('service constructed before formal gate'))
+    monkeypatch.setattr(workflow.s5_gateway_http, 'GatewayServer',
+        lambda *a, **k: pytest.fail('gateway constructed before formal gate'))
+    with pytest.raises(FormalReadinessRefused):
+        workflow.run_one(plan, plan['cases'][0], 'A', tmp_path / 'execution', 'unused')
+    assert not (tmp_path / 'execution').exists()
+
+
+@pytest.mark.parametrize('stop_at', [None, 7])
+def test_study_offline_executor_keeps_24_slots_and_stops_only_on_infrastructure(
+        tmp_path, monkeypatch, stop_at):
+    from benchmarks import s5_study_readiness
+    output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
+    # This test proves scheduling only; bypass is explicit and no real transport is constructed.
+    monkeypatch.setattr(s5_study_readiness, 'require_formal_readiness', lambda p: {'test_only': True})
+    monkeypatch.setattr(workflow, 'resources', lambda p: dict(mock_only=True))
+    dispatched = []
+    def run_one(plan, case, arm, output, api_key, *, repeat_id):
+        dispatched.append((case['case_id'], repeat_id, arm))
+        index = len(dispatched)
+        status = 'passed' if index % 3 == 0 else 'failed' if index % 3 == 1 else 'unknown'
+        outcome = 'completed' if status == 'passed' else 'candidate_rejected' if status == 'failed' else 'call_budget_exhausted'
+        if index == stop_at: status, outcome = 'unknown', 'infrastructure_error'
+        return dict(case_id=case['case_id'], repeat_id=repeat_id, arm=arm,
+            plan_hash=plan['hash'], status=status, execution_state='finished' if status != 'unknown' else 'interrupted',
+            outcome_class=outcome, model_calls=dict(reserved=3, completed=3), wall_seconds=5,
+            development_audit=dict(plugin_verification_observed=False))
+    monkeypatch.setattr(workflow, 'run_one', run_one)
+    result = workflow.execute(output / 'plan.json', plan['hash'], tmp_path / 'execution', api_key='fake-key')
+    assert result['schema'] == 's5-plugin-study-summary-v1'
+    assert result['planned'] == 24 and len(result['rows']) == 24
+    assert len(dispatched) == (24 if stop_at is None else stop_at)
+    assert len(set(dispatched)) == len(dispatched)
+    assert len(list((tmp_path / 'execution/records').glob('*.json'))) == 24
+    assert result['comparisons']['C-minus-A']['inference_allowed'] is (stop_at is None)
+    assert result['formal_s5_credit'] is False
+    assert sum(r['execution_state'] == 'not_executed' for r in result['rows']) == (0 if stop_at is None else 17)
+    with pytest.raises(FileExistsError):
+        workflow.execute(output / 'plan.json', plan['hash'], tmp_path / 'execution', api_key='fake-key')
+
+
+@pytest.mark.parametrize('malformed', [False, True])
+def test_study_run_one_uses_same_final_extraction_without_development_history_and_isolates_repeats(
+        tmp_path, monkeypatch, malformed):
+    import time
+    from types import SimpleNamespace
+    from benchmarks import s5_study_readiness
+    from operator_agent.run_contract import code_hash
+    output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
+    case = plan['cases'][0]
+    contract_hash = case['service_contract']
+    source = 'def kernel(X):\n    return X\n'
+    raw = ('Done.\n\n```python\n' + source + '```' if not malformed else
+           '```python\n' + source + '```\n```python\n' + source + '```')
+    monkeypatch.setattr(s5_study_readiness, 'require_formal_readiness', lambda p: {'test_only': True})
+    class Service:
+        def __init__(self, plan_path, sha, path, **kwargs):
+            self.plan = dict(contract_hash=contract_hash, declaration={}, mode='ssh', timeout=600)
+            self.output, self.records, self.arm = path, [], kwargs['arm']
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        url, token = 'http://127.0.0.1:1/development/verify', 'fake-token'
+        def final(self, code):
+            assert code == source
+            result = dict(status='passed', full_l2_passed=True,
+                source_sha256=code_hash(code), contract_hash=contract_hash)
+            self.records.append(dict(phase='final', sequence=1, status='passed',
+                source_sha256=code_hash(code), completed_monotonic=time.monotonic(), result=result))
+            return result
+        def snapshot(self):
+            return dict(records=self.records, development_used=0, final_used=len(self.records))
+    class Context:
+        def __init__(self, *args, **kwargs):
+            self._server = SimpleNamespace(gateway=SimpleNamespace(last_budget_refusal=None))
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        base_url = 'http://127.0.0.1:1/v1'
+        def failure_snapshot(self): return dict(schema='s5-upstream-failures-v1', failures=[], truncated=False)
+        def snapshot(self): return dict(mock_only=True)
+    monkeypatch.setattr(workflow.s5_development_service, 'DevelopmentService', Service)
+    monkeypatch.setattr(workflow.s5_gateway_supervisor, 'SupervisedTransport', Context)
+    monkeypatch.setattr(workflow.s5_gateway_http, 'GatewayServer', Context)
+    monkeypatch.setattr(workflow.s5_plugin_rpc, 'MCPRelay', Context)
+    monkeypatch.setattr(workflow.s5_verify_remote, 'load_plan', lambda *a: dict(declaration={}))
+    monkeypatch.setattr(workflow, 'prepare', lambda *a: dict(contract_hash=contract_hash))
+    monkeypatch.setattr(workflow.s5_plugin_env, 'build', lambda arm, **kw:
+        dict(arm=arm, work=str(kw['arm_dir'] / 'work')))
+    monkeypatch.setattr(workflow.s5_arm_env, 'start_headless', lambda *a, **k:
+        dict(returncode=0, stderr='', events=[dict(type='final', text=raw),
+             dict(phase='turn_end', reason=dict(kind='completed'))]))
+    monkeypatch.setattr(workflow.s5_arm_env, 'cleanup_development', lambda *a: None)
+    monkeypatch.setattr(workflow.s5_seatbelt, 'archive_work', lambda *a: dict(complete=True))
+    execution = tmp_path / 'runs'
+    for repeat in (1, 2):
+        for arm in ('A', 'C'):
+            row = workflow.run_one(plan, case, arm, execution, 'fake-key', repeat_id=repeat)
+            path = execution / 'runs' / case['case_id'] / ('repeat-%d' % repeat) / arm
+            assert (path / 'raw-answer.txt').read_text() == raw
+            assert row['development']['development_used'] == 0
+            assert row['outcome_class'] == ('no_submission' if malformed else 'completed')
+            assert row['development']['final_used'] == (0 if malformed else 1)
+            expected_id = 'plugin-' + digest([plan['hash'], case['case_id'], repeat, arm])[:24]
+            assert workflow.shared.snapshot(path / 'budget.sqlite', expected_task_id=expected_id)['reserved_calls'] == 0
+            if malformed:
+                assert row['final_submission_refused'] is True
+                assert not (path / 'candidate.txt').exists()
+            else:
+                assert (path / 'candidate.txt').read_text() == source
+                assert row['candidate_sha256'] == code_hash(source)
+            with pytest.raises(FileExistsError):
+                workflow.run_one(plan, case, arm, execution, 'fake-key', repeat_id=repeat)

@@ -1,5 +1,5 @@
 """Classify ordinary task noncompletion separately from infrastructure faults."""
-def classify(record):
+def classify(record, *, require_development_audit=True):
     if record.get('execution_state')=='not_executed':return 'not_executed'
     if record.get('error') and record['error']!='TimeoutExpired':return 'infrastructure_error'
     gateway=record.get('gateway_diagnostics')
@@ -8,7 +8,9 @@ def classify(record):
                 or not isinstance(gateway.get('failures'),list) or gateway.get('truncated') is True
                 or gateway['failures']):
             return 'infrastructure_error'
-    if record.get('development_audit',{}).get('complete') is not True:
+    if (require_development_audit
+            and (not isinstance(record.get('development_audit'), dict)
+                 or record['development_audit'].get('complete') is not True)):
         return 'infrastructure_error'
     if record.get('workspace_archive',{}).get('complete') is False:
         return 'infrastructure_error'

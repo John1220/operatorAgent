@@ -22,7 +22,7 @@ from benchmarks import (s5_arm_env, s5_development_service, s5_formal_run,
                         s5_plugin_env, s5_plugin_flow, s5_plugin_probe,
                         s5_plugin_rpc, s5_plugin_summary, s5_outcomes,
                         s5_seatbelt, s5_shared_gpu, s5_verify_remote,
-                        s5_task_manifest)
+                        s5_task_manifest, s5_minimal_tasks)
 from operator_agent import s5_shared_budget as shared
 from operator_agent.hitl_tools import prepare
 from operator_agent.run_contract import digest
@@ -31,6 +31,9 @@ SCHEMA = 's5-plugin-only-plan-v1'
 C_ONLY_SCHEMA = 's5-plugin-c-diagnostic-plan-v1'
 PLUGIN_ENTRY_SCHEMA = 's5-plugin-entry-acceptance-plan-v1'
 PLUGIN_REPAIR_SCHEMA = 's5-plugin-repair-acceptance-plan-v1'
+STUDY_SCHEMA = 's5-plugin-study-plan-v1'
+STUDY_MANIFEST_HASH = '79fb8b03ee0514d67a354e24b78622fb668a7d27e3592ad3d1144ee2dc74bbd2'
+STUDY_CASES = tuple(row[0] for row in s5_minimal_tasks.SPECS)
 REPAIR_SEED_PATH = Path(__file__).parent / 'fixtures/s5_layernorm_repair_seed.py'
 PLUGIN_REPAIR_INSTRUCTION = (
     'Repair acceptance: candidate.py already contains the starting implementation. '
@@ -60,6 +63,7 @@ BUDGET = dict(max_calls=24, max_output_tokens=32768,
               total_output_tokens=24 * 32768, wall_clock_s=2400)
 DEVELOPMENT = dict(max_development=2, final_reserve=1)
 VERIFY_TIMEOUT = 600
+STUDY_STREAM_IDLE_TIMEOUT_MS = (s5_formal_run.REQUEST_WALL_SECONDS + 30) * 1000
 MAX_PLAN_BYTES = 1024 * 1024
 
 
@@ -90,7 +94,9 @@ def implementation_identity():
              'operator_agent/hitl_tools.py', 'operator_agent/s5_verify_client.py',
              'operator_agent/mcp_server.py', 'integrations/dsh-operator/index.mjs',
              'integrations/dsh-operator/package.json',
-             'benchmarks/fixtures/s5_layernorm_repair_seed.py')
+             'benchmarks/fixtures/s5_layernorm_repair_seed.py',
+             'benchmarks/s5_minimal_tasks.py', 'benchmarks/s5_plugin_study_summary.py',
+             'benchmarks/s5_candidate_extraction.py', 'benchmarks/s5_study_readiness.py')
     return {name: hashlib.sha256((root / name).read_bytes()).hexdigest()
             for name in paths}
 
@@ -110,21 +116,26 @@ def _case_order(cases, repeats, arms=ARMS):
 
 def freeze(output, *, readiness_report, gpu, resource_policy,
            case_ids=PREFLIGHT_CASES, endpoint=None, model=MODEL,
-           budget=None, repeats=1, arms=ARMS, mode=None):
+           budget=None, repeats=1, arms=ARMS, mode=None,
+           formal_readiness_report=None, exploratory=False):
     """Freeze an A/C preflight, C-only diagnostic or plugin-entry acceptance."""
     from benchmarks.s5_gateway_transport import _endpoint
 
     arms = tuple(arms)
     if mode is None:
         mode = 'ac' if arms == ARMS else 'c-only'
-    if mode not in ('ac', 'c-only', 'plugin-entry', 'plugin-repair'):
+    study = mode == 'study'
+    if type(exploratory) is not bool or (exploratory and not study):
+        raise ValueError('exploratory policy requires study mode')
+    if mode not in ('ac', 'c-only', 'plugin-entry', 'plugin-repair', 'study'):
         raise ValueError('unsupported plugin-only plan mode')
-    expected_arms = ARMS if mode == 'ac' else C_ONLY_ARMS
-    expected_cases = PLUGIN_ENTRY_CASES if mode in ('plugin-entry', 'plugin-repair') else PREFLIGHT_CASES
+    expected_arms = ARMS if mode in ('ac', 'study') else C_ONLY_ARMS
+    expected_cases = (STUDY_CASES if study else PLUGIN_ENTRY_CASES
+                      if mode in ('plugin-entry', 'plugin-repair') else PREFLIGHT_CASES)
     if arms != expected_arms:
         raise ValueError('plugin-only plan supports A/C or C-only diagnostic arms')
-    if model != MODEL or type(repeats) is not int or repeats != 1:
-        raise ValueError('first plugin-only preflight fixes model and one repeat')
+    if model != MODEL or type(repeats) is not int or repeats != (2 if study else 1):
+        raise ValueError('plugin-only protocol fixes model and repeat count')
     budget = dict(BUDGET if budget is None else budget)
     _validate_budget(budget)
     if (not isinstance(case_ids, (list, tuple)) or tuple(case_ids) != expected_cases
@@ -139,7 +150,9 @@ def freeze(output, *, readiness_report, gpu, resource_policy,
     endpoint = endpoint or os.environ.get(ENDPOINT_KEY, DEFAULT_ENDPOINT)
     _endpoint(endpoint)
 
-    manifest = s5_task_manifest.manifest()
+    manifest = s5_minimal_tasks.manifest() if study else s5_task_manifest.manifest()
+    if study and manifest['hash'] != STUDY_MANIFEST_HASH:
+        raise ValueError('prospective study task manifest drift')
     rows = {row['case_id']: row for row in manifest['tasks']}
     selected = [rows[name] for name in case_ids if name in rows]
     if len(selected) != len(expected_cases):
@@ -174,7 +187,7 @@ def freeze(output, *, readiness_report, gpu, resource_policy,
 
     runs = len(cases) * len(arms) * repeats
     is_c_only = mode == 'c-only'
-    schema = (PLUGIN_REPAIR_SCHEMA if mode == 'plugin-repair'
+    schema = (STUDY_SCHEMA if study else PLUGIN_REPAIR_SCHEMA if mode == 'plugin-repair'
               else PLUGIN_ENTRY_SCHEMA if mode == 'plugin-entry'
               else C_ONLY_SCHEMA if is_c_only else SCHEMA)
     purpose = {
@@ -182,10 +195,11 @@ def freeze(output, *, readiness_report, gpu, resource_policy,
         'c-only': 'three fixed plugin-path diagnostic tasks; no A/C comparison',
         'plugin-entry': 'one LayerNorm C task requiring DSH operator_verify; acceptance only',
         'plugin-repair': 'one seeded LayerNorm C failure-feedback-repair acceptance; no gain inference',
+        'study': 'six prospective tasks x A/C x two repeats; scoped contribution study',
     }[mode]
     body = dict(schema=schema, mode=mode,
-        status='frozen_preflight', formal_s5_credit=False,
-        counts_toward_denominator=False,
+        status='frozen_study_candidate' if study else 'frozen_preflight', formal_s5_credit=False,
+        counts_toward_denominator=study,
         purpose=purpose,
         manifest_hash=manifest['hash'], arms=list(arms), repeats=repeats,
         model=dict(id=model, protocol='responses', endpoint=endpoint,
@@ -205,6 +219,15 @@ def freeze(output, *, readiness_report, gpu, resource_policy,
                     max_verifications=runs * 3,
                     stop_after_infrastructure_unknown=True,
                     ordinary_budget_exhaustion_continues=True))
+    if study:
+        body['model']['stream_idle_timeout_ms'] = STUDY_STREAM_IDLE_TIMEOUT_MS
+        report = Path(formal_readiness_report).resolve() if formal_readiness_report is not None else None
+        body['formal_readiness'] = (dict(report_path=str(report),
+            report_sha256=hashlib.sha256(report.read_bytes()).hexdigest()) if report else None)
+        if exploratory:
+            from benchmarks.s5_study_readiness import EXPLORATORY_POLICY, EXPLORATORY_LIMITATIONS
+            body.update(execution_policy=EXPLORATORY_POLICY,
+                        exploratory_limitations=dict(EXPLORATORY_LIMITATIONS))
     body['hash'] = digest(body)
     _write_once(root / 'plan.json', body)
     return body
@@ -221,22 +244,25 @@ def load_plan(path):
     plan['hash'] = stored
     arms = tuple(plan.get('arms', ()))
     mode = plan.get('mode', 'c-only' if plan.get('schema') == C_ONLY_SCHEMA else 'ac')
-    expected_arms = ARMS if mode == 'ac' else C_ONLY_ARMS
-    expected_cases = PLUGIN_ENTRY_CASES if mode in ('plugin-entry', 'plugin-repair') else PREFLIGHT_CASES
+    study = mode == 'study'
+    repeats = 2 if study else 1
+    expected_arms = ARMS if mode in ('ac', 'study') else C_ONLY_ARMS
+    expected_cases = (STUDY_CASES if study else PLUGIN_ENTRY_CASES
+                      if mode in ('plugin-entry', 'plugin-repair') else PREFLIGHT_CASES)
     expected_schema = {'ac': SCHEMA, 'c-only': C_ONLY_SCHEMA,
                        'plugin-entry': PLUGIN_ENTRY_SCHEMA,
-                       'plugin-repair': PLUGIN_REPAIR_SCHEMA}.get(mode)
-    expected_runs = len(expected_cases) * len(arms)
-    if (mode not in ('ac', 'c-only', 'plugin-entry', 'plugin-repair') or arms != expected_arms
+                       'plugin-repair': PLUGIN_REPAIR_SCHEMA, 'study': STUDY_SCHEMA}.get(mode)
+    expected_runs = len(expected_cases) * len(arms) * repeats
+    if (mode not in ('ac', 'c-only', 'plugin-entry', 'plugin-repair', 'study') or arms != expected_arms
             or plan.get('schema') != expected_schema
-            or plan.get('status') != 'frozen_preflight'
+            or plan.get('status') != ('frozen_study_candidate' if study else 'frozen_preflight')
             or plan.get('formal_s5_credit') is not False
-            or plan.get('counts_toward_denominator') is not False
+            or plan.get('counts_toward_denominator') is not study
             or plan.get('implementation') != implementation_identity()
             or [case.get('case_id') for case in plan.get('cases', [])] != list(expected_cases)
             or plan.get('planned_runs') != expected_runs
-            or plan.get('repeats') != 1
-            or plan.get('schedule') != _case_order(plan.get('cases', []), 1, arms)
+            or plan.get('repeats') != repeats
+            or plan.get('schedule') != _case_order(plan.get('cases', []), repeats, arms)
             or (mode == 'plugin-entry'
                 and plan['cases'][0].get('acceptance_instruction') != PLUGIN_ENTRY_INSTRUCTION)
             or (mode == 'plugin-repair' and (
@@ -249,12 +275,58 @@ def load_plan(path):
             or plan.get('model', {}).get('reasoning_effort') != 'medium'
             or plan.get('development') != DEVELOPMENT):
         raise ValueError('plugin-only plan configuration or source drift')
+    if study:
+        from benchmarks.s5_study_readiness import EXPLORATORY_POLICY, EXPLORATORY_LIMITATIONS
+        if (plan.get('execution_policy', 'formal') not in ('formal', EXPLORATORY_POLICY)
+                or (plan.get('execution_policy') == EXPLORATORY_POLICY
+                    and plan.get('exploratory_limitations') != EXPLORATORY_LIMITATIONS)):
+            raise ValueError('study execution policy drift')
+        manifest = s5_minimal_tasks.manifest()
+        if manifest['hash'] != STUDY_MANIFEST_HASH or plan.get('manifest_hash') != manifest['hash']:
+            raise ValueError('prospective study task manifest drift')
+        model_fields = dict(id=MODEL, protocol='responses', reasoning_effort='medium',
+            stream_idle_timeout_ms=STUDY_STREAM_IDLE_TIMEOUT_MS,
+            context_window=s5_formal_run.CONTEXT_WINDOW,
+            request_wall_seconds=s5_formal_run.REQUEST_WALL_SECONDS,
+            max_response_bytes=s5_formal_run.RESPONSE_BYTES)
+        expected_limits = dict(max_model_reservations=24 * BUDGET['max_calls'],
+            max_output_reservations=24 * BUDGET['total_output_tokens'], max_verifications=72,
+            stop_after_infrastructure_unknown=True, ordinary_budget_exhaustion_continues=True)
+        if (type(plan.get('repeats')) is not int or type(plan.get('planned_runs')) is not int
+                or any(plan['model'].get(k) != v for k, v in model_fields.items())
+                or plan.get('limits') != expected_limits):
+            raise ValueError('study model or aggregate budget drift')
+        from benchmarks.s5_gateway_transport import _endpoint
+        _endpoint(plan['model'].get('endpoint'))
+        for case, row in zip(plan['cases'], manifest['tasks']):
+            for name in ('case_id', 'kernel_type', 'shape', 'precision', 'layout'):
+                if case.get(name) != row[name]:
+                    raise ValueError('study task specification drift')
+            if case.get('text') != s5_formal_run.task_text(row) or case.get('order') != list(ARMS):
+                raise ValueError('study task prompt or tool-path drift')
+            if any(name in case for name in ('initial_candidate', 'acceptance_instruction')):
+                raise ValueError('study task drift: cannot seed candidates or force plugin use')
     readiness = s5_plugin_probe.load_readiness(plan['readiness']['report_path'])
     if readiness != plan['readiness']:
         raise ValueError('plugin-only readiness drift')
     for case in plan['cases']:
         service_path = Path(plan['service_root']) / case['case_id'] / 'plan.json'
-        s5_verify_remote.load_plan(service_path, case['service_sha256'])
+        service = s5_verify_remote.load_plan(service_path, case['service_sha256'])
+        if study:
+            row = next(r for r in manifest['tasks'] if r['case_id'] == case['case_id'])
+            contract = s5_formal_run._read(service_path.parent / 'task/contract.json')
+            if (service.get('declaration') != s5_formal_run.declaration(row)
+                    or service.get('contract_hash') != case.get('service_contract')
+                    or s5_formal_run.check_task_inputs(row, contract) != case.get('input_semantics')):
+                raise ValueError('study service contract or input identity drift')
+            expected_verification = dict(backend='h20', host=s5_formal_run.GATEWAY_HOST,
+                gpu=dict(index=service.get('gpu_index'), uuid=service.get('gpu_uuid'),
+                         name=service.get('gpu_name')), stop_after='L2', timeout=VERIFY_TIMEOUT)
+            if (plan.get('verification') != expected_verification
+                    or service.get('backend') != 'h20' or service.get('mode') != 'ssh'
+                    or service.get('host') != s5_formal_run.GATEWAY_HOST
+                    or service.get('timeout') != VERIFY_TIMEOUT or service.get('stop_after') != 'L2'):
+                raise ValueError('study verification backend or GPU identity drift')
     s5_shared_gpu.validate_policy(plan['resource_policy'])
     return plan
 
@@ -301,11 +373,25 @@ def extract_repair_final(text, verified_source):
 
 def run_one(plan, case, arm, output, api_key, *, repeat_id=1):
     """Run one real arm with a shared ledger, real plugin MCP, and final L2."""
-    if arm not in plan.get('arms', ()) or type(repeat_id) is not int or repeat_id != 1:
+    study = plan.get('mode') == 'study' or plan.get('schema') == STUDY_SCHEMA
+    performance = plan.get('mode') == 'performance'
+    if (arm not in plan.get('arms', ()) or type(repeat_id) is not int
+            or repeat_id not in ((1, 2) if study or performance else (1,))):
         raise ValueError('unplanned plugin-only slot')
-    run_dir = Path(output) / 'runs' / case['case_id'] / arm
+    if study:
+        from benchmarks.s5_study_readiness import require_study_readiness
+        require_study_readiness(plan)
+        if (case not in plan.get('cases', []) or dict(case_id=case['case_id'],
+                repeat_id=repeat_id, arm=arm) not in plan.get('schedule', [])):
+            raise ValueError('unplanned study slot')
+    run_dir = Path(output) / 'runs' / case['case_id']
+    if study or performance:
+        run_dir = run_dir / ('repeat-%d' % repeat_id)
+    run_dir = run_dir / arm
     run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
-    task_id = 'plugin-' + digest([plan['hash'], case['case_id'], arm])[:24]
+    identity = ([plan['hash'], case['case_id'], repeat_id, arm]
+                if study or performance else [plan['hash'], case['case_id'], arm])
+    task_id = 'plugin-' + digest(identity)[:24]
     ledger = run_dir / 'budget.sqlite'
     record = dict(schema=RECORD_SCHEMA, plan_hash=plan['hash'], case_id=case['case_id'],
         repeat_id=repeat_id, arm=arm, status='unknown', execution_state='unknown',
@@ -334,9 +420,23 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=1):
             contract=service.plan['contract_hash'], backend=service.plan['mode'],
             timeout=service.plan['timeout'] + 10)
         if arm == 'C':
-            relay = s5_plugin_rpc.MCPRelay(development, work / 'task',
-                service.plan['declaration'], run_dir / 'mcp-relay',
-                timeout=development['timeout'] + 30)
+            if performance:
+                from benchmarks.s5_perf_mcp import PerformanceRelay
+                gpu = plan['verification']['gpu']
+                relay = PerformanceRelay(work / 'task', service.plan['declaration'],
+                    run_dir / 'mcp-relay',
+                    pin=dict(host=plan['verification']['host'], gpu_index=gpu['index'],
+                             gpu_uuid=gpu['uuid'], gpu_name=gpu['name']),
+                    resource_policy=plan['resource_policy'], timeout=660,
+                    max_candidates=plan['development']['max_candidate_configs'],
+                    max_verify_calls=plan['development']['max_operator_verify_calls'],
+                    max_bench_calls=plan['development']['max_operator_bench_calls'],
+                    max_tool_gpu_calls=plan['development']['max_tool_gpu_calls'],
+                    allow_prepare=not plan.get('require_plugin_tool_use'))
+            else:
+                relay = s5_plugin_rpc.MCPRelay(development, work / 'task',
+                    service.plan['declaration'], run_dir / 'mcp-relay',
+                    timeout=development['timeout'] + 30)
             relay.__enter__()
         shared.create(ledger, task_id=task_id,
             max_calls=plan['budget']['max_calls'],
@@ -355,18 +455,49 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=1):
             max_chunks=1048576, max_calls_limit=plan['budget']['max_calls'],
             reasoning_effort=plan['model']['reasoning_effort'])
         gateway.__enter__()
+        participant_development = None if performance and arm == 'C' else development
         built = s5_plugin_env.build(arm, runtime=plan['readiness']['runtime'],
             relay=relay, base_url=gateway.base_url, arm_dir=participant,
             api='responses', model=plan['model']['id'],
             max_tokens=plan['budget']['max_output_tokens'], tools=True,
-            development=development, context_window=plan['model']['context_window'],
-            reasoning_effort=plan['model']['reasoning_effort'])
+            development=participant_development,
+            plugin_tool_timeout_ms=((relay.timeout + 30) * 1000
+                                    if performance and arm == 'C' else None),
+            context_window=plan['model']['context_window'],
+            reasoning_effort=plan['model']['reasoning_effort'],
+            stream_idle_timeout_ms=(plan['model']['stream_idle_timeout_ms']
+                                    if study or performance else None))
         if plan.get('mode') == 'plugin-repair':
             (work / 'candidate.py').write_text(case['initial_candidate'], encoding='utf-8')
-        task = case['text'] + '\n' + s5_plugin_flow.common_instructions(
-            work, service.plan['mode'], plan['development']['max_development'],
-            plan['budget']['max_calls'],
-            require_plugin_verify=plan.get('mode') in ('plugin-entry', 'plugin-repair'))
+        if performance:
+            seed_path = Path(plan['seed_root']) / case['seed_file']
+            if seed_path.is_symlink() or not seed_path.is_file():
+                raise ValueError('frozen performance seed unavailable')
+            seed = seed_path.read_bytes()
+            if hashlib.sha256(seed).hexdigest() != case['seed_sha256']:
+                raise ValueError('frozen performance seed changed')
+            (work / 'candidate.py').write_bytes(seed)
+            task = case['text'] + '\n\n' + case['instructions']
+            if plan.get('require_plugin_tool_use') and arm == 'C':
+                task += (
+                    '\n\nFor this frozen plugin-tool follow-up, optimize the supplied kernel and '
+                    'create candidate_v1.py. Before returning the final source, make one real '
+                    'mcp__operator__operator_bench call comparing candidate.py and '
+                    'candidate_v1.py, then call mcp__operator__operator_verify on the selected '
+                    'final candidate with stop_after="L2". This task is already prepared; do not '
+                    'call operator_prepare. For both calls use run_dir="task" relative to this '
+                    'session workspace. '
+                    'For operator_bench pass candidates with code_file="candidate.py" and '
+                    'code_file="candidate_v1.py". For operator_verify pass code_file for the '
+                    'selected candidate. Omit backend, host, timeout, and work_dir so the frozen '
+                    'relay supplies them. Do not use an absolute /work path or mock backend. The bench result '
+                    'is exploratory; operator_verify must check the final candidate.'
+                )
+        else:
+            task = case['text'] + '\n' + s5_plugin_flow.common_instructions(
+                work, service.plan['mode'], plan['development']['max_development'],
+                plan['budget']['max_calls'],
+                require_plugin_verify=plan.get('mode') in ('plugin-entry', 'plugin-repair'))
         if plan.get('mode') in ('plugin-entry', 'plugin-repair'):
             task += '\n\n' + case['acceptance_instruction']
         if plan.get('mode') == 'plugin-repair':
@@ -392,6 +523,9 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=1):
         if response['returncode'] != 0:
             record['execution_state'] = 'interrupted'
             record['reason'] = 'headless interrupted; inspect retained events and gateway diagnostics'
+            record['headless_diagnostics'] = s5_arm_env.headless_failure_diagnostics(response)
+            if record['headless_diagnostics']:
+                record['reason'] = 'DSH adapter stream idle timeout; upstream root cause unknown'
         else:
             candidate = s5_formal_run._final_text(events)
             if not candidate or not candidate.strip():
@@ -401,7 +535,10 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=1):
                 record['execution_state'] = 'finished'
                 (run_dir / 'raw-answer.txt').write_text(candidate, encoding='utf-8')
                 dev_records = [r for r in service.snapshot()['records'] if r['phase'] == 'development']
-                if (plan.get('mode') == 'plugin-repair' and dev_records
+                if study or performance:
+                    from benchmarks.s5_candidate_extraction import extract_final_source
+                    candidate, normalization = extract_final_source(candidate)
+                elif (plan.get('mode') == 'plugin-repair' and dev_records
                         and dev_records[-1]['status'] == 'passed'):
                     last = dev_records[-1]
                     verified_path = service.output / ('%03d-development' % last['sequence']) / 'candidate.py'
@@ -416,11 +553,22 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=1):
                     service_plan_sha256=case['service_sha256'])
                 record['normalization'] = normalization
                 record['status'] = verdict['status']
+                if (study or performance) and (verdict.get('source_sha256') != record['candidate_sha256']
+                        or verdict.get('contract_hash') != case['service_contract']):
+                    raise ValueError('performance-study final verification identity mismatch')
     except Exception as exc:
-        record['error'] = type(exc).__name__
-        record['reason'] = 'plugin-only run interrupted; inspect retained local diagnostics'
-        if record['execution_state'] == 'unknown':
+        from benchmarks.s5_candidate_extraction import FinalSourceError
+        if (study or performance) and isinstance(exc, FinalSourceError):
+            record['error'] = None
+            record['reason'] = 'final source refused: no unambiguous Python candidate'
+            record['final_submission_refused'] = True
             record['execution_state'] = 'interrupted'
+            record['terminal_kind'] = 'completed'
+        else:
+            record['error'] = type(exc).__name__
+            record['reason'] = 'plugin-only run interrupted; inspect retained local diagnostics'
+            if record['execution_state'] == 'unknown':
+                record['execution_state'] = 'interrupted'
         record['status'] = 'unknown'
     finally:
         for owner in (gateway, relay, service):
@@ -446,12 +594,26 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=1):
                 usage=[call.get('api_usage') for call in snapshot['calls']])
         if service is not None:
             record['development'] = service.snapshot()
+            if study:
+                first = next((item for item in record['development']['records']
+                    if item.get('status') == 'passed' and (item.get('result') or {}).get(
+                        'full_l2_passed', (item.get('result') or {}).get('passed')) is True), None)
+                record['first_complete_correct'] = None if first is None else dict(
+                    phase=first['phase'], sequence=first['sequence'],
+                    source_sha256=first['source_sha256'],
+                    elapsed_seconds=round(first['completed_monotonic'] - started, 3),
+                    model_call_reservations=((record.get('model_calls') or {}).get('reserved')
+                                             if first['phase'] == 'final' else None),
+                    call_watermark_basis=('all DSH requests completed before independent final'
+                        if first['phase'] == 'final' else
+                        'unknown; development feedback lacks provider dispatch watermark'))
             _write_once(run_dir / 'development.json', record['development'])
-            record['development_audit'] = s5_plugin_probe.audit(
-                events, record['development'], arm=arm)
-            _write_once(run_dir / 'development-audit.json', record['development_audit'])
-            record['workflow_progress'] = s5_plugin_flow.progress(events, record['development'])
-            _write_once(run_dir / 'workflow-progress.json', record['workflow_progress'])
+            if not performance:
+                record['development_audit'] = s5_plugin_probe.audit(
+                    events, record['development'], arm=arm)
+                _write_once(run_dir / 'development-audit.json', record['development_audit'])
+                record['workflow_progress'] = s5_plugin_flow.progress(events, record['development'])
+                _write_once(run_dir / 'workflow-progress.json', record['workflow_progress'])
         if relay is not None:
             _write_once(run_dir / 'mcp-relay-snapshot.json', relay.snapshot())
         if built is not None:
@@ -460,7 +622,8 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=1):
                 built, run_dir / 'participant-work')
             record['read_boundary'] = 'macos-outer-seatbelt-whitelist'
         record['wall_seconds'] = round(time.monotonic() - started, 3)
-        record['outcome_class'] = s5_outcomes.classify(record)
+        record['outcome_class'] = s5_outcomes.classify(
+            record, require_development_audit=not performance)
         _write_once(run_dir / 'record.json', record)
     return record
 
@@ -604,6 +767,10 @@ def execute(plan_path, expected_plan_hash, output, api_key=None):
     plan = load_plan(plan_path)
     if plan['hash'] != expected_plan_hash:
         raise ValueError('plugin-only expected plan hash mismatch')
+    formal_readiness = None
+    if plan.get('mode') == 'study':
+        from benchmarks.s5_study_readiness import require_study_readiness
+        formal_readiness = require_study_readiness(plan)
     root = Path(output).resolve()
     root.mkdir(parents=True, exist_ok=False, mode=0o700)
     initial = resources(plan)
@@ -614,13 +781,15 @@ def execute(plan_path, expected_plan_hash, output, api_key=None):
         raise ValueError('provider credential unavailable')
     _write_once(root / 'execution-started.json', dict(schema='s5-plugin-only-execution-v1',
         plan_hash=plan['hash'], started_unix=time.time(), initial_resources=initial,
+        formal_readiness=formal_readiness,
         real_model_calls='not yet observed', gpu_executions=0, formal_s5_credit=False))
     records = []
     cases = {case['case_id']: case for case in plan['cases']}
     stopped = None
     for index, slot in enumerate(plan['schedule']):
         case, arm = cases[slot['case_id']], slot['arm']
-        label = '%02d-%s-%s' % (index + 1, case['case_id'], arm)
+        label = ('%02d-%s-repeat-%d-%s' % (index + 1, case['case_id'], slot['repeat_id'], arm)
+                 if plan.get('mode') == 'study' else '%02d-%s-%s' % (index + 1, case['case_id'], arm))
         if stopped is not None:
             record = dict(case_id=case['case_id'], repeat_id=slot['repeat_id'], arm=arm,
                 plan_hash=plan['hash'], status='unknown', execution_state='not_executed',
@@ -640,7 +809,10 @@ def execute(plan_path, expected_plan_hash, output, api_key=None):
                 stopped = 'infrastructure failure at %s' % label
         _write_once(root / 'records' / (label + '.json'), record)
         records.append(record)
-    if plan.get('mode') in ('plugin-entry', 'plugin-repair'):
+    if plan.get('mode') == 'study':
+        from benchmarks.s5_plugin_study_summary import aggregate
+        summary = aggregate(plan, records)
+    elif plan.get('mode') in ('plugin-entry', 'plugin-repair'):
         summary = aggregate_plugin_entry(plan, records)
     elif plan['arms'] == list(C_ONLY_ARMS):
         summary = aggregate_c_diagnostic(plan, records)
@@ -660,7 +832,9 @@ def main(argv=None):
     freeze_parser.add_argument('--gpu-uuid', required=True)
     freeze_parser.add_argument('--gpu-name', required=True)
     freeze_parser.add_argument('--allowed-pid', action='append', type=int, default=[])
-    freeze_parser.add_argument('--mode', choices=('ac', 'c-only', 'plugin-entry', 'plugin-repair'), default='ac')
+    freeze_parser.add_argument('--mode', choices=('ac', 'c-only', 'plugin-entry', 'plugin-repair', 'study'), default='ac')
+    freeze_parser.add_argument('--formal-readiness-report', type=Path)
+    freeze_parser.add_argument('--exploratory', action='store_true')
     run_parser = sub.add_parser('execute')
     run_parser.add_argument('--plan', required=True, type=Path)
     run_parser.add_argument('--plan-hash', required=True)
@@ -672,9 +846,12 @@ def main(argv=None):
         plan = freeze(args.output, readiness_report=args.readiness_report,
             gpu=dict(index=args.gpu_index, uuid=args.gpu_uuid, name=args.gpu_name),
             resource_policy=policy,
-            arms=ARMS if args.mode == 'ac' else C_ONLY_ARMS,
-            case_ids=PLUGIN_ENTRY_CASES if args.mode in ('plugin-entry', 'plugin-repair') else PREFLIGHT_CASES,
-            mode=args.mode)
+            arms=ARMS if args.mode in ('ac', 'study') else C_ONLY_ARMS,
+            case_ids=(STUDY_CASES if args.mode == 'study' else PLUGIN_ENTRY_CASES
+                      if args.mode in ('plugin-entry', 'plugin-repair') else PREFLIGHT_CASES),
+            repeats=2 if args.mode == 'study' else 1,
+            mode=args.mode, formal_readiness_report=args.formal_readiness_report,
+            exploratory=args.exploratory)
         print(json.dumps(dict(plan_path=str(args.output / 'plan.json'), hash=plan['hash'],
                               planned_runs=plan['planned_runs'], arms=plan['arms']), sort_keys=True))
         return 0

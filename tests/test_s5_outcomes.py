@@ -31,3 +31,13 @@ def test_malformed_or_truncated_gateway_diagnostics_are_unknown():
                    dict(schema='s5-upstream-failures-v1', failures='missing'),
                    dict(schema='s5-upstream-failures-v1', failures=[], truncated=True)):
         assert classify(dict(base_record(), gateway_diagnostics=detail))=='infrastructure_error'
+
+
+def test_performance_record_can_omit_non_applicable_development_audit():
+    record=base_record()
+    record.update(status='passed',execution_state='finished',verification=dict(status='passed'),
+                  development_audit=None)
+    record['gateway_diagnostics']=dict(schema='s5-upstream-failures-v1',calls_created=2,
+        failures=[],truncated=False,provider_billing_known=False)
+    assert classify(record)=='infrastructure_error'
+    assert classify(record,require_development_audit=False)=='completed'

@@ -134,7 +134,8 @@ def test_core_opt_in_never_falls_back_to_a_local_backend(tmp_path, monkeypatch):
             function(*args)
         assert exc.value.code == 's5_development_only'
     from operator_agent.mcp_server import _tool_definitions
-    assert {d['name'] for d in _tool_definitions()} == {'operator_prepare', 'operator_verify', 'operator_capabilities'}
+    with pytest.raises(ValueError, match='incomplete'):
+        _tool_definitions()
 
 
 def test_response_binding_checked_and_transport_options_cannot_change_task(tmp_path, monkeypatch):

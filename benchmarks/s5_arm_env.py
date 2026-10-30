@@ -61,7 +61,8 @@ KEEP_DISABLED = frozenset({'session-title-llm', 'llm-retry', 'otel', 'session-te
 
 def build(arm, *, base_url, arm_dir, root=ROOT, deps=None, api='chat_completions',
           max_tokens=1024, model='fake-model', tools=False, development=None,
-          context_window=16384, reasoning_effort=None, isolation_runtime=None):
+          context_window=16384, reasoning_effort=None, isolation_runtime=None,
+          stream_idle_timeout_ms=None):
     """Return the launch configuration for one arm without starting anything."""
     facts = surface(arm)
     plugin = PLUGIN
@@ -92,6 +93,11 @@ def build(arm, *, base_url, arm_dir, root=ROOT, deps=None, api='chat_completions
     patch.append(dict(id='agent-default-model', config=model_config))
     provider = dict(api=API_NAMES[api], baseURL=base_url, apiKeyEnv='S5_FAKE_API_KEY',
                     models=[dict(id=model, contextWindow=context_window, maxTokens=max_tokens)])
+    if stream_idle_timeout_ms is not None:
+        if (type(stream_idle_timeout_ms) is not int
+                or not 1 <= stream_idle_timeout_ms <= 2147483647):
+            raise ValueError('invalid adapter stream idle timeout')
+        provider['streamIdleTimeoutMs'] = stream_idle_timeout_ms
     if reasoning_effort is not None:
         provider['models'][0]['reasoningEfforts'] = dict(
             off=None, low='low', medium='medium', high='high')
@@ -146,6 +152,7 @@ def build(arm, *, base_url, arm_dir, root=ROOT, deps=None, api='chat_completions
         _write_shim(bindir / 's5-verify', (sys.executable, client))
         env['PATH'] = str(bindir) + os.pathsep + env['PATH']
     body = dict(schema='s5-arm-launch-v1', arm=arm, surface=facts, model_api=api,
+                stream_idle_timeout_ms=stream_idle_timeout_ms,
                 diagnostic_console='console.debug to stderr via Node preload',
                 tools_enabled=bool(tools),
                 home=str(home), work=str(work), cli_shim=(str(shim) if shim else None),
@@ -161,6 +168,19 @@ def build(arm, *, base_url, arm_dir, root=ROOT, deps=None, api='chat_completions
 
 
 OUTPUT_BOUND = 2 * 1024 * 1024
+
+
+def headless_failure_diagnostics(response):
+    """Identify a known host timeout without guessing the upstream root cause."""
+    import re
+    if response.get('returncode') == 0:
+        return None
+    match = re.fullmatch(r'dsh: TIMEOUT: pi-ai stream idle timeout after ([0-9]{1,10})ms',
+                         (response.get('stderr') or '').strip())
+    if match:
+        return dict(kind='adapter_stream_idle_timeout', idle_timeout_ms=int(match.group(1)),
+                    upstream_root_cause='unknown', budget_refund=False)
+    return None
 
 
 def _capture_output(directory, stdout, stderr, *, returncode=None, timed_out=False):

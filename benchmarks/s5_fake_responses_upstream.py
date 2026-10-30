@@ -10,6 +10,7 @@ import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
+import math
 
 
 def _event(name, obj):
@@ -95,6 +96,8 @@ class _Handler(BaseHTTPRequestHandler):
             reasoning=fields.get('reasoning'),
             stream=fields.get('stream'), store=fields.get('store'),
             tool_count=len(fields.get('tools') or [])))
+        if server.release.wait(server.header_delay_seconds):
+            return
         events = transcript(server.text, terminal=server.terminal,
                             include_usage=server.include_usage)
         if server.truncate_after is not None:
@@ -103,17 +106,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'text/event-stream')
         self.send_header('Connection', 'close')
         self.end_headers()
-        for event in events:
-            self.wfile.write(event)
-            self.wfile.flush()
+        try:
+            for index, event in enumerate(events):
+                if index == 1 and server.release.wait(server.output_delay_seconds):
+                    return
+                self.wfile.write(event)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 
 class FakeResponsesUpstream:
     """Context-managed loopback Responses fixture with a fixed reply."""
 
     def __init__(self, *, text='OK', terminal='completed', include_usage=True,
-                 truncate_after=None):
+                 truncate_after=None, header_delay_seconds=0, output_delay_seconds=0):
+        for delay in (header_delay_seconds, output_delay_seconds):
+            if type(delay) not in (int, float) or not math.isfinite(delay) or not 0 <= delay <= 10:
+                raise ValueError('fake delay must be finite and bounded by ten seconds')
         self._server = _Server(('127.0.0.1', 0), _Handler)
+        self._server.header_delay_seconds = header_delay_seconds
+        self._server.output_delay_seconds = output_delay_seconds
+        self._server.release = threading.Event()
         self._server.text = text
         self._server.terminal = terminal
         self._server.include_usage = include_usage
@@ -137,6 +151,7 @@ class FakeResponsesUpstream:
         return self
 
     def __exit__(self, *exc):
+        self._server.release.set()
         self._server.shutdown()
         self._server.server_close()
         self._thread.join(timeout=6)
