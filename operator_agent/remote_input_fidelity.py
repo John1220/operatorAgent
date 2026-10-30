@@ -136,7 +136,7 @@ def to_torch_inputs(inputs, device):
     express negative strides or NumPy readonly semantics: refuse, don't pretend.
     """
     import torch
-    packet = fidelity.encode_inputs(inputs)
+    packet = fidelity.encode_inputs(inputs, limit=fidelity.MAX_SEED_STORAGE_BYTES)
     specs = []
     for name, spec in packet["tensors"].items():
         dtype = np.dtype(spec["dtype"])
@@ -179,14 +179,14 @@ def torch_input_readback(inputs):
         identity = (str(value.device), storage.data_ptr(), storage.nbytes())
         if identity not in groups:
             total_bytes += storage.nbytes()
-            if total_bytes > fidelity.MAX_STORAGE_BYTES:
+            if total_bytes > fidelity.MAX_SEED_STORAGE_BYTES:
                 raise InputFidelityError("Torch storage 超过字节上限")
             raw_view = torch.empty(0, dtype=torch.uint8, device=value.device).set_(
                 storage, 0, (storage.nbytes(),), (1,))
             raw = raw_view.cpu().numpy().tobytes()
             groups[identity] = (len(groups), hashlib.sha256(raw).hexdigest())
         group, digest = groups[identity]
-        if value.numel() * value.element_size() > fidelity.MAX_STORAGE_BYTES:
+        if value.numel() * value.element_size() > fidelity.MAX_SEED_STORAGE_BYTES:
             raise InputFidelityError("Torch logical tensor 超过字节上限")
         logical = value.detach().cpu().numpy()
         observed[name] = {"shape": list(value.shape), "dtype": logical.dtype.str,

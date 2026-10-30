@@ -1024,7 +1024,7 @@ class Verifier:
                     if seed_input_digest(expected) == seed_input_digest(inputs):
                         spec = case_spec(subset)
                         break
-        except Exception:                       # noqa: BLE001 — 出任何事都退回传字节
+        except Exception as exc:                # noqa: BLE001 — 出任何事都退回传字节
             spec = None
         self._seed_spec_cache[key] = spec
         return spec

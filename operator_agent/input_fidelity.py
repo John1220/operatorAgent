@@ -106,8 +106,8 @@ def _describe(inputs, include_storage, limit=None):
             "scalars": scalars}, observed
 
 
-def encode_inputs(inputs):
-    return _describe(inputs, True)[0]
+def encode_inputs(inputs, limit=None):
+    return _describe(inputs, True, limit=limit)[0]
 
 
 def describe_inputs(inputs, limit=None):
