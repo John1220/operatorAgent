@@ -76,6 +76,12 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
 冲刷脚本报告的 torch/triton 是 `2.14.0/3.8.0`，与 runner 环境一致。launch floor
 的 20.42 µs 与代码里的 20.24 µs 差约 0.9%，**没有**改常量；这次只作为复标证据。
 
+离散度复标（30 轮 × 30 样本）：合并 `iqr/median` p95=**0.0261**，单核最大 p95=0.0324；
+`DISPERSION_DEGRADED=0.10` 与 `DISPERSION_UNINFORMATIVE=0.30` 都高于观测到的最大值
+0.0374，本轮未触发，**未改常量**。`INTRUDER_MAX_OVER_MEDIAN=2.0` 低于小 shape 的
+`max/median` p95=10.34，但该阈值只作诊断、不改 validity；记为后续调整项，不在本轮
+改代码。
+
 ### 2.4 64³ L1 冒烟
 
 `matmul4096/sanity64`：L1 通过。用于确认部署、固定 GPU 7、编译链路在正式跑之前
@@ -102,8 +108,8 @@ triton 3.7）。引用版本时以 runner 环境为准。完整快照见
   不新增样本、不重派旧 unknown 格。受控合作环境的探索性 24 格是另一条记录：已派发
   13/24 格后因 DSH 流空闲超时停批，12 格通过、1 格设施 unknown，正式分母仍未完成。
 - **跨卡验证未做**：本轮只有 H20；没有 A100/H100 读数，因此不能声称“跨 GPU 通用”。
-- **离散度阈值未复标**：`DISPERSION_DEGRADED/UNINFORMATIVE` 保持原值；本轮运行
-  的 4096 读数 `iqr/median=0.0007`，未触发问题，但不等于阈值已在本机复核。
+- **离散度已复标**（§2.3）：`DISPERSION_*` 未触发、未改；`INTRUDER_MAX_OVER_MEDIAN=2.0`
+  对小于 1 ms 的核偏紧，但它只作诊断，不影响 validity —— 记为后续调整项。
 - **v2 LayerNorm 参考未跑**：环境 torch 2.14/driver 580 与 `PINNED_RUNTIME` 表面一致，
   但没有执行 attestation；不能声称 v2 可用。
 - **多卡/并发/UI**：未做。
@@ -129,13 +135,14 @@ S5 正式批次、跨卡对照。
 | `smoke.log` | `effcb1641b28d25d3f03096b6f489f1a19d1042547291097dea7299947b996fb` |
 | `launch-floor.log` | `2dc4aeee85972d7913fc618aa4c3bfba17a48e7f0700b18c5040d0822ab3f385` |
 | `l2-flush-effect.log` | `664939cea6100335ec83f01e28cf58430160c2c924ae3ab286015170de0cc6a4` |
-| `summary.json` | `d181ebed441b7f6973112946a0e6dbe1f50d0c9a2925f3308b529e7f0a7fb5d1` |
+| `dispersion.log` | `49998bae441ca35c7bf8fadd347d6be7b0438d29fc016f077470b772a53e8b2e` |
+| `summary.json` | `6fe3ccc87dbf39cc5b46f4c0f32a91e8749c3dc55548a80ac6b72cd367692a1b` |
 | `cancellation/cancel.json` | `8bb39852d9791bfd6176e1724ba7a79b95e9bf43dca738fa66f1f7e82eab7396` |
 | `cancellation/status.json` | `9c5471ceb2130bd97cc764a6b3ba13354be64b68c6d908437783c2854b44f70c` |
 | `environment.txt` | `5a37dfb43fbb80aef62cb162d0300b6a787dfe0768240cae3056a564fbefd4ce` |
 
 打包：`output/plugin_completion/20261030-gpu-freeze-evidence.tar.gz`
-（SHA256 `06cbbe63627fbc2b1916348afa0e0fe39b2b65e26ff3024acbd1cca8a681a1ec`）。
+（SHA256 `2312cd2a05910604fa69f0e47458fe8400e2f63a5ae88c3904dcfe7a6ae9ae29`）。
 
 完整清单：`output/plugin_completion/20261030-gpu-freeze/SHA256SUMS`。复核：
 
