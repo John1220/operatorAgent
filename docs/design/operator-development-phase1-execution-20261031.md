@@ -26,8 +26,8 @@ v0.1 写成之后，工作区被四个提交扫过（证据出仓 + 布局守卫
 | # | 事实 | 本次实算证据 |
 |---|---|---|
 | F1 | 默认清理修复**已入库**，v0.1 里"在盘未提交"这条缺口不成立了 | `git log -S'owned_worker_scope'` 指向 `ef6acea`（`tests/` 分目录那个提交）；`6cb1fca` 上 `backend_ownership.py` 内该符号出现 **0** 次。即：修复与一次 578 文件重构挤在同一提交里，交付动作本身没留独立记录 |
-| F2 | **在盘 0.6.1 wheel 与 HEAD 不是同一身份**，且版本号没变 | ① 布局：wheel 内是包根平铺（`operator_agent/tool_calls.py`），HEAD 包根只剩 `__init__.py`+`__main__.py`，模块进五层（`ls` 计 24/31/16/22/10 含各层 `__init__`）② 入口：wheel `entry_points.txt` = `operator_agent.cli:main` / `.mcp_server:main`，HEAD [pyproject.toml:21](../../pyproject.toml#L21-L22) = `operator_agent.app.cli:main` / `app.mcp_server:main` ③ 两处都自称 `0.6.1`（[pyproject.toml:6](../../pyproject.toml#L6)、[operator_agent/__init__.py:20](../../operator_agent/__init__.py#L20)） |
-| F3 | **协议身份断链**，比 F2 更硬 | `protocol_identity()` 的清单仍是 73 条、文件名集合完全不变，但 **70 条路径键**从平铺变成带层（`operator_agent/conductor.py` → `operator_agent/app/conductor.py`）。比对方式：解包 wheel 读 `run_contract.py` 的 `files` 元组与 [core/run_contract.py:71](../../operator_agent/core/run_contract.py#L71) 逐条对照，不依赖运行期（本机默认解释器无 numpy，`import operator_agent` 起不来）。⇒ HEAD 算出的身份与在盘 wheel、与引用「协议身份 73 文件」的[安装工件验收](../status/dsh-operator-s5-installed-gpu-acceptance-20261030.md#L7)、[S6 准备记录的「70 文件」](../status/dsh-operator-s6-preparation-20261027.md#L11) 都不同源；[分包记录自己写明](repo-slimming-20261031.md#L115-L118)「引用旧身份的冻结记录不能与新身份互换」 |
+| F2 | **在盘 0.6.1 wheel 与 HEAD 不是同一身份**，且版本号没变 | ① 布局：wheel 内是包根平铺（`operator_agent/tool_calls.py`），HEAD 包根只剩 `__init__.py`+`__main__.py`，模块进五层（`ls` 计 24/31/16/22/10 含各层 `__init__`）② 入口：wheel `entry_points.txt` = `operator_agent.cli:main` / `.mcp_server:main`，HEAD [pyproject.toml:21](../../pyproject.toml#L21-L22) = `operator_agent.app.cli:main` / `app.mcp_server:main` ③ 两处都自称 `0.6.1`（[pyproject.toml:7](../../pyproject.toml#L7)、[operator_agent/__init__.py:20](../../operator_agent/__init__.py#L20)） |
+| F3 | **协议身份断链**，比 F2 更硬，且已有具体数值 | 两侧 `protocol_identity()` 用仓库自己的 `digest()` 归约：旧 `78993c98…`（在盘 wheel，解包到独立目录计算）→ 新 `e8c7f2c6…`（`HEAD = 24f4fc2`）。清单仍是 73 条、文件名集合一个没变，但 **14 条是纯搬运（内容哈希不变、仅路径键变）、59 条内容也随 import 重写而变**，`remote_scripts/` 三件全变 ⇒ 远端部署集合的身份同时改变。机制后果与失效清单写在 [交付身份重绑](../status/delivery-identity-rebind-20261031.md)：分层前落盘的经验库会被 [corpus_admission 的 drift 门](../../operator_agent/core/corpus_admission.py#L36-L42) 直接拒收，旧批次冻结计划被 workload driver 的比对挡下 |
 | F4 | 全量回归读数现在有**四个口径**，最新那份在一页内自相矛盾 | 6172 passed / 1 skipped（[中断恢复](../status/gpu-interrupt-recovery-20261030.md#L47)）；6159 passed + 15 failed + 4 errors（[发布形态](../status/dsh-operator-release-readiness-20261030.md#L53)，沙箱内）；6185 passed / 1 skipped（[瘦身记录第 5 行](repo-slimming-20261031.md#L5)）；6183 passed / 1 skipped（[同一文件 §4](repo-slimming-20261031.md#L95)）。**不得预先命名成因**；先把每个数钉到提交号、解释器与目录集合 |
 | F5 | 工作树布局多了守卫，**在仓内落产物会先把守卫跑红** | `output/` 已是指向仓外证据树的符号链接，位置与单副本警告写在 [evidence-location.json](../research/evidence-location.json)；[tests/hygiene/test_repo_layout.py](../../tests/hygiene/test_repo_layout.py) 管根目录白名单、单层条目预算、禁缓存/构建产物/证据入库、`output/` 只能是符号链接。v0.1 里"日志落 `output/plugin_completion/`"仍可用（符号链接照旧解析，已实测可读），但构建目录必须落在仓外 |
 
@@ -40,7 +40,7 @@ v0.1 写成之后，工作区被四个提交扫过（证据出仓 + 布局守卫
 
 - [ ] 复核上述两行哈希，确认文档与在盘工件一致
 - [ ] 把 F4 的四个读数钉到「哪个提交、哪个解释器、哪个目录集合」，结论写回本节，不改进判定
-- [ ] 记下 F3 是**结构性断链**：同名文件集合不变、70 条路径键变，因此不能靠"内容没改"解释掉
+- [x] 记下 F3 是**结构性断链**：文件名集合不变，但只有 14 条是纯搬运、59 条内容也变了，因此不能靠"内容没改"解释掉 → 见 [交付身份重绑](../status/delivery-identity-rebind-20261031.md)
 
 ## 2. W1 交付身份收口
 
@@ -48,13 +48,14 @@ v0.1 写成之后，工作区被四个提交扫过（证据出仓 + 布局守卫
 
 v0.1 的 T1.1（提交在盘改动）已被重构顺带完成，但换来的是 F2/F3：**已交付工件与 HEAD 成了两个身份、共用一个版本号**。所以本期 W1 的第一动作从"提交"变成"重绑身份"。
 
-- [ ] **T1.1 写一份身份重绑记录（本期第一个产出）。** 逐条列旧身份 → 新身份：协议身份（73 条清单、文件名集合不变、70 条路径键带层）、console script 入口（`operator_agent.cli` → `operator_agent.app.cli`）、包布局（平铺 → 五层）。点名从此**只能读、不能引**的冻结记录：[S5 安装工件验收](../status/dsh-operator-s5-installed-gpu-acceptance-20261030.md#L7)（协议身份 73 文件）、[S6 准备](../status/dsh-operator-s6-preparation-20261027.md#L11)（70 文件）、[S6 验收](../status/dsh-operator-s6-acceptance-20261030.md#L7)、[中断恢复](../status/gpu-interrupt-recovery-20261030.md)、[发布形态](../status/dsh-operator-release-readiness-20261030.md)。不改判据、不重跑 GPU、不刷新任何哈希。
-- [ ] **T1.2 版本号强制递增。** `0.6.1` 现在指两种结构（F2），必须升到 `0.6.2`，同步 [pyproject.toml:6](../../pyproject.toml#L6) 与 [operator_agent/__init__.py:20](../../operator_agent/__init__.py#L20)，插件包同步 `0.1.11`；在盘 `0.6.1`/`0.1.10` 工件与其 SHA256 原样保留，不覆盖、不复用其验收。v0.1 里这条是"若判定需要"，现在升级为硬条件。
+- [x] **T1.1 写一份身份重绑记录（本期第一个产出）。** 已落 [交付身份重绑](../status/delivery-identity-rebind-20261031.md)：两侧聚合摘要 `78993c98…` → `e8c7f2c6…`、14 纯搬运 / 59 内容变、入口与布局差异、三处硬失败机制、五份冻结记录的失效清单。复算命令按文档原样跑过（`/usr/bin/python3` 3.9.6，`HEAD = 24f4fc2`）。未改任何判据、未重跑 GPU、未覆盖任何哈希。
+- [x] **T1.2 版本号强制递增。** Python `0.6.1` → `0.6.2`，插件壳 `0.1.10` → `0.1.11`。改了 8 处活副本：[pyproject.toml:7](../../pyproject.toml#L7)、[operator_agent/__init__.py:20](../../operator_agent/__init__.py#L20) 与同文件首行 docstring、[README.md:7](../../README.md#L7)、[package.json:3](../../integrations/dsh-operator/package.json#L3)、[CHANGELOG.md](../../integrations/dsh-operator/CHANGELOG.md) 新增 `## 0.1.11` 段、插件 README 的安装命令与发布形态段落。带日期的状态文档按「历史快照不改写」保留 `0.6.1` 原文。读数：`tests/hygiene` **59 passed**、`npm test` **58/58**、`capabilities()` 返回 `version=0.6.2`、`tool_version=9`（工具契约未变）。
 - [ ] **T1.3 仓外干净检出重建。** 构建目录落在**仓外**（F5：[布局守卫](../../tests/hygiene/test_repo_layout.py) 禁构建产物入库），`rsync` 导出排除 `output/`、`logs/`、`triton/`、`.git/`。新 wheel 三条断言：模块集合是五层、`entry_points.txt` 指向 `operator_agent.app.*`、许可与 11 prompts / 2 skills 齐备。`tests/hygiene/test_packaging.py` 与布局守卫同时绿才算过。
-- [ ] **T1.4 反向对照。** 在 `6cb1fca`（本次实算：该提交 `backend_ownership.py` 内 `owned_worker_scope` 出现 0 次）跑 [tests/unit/test_owned_cleanup_defaults.py](../../tests/unit/test_owned_cleanup_defaults.py)，必须以缺失/失败告终。这一条不过，T1.3 的绿灯不算数——说明这组测试锁不住行为，只证"这条分支没人走"。
+- [ ] **T1.4 反向对照。** 在 `6cb1fca`（本次实算：该提交 `backend_ownership.py` 内 `owned_worker_scope` 出现 0 次）跑 [tests/unit/test_owned_cleanup_defaults.py](../../tests/unit/test_owned_cleanup_defaults.py)，必须以缺失/失败告终。这一条不过，T1.3 的绿灯不算数——说明这组测试锁不住行为，只证"这条分支没人走"。**用临时 clone 或独立 worktree，不在共享工作树上做历史提交检出。**
 - [ ] **T1.5 沙箱外全量 pytest 一次留档。** 缺口见[发布形态 §3](../status/dsh-operator-release-readiness-20261030.md#L57-L59)：`ps`／`sandbox-exec`／真 DSH 的 19 项集成用例仍只有历史轮次读数。本次要顺带把 F4 的四个口径钉到提交号与解释器上。日志经 `output/` 符号链接落仓外证据树，逐文件哈希入清单。**已知顺序相关偶发**（[分包记录 §未处理项](repo-slimming-20261031.md#L140-L142) 的 `test_hitl_tools::…gets_two_consequences`）按偶发单列，不并进"全绿"。
-- [ ] **T1.6 CI 首跑。** 工作流从未在远端真实执行过；首跑红/绿都要记录，失败不靠改判据变绿。注意 CI 跑的是分层后的新布局，与 `6cb1fca` 那次定义已有差异。
-- [ ] **T1.7 安装说明与身份绑定。** [插件 README](../../integrations/dsh-operator/README.md) 的安装段落按新工件版本与哈希写；命令名（`operator-agent` / `operator-agent-mcp`）不变但背后模块路径变了，段落里要写明这点，避免按旧模块路径排查。
+- ~~**T1.6 CI 首跑**~~ **本期不纳入**（用户 2026-10-31 决定：一期做到「本地可发布」为止，不 push）。工作流仍未在远端真实执行过；解除条件是先过凭据/脱敏扫描并单独确认，因为 origin 是公开库、`design/autonomous-spine` 至今零 push。
+- [ ] **T1.7 安装说明与身份绑定。** [插件 README](../../integrations/dsh-operator/README.md) 的安装段落已随 T1.2 换成 `0.6.2`/`0.1.11` 并指向重绑记录；仍需补的是**实际构建产物的 SHA256**（要等 T1.3 真建出来再写，不预先填）。
+- [ ] **T1.8 入口 docstring 与包布局矛盾。** [operator_agent/__init__.py:4-15](../../operator_agent/__init__.py#L4-L15) 的「模块结构」还在列平铺名（`schemas.py`、`kernel_db.py`、`mock_gpu.py`…），分层后这些都已带层前缀。与版本 bump 分开放，避免一次改动混两类事实。
 
 本期**不做** `npm publish` / `twine upload`：会产生不可撤回的公开版本号，属发布决定，不在一期范围。
 
@@ -120,3 +121,4 @@ v0.1 的 T1.1（提交在盘改动）已被重构顺带完成，但换来的是 
 |---|---|---|
 | 2026-10-31 | 创建 v0.1：把路线阶段 A 改写为可勾选一期清单，含 W1 交付身份收口、W3 冻结 B 计划 | 本次实算的工件与 `HEAD`/工作区哈希、发布形态与中断恢复记录、可迁移性评估 |
 | 2026-10-31 | v0.2：适配四层重构（`HEAD = f3c9c03`）。§1 读数整段替换为 F1–F5；W1 第一动作由"提交在盘改动"改为"身份重绑"，版本号递增从条件项变硬条件，构建改到仓外，反向对照基线钉到 `6cb1fca`；W3 新增 T3.6 evaluator 身份重绑；出口判据四条扩为五条；§6 加"不回退布局"，§7 加旧身份不可复现与历史文档不改写 | 本次实算：wheel 与 HEAD 的 `entry_points`/模块集合/路径键差异（73 条清单里 70 条变）、`git log -S` 定位 `ef6acea`、`6cb1fca` 上符号 0 次、四个全量读数、布局守卫与符号链接 |
+| 2026-10-31 | v0.3：T1.1、T1.2 完成并打勾，F3 换成具体数值（聚合摘要 `78993c98…`→`e8c7f2c6…`、14 纯搬运 / 59 内容变、`remote_scripts` 三件全变、corpus drift 门这一机制后果）；按用户决定把 T1.6 CI 首跑划出一期范围（本地做完，不 push）；T1.7 拆出「等 T1.3 再填哈希」；新增 T1.8 记入口 docstring 与包布局矛盾 | [交付身份重绑](../status/delivery-identity-rebind-20261031.md)；两侧 `protocol_identity()`/`digest()` 复算；`tests/hygiene` 59 passed、`npm test` 58/58、`capabilities()` 报 `0.6.2` / 契约 9 |
