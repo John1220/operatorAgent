@@ -11,9 +11,9 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from operator_agent import run_contract as rc
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.contract import freeze_from_task
+from operator_agent.core import run_contract as rc
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.core.contract import freeze_from_task
 from tests.unit.test_resume_integrity import _conductor, _inputs, _run, _task, SNAP
 
 
@@ -139,7 +139,7 @@ def test_contract_reference_protocol_and_controls_are_not_rebound_on_resume(tmp_
         c.heartbeat_interval += 1
     else:
         identity = rc.protocol_identity()
-        identity["operator_agent/verifier.py"] = "0" * 64
+        identity["operator_agent/decide/verifier.py"] = "0" * 64
         with mock.patch.object(rc, "protocol_identity", return_value=identity):
             hold(c, task, _inputs(), folder)
         return
@@ -318,7 +318,7 @@ def test_live_sidecar_drift_is_not_silently_ignored_or_overwritten(tmp_path, fil
 
 def test_protocol_includes_numeric_and_admission_gate_implementations():
     sources = rc.protocol_identity()
-    for file in ("tolerance.py", "measurement.py", "eligibility.py", "oracle.py", "confirm.py"):
+    for file in ("core/tolerance.py", "decide/measurement.py", "decide/eligibility.py", "decide/oracle.py", "core/confirm.py"):
         assert len(sources["operator_agent/" + file]) == 64
 
 

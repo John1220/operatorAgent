@@ -11,8 +11,8 @@ import subprocess
 import threading
 import time
 
-from operator_agent.llm_budget import strict_object
-from operator_agent.run_contract import atomic_json, json_value
+from operator_agent.execute.llm_budget import strict_object
+from operator_agent.core.run_contract import atomic_json, json_value
 
 STAGES = ('runtime_probe', 'gpu_query', 'gpu_select', 'scratch_create',
           'source_upload', 'source_readback', 'runner_readback')

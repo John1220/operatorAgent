@@ -16,7 +16,7 @@
 import math
 import unittest
 
-from operator_agent.calibration import (
+from operator_agent.decide.calibration import (
     KNOWN_GOOD_SOURCE, KNOWN_SLOW_SOURCE, SLOW_REPEATS, HeartbeatResult, RULER_BROKEN,
     _from_source, backend_bench_fn, default_bench_fn, default_inputs, heartbeat,
     heartbeat_due, known_good_kernel, known_slow_kernel, ruler_broken_window,
@@ -217,14 +217,14 @@ class TestBackendMeasuredPair(unittest.TestCase):
 
     def test_backend_measured_pair_separates(self):
         """经后端量参照对: 诚实路径 ok, 且慢核显著更慢 (设计分离度 ≈8×)"""
-        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.execute.mock_gpu import MockGPU
         result = heartbeat(backend_bench_fn(MockGPU(), warmup=1, repeat=3))
         self.assertTrue(result.ok, result.reasons)
         self.assertGreaterEqual(result.known_slow_ratio, 2.0, result.reasons)
 
     def test_kernel_without_source_form_breaks_the_ruler(self):
         """后端量不了参照物 → RULER_BROKEN, 不是静默放行"""
-        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.execute.mock_gpu import MockGPU
         result = heartbeat(backend_bench_fn(MockGPU()),
                            good_kernel=lambda A, B: None,
                            slow_kernel=lambda A, B: None)

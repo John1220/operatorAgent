@@ -10,13 +10,13 @@ import numpy as np
 import pytest
 
 from operator_agent import Conductor, IntentParser, MockGPU, Verifier
-from operator_agent.contract import ContractError, freeze_from_task, load_dict
-from operator_agent.correctness import as_suite, credential
-from operator_agent.correctness_profiles import PROFILE_VERSION, PROFILE_V2, profile_check, v2_suite
-from operator_agent.reference_contract import (ReferenceIdentityError, as_reference, registered_reference,
+from operator_agent.core.contract import ContractError, freeze_from_task, load_dict
+from operator_agent.decide.correctness import as_suite, credential
+from operator_agent.decide.correctness_profiles import PROFILE_VERSION, PROFILE_V2, profile_check, v2_suite
+from operator_agent.decide.reference_contract import (ReferenceIdentityError, as_reference, registered_reference,
     check_observed, execution_receipt, validate_receipt, validate_gate, _file_hash)
-from operator_agent.remote_executor import SSHExecutor, RemoteExecutor
-from operator_agent.schemas import VerificationLevel as Level
+from operator_agent.execute.remote_executor import SSHExecutor, RemoteExecutor
+from operator_agent.core.schemas import VerificationLevel as Level
 
 
 def task():
@@ -37,7 +37,7 @@ class ProtocolSSH(SSHExecutor):
         self.reply = None
 
     def _ssh_exec_json(self, payload):
-        from operator_agent.remote_input_fidelity import decode_json_inputs, to_torch_inputs, torch_input_readback
+        from operator_agent.decide.remote_input_fidelity import decode_json_inputs, to_torch_inputs, torch_input_readback
         self.requests.append(copy.deepcopy(payload))
         action = payload["action"]
         if action == "gpu_info":
@@ -103,9 +103,9 @@ def test_missing_or_forged_receipt_not_trusted(change):
 
 
 def test_pinned_primitive_and_cache_invalidation(tmp_path):
-    from operator_agent import builtin_layernorm
+    from operator_agent.decide import builtin_layernorm
     assert hashlib.sha256(Path(builtin_layernorm.__file__).read_bytes()).hexdigest() == registered_reference().execution.primitive_sha256
-    p = tmp_path / "reference.py"; p.write_bytes(b"first")
+    p = tmp_path / "reference.py"; p.write_bytes(b"first")   # 只是要一个文件，层目录与判据无关
     first = _file_hash(p)
     assert _file_hash(p) == first
     p.write_bytes(b"other")  # Same size, still re-hashed via stat.
@@ -132,7 +132,7 @@ def test_finite_suite_is_exact_calibration_not_passing_subset():
 
 
 def test_real_identity_is_required_before_generation_and_failure_learning(tmp_path):
-    from operator_agent.kernel_db import FailureDatabase
+    from operator_agent.core.kernel_db import FailureDatabase
     c = Conductor(backend=MockGPU(), failure_db=FailureDatabase(str(tmp_path / "failures.jsonl")))
     c.designer.run = Mock(side_effect=AssertionError("generated"))
     c.fixer.run = Mock(side_effect=AssertionError("fixed"))
@@ -207,7 +207,7 @@ def test_l3_cannot_measure_without_l2_credential_or_fallback_to_another_baseline
     assert bench["reference_identity_unknown"]
     payload = b.requests[-1]
     assert payload["baseline_priority"] == ["pytorch_eager"]
-    from operator_agent.remote_input_fidelity import JSON_PROTOCOL
+    from operator_agent.decide.remote_input_fidelity import JSON_PROTOCOL
     assert payload["inputs"]["protocol"] == JSON_PROTOCOL
 
 
@@ -254,7 +254,7 @@ def test_static_reference_drift_is_hold_not_fixer_input():
 
 @pytest.mark.parametrize("change", ["dtype", "accum", "tf32", "reduced", "nondeterministic", "baseline"])
 def test_freeze_rejects_inconsistent_precision_or_baseline(change):
-    from operator_agent.contract import freeze
+    from operator_agent.core.contract import freeze
     c = freeze_from_task(task())
     ds = c.dtype_semantics
     baseline = c.baseline
@@ -292,9 +292,9 @@ def test_xpu_explicitly_refuses_identity_contract_before_execution():
 
 def test_identity_hold_after_generation_stops_round_without_fix_search_retry_or_learning(tmp_path):
     from types import SimpleNamespace
-    from operator_agent.backend_caps import Cap
-    from operator_agent.kernel_db import KernelDatabase, FailureDatabase
-    from operator_agent.schemas import UnifiedSketch
+    from operator_agent.core.backend_caps import Cap
+    from operator_agent.core.kernel_db import KernelDatabase, FailureDatabase
+    from operator_agent.core.schemas import UnifiedSketch
     class NoProvisionPeer(ProtocolSSH):
         @property
         def capabilities(self):
@@ -307,7 +307,7 @@ def test_identity_hold_after_generation_stops_round_without_fix_search_retry_or_
     c = Conductor(backend=b, kernel_db=KernelDatabase(str(tmp_path / "kernels.jsonl"), persist_retrievals=False),
                   failure_db=FailureDatabase(str(tmp_path / "failures.jsonl")),
                   max_optimize_rounds=3, use_coder_pipeline=False)
-    from operator_agent.artifact_store import ArtifactStore
+    from operator_agent.core.artifact_store import ArtifactStore
     c.store = ArtifactStore(str(tmp_path / "artifacts"))
     c.designer.run = Mock(return_value=UnifiedSketch(algorithm="layernorm", target_dsl="triton"))
     from benchmarks.calibration.calibrate_layernorm import candidate_source
@@ -325,7 +325,7 @@ def test_identity_hold_after_generation_stops_round_without_fix_search_retry_or_
 
 
 def test_secondary_case_reference_unknown_stops_remaining_ledger_and_revokes_l3():
-    from operator_agent.contract import case_key
+    from operator_agent.core.contract import case_key
     xs = [{"X": np.ones((8, n), np.float16)} for n in (8, 9, 10)]
     v = Verifier(ProtocolSSH())
     v._measure_case_speedup = Mock(return_value=dict(speedup_vs_baseline=None,

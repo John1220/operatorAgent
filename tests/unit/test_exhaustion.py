@@ -7,7 +7,7 @@
 ```
 
 前半句早有实现（`max_stagnant_rounds`），后半句在代码里**不存在** ⇒ 循环在「轮数够了」那
-一刻就宣布停滞。这个文件守 `operator_agent/exhaustion.py` 的三态判据与它的两种接法：
+一刻就宣布停滞。这个文件守 `operator_agent/decide/exhaustion.py` 的三态判据与它的两种接法：
 
 * **可枚举**（模板型：剪枝后的参数点）⇒ `exhausted` / `unexplored`，并附上「试过几个／
   没试的是哪几个」；
@@ -34,13 +34,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.bandit import Bandit
-from operator_agent.candidates import point_label
-from operator_agent.exhaustion import (EXHAUSTED, FROM_LLM_ON_DEMAND,
+from operator_agent.generate.bandit import Bandit
+from operator_agent.core.candidates import point_label
+from operator_agent.decide.exhaustion import (EXHAUSTED, FROM_LLM_ON_DEMAND,
                                        FROM_TEMPLATE_SPACE, UNEXPLORED, UNKNOWN,
                                        Coverage, CoverageLedger,
                                        assess_coverage, undeclared)
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                     TargetSpec, TaskComplexity, TaskSchema,
                                     TaskType)
 

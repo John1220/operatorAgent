@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from operator_agent.repair_stride_diagnoser import (
+from operator_agent.generate.repair_stride_diagnoser import (
     GUARDED_RECOGNIZER,
     guarded_column_stride_sites,
     missing_column_stride_sites,
 )
-from operator_agent.run_contract import code_hash
+from operator_agent.core.run_contract import code_hash
 
 
 SOURCE = (Path(__file__).resolve().parents[1] / 'fixtures' / 'layernorm_guarded_missing_column_stride.txt').read_text()

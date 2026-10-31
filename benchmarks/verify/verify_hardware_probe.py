@@ -33,12 +33,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from operator_agent.hardware_caps import (  # noqa: E402
+from operator_agent.core.hardware_caps import (  # noqa: E402
     HardwareCaps,
     _KNOWN_HARDWARE,
     detect_hardware_caps,
 )
-from operator_agent.remote_executor import (  # noqa: E402
+from operator_agent.execute.remote_executor import (  # noqa: E402
     HardwareProbeFailed,
     SSHExecutor,
 )

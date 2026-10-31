@@ -19,10 +19,10 @@ import time
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
-from operator_agent.contract import freeze_from_task
-from operator_agent.correctness import as_suite
-from operator_agent.hitl_tools import build_task
-from operator_agent.run_contract import digest, protocol_identity
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.decide.correctness import as_suite
+from operator_agent.app.hitl_tools import build_task
+from operator_agent.core.run_contract import digest, protocol_identity
 
 UUID = 'GPU-0f61d0d6-767e-44a6-0cd0-a43892bf17e2'
 SOURCE = ROOT/'output/plugin_completion/20261027-s4/gpu6-8004/tasks/matmul-aligned/candidate/code.py'
@@ -43,7 +43,7 @@ def declaration(n):
 def remote_files():
     # These include session_control.py and gpu_claim.py, which are not all in
     # protocol_identity(). Bind the complete deployment set before any SSH.
-    from operator_agent.remote_executor import SSHExecutor
+    from operator_agent.execute.remote_executor import SSHExecutor
     ex=SSHExecutor(host='algorithm-h20',work_dir='~/operator_agent',
                    remote_runner_path='~/operator_agent/run_kernel.py',persistent=True)
     files=ex._remote_files()
@@ -171,7 +171,7 @@ def _execute_inner(out, plan_sha):
         if key.startswith('REMOTE_'): os.environ.pop(key,None)
     for key,value in env.items():
         if key.startswith('OPERATOR_AGENT_'): os.environ[key]=value
-    from operator_agent.remote_executor import SSHExecutor
+    from operator_agent.execute.remote_executor import SSHExecutor
     start=out/'execution-started.json'
     write(start,dict(plan_sha256=plan_sha, started_at=time.time(), no_resume=True))
     summaries=[]

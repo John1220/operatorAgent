@@ -48,7 +48,12 @@ DIRECTORY_BUDGETS = {
     "benchmarks": 10,            # __init__ + 私有辅助 + 子目录
     "benchmarks/experiments/s5": 70,
     "benchmarks/drivers": 25,
-    "operator_agent": 105,       # 含 prompts/ 与 skills/，当前 114 中 99 是 .py 平铺
+    "operator_agent": 4,         # 只剩 __init__.py + ops/ prompts/ skills/ 与五个层目录
+    "operator_agent/core": 30,
+    "operator_agent/decide": 35,
+    "operator_agent/execute": 20,
+    "operator_agent/generate": 26,
+    "operator_agent/app": 12,
     "docs/design": 62,
     "docs/research": 75,
     "docs/status": 46,
@@ -124,6 +129,84 @@ class TestRepoLayout(unittest.TestCase):
         self.assertIn("path", data)
         self.assertIn("why", data)
         self.assertTrue(data["path"].startswith("~"), "证据路径请写成家目录相对形式，别写死本机绝对路径")
+
+
+#: 层间依赖方向（2026-10-31 分包时定）：`app → generate → decide → execute → core`。
+#: 这条表的用意不是「已经完美」——**当前有 23 处向上依赖**，几乎全是函数内的延迟导入
+#: （`from ..app.autonomous import ...` 是为了避免循环导入）或类型注解。把它做成
+#: **棘轮**：新增一处就红，拆掉一处也要来改表，于是「又往上依赖了」不会静默发生。
+LAYER_ORDER = ("core", "decide", "execute", "generate", "app")
+UPWARD_IMPORTS = {
+    "core/candidates.py -> decide",
+    "core/confirm.py -> decide",
+    "core/contract.py -> decide",
+    "core/corpus_admission.py -> decide",
+    "core/environment.py -> decide",
+    "core/execution_audit.py -> decide",
+    "core/execution_audit.py -> execute",
+    "core/execution_audit.py -> generate",
+    "core/kernel_db.py -> app",
+    "core/run_contract.py -> decide",
+    "core/run_contract.py -> generate",
+    "core/schemas.py -> decide",
+    "core/workload.py -> decide",
+    "decide/oracle.py -> execute",
+    "decide/quality_evaluation.py -> app",
+    "decide/quality_evaluation.py -> execute",
+    "decide/quality_evaluation.py -> generate",
+    "decide/quality_pairing.py -> execute",
+    "decide/quality_portfolio.py -> generate",
+    "decide/quality_preflight.py -> execute",
+    "decide/verifier.py -> execute",
+    "execute/task_cancellation.py -> app",
+    "generate/agent_logger.py -> app",
+}
+
+
+def _upward_imports():
+    import ast
+    rank = {layer: index for index, layer in enumerate(LAYER_ORDER)}
+    found = set()
+    for layer in LAYER_ORDER:
+        for path in sorted((ROOT / "operator_agent" / layer).glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                targets = []
+                if isinstance(node, ast.ImportFrom):
+                    if node.level and node.module:
+                        targets.append(node.module.split(".")[0])
+                    elif node.module and node.module.startswith("operator_agent."):
+                        parts = node.module.split(".")
+                        if len(parts) > 2:
+                            targets.append(parts[2])
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.startswith("operator_agent."):
+                            parts = alias.name.split(".")
+                            if len(parts) > 2:
+                                targets.append(parts[2])
+                for target in targets:
+                    if target in rank and rank[target] > rank[layer]:
+                        found.add("%s/%s -> %s" % (layer, path.name, target))
+    return found
+
+
+class TestLayerDirection(unittest.TestCase):
+    """`app → generate → decide → execute → core`：向上依赖只能减少，不能静默增加。"""
+
+    def test_upward_imports_do_not_grow(self):
+        found = _upward_imports()
+        new = sorted(found - UPWARD_IMPORTS)
+        self.assertEqual([], new, (
+            "新增了向上依赖：%s\n"
+            "层的方向是 app → generate → decide → execute → core；"
+            "要用上层的函数请反转依赖（回调/参数注入），或把这条登记进 UPWARD_IMPORTS 并写明理由"
+            % new))
+
+    def test_the_ratchet_table_has_no_stale_rows(self):
+        """拆掉依赖也要来改表 —— 否则这张表会变成一份越来越假的历史。"""
+        stale = sorted(UPWARD_IMPORTS - _upward_imports())
+        self.assertEqual([], stale, "这些行已经不再是向上依赖了，请从 UPWARD_IMPORTS 删掉: %s" % stale)
 
 
 if __name__ == "__main__":

@@ -9,12 +9,12 @@ import pytest
 
 from benchmarks.calibration import calibrate_layernorm as driver
 from benchmarks.experiments.misc import layernorm_numerics as numerics
-from operator_agent.anticheat import static_audit
-from operator_agent.correctness_profiles import with_default_correctness
-from operator_agent.correctness_boundaries import lint_coverage
-from operator_agent.input_fidelity import describe_inputs
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.verifier import Verifier
+from operator_agent.decide.anticheat import static_audit
+from operator_agent.decide.correctness_profiles import with_default_correctness
+from operator_agent.decide.correctness_boundaries import lint_coverage
+from operator_agent.decide.input_fidelity import describe_inputs
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.decide.verifier import Verifier
 
 
 def measured(inputs=None, reference=None):
@@ -107,7 +107,7 @@ def test_measurement_gate_refuses_missing_or_mutated_evidence(mutation):
     if mutation == "identity": result["reference_identity_hash"] = "wrong"
     if mutation == "source": result["reference_identity"]["provenance"].pop("source_sha256")
     if mutation == "semantics": result["reference_identity"]["semantics"] = dict(numerics.SEMANTICS, epsilon=1e-3)
-    if mutation == "shared-source": result["reference_identity"]["shared_source_hashes"]["tolerance.py"] = "b" * 64
+    if mutation == "shared-source": result["reference_identity"]["shared_source_hashes"]["core/tolerance.py"] = "b" * 64
     if mutation == "arm": result["arms"].pop("centered_fp32")
     if mutation == "tolerance": result["arms"]["centered_fp32"]["vs_production"]["atol"] = 1e-2
     if mutation == "missing-gate": result["arms"]["centered_fp32"].pop("vs_rounded_oracle")

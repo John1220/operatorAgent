@@ -4,8 +4,8 @@ import copy
 import pytest
 
 from benchmarks.experiments.misc.gpu_interrupt_recovery import active_witness, terminal_errors, SLOW
-from operator_agent.anticheat import static_audit
-from operator_agent.measurement import TRANSPORT_UNKNOWN
+from operator_agent.decide.anticheat import static_audit
+from operator_agent.decide.measurement import TRANSPORT_UNKNOWN
 
 
 def samples():

@@ -18,7 +18,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from operator_agent.achievable import (MIN_SAMPLES_FOR_PCT, Cell, Key, collect,
+from operator_agent.core.achievable import (MIN_SAMPLES_FOR_PCT, Cell, Key, collect,
                                       points_from_rounds, report)
 
 
@@ -175,7 +175,7 @@ class TheL2BandIsHonestAboutWhatIsMissing(unittest.TestCase):
         self.assertEqual("exceeds_l2", exceeds.l2_band)
 
     def test_missing_one_side_is_not_guessed_as_fits(self):
-        from operator_agent.achievable import _l2_band
+        from operator_agent.core.achievable import _l2_band
         self.assertEqual("unknown", _l2_band(None, 61440))
         self.assertEqual("unknown", _l2_band(1024, None))
         self.assertEqual("unknown", _l2_band(0, 0), "0 不是读数, 不许据此定档")

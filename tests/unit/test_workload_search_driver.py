@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import pytest
 from benchmarks.drivers import workload_search_h20 as driver
-from operator_agent import run_contract as rc
+from operator_agent.core import run_contract as rc
 
 
 def args(tmp_path,*argv):
@@ -24,7 +24,7 @@ def test_local_plan_allocates_no_inputs_or_transport(tmp_path,monkeypatch):
     assert all(c['hash']==rc.code_hash(c['source']) for c in plan['candidates'])
     assert plan['contract']['min_speedup']==10. and plan['contract']['aggregate']=='weighted_geomean'
     assert plan['controls']['oracle_total']==7 and plan['controls']['max_rounds']==3
-    from operator_agent.budget import BudgetPlan
+    from operator_agent.execute.budget import BudgetPlan
     budget=BudgetPlan(**plan['controls']['budget'])
     assert budget.oracle_total==7 and budget.llm_tokens==128
     assert plan['budget_accounting']['unit']=='candidate_verification_dispatch_per_input_group'
@@ -87,9 +87,9 @@ def test_invalid_budget_is_rejected_before_any_transport_or_input_allocation(tmp
 
 def durable_fixture(tmp_path,monkeypatch,second_wins=False):
     """Production save/load with deterministic fake timings, NOT GPU evidence."""
-    from operator_agent.verifier import Verifier
-    from operator_agent.budget import BudgetPlan
-    from operator_agent.contract import freeze_from_task
+    from operator_agent.decide.verifier import Verifier
+    from operator_agent.execute.budget import BudgetPlan
+    from operator_agent.core.contract import freeze_from_task
     from tests.unit.test_search_objective import execute
     from tests.unit.test_workload_evidence import task
     rounds=[];original=Verifier.verify
@@ -127,7 +127,7 @@ def test_durable_audit_reloads_actual_selected_product_and_sealed_checkpoint_wit
     'verification','benchmark','report','checkpoint','resealed_best','protocol','symlink','confirmation','admission'))
 def test_durable_audit_rejects_missing_or_swapped_evidence_without_repairing_files(tmp_path,monkeypatch,drift):
     from tests.unit.test_workload_evidence import inputs
-    from operator_agent.search_objective import results_dict
+    from operator_agent.generate.search_objective import results_dict
     art,c,t,rounds,plan=durable_fixture(tmp_path,monkeypatch)
     folder=Path(art.saved_dir)
     def change(name,modify):

@@ -7,11 +7,11 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from operator_agent import hitl_tools as ht, mcp_server
-from operator_agent.generation_spec import GENERATION_SPEC, generation_spec_identity
-from operator_agent.llm_client import LLMClient
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
-from operator_agent.tolerance import effective_atol
+from operator_agent.app import hitl_tools as ht, mcp_server
+from operator_agent.generate.generation_spec import GENERATION_SPEC, generation_spec_identity
+from operator_agent.execute.llm_client import LLMClient
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.core.tolerance import effective_atol
 
 
 @pytest.mark.parametrize('operator', ('layernorm', 'softmax', 'relu'))
@@ -21,8 +21,8 @@ def test_prepare_uses_the_trusted_single_input_profile_not_legacy_affine_names(t
     assert set(prepared['inputs']) == {'X'}
     assert prepared['generation_spec'] == generation_spec_identity()
     task = ht.build_task(declaration)
-    from operator_agent.contract import freeze_from_task
-    from operator_agent.verifier import Verifier
+    from operator_agent.core.contract import freeze_from_task
+    from operator_agent.decide.verifier import Verifier
     inputs = freeze_from_task(task).cases[0].materialize()
     assert Verifier.correctness_preflight(task, inputs) is None
     assert inputs['X'].shape == (7,33)
@@ -71,8 +71,8 @@ def test_mcp_repair_receives_diagnosis_and_returns_compact_evidence(tmp_path, mo
     full = saved['rounds'][0]['diagnosis']['findings'][0]
     assert full['source_sites'] and full['witness']
     receipt, = saved['candidate_records']
-    from operator_agent.generation_context import validate_candidate_record
-    from operator_agent.run_contract import code_hash
+    from operator_agent.generate.generation_context import validate_candidate_record
+    from operator_agent.core.run_contract import code_hash
     assert validate_candidate_record(receipt)
     assert receipt['source'] == corrected.strip()
     assert receipt['parent_source_hash'] == code_hash(source)

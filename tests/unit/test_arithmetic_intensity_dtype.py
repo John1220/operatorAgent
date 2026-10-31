@@ -14,10 +14,10 @@ import unittest
 
 import numpy as np
 
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 
 # doc 42 实测的 H20 dense 规格: fp16 148 TFLOPS / 显存带宽 4.0 TB/s ⇒ 脊点 37 FLOP/Byte
 H20_PEAK = {"name": "NVIDIA H20", "device": "NVIDIA H20", "compute_capability": "9.0",

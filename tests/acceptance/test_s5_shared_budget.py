@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 import pytest
-from operator_agent import s5_shared_budget as budget
+from operator_agent.execute import s5_shared_budget as budget
 
 ROOT=Path(__file__).resolve().parents[2]
 REQ='a'*64
@@ -26,7 +26,7 @@ def reserve(path, participant='outer', caller='loop', tokens=50):
 
 
 def command(*args):
-    return subprocess.run([sys.executable,'-m','operator_agent.s5_shared_budget',*map(str,args)],
+    return subprocess.run([sys.executable,'-m','operator_agent.execute.s5_shared_budget',*map(str,args)],
                           cwd=ROOT,text=True,capture_output=True,timeout=30)
 
 

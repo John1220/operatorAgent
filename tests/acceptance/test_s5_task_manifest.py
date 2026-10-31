@@ -1,7 +1,7 @@
 """The S5 draft preserves quality inputs instead of silently changing tasks."""
 from benchmarks.experiments.s5 import s5_task_manifest as s5
-from operator_agent.quality_suite import suite_manifest
-from operator_agent.run_contract import digest
+from operator_agent.decide.quality_suite import suite_manifest
+from operator_agent.core.run_contract import digest
 
 
 def test_existing_tasks_keep_the_original_contract_and_challenge_inputs():

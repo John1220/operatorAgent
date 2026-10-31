@@ -48,13 +48,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import numpy as np
 
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.remote_executor import LocalExecutor
-from operator_agent.schemas import (
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.execute.remote_executor import LocalExecutor
+from operator_agent.core.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType,
 )
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 
 CORRECT = "import numpy as np\n\ndef kernel(A=None, B=None, **kw):\n    return A @ B\n"
 SCALED = "import numpy as np\n\ndef kernel(A=None, B=None, **kw):\n    return 0.97 * (A @ B)\n"

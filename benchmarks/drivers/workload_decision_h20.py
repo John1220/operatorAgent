@@ -45,23 +45,23 @@ from benchmarks.drivers.durable_profile_h20 import primary, receipt_errors
 from benchmarks.drivers.input_fidelity_h20 import dumps, validate_scratch
 from benchmarks.drivers.reference_profile_h20 import trial_code
 from operator_agent import Conductor, IntentParser, KernelDatabase
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.backend_caps import Cap
-from operator_agent.bench_cases import BenchmarkCase, TensorSpec
-from operator_agent.contract import freeze_from_task, case_key
-from operator_agent.correctness import as_suite
-from operator_agent.confirm import confirm_metrics
-from operator_agent.corpus_journal import confirmed_key, admission_id, record_hash, scan
-from operator_agent.eligibility import (ALL_FALSE, ALL_TRUE, aggregate_speedup,
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.core.backend_caps import Cap
+from operator_agent.decide.bench_cases import BenchmarkCase, TensorSpec
+from operator_agent.core.contract import freeze_from_task, case_key
+from operator_agent.decide.correctness import as_suite
+from operator_agent.core.confirm import confirm_metrics
+from operator_agent.core.corpus_journal import confirmed_key, admission_id, record_hash, scan
+from operator_agent.decide.eligibility import (ALL_FALSE, ALL_TRUE, aggregate_speedup,
     case_speedups, decision_speedup, implementation_decision, performance_verdict, regression_over_limit)
-from operator_agent.input_fidelity import MAX_STORAGE_BYTES
-from operator_agent.kernel_db import FailureDatabase
-from operator_agent.placement import observed_pairing, SCOPE_SAME
-from operator_agent.reference_contract import registered_reference, validate_receipt
-from operator_agent.run_contract import atomic_json, audit_value, code_hash, digest, json_value, protocol_identity
-from operator_agent.schemas import UnifiedSketch, VerificationLevel as Level
-from operator_agent.session_inputs import PROTOCOL as INPUT_PROTOCOL
-from operator_agent.workload import confirmation_evidence
+from operator_agent.decide.input_fidelity import MAX_STORAGE_BYTES
+from operator_agent.core.kernel_db import FailureDatabase
+from operator_agent.execute.placement import observed_pairing, SCOPE_SAME
+from operator_agent.decide.reference_contract import registered_reference, validate_receipt
+from operator_agent.core.run_contract import atomic_json, audit_value, code_hash, digest, json_value, protocol_identity
+from operator_agent.core.schemas import UnifiedSketch, VerificationLevel as Level
+from operator_agent.decide.session_inputs import PROTOCOL as INPUT_PROTOCOL
+from operator_agent.core.workload import confirmation_evidence
 
 LARGE = ((8192, 15360), (8192, 12288))
 TINY = (32, 64)
@@ -119,8 +119,8 @@ def tasks():
 
 
 def ruler(args):
-    from operator_agent.cuda_calibration import read_calibration
-    from operator_agent.cuda_ruler_profile import read_profile
+    from operator_agent.decide.cuda_calibration import read_calibration
+    from operator_agent.decide.cuda_ruler_profile import read_profile
     profile = read_profile(args.cuda_ruler_profile) if args.cuda_ruler_profile else None
     calibration = profile["calibration"] if profile else (
         read_calibration(args.cuda_calibration) if args.cuda_calibration else None)
@@ -132,7 +132,8 @@ def ruler(args):
 def evaluator_sources():
     # Keep the complete production manifest protocol, AND files omitted by older
     # protocol_identity implementations (notably the new workload composition).
-    paths = list((ROOT / "operator_agent").glob("*.py")) + list((ROOT / "remote_scripts").glob("*.py"))
+    # 2026-10-31: operator_agent/ 分五层 ⇒ 递归（这份清单是 evaluator 身份，键随之变为层相对路径）
+    paths = list((ROOT / "operator_agent").rglob("*.py")) + list((ROOT / "remote_scripts").glob("*.py"))
     # 2026-10-31: benchmarks/ 按用途分目录后，这些文件名前多了子目录 —— 清单键
     # （relative_to(ROOT)）随之变化，即这条 workload 的 evaluator 身份变了。这不是
     # 数值或判据改动，但引用旧身份的冻结记录不能与新身份互换。
@@ -427,8 +428,8 @@ def binding_errors(artifact, metrics, contract, plan):
 def ruler_errors(metrics_list, trace, calibration, profile, gpu):
     if not calibration:
         return []
-    from operator_agent.cuda_calibration import validate_probe
-    from operator_agent.cuda_ruler_profile import anchor_reading
+    from operator_agent.decide.cuda_calibration import validate_probe
+    from operator_agent.decide.cuda_ruler_profile import anchor_reading
     probes = [r.get("response") or {} for r in trace if r["request"]["action"] == "cuda_calibration_probe"]
     errors = [] if len(probes) == len(metrics_list) else ["main/confirmation missing independent native heartbeat"]
     for probe in probes:
@@ -519,8 +520,8 @@ def check_trial_contract(t, expected):
 
 
 def positive_context(path, t, code):
-    from operator_agent.run_contract import MANIFEST, CONTRACT
-    from operator_agent.contract import load_dict
+    from operator_agent.core.run_contract import MANIFEST, CONTRACT
+    from operator_agent.core.contract import load_dict
     path = Path(path).expanduser().resolve()
     manifest = json.loads((path / MANIFEST).read_text())
     contract = freeze_from_task(t)

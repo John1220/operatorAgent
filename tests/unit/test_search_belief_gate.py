@@ -27,12 +27,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.agents import SearchAgent
-from operator_agent.bandit import Bandit
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (
+from operator_agent.generate.agents import SearchAgent
+from operator_agent.generate.bandit import Bandit
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, UnifiedSketch,
     TilingStrategy, TaskType, TaskComplexity, Precision,
 )
@@ -305,7 +305,7 @@ class TestTheQueueGoesThroughTheBandit(unittest.TestCase):
     def test_the_consumed_order_is_the_bandits_output(self):
         from unittest import mock
         _ReversingBandit.instances = []
-        with mock.patch("operator_agent.conductor.Bandit", _ReversingBandit):
+        with mock.patch("operator_agent.app.conductor.Bandit", _ReversingBandit):
             c = Conductor(backend=LaunchDominatedGPU(NET_MS_MATMUL_4096),
                           kernel_db=KernelDatabase(jsonl_path=None),
                           llm=_LoopLlm(), max_optimize_rounds=4)

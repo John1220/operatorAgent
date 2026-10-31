@@ -8,11 +8,11 @@ import pytest
 
 from operator_agent import (Conductor, IntentParser, MockGPU, TestInputGenerator,
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, Verifier, with_default_correctness)
-from operator_agent.correctness import as_suite, credential
-from operator_agent.correctness_profiles import PROFILE_VERSION, default_policy, profile_check
-from operator_agent.contract import ContractError, freeze_from_task, load_dict
-from operator_agent.failure_route import classify, ROUTE_HOLD
-from operator_agent.schemas import Precision, UnifiedSketch, VerificationLevel as Level, VerificationResult
+from operator_agent.decide.correctness import as_suite, credential
+from operator_agent.decide.correctness_profiles import PROFILE_VERSION, default_policy, profile_check
+from operator_agent.core.contract import ContractError, freeze_from_task, load_dict
+from operator_agent.decide.failure_route import classify, ROUTE_HOLD
+from operator_agent.core.schemas import Precision, UnifiedSketch, VerificationLevel as Level, VerificationResult
 
 GOOD = {
     "relu": "import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n",
@@ -192,8 +192,8 @@ def test_explicit_nondefault_requests_cannot_be_erased_by_llm_or_rules(prompt,us
 
 
 def test_unknown_profile_report_names_reason_and_default_requirement():
-    from operator_agent.report import build_report
-    from operator_agent.schemas import KernelArtifact
+    from operator_agent.core.report import build_report
+    from operator_agent.core.schemas import KernelArtifact
     t=task("attention")
     a=KernelArtifact(verification_results=[Verifier.correctness_preflight(t)])
     report=build_report(artifact=a,task=t)
@@ -203,7 +203,7 @@ def test_unknown_profile_report_names_reason_and_default_requirement():
 @pytest.mark.parametrize("op", tuple(GOOD))
 def test_conductor_defaults_run_and_save_suite_not_performance_workload(op, tmp_path):
     t = task(op); inputs = TestInputGenerator.generate(t, (8,8), seed=11)
-    from operator_agent.artifact_store import ArtifactStore
+    from operator_agent.core.artifact_store import ArtifactStore
     c = Conductor(backend=MockGPU(), max_optimize_rounds=1, use_coder_pipeline=False)
     c.store = ArtifactStore(str(tmp_path))
     c.designer.run = lambda *a: UnifiedSketch(algorithm=op, target_dsl="python")

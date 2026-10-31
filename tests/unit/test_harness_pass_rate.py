@@ -18,7 +18,7 @@ from benchmarks.drivers.harness_pass_rate import (MIN_DENOM, aggregate, compare_
                                           format_comparison, format_report,
                                           min_detectable_delta, record_rounds,
                                           required_runs_per_arm, threshold_curve)
-from operator_agent.backend_caps import Cap
+from operator_agent.core.backend_caps import Cap
 from tests.backend_fakes import DeclaredFakeBackend
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -31,7 +31,7 @@ def _round(n, l1=True, l2=None, l3=None, validity=None, speedup=None, action="op
 
     键集合必须与 Conductor 真写进 `iteration_history` 的一致 ——
     `TestLineageIsNotWhitelisted.test_the_fixtures_cover_every_real_key`
-    会去 `conductor.py` 的 AST 里核对, 所以这里少写一个键就会红。
+    会去 `app/conductor.py` 的 AST 里核对, 所以这里少写一个键就会红。
     """
     lv = {"L1": l1}
     if l2 is not None:
@@ -243,7 +243,7 @@ class TestCostKeysMatchTheRealTracker(unittest.TestCase):
     """
 
     def test_the_keys_we_read_exist_in_the_real_summary(self):
-        from operator_agent.llm_client import CostTracker
+        from operator_agent.execute.llm_client import CostTracker
         keys = set(CostTracker().summary())
         for k in ("total_tokens", "total_cost_usd", "total_calls"):
             self.assertIn(k, keys, f"账单摘要里没有 {k} —— 量具读到的会是默认值 0")
@@ -335,7 +335,7 @@ def _dict_keys_in(source, required):
 
 
 def _real_lineage_keys():
-    src = (REPO_ROOT / "operator_agent" / "conductor.py").read_text(encoding="utf-8")
+    src = (REPO_ROOT / "operator_agent" / "app" / "conductor.py").read_text(encoding="utf-8")
     hits = _dict_keys_in(src, {"round", "action", "all_passed"})
     if len(hits) != 1:
         raise AssertionError(f"conductor 里认出 {len(hits)} 处血缘字典, 这条守卫的前提变了")
@@ -474,7 +474,7 @@ class TestAdmissionDenominatorsMatch(unittest.TestCase):
     """入库率的分母是「通过的运行」, 而拒收名单以前取自**所有未崩溃的运行** —— 两个口径
     不同源 (2026-09-29 那份真机报表: 「入库 3/3 = 100%」紧跟三条拒收, 而三条全部来自
     **未通过**的运行)。`_save_to_db()` 只在 `artifact.all_passed` 那一支被调
-    (`conductor.py:1112` 明写), 所以那些运行在生产里**从没被这道门问过**。
+    (`app/conductor.py:1112` 明写), 所以那些运行在生产里**从没被这道门问过**。
     后果不是数字算错, 是故事讲反: 读者会以为入库门拒了 3 个好核。
     """
 

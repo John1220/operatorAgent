@@ -58,11 +58,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.environment import EnvironmentChecker  # noqa: E402
-from operator_agent.measurement import (TRANSPORT_ANSWERED, TRANSPORT_KEY,  # noqa: E402
+from operator_agent.core.environment import EnvironmentChecker  # noqa: E402
+from operator_agent.decide.measurement import (TRANSPORT_ANSWERED, TRANSPORT_KEY,  # noqa: E402
                                         TRANSPORT_UNKNOWN, safe_error_text,
                                         mask_transport_secrets)
-from operator_agent.remote_executor import LocalExecutor, SSHExecutor  # noqa: E402
+from operator_agent.execute.remote_executor import LocalExecutor, SSHExecutor  # noqa: E402
 
 # 全部是**合成**值 (RFC 5737 的文档地址段 + 不存在的用户/路径)。真实端口、真实用户名
 # 与真实密钥文件名一律不许进这个文件 —— 那正是 `tests/hygiene/test_repo_hygiene.py` 的靶子。
@@ -269,7 +269,7 @@ class TestTheRemoteExits(unittest.TestCase):
     def test_the_http_probe_reason_is_masked_too(self):
         """同一道掩码的第二个探连通出口 (HTTP 那一路) —— 没有它这一行就没有读者"""
         from urllib.error import URLError
-        from operator_agent.remote_executor import HTTPExecutor
+        from operator_agent.execute.remote_executor import HTTPExecutor
         ex = HTTPExecutor(base_url="http://203.0.113.9:18080")
         with mock.patch("urllib.request.urlopen",
                         side_effect=URLError(OSError("connect to host 203.0.113.9 port 18080"))):

@@ -12,7 +12,7 @@
 """
 import unittest
 
-from operator_agent.novelty import candidate_signature, signature_of
+from operator_agent.core.novelty import candidate_signature, signature_of
 
 BASE = '''import triton
 import triton.language as tl

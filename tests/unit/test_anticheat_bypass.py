@@ -18,8 +18,8 @@ import ast
 import unittest
 from pathlib import Path, PurePosixPath
 
-from operator_agent import anticheat
-from operator_agent.anticheat import static_audit
+from operator_agent.decide import anticheat
+from operator_agent.decide.anticheat import static_audit
 
 # ─── 两个 DSL 下都必须拦下 ───────────────────────────────────
 # python DSL 允许 NumPy (它是实现介质)，但下列写法语义明确指向 torch，
@@ -48,7 +48,7 @@ CAUGHT_BOTH_DSL = {
 
 # ─── 仅 GPU DSL 下必须拦下 ───────────────────────────────────
 # `A @ B` 是歧义写法: 对 numpy 数组它是合法矩阵乘，对 torch 张量它是回退。
-# python DSL 下 NumPy 是实现介质 (anticheat.py 模块 docstring 明说)，本仓自己的
+# python DSL 下 NumPy 是实现介质 (decide/anticheat.py 模块 docstring 明说)，本仓自己的
 # tests/unit/test_p0_3.py::PYTHON_MATMUL 与 tests/unit/test_m1_hardening.py::PYTHON_MATMUL
 # 正是这一形态，属正样本。详见 docs/research/03 的更正记录。
 
@@ -212,10 +212,10 @@ class TestVendorTorchWhitelist(unittest.TestCase):
         绿灯 (而运行时屏蔽照样装着 ⇒ 两半互相矛盾)。现在两半读同一个声明, 而
         生产路径没有声明者。
         """
-        from operator_agent.mock_gpu import MockGPU
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+        from operator_agent.execute.mock_gpu import MockGPU
+        from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                             TargetSpec, TaskSchema, TaskType)
-        from operator_agent.verifier import Verifier
+        from operator_agent.decide.verifier import Verifier
         import numpy as np
         task = TaskSchema(
             task_type=TaskType.OPERATOR_GENERATION,
@@ -239,7 +239,7 @@ class TestVendorTorchWhitelist(unittest.TestCase):
         另一个任务字段 (例如 `task.target.dsl`) 就不会 —— 所以这里直接钉住那一行。
         """
         src = (Path(__file__).resolve().parents[2]
-               / "operator_agent" / "verifier.py").read_text(encoding="utf-8")
+               / "operator_agent" / "decide" / "verifier.py").read_text(encoding="utf-8")
         self.assertIn("VENDOR_TORCH_OK: bool = False", src,
                       "执行侧声明那行没了 —— 本守卫需要跟着复核")
         # 逐个调用点取**括号配对**的那一段 (不写死窗口宽度: 窗口的失效方式是静默的,
@@ -492,8 +492,8 @@ class TestRuntimeShieldCoverage(unittest.TestCase):
         """
         root = Path(__file__).resolve().parents[2]
         targets = [root / "remote_scripts" / "run_kernel.py",
-                   root / "operator_agent" / "remote_executor.py",
-                   root / "operator_agent" / "mock_gpu.py"]
+                   root / "operator_agent" / "execute" / "remote_executor.py",
+                   root / "operator_agent" / "execute" / "mock_gpu.py"]
         offenders = []
         for path in targets:
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -591,7 +591,7 @@ class TestRuntimeShieldCoverage(unittest.TestCase):
 
 
 class TestShieldIsActuallyDeployed(unittest.TestCase):
-    """runner 里 import anticheat 之后, 部署链必须把 anticheat.py 一起推上去
+    """runner 里 import anticheat 之后, 部署链必须把 decide/anticheat.py 一起推上去
 
     否则每次远端调用都 ImportError。_remote_files() 的顺序也有讲究: 依赖排在
     runner 前面, 中途失败只会得到「新依赖 + 旧 runner」(能跑), 不会得到
@@ -599,7 +599,7 @@ class TestShieldIsActuallyDeployed(unittest.TestCase):
     """
 
     def test_anticheat_deployed_before_runner(self):
-        from operator_agent.remote_executor import SSHExecutor
+        from operator_agent.execute.remote_executor import SSHExecutor
 
         ex = SSHExecutor(host="h", user="u")
         names = [PurePosixPath(remote).name for _, remote in ex._remote_files()]
@@ -607,10 +607,10 @@ class TestShieldIsActuallyDeployed(unittest.TestCase):
         self.assertLess(names.index("anticheat.py"), names.index("run_kernel.py"))
 
     def test_deployed_anticheat_is_the_one_under_test(self):
-        """推上去的必须是 operator_agent/anticheat.py 本身, 不是副本"""
-        from operator_agent import anticheat
+        """推上去的必须是 operator_agent/decide/anticheat.py 本身, 不是副本"""
+        from operator_agent.decide import anticheat
 
-        deployed = Path(__file__).resolve().parents[2] / "operator_agent" / "anticheat.py"
+        deployed = Path(__file__).resolve().parents[2] / "operator_agent" / "decide" / "anticheat.py"
         self.assertEqual(deployed.resolve(), Path(anticheat.__file__).resolve())
 
 

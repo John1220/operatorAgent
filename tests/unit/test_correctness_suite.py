@@ -7,13 +7,13 @@ import pytest
 
 from operator_agent import (CorrectnessCase, CorrectnessSuite, ConstraintSpec,
                             MockGPU, SourceSpec, TargetSpec, TaskSchema, Verifier)
-from operator_agent.bench_cases import BenchmarkCase, TensorSpec, BenchCaseError
-from operator_agent.contract import ContractError, freeze_from_task, load_dict
-from operator_agent.conductor import Conductor, _correctness_credential
-from operator_agent.correctness import as_suite, verdict_of
-from operator_agent.failure_route import classify, ROUTE_HOLD
-from operator_agent.report import build_report, collect_unable
-from operator_agent.schemas import KernelArtifact, VerificationLevel, VerificationResult
+from operator_agent.decide.bench_cases import BenchmarkCase, TensorSpec, BenchCaseError
+from operator_agent.core.contract import ContractError, freeze_from_task, load_dict
+from operator_agent.app.conductor import Conductor, _correctness_credential
+from operator_agent.decide.correctness import as_suite, verdict_of
+from operator_agent.decide.failure_route import classify, ROUTE_HOLD
+from operator_agent.core.report import build_report, collect_unable
+from operator_agent.core.schemas import KernelArtifact, VerificationLevel, VerificationResult
 
 GOOD = "import numpy as np\ndef kernel(A, B):\n    return A @ B\n"
 
@@ -74,7 +74,7 @@ def test_suite_checks_and_determinism_are_hashed():
 
 
 def test_suite_determinism_policy_is_consistent_with_frozen_semantics():
-    from operator_agent.contract import freeze
+    from operator_agent.core.contract import freeze
     suite = CorrectnessSuite((case(),), deterministic=False)
     c = freeze_from_task(task(suite))
     assert c.dtype_semantics.deterministic is False
@@ -212,7 +212,7 @@ def test_partial_nonfinite_reference_is_unknown(monkeypatch):
 
 
 def test_remote_input_regeneration_cannot_silently_claim_value_coverage():
-    from operator_agent.remote_executor import SSHExecutor
+    from operator_agent.execute.remote_executor import SSHExecutor
     backend = SSHExecutor(host="offline")
     backend._deployed = True
     # A capability claim cannot substitute for runtime evidence from old runners.
@@ -270,7 +270,7 @@ def test_conductor_candidate_selection_and_saved_report_use_suite(broken, tmp_pa
     import json
     from pathlib import Path
     from tests.golden_regression import _FixedCodeMockLLM
-    from operator_agent.artifact_store import ArtifactStore
+    from operator_agent.core.artifact_store import ArtifactStore
 
     code = ("import numpy as np\ndef kernel(A, B):\n"
             "    return A @ B if A.shape[0] == 8 else np.zeros((A.shape[0], B.shape[1]))\n"

@@ -19,14 +19,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.agents import CoderAgent
-from operator_agent.anticheat import (
+from operator_agent.generate.agents import CoderAgent
+from operator_agent.decide.anticheat import (
     static_audit, shield_torch, CheatDetectedError,
 )
-from operator_agent.verifier import Verifier
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.intent_parser import TestInputGenerator
-from operator_agent.schemas import (
+from operator_agent.decide.verifier import Verifier
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.app.intent_parser import TestInputGenerator
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision, VerificationLevel,
 )

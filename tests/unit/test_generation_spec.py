@@ -8,10 +8,10 @@ import hashlib
 import numpy as np
 import pytest
 
-from operator_agent import generation_spec as spec
-from operator_agent import single_candidate_coder as bounded
-from operator_agent.interface_contract import broadcast_calling_convention
-from operator_agent.prompt_manager import PromptManager
+from operator_agent.generate import generation_spec as spec
+from operator_agent.generate import single_candidate_coder as bounded
+from operator_agent.core.interface_contract import broadcast_calling_convention
+from operator_agent.generate.prompt_manager import PromptManager
 
 
 FAMILIES = ("designer_", "planner_", "coder_", "fixer_", "search_")

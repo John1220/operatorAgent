@@ -19,7 +19,7 @@
 |---|---|---|
 | **DSH 里的工具** | 人/模型在对话里一步步驱动 | 装一次（§6），之后直接说“用 operator_* 工具…” |
 | **CLI** | 脚本、排障、不进 DSH | `python -m operator_agent <子命令>` |
-| **协议自检** | 验证 MCP 实现本身 | `python -m operator_agent.mcp_server --selftest` |
+| **协议自检** | 验证 MCP 实现本身 | `python -m operator_agent.app.mcp_server --selftest` |
 
 先确认环境（只读，不跑活、不联网）：
 
@@ -74,7 +74,7 @@ dsh plugin --profile <profile> add /path/to/operatorAgent/integrations/dsh-opera
         serverName: operator
         transport: stdio
         command: <abs-python>
-        args: ["-m", "operator_agent.mcp_server"]
+        args: ["-m", "operator_agent.app.mcp_server"]
         cwd: <abs-repo>
         toolCallTimeoutMs: 600000
         failOnStartupError: false
@@ -92,7 +92,7 @@ dsh plugin --profile <profile> add /path/to/operatorAgent/integrations/dsh-opera
 之后**重连 MCP**（工具表是 `mcp_server.py` 里的静态表 ⇒ 改它要重启 server **进程**）：
 
 ```bash
-pkill -f operator_agent.mcp_server      # 宿主 500ms 后自动重连并 re-sync
+pkill -f operator_agent.app.mcp_server      # 宿主 500ms 后自动重连并 re-sync
 ```
 
 模型侧会出现八个工具：`mcp__operator__operator_{prepare,verify,bench,repair,run,status,cancel,capabilities}`；
@@ -206,7 +206,7 @@ python -m operator_agent repair --run-dir /tmp/op-r1 --code-file cand.py \
 
 | 现象 | 原因 | 动作 |
 |---|---|---|
-| 工具列表里没有 `operator_*` | MCP server 没连上/工具清单过期 | `pkill -f operator_agent.mcp_server`，等重连 |
+| 工具列表里没有 `operator_*` | MCP server 没连上/工具清单过期 | `pkill -f operator_agent.app.mcp_server`，等重连 |
 | `/op` 补全不出来 | 命令面板要重启宿主才刷新 | 重启 DSH；配置不用改 |
 | `llm_not_configured` | 无人值守缺内层 LLM | 在 MCP 行 `env:` 里配 `LLM_*`（§6） |
 | `host_required` | `backend=ssh` 没给 host | 加 `--host <ssh-alias>` |
@@ -218,7 +218,7 @@ python -m operator_agent repair --run-dir /tmp/op-r1 --code-file cand.py \
 
 ### 0.8 卸载/禁用
 
-删掉 profile 里那段 `insert`，`pkill -f operator_agent.mcp_server` 即可；仓库侧不需要改任何东西
+删掉 profile 里那段 `insert`，`pkill -f operator_agent.app.mcp_server` 即可；仓库侧不需要改任何东西
 （磁盘上的 run 目录留在你给的位置，不会被清理）。
 
 ---
@@ -226,16 +226,16 @@ python -m operator_agent repair --run-dir /tmp/op-r1 --code-file cand.py \
 ## 1. 架构（一行图）
 
 ```
-DSH  ──(MCP stdio, JSON-RPC)──▶  operator_agent.mcp_server
+DSH  ──(MCP stdio, JSON-RPC)──▶  operator_agent.app.mcp_server
                                       │
-                                      ├─▶ operator_agent.hitl_tools ──▶ 既有判定层
+                                      ├─▶ operator_agent.app.hitl_tools ──▶ 既有判定层
                                       │      prepare / verify / capabilities      contract / Verifier /
                                       │                                          failure_route / report
-                                      └─▶ (独立进程) operator_agent.autonomous
+                                      └─▶ (独立进程) operator_agent.app.autonomous
                                              └─▶ Conductor（无人值守整段）
 ```
 
-`operator_agent.cli` 是同一层的**进程入口**（`python -m operator_agent …`），不经过 MCP，
+`operator_agent.app.cli` 是同一层的**进程入口**（`python -m operator_agent …`），不经过 MCP，
 供脚本与排障使用；两条路调的是同一批函数。
 
 ---
@@ -420,7 +420,7 @@ operator_run:  (未开始) ──llm 缺失──▶ llm_not_configured（不起
         serverName: operator
         transport: stdio
         command: <abs-path-to-python3>
-        args: [-m, operator_agent.mcp_server]
+        args: [-m, operator_agent.app.mcp_server]
         cwd: <abs-path-to-this-repo>
         toolCallTimeoutMs: 600000
         failOnStartupError: false
@@ -464,7 +464,7 @@ operator_run:  (未开始) ──llm 缺失──▶ llm_not_configured（不起
 
 **加第 N 个工具**：① `mcp_server._tool_definitions()` 加 schema；② `_call_tool()` 加一个分支
 （注意把**运行选项**从 declaration 里摘出来）；③ 若加新拒绝码，补进本文 §4 与测试；
-④ **重启 server 进程**：`pkill -f operator_agent.mcp_server`，宿主会在 500 ms 后自动重连并
+④ **重启 server 进程**：`pkill -f operator_agent.app.mcp_server`，宿主会在 500 ms 后自动重连并
 re-sync，**本会话的工具列表要到下一回合才刷新**。宿主本身支持热刷新
 （收 `notifications/tools/list_changed` 即重新同步），是这张表在进程里是静态的才要重启；
 重连有上限（默认退避 500 ms→30 s、10 次），别把它当日常刷新手段。
@@ -520,5 +520,5 @@ re-sync，**本会话的工具列表要到下一回合才刷新**。宿主本身
 - 决策与读数：[`docs/dsh-plugin-evaluation.md`](../dsh-plugin-evaluation.md)（§9.5 工具壳、§9.6 MCP、
   §9.7 真机三连、§9.8 自动化入口 + 真机闭环、§9.9 处方对照、§9.11 自动修复统计、§9.12 发布形态、§9.13 待办）
 - 用法：[`docs/user_guide.md`](../user_guide.md) §3.1 方式三（CLI）/ 方式四（接进 DSH）
-- 代码：`operator_agent/mcp_server.py`（握手与工具表）、`hitl_tools.py`（判定封装）、
+- 代码：`operator_agent/app/mcp_server.py`（握手与工具表）、`hitl_tools.py`（判定封装）、
   `autonomous.py`（无人值守执行体）、`cli.py`（同源进程入口）

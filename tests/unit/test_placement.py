@@ -9,7 +9,7 @@
 """
 import unittest
 
-from operator_agent.placement import (LEASE_CLEAN, LEASE_CONTENDED, LEASE_UNOBSERVED,
+from operator_agent.execute.placement import (LEASE_CLEAN, LEASE_CONTENDED, LEASE_UNOBSERVED,
                                       BuildKey, DeviceKey, DeviceLease, PartitionKey,
                                       build_key, can_measure_parallel,
                                       device_of_payload, lease_evidence, lease_waves,

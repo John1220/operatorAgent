@@ -18,8 +18,8 @@
 """
 from __future__ import annotations
 
-from operator_agent.backend_caps import OPTIONAL_CAP_METHODS, Backend, Cap
-from operator_agent.remote_executor import LocalExecutor
+from operator_agent.core.backend_caps import OPTIONAL_CAP_METHODS, Backend, Cap
+from operator_agent.execute.remote_executor import LocalExecutor
 
 #: 允许被替换的方法名。`label` 不是方法, 单独走构造参数。
 OVERRIDABLE = frozenset(

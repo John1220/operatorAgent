@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.llm_client import CostTracker, parse_usage  # noqa: E402
+from operator_agent.execute.llm_client import CostTracker, parse_usage  # noqa: E402
 
 INCLUSIVE = {"prompt_tokens": 1000, "completion_tokens": 200,
              "prompt_tokens_details": {"cached_tokens": 800}}
@@ -114,7 +114,7 @@ class TestTheWiringIsLive(unittest.TestCase):
     """两条「算了有人读」的接线守卫 —— 归一器写在文件里但没人调用，就等于没有"""
 
     def test_the_client_reads_usage_through_the_normalizer(self):
-        src = (Path(__file__).resolve().parents[2] / "operator_agent" / "llm_client.py"
+        src = (Path(__file__).resolve().parents[2] / "operator_agent" / "execute" / "llm_client.py"
                ).read_text(encoding="utf-8")
         body = src[src.index("def _call_model"):]
         self.assertIn("parse_usage(", body[:body.index("\n    def ") if "\n    def " in body else 4000],
@@ -127,7 +127,7 @@ class TestTheWiringIsLive(unittest.TestCase):
         所以这条守卫盯的是**没有键过滤**，而不是「键在不在名单里」—— 后者从抄下那刻就开始漂，
         新加的 `cache_semantics` / `total_cached_prompt_tokens` 就是会被漂掉的那种。
         """
-        src = (Path(__file__).resolve().parents[2] / "operator_agent" / "artifact_store.py"
+        src = (Path(__file__).resolve().parents[2] / "operator_agent" / "core" / "artifact_store.py"
                ).read_text(encoding="utf-8")
         self.assertIn('result_data["llm_cost"] = _llm_cost', src)
         self.assertNotIn('result_data["llm_cost"] = {', src, "又变成挑键导出了")

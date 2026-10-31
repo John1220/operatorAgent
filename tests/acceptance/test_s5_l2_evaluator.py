@@ -5,8 +5,8 @@ import io
 import pytest
 
 from benchmarks.experiments.s5 import s5_l2_evaluator as evaluator
-from operator_agent import quality_suite
-from operator_agent.run_contract import code_hash, digest
+from operator_agent.decide import quality_suite
+from operator_agent.core.run_contract import code_hash, digest
 
 GOOD = ('import numpy as np\ndef kernel(X):\n'
         '    x = X.astype(np.float32)\n'
@@ -47,8 +47,8 @@ def test_real_failed_fixture_cannot_claim_complete_correctness():
 
 
 def test_interface_mismatch_is_failed_but_transport_failure_is_unknown():
-    from operator_agent.schemas import VerificationLevel, VerificationResult
-    from operator_agent.measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
+    from operator_agent.core.schemas import VerificationLevel, VerificationResult
+    from operator_agent.decide.measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
     result=run('def kernel(Y):\n    return Y\n')
     assert result['status']=='failed' and result['inputs'][0]['reason']=='verified local interface mismatch'
     l1=VerificationResult(VerificationLevel.L1_COMPILE,False,'transport failed',
@@ -74,7 +74,7 @@ def test_big_candidates_remain_unknown_before_any_materialization(monkeypatch):
     'def kernel(X): return __import__("torch").cuda.FloatTensor(X)\n',
 ])
 def test_external_or_gpu_fixture_rejected_before_backend(code, monkeypatch):
-    import operator_agent.mock_gpu as mock
+    import operator_agent.execute.mock_gpu as mock
     monkeypatch.setattr(mock, 'MockGPU', lambda: pytest.fail('no backend must be made'))
     assert run(code)['status']=='unknown'
 
@@ -87,7 +87,7 @@ def test_missing_task_and_changed_manifest_are_unknown():
 
 
 def test_one_missing_or_wrong_suite_case_cannot_become_pass(monkeypatch):
-    from operator_agent.verifier import Verifier
+    from operator_agent.decide.verifier import Verifier
     original=Verifier.verify
     def drop_a_case(self,*a,**kw):
         results=original(self,*a,**kw)
@@ -100,7 +100,7 @@ def test_one_missing_or_wrong_suite_case_cannot_become_pass(monkeypatch):
 
 
 def test_missing_holdout_cannot_become_pass(monkeypatch):
-    from operator_agent.verifier import Verifier
+    from operator_agent.decide.verifier import Verifier
     original=Verifier.verify
     count=[0]
     def break_second(self,*a,**kw):
@@ -117,7 +117,7 @@ def test_missing_holdout_cannot_become_pass(monkeypatch):
 
 @pytest.mark.parametrize('target', ['primary', 'suite', 'suite_repeat'])
 def test_missing_fidelity_or_wrong_input_identity_is_unknown(monkeypatch, target):
-    from operator_agent.verifier import Verifier
+    from operator_agent.decide.verifier import Verifier
     original=Verifier.verify
     def break_fidelity(self,*a,**kw):
         results=original(self,*a,**kw)

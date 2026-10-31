@@ -17,7 +17,7 @@ import threading
 
 from benchmarks.experiments.s5 import s5_runtime
 from benchmarks.experiments.s5.s5_vertical_validation import VerticalValidator, GOOD_FIXTURE, BAD_FIXTURE
-from operator_agent.task_clock import monotonic
+from operator_agent.execute.task_clock import monotonic
 
 MAX_BODY = 131072
 

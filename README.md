@@ -97,29 +97,39 @@ python test_nvidia_matmul.py
 
 逻辑依赖顺序是 **先可信 → 再可搜 → 最后可生成**。推荐这条路线：
 
-1. [operator_agent/schemas.py](operator_agent/schemas.py) —— 全项目词汇表
-   （`TaskSchema` / `SourceSpec` / `TargetSpec` / `ConstraintSpec`）
-2. [operator_agent/conductor.py](operator_agent/conductor.py) —— `Router` 与主循环
-   `_execute_inner()`。**别顺序读**（3000+ 行），用实现状态 §五 的表跳读
-3. 判决层：`verifier.py` → `measurement.py` → `eligibility.py` → `contract.py`
-4. 执行层：[remote_executor.py](operator_agent/remote_executor.py) +
+包里按**层**分五个子包（2026-10-31 起；`operator_agent/` 根目录只剩 `__init__.py`，
+公开再导出不变 —— `from operator_agent import Conductor` 照旧）：
+
+1. `core/` —— 词汇与产物：[schemas.py](operator_agent/core/schemas.py)（`TaskSchema` /
+   `SourceSpec` / `TargetSpec` / `ConstraintSpec`）、`contract.py`、`run_contract.py`、
+   `artifact_store.py`、`kernel_db.py`
+2. `decide/` —— 判定：`verifier.py` → `measurement.py` → `eligibility.py`，
+   以及 `correctness*`、`anticheat`、`reference*`、`resource_check`
+3. `execute/` —— 执行：[remote_executor.py](operator_agent/execute/remote_executor.py)、
+   `exec_guard.py`、`task_budget/cancellation/clock`、
    [remote_scripts/run_kernel.py](remote_scripts/run_kernel.py)
-5. 生成层：[agents.py](operator_agent/agents.py) → `coder_pipeline.py` →
+4. `generate/` —— 生成与修复：[agents.py](operator_agent/generate/agents.py) →
+   `coder_pipeline.py` → `fixer.py` / `repair_*` →
    [prompts/](operator_agent/prompts) + [skills/triton_skill.md](operator_agent/skills/triton_skill.md)
+5. `app/` —— 入口与编排：[conductor.py](operator_agent/app/conductor.py)（`Router` 与主循环
+   `_execute_inner()`。**别顺序读**，3000+ 行，用实现状态 §五 的表跳读）、`cli.py`、
+   `mcp_server.py`、`hitl_tools.py`、`autonomous.py`
+
+依赖方向是单向的：`app → generate → decide → execute → core`（由
+[tests/hygiene/test_repo_layout.py](tests/hygiene/test_repo_layout.py) 与各层 docstring 守着）。
 
 ## 目录结构
 
 ```
 operatorAgent/
-├── operator_agent/          # 核心包
-│   ├── conductor.py         # 调度层：Router + 主循环
-│   ├── verifier.py          # L1 / L2 / L3 验证 + Roofline
-│   ├── measurement.py       # 测量有效性：一个数字被允许造成什么后果
-│   ├── remote_executor.py   # SSH / HTTP / Local 三后端 + 统一门面
-│   ├── agents.py            # Designer / Coder / Search
-│   ├── kernel_db.py         # 正样本 + 负样本经验库（append-only JSONL）
-│   ├── prompts/             # Prompt 模板
-│   └── skills/              # SKILL 规范 + 优化配方库
+├── operator_agent/          # 核心包（按层分组，根目录只有 __init__.py）
+│   ├── core/                # 词汇/契约/产物：schemas contract run_contract artifact_store kernel_db …
+│   ├── decide/              # 判定：verifier measurement eligibility correctness* anticheat reference* …
+│   ├── execute/             # 执行：remote_executor exec_guard task_budget task_clock mock_gpu …
+│   ├── generate/            # 生成与修复：agents coder_pipeline fixer repair_* prompt_manager …
+│   ├── app/                 # 入口与编排：conductor cli mcp_server hitl_tools autonomous
+│   ├── ops/  prompts/  skills/   # 资源与内嵌子包
+│   └── __main__.py          # `python -m operator_agent` 的委托入口
 ├── remote_scripts/          # 远端执行载荷（run_kernel.py）
 ├── tests/                   # 按用途分三层（见下）
 │   ├── conftest.py  fixtures/  golden_regression.py  # 共享夹具与 golden harness

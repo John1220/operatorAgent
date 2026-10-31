@@ -13,11 +13,11 @@ import contextlib
 import io
 import unittest
 
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.novelty import signature_of
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.novelty import signature_of
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
 
 KERNEL_A = '''import numpy as np
@@ -136,7 +136,7 @@ class TestConductorNoveltyWiring(unittest.TestCase):
         第 2 轮拿到的还是第 1 份代码, 于是「没判成重复」永远不可能发生: 一个自身就不会
         产生差异的接线测试, 断得再严也是空的。
         """
-        from operator_agent.novelty import signature_of
+        from operator_agent.core.novelty import signature_of
         different = KERNEL_A.replace("out + B", "out - B")
         self.assertNotEqual(signature_of(KERNEL_A), signature_of(different))
         same = KERNEL_A.replace("out + B", "out + B")

@@ -3,13 +3,13 @@ import hashlib
 
 import pytest
 
-from operator_agent import execution_audit
-from operator_agent.contract import freeze_from_task
-from operator_agent.hitl_tools import build_task
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import VerificationLevel
-from operator_agent.task_clock import monotonic
-from operator_agent.verifier import Verifier
+from operator_agent.core import execution_audit
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.app.hitl_tools import build_task
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import VerificationLevel
+from operator_agent.execute.task_clock import monotonic
+from operator_agent.decide.verifier import Verifier
 
 
 def setup(root):
@@ -62,8 +62,8 @@ def test_missing_or_damaged_model_usage_stays_unknown(tmp_path):
 
 
 def test_level_event_captures_only_a_consistent_api_usage_watermark(tmp_path):
-    from operator_agent.llm_budget import LLMCallLimits, ProductionLLMCallBudget
-    from operator_agent.task_clock import monotonic
+    from operator_agent.execute.llm_budget import LLMCallLimits, ProductionLLMCallBudget
+    from operator_agent.execute.task_clock import monotonic
     limits = LLMCallLimits(max_calls=1, max_output_tokens=16,
         total_output_token_reservations=16, call_seconds=5, campaign_seconds=60,
         allowed_callers=('Coder',))

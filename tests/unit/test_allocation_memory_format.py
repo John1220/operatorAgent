@@ -1,8 +1,8 @@
 """Static allocation compatibility only; no tensor execution or L2 claims."""
 import pytest
 
-from operator_agent.run_contract import code_hash
-from operator_agent.single_candidate_coder import PrecheckRefused, precheck
+from operator_agent.core.run_contract import code_hash
+from operator_agent.generate.single_candidate_coder import PrecheckRefused, precheck
 from tests.unit.test_single_candidate_coder import CODE
 
 

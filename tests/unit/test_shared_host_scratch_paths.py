@@ -63,7 +63,7 @@ SCAN_DIRS = ("benchmarks", "operator_agent", "remote_scripts")
 #: 钉的是**去重后的路径集合**而不是数量: 数量对「换掉一个、少掉一个」恒盲 (量具先标定
 #: 那条纪律的第 22 条 —— 钉集合要用差集等式, 子集/计数式断言对集合变动是瞎的)。
 RATCHET = {
-    "operator_agent/remote_executor.py": {
+    "operator_agent/execute/remote_executor.py": {
         "/tmp/xpujitc-temp", "/tmp/kXPU3", "/tmp/.xblas_cache", "/tmp/.xblas_jit.lock",
     },
     "remote_scripts/run_kernel_xpu.py": {
@@ -339,7 +339,7 @@ class TestSharedPathRatchet(unittest.TestCase):
         hits = _shared_path_hits()
         self.assertGreaterEqual(sum(len(v) for v in hits.values()), 12,
                                 f"只扫出 {hits} —— 解析面可能已经窄过代码")
-        executor = hits.get("operator_agent/remote_executor.py", [])
+        executor = hits.get("operator_agent/execute/remote_executor.py", [])
         self.assertTrue(any("/tmp/kXPU3" == h for h in executor),
                         f"shell 字符串里的路径没被认出来: {executor}")
 

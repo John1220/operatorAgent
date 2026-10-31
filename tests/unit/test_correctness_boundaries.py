@@ -10,12 +10,12 @@ import pytest
 from operator_agent import (BoundaryAxis, BoundaryPolicy, TensorAxes, CorrectnessSuite,
     ConstraintSpec, MockGPU, SourceSpec, TargetSpec, TaskSchema, Verifier,
     generate_correctness_suite, lint_coverage)
-from operator_agent.bench_cases import BenchCaseError, BenchmarkCase
-from operator_agent.contract import ContractError, freeze_from_task, load_dict
-from operator_agent.correctness import as_suite, credential
-from operator_agent.failure_route import ROUTE_HOLD, classify
-from operator_agent.report import build_report, collect_unable
-from operator_agent.schemas import KernelArtifact, VerificationLevel, VerificationResult
+from operator_agent.decide.bench_cases import BenchCaseError, BenchmarkCase
+from operator_agent.core.contract import ContractError, freeze_from_task, load_dict
+from operator_agent.decide.correctness import as_suite, credential
+from operator_agent.decide.failure_route import ROUTE_HOLD, classify
+from operator_agent.core.report import build_report, collect_unable
+from operator_agent.core.schemas import KernelArtifact, VerificationLevel, VerificationResult
 
 GOOD = "import numpy as np\ndef kernel(A, B):\n    return A @ B\n"
 
@@ -362,7 +362,7 @@ def test_generated_fp16_extreme_gemm_overflow_remains_unknown_not_dropped():
 def test_conductor_defers_to_trusted_generation_or_holds_before_llm_and_saves_valid_runs(missing, tmp_path):
     from tests.golden_regression import _FixedCodeMockLLM
     from operator_agent import Conductor
-    from operator_agent.artifact_store import ArtifactStore
+    from operator_agent.core.artifact_store import ArtifactStore
     raw = {"coverage_policy": finite_policy().content_dict()}
     if missing:
         s = as_suite(raw)

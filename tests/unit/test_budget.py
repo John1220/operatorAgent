@@ -1,4 +1,4 @@
-"""§10.2 三种预算的账本 (`operator_agent/budget.py`)
+"""§10.2 三种预算的账本 (`operator_agent/execute/budget.py`)
 
 这一层的失效方式有三种, 都得有守卫:
   * **预留被挪用** —— 「最后 10% 的最终确认预算不可挪用」是这条预算存在的唯一理由;
@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.budget import (
+from operator_agent.execute.budget import (
     DEFAULT_SPLIT, MIN_TOTAL_FOR_RESERVE, PHASES, BudgetLedger, BudgetPlan,
 )
 

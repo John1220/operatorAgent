@@ -22,7 +22,7 @@ from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
 from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
 from benchmarks.experiments.s5.s5_gateway_transport import _endpoint as _transport_endpoint
 from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
-from operator_agent import s5_shared_budget as shared
+from operator_agent.execute import s5_shared_budget as shared
 
 SCHEMA='s5-single-model-preflight-v1'
 PROMPT='Reply with exactly OK.'
@@ -46,8 +46,10 @@ def _identities(node):
            'dsh_llm':DSH_ROOT/'dsh-llm/lib/index.js',
            'dsh_pi_ai':DSH_ROOT/'dsh-llm-pi-ai/lib/index.js',
            'preflight':Path(__file__).resolve(),
-           **{name:root.parents[2]/'operator_agent'/(name+'.py') for name in
-              ('s5_shared_budget','run_layout','task_clock')},
+           # 2026-10-31: 这三个模块分属 execute/core 两层，路径要带子目录
+           **{'operator_agent/' + rel: root.parents[2] / 'operator_agent' / rel
+              for rel in ('execute/s5_shared_budget.py', 'core/run_layout.py',
+                          'execute/task_clock.py')},
            **{name:root/(name+'.py') for name in
               ('s5_gateway_http','s5_gateway_policy','s5_gateway_supervisor','s5_gateway_transport')}}
     return {name:hashlib.sha256(path.read_bytes()).hexdigest() for name,path in files.items()}

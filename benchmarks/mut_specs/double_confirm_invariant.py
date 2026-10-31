@@ -30,8 +30,8 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "cond": "operator_agent/conductor.py",
-    "confirm": "operator_agent/confirm.py",
+    "cond": "operator_agent/app/conductor.py",
+    "confirm": "operator_agent/core/confirm.py",
 }
 
 TARGETS = [

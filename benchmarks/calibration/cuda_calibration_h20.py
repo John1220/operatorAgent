@@ -10,11 +10,11 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from benchmarks.drivers.correctness_profiles_h20 import ProfileSSH, compact_trace
 from benchmarks.drivers.input_fidelity_h20 import dumps
-from operator_agent.cuda_calibration import (CONFIG, PROTOCOL, freeze_audits,
+from operator_agent.decide.cuda_calibration import (CONFIG, PROTOCOL, freeze_audits,
     source_hashes, digest, validate_probe)
-from operator_agent.run_contract import atomic_json
-from operator_agent.run_layout import new_run_root
-from operator_agent.cuda_ruler_profile import build_profile, POLICY as RULER_POLICY
+from operator_agent.core.run_contract import atomic_json
+from operator_agent.core.run_layout import new_run_root
+from operator_agent.decide.cuda_ruler_profile import build_profile, POLICY as RULER_POLICY
 
 
 def run(args):

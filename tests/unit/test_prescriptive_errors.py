@@ -20,12 +20,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.fixer import (
+from operator_agent.generate.fixer import (
     FixerAgent, prescribe, _ATTRIBUTION, _PRESCRIPTIONS,
 )
-from operator_agent.verifier import Verifier, syntax_error_report, failure_pair
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import VerificationResult, VerificationLevel
+from operator_agent.decide.verifier import Verifier, syntax_error_report, failure_pair
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import VerificationResult, VerificationLevel
 
 import tests.unit.test_fixer as tfx
 from tests.backend_fakes import fake_backend

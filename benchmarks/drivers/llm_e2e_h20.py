@@ -30,7 +30,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from operator_agent._harness_controls import enable_for_harness
+from operator_agent.app._harness_controls import enable_for_harness
 enable_for_harness()
 os.environ.setdefault("OPERATOR_AGENT_KERNEL_DB", "off")
 os.environ.setdefault("OPERATOR_AGENT_FAILURE_DB", "off")
@@ -40,7 +40,7 @@ import numpy as np  # noqa: E402
 import yaml  # noqa: E402  (本地依赖, 只为读 config.yaml; 仓内只有 example)
 
 from operator_agent import Conductor, LLMClient, RemoteExecutor  # noqa: E402
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,  # noqa: E402
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,  # noqa: E402
                                     TaskSchema, TaskComplexity, TaskType, TargetSpec)
 
 

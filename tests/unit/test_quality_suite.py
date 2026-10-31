@@ -5,16 +5,16 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from operator_agent.contract import freeze_from_task
-from operator_agent.correctness import as_suite
-from operator_agent.correctness_profiles import profile_check, with_default_correctness
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.quality_suite import (cases, compare_reports, evaluation_inputs_for,
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.decide.correctness import as_suite
+from operator_agent.decide.correctness_profiles import profile_check, with_default_correctness
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.decide.quality_suite import (cases, compare_reports, evaluation_inputs_for,
                                          get_case, input_cases_for, inputs_for,
                                          suite_manifest, summarize, task_for)
-from operator_agent.run_contract import digest
-from operator_agent.schemas import VerificationLevel
-from operator_agent.verifier import Verifier
+from operator_agent.core.run_contract import digest
+from operator_agent.core.schemas import VerificationLevel
+from operator_agent.decide.verifier import Verifier
 
 
 GOOD = {

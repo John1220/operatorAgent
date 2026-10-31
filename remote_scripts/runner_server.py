@@ -56,9 +56,17 @@ if os.environ.get(TOKEN_ENV):
         pass  # Non-Linux: no /proc identity; client must not claim remote cleanup.
 
 # Same dispatch as the one-shot runner, never a second kernel action table.
-import run_kernel  # noqa: E402
-from session_inputs import SessionInputs, PROTOCOL as INPUT_CACHE_PROTOCOL  # noqa: E402
-from cuda_calibration import run_probe  # noqa: E402
+# 2026-10-31: operator_agent/ 分五层。远端部署仍是**平铺**（裸名 import 生效）；
+# 仓库内直跑时那几个模块在子目录下，退回包路径。
+try:
+    import run_kernel  # noqa: E402
+    from session_inputs import SessionInputs, PROTOCOL as INPUT_CACHE_PROTOCOL  # noqa: E402
+    from cuda_calibration import run_probe  # noqa: E402
+except ImportError:                      # 仓库内直跑：模块已分层
+    sys.path.insert(0, os.path.dirname(_HERE))          # 仓库根
+    import run_kernel  # noqa: E402
+    from operator_agent.decide.session_inputs import SessionInputs, PROTOCOL as INPUT_CACHE_PROTOCOL  # noqa: E402
+    from operator_agent.decide.cuda_calibration import run_probe  # noqa: E402
 
 _INPUTS = SessionInputs()
 

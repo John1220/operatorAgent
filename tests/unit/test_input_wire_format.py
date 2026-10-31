@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from operator_agent.remote_executor import SSHExecutor
+from operator_agent.execute.remote_executor import SSHExecutor
 
 ROOT = Path(__file__).resolve().parents[2]
 

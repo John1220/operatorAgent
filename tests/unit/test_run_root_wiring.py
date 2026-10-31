@@ -24,9 +24,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.kernel_db import KernelDatabase  # noqa: E402
-from operator_agent.run_layout import (  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.core.kernel_db import KernelDatabase  # noqa: E402
+from operator_agent.core.run_layout import (  # noqa: E402
     DIR_NAMES, LayoutError, PROTECTED_DIR_NAMES, new_run_root, run_layout,
 )
 from tests.unit.test_agent_runtime_wiring import (  # noqa: E402
@@ -136,7 +136,7 @@ class TestWriteForHasAProductionCaller(unittest.TestCase):
     """结构性：唯一写入口**真的有生产调用者**，而且「真机驱动在传 run_root」不许悄悄回退"""
 
     def test_conductor_calls_write_for_exactly_once(self):
-        src = (ROOT / "operator_agent" / "conductor.py").read_text(encoding="utf-8")
+        src = (ROOT / "operator_agent" / "app" / "conductor.py").read_text(encoding="utf-8")
         self.assertEqual(1, src.count("write_for("),
                          "唯一写入口在控制器里出现了不止一次（或一次都没有）"
                          "—— §22.1 的主张是「只有一个写入口」")

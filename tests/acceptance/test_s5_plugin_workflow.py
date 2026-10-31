@@ -6,7 +6,7 @@ import pytest
 
 from benchmarks.experiments.s5 import s5_formal_run, s5_plugin_probe
 from benchmarks.experiments.s5 import s5_plugin_workflow as workflow
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 
 def fake_readiness(tmp_path):
@@ -469,7 +469,7 @@ def test_study_run_one_uses_same_final_extraction_without_development_history_an
     import time
     from types import SimpleNamespace
     from benchmarks.experiments.s5 import s5_study_readiness
-    from operator_agent.run_contract import code_hash
+    from operator_agent.core.run_contract import code_hash
     output, plan = freeze_fixture(tmp_path, monkeypatch, mode='study')
     case = plan['cases'][0]
     contract_hash = case['service_contract']

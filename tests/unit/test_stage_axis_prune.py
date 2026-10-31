@@ -13,9 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.resource_check import (MemCaps, SharedBuffer,  # noqa: E402
+from operator_agent.decide.resource_check import (MemCaps, SharedBuffer,  # noqa: E402
                                            SharedMemoryEvidence)
-from operator_agent.candidates import (ParamSpace, prune_by_smem,  # noqa: E402
+from operator_agent.core.candidates import (ParamSpace, prune_by_smem,  # noqa: E402
                                        stages_of, template_resource_binding, tile_smem_bytes)
 
 # Compatibility logical numbers only; actual layouts below are declared separately.

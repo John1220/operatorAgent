@@ -18,11 +18,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.agents import SearchAgent
-from operator_agent.conductor import Conductor
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.schemas import (
+from operator_agent.generate.agents import SearchAgent
+from operator_agent.app.conductor import Conductor
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, UnifiedSketch,
     TilingStrategy, TaskType, TaskComplexity, Precision,
 )

@@ -11,10 +11,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent import quality_preflight as p
-from operator_agent.backend_caps import Cap
-from operator_agent.remote_executor import LocalExecutor, RemoteExecutor, SSHExecutor
-from operator_agent.run_contract import code_hash, digest
+from operator_agent.decide import quality_preflight as p
+from operator_agent.core.backend_caps import Cap
+from operator_agent.execute.remote_executor import LocalExecutor, RemoteExecutor, SSHExecutor
+from operator_agent.core.run_contract import code_hash, digest
 
 
 def _assignments(source):

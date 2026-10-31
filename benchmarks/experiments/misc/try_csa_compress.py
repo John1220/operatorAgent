@@ -16,11 +16,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from operator_agent.ops import csa_compress  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema, TaskType,
 )
-from operator_agent.verifier import Verifier  # noqa: E402
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
 
 # 一份「正确但不快」的候选: NumPy 实现同一公式。
 # python DSL 下 NumPy 是实现介质 (anticheat 只禁 torch), 所以它能过静态审计。

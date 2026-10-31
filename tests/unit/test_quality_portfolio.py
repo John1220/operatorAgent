@@ -12,11 +12,11 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from operator_agent import quality_evaluation as q
-from operator_agent import quality_portfolio as portfolio
-from operator_agent import quality_suite as suite
-from operator_agent.run_contract import code_hash, digest
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.decide import quality_evaluation as q
+from operator_agent.decide import quality_portfolio as portfolio
+from operator_agent.decide import quality_suite as suite
+from operator_agent.core.run_contract import code_hash, digest
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
 
 
 CASE = 'layernorm-tail'
@@ -521,7 +521,7 @@ def test_subset_merge_requires_disjoint_complete_coverage_and_identical_controls
 
 
 def test_precheck_rejected_paid_source_is_retained_and_counted(tmp_path, monkeypatch):
-    from operator_agent.single_candidate_coder import PrecheckRefused
+    from operator_agent.generate.single_candidate_coder import PrecheckRefused
     monkeypatch.setenv('LLM_MODEL', 'synthetic-model')
     monkeypatch.setenv('LLM_BASE_URL', 'https://model.invalid/v1')
     monkeypatch.setattr(q, '_preflight', lambda *args: dict(identity=dict(device='cuda', uuid='fake-offline')))

@@ -26,8 +26,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from operator_agent.hardware_caps import _KNOWN_HARDWARE, detect_hardware_caps  # noqa: E402
-from operator_agent.optimization_planner import (  # noqa: E402
+from operator_agent.core.hardware_caps import _KNOWN_HARDWARE, detect_hardware_caps  # noqa: E402
+from operator_agent.generate.optimization_planner import (  # noqa: E402
     OptimizationPlanner, _axis_field,
 )
 

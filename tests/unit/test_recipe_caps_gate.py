@@ -20,8 +20,8 @@ import os
 import re
 import unittest
 
-from operator_agent.hardware_caps import _KNOWN_HARDWARE, HardwareCaps
-from operator_agent.optimization_planner import OptimizationPlanner
+from operator_agent.core.hardware_caps import _KNOWN_HARDWARE, HardwareCaps
+from operator_agent.generate.optimization_planner import OptimizationPlanner
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RECIPE_MD = os.path.join(REPO_ROOT, "operator_agent", "skills",
@@ -254,7 +254,7 @@ class TestBoundTypeVocabularyContract(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        path = os.path.join(REPO_ROOT, "operator_agent", "verifier.py")
+        path = os.path.join(REPO_ROOT, "operator_agent", "decide", "verifier.py")
         with open(path, encoding="utf-8") as fh:
             tree = ast.parse(fh.read())
         fn = next((n for n in ast.walk(tree)
@@ -272,8 +272,8 @@ class TestBoundTypeVocabularyContract(unittest.TestCase):
         self.assertIn("compute", self.emitted)
 
     def test_opt_rules_recognizes_every_emitted_value(self):
-        from operator_agent.triton_opt_rules import TritonOptimizationRules, normalize_bound_type
-        from operator_agent.schemas import TilingStrategy
+        from operator_agent.generate.triton_opt_rules import TritonOptimizationRules, normalize_bound_type
+        from operator_agent.core.schemas import TilingStrategy
         tiling = TilingStrategy(64, 64, 32)
         # 断言必须盯住**策略文本**而不是 bound 这个词: else 兜底分支会把传入的
         # bound 插进 reason 里, 于是「走错分支」在字面上看不出来 (实测漏过一次)。
@@ -291,8 +291,8 @@ class TestBoundTypeVocabularyContract(unittest.TestCase):
 
     def test_opt_rules_mixed_branch_is_reachable_only_for_mixed(self):
         """兜底分支的 reason 不许冒充 compute/memory 建议。"""
-        from operator_agent.triton_opt_rules import TritonOptimizationRules
-        from operator_agent.schemas import TilingStrategy
+        from operator_agent.generate.triton_opt_rules import TritonOptimizationRules
+        from operator_agent.core.schemas import TilingStrategy
         for bound in ("memory", "compute"):
             _, reason = TritonOptimizationRules.recommend_tiling(
                 TilingStrategy(64, 64, 32), bound, hw_name="NVIDIA H20")
@@ -303,7 +303,7 @@ class TestBoundTypeVocabularyContract(unittest.TestCase):
 
     def test_opt_rules_accepts_the_underscore_spelling_too(self):
         """两套拼法都要认 —— 消费端归一化, 不依赖产出端只用一种写法。"""
-        from operator_agent.triton_opt_rules import normalize_bound_type
+        from operator_agent.generate.triton_opt_rules import normalize_bound_type
         for spelled in ("memory", "memory_bound", "memory-bound", "MEMORY_BOUND"):
             self.assertEqual("memory", normalize_bound_type(spelled))
         self.assertEqual("compute", normalize_bound_type("compute_bound"))
@@ -315,8 +315,8 @@ class TestBoundTypeVocabularyContract(unittest.TestCase):
         提示词里出现不存在的 API, Coder 会照抄, 然后 NameError 烧掉一轮 Fixer。
         同理「fp16 累加器」是精度 bug 不是优化, 与 R-UNIV-03 直接冲突。
         """
-        from operator_agent.triton_opt_rules import TritonOptimizationRules
-        from operator_agent.schemas import TilingStrategy
+        from operator_agent.generate.triton_opt_rules import TritonOptimizationRules
+        from operator_agent.core.schemas import TilingStrategy
         for bound in ("memory", "compute"):
             hints = TritonOptimizationRules.generate_optimization_hints(
                 bound, current_gflops=10.0, target_gflops=100.0,
@@ -331,8 +331,8 @@ class TestBoundTypeVocabularyContract(unittest.TestCase):
 
         只断言「hints 非空」挡不住这种退化 —— 兜底分支也非空。
         """
-        from operator_agent.triton_opt_rules import TritonOptimizationRules
-        from operator_agent.schemas import TilingStrategy
+        from operator_agent.generate.triton_opt_rules import TritonOptimizationRules
+        from operator_agent.core.schemas import TilingStrategy
         tiling = TilingStrategy(64, 64, 32)
         compute_hints = " ".join(TritonOptimizationRules.generate_optimization_hints(
             "compute", 10.0, 100.0, tiling))
@@ -347,8 +347,8 @@ class TestBoundTypeVocabularyContract(unittest.TestCase):
 
     def test_planner_uses_the_same_vocabulary_as_verifier(self):
         """Planner 的 memory_bound 条件必须按裸词判, 否则配方全被误杀/误放。"""
-        from operator_agent.optimization_planner import OptimizationPlanner, Recipe
-        from operator_agent.hardware_caps import _KNOWN_HARDWARE
+        from operator_agent.generate.optimization_planner import OptimizationPlanner, Recipe
+        from operator_agent.core.hardware_caps import _KNOWN_HARDWARE
 
         def _recipe(cond: str) -> Recipe:
             r = Recipe(id=f"t-{cond}", name="t", applies_to=["matmul"], applies_when=cond)

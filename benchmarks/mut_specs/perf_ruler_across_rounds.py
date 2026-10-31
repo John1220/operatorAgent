@@ -11,9 +11,9 @@
 from benchmarks.calibration.mutation_calibrate import Row
 
 FILES = {
-    "ms": "operator_agent/measurement.py",
-    "ver": "operator_agent/verifier.py",
-    "cond": "operator_agent/conductor.py",
+    "ms": "operator_agent/decide/measurement.py",
+    "ver": "operator_agent/decide/verifier.py",
+    "cond": "operator_agent/app/conductor.py",
     "hpr": "benchmarks/drivers/harness_pass_rate.py",
 }
 

@@ -18,7 +18,7 @@ import time
 from benchmarks.experiments.s5 import s5_arm_env
 from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
 from benchmarks.experiments.s5.s5_gateway_transport import UpstreamTransport
-from operator_agent import s5_shared_budget as shared
+from operator_agent.execute import s5_shared_budget as shared
 
 SCHEMA = 's5-responses-turn-v1'
 PLAN_SCHEMA = 's5-responses-plan-v1'
@@ -45,7 +45,7 @@ def _identities():
                                       's5_gateway_transport.py', 's5_gateway_supervisor.py',
                                       's5_arm_env.py', 's5_responses_turn.py')]
     files += [root.parents[2] / 'operator_agent' / name for name in
-              ('s5_shared_budget.py', 'run_layout.py', 'task_clock.py')]
+              ('execute/s5_shared_budget.py', 'core/run_layout.py', 'execute/task_clock.py')]
     return {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
 
 

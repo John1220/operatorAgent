@@ -13,10 +13,10 @@ from pathlib import Path
 import re
 
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
-from operator_agent.contract import freeze_from_task
-from operator_agent.hitl_tools import build_task
-from operator_agent.correctness import as_suite
-from operator_agent.run_contract import code_hash
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.app.hitl_tools import build_task
+from operator_agent.decide.correctness import as_suite
+from operator_agent.core.run_contract import code_hash
 
 HASH = re.compile(r'[a-f0-9]{64}\Z')
 

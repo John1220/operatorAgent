@@ -11,9 +11,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from operator_agent.remote_executor import RemoteExecutor
-from operator_agent.verifier import Verifier
-from operator_agent.schemas import (TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
+from operator_agent.execute.remote_executor import RemoteExecutor
+from operator_agent.decide.verifier import Verifier
+from operator_agent.core.schemas import (TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
                                     TaskType, TaskComplexity, Precision)
 
 TRITON_MM = '''

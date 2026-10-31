@@ -11,7 +11,7 @@ from pathlib import Path
 
 from benchmarks.experiments.s5.s5_vertical_tool_provider import _hash, _sse
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
-from operator_agent.task_clock import monotonic
+from operator_agent.execute.task_clock import monotonic
 
 CALL_ID='call_operator_verify_01'
 TOOL_NAME='mcp__operator__operator_verify'

@@ -18,9 +18,9 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "rl": "operator_agent/run_layout.py",
-    "ar": "operator_agent/agent_runtime.py",
-    "cu": "operator_agent/conductor.py",
+    "rl": "operator_agent/core/run_layout.py",
+    "ar": "operator_agent/generate/agent_runtime.py",
+    "cu": "operator_agent/app/conductor.py",
 }
 
 TARGETS = ["tests/unit/test_run_layout.py"]

@@ -23,16 +23,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.backend_caps import (
+from operator_agent.core.backend_caps import (
     OPTIONAL_CAP_METHODS, Backend, CapabilityMissing, Cap, concrete_backends,
 )
-from operator_agent.mock_gpu import MockGPU, _has_cuda
-from operator_agent.remote_executor import (
+from operator_agent.execute.mock_gpu import MockGPU, _has_cuda
+from operator_agent.execute.remote_executor import (
     HTTPExecutor, LocalExecutor, RemoteExecutor, SSHExecutor,
 )
 
 REPO = Path(__file__).resolve().parents[2]
-PRODUCTION = sorted((REPO / "operator_agent").glob("*.py"))
+PRODUCTION = sorted((REPO / "operator_agent").rglob("*.py"))
 
 #: SSHExecutor(nvidia) 的完整声明。xpu 不声明 GPU_PINNING 或 CUDA REFERENCE_IDENTITY。
 #: `_pinned_gpu()` 依赖
@@ -212,7 +212,7 @@ class TestFacadeOnlyForwards(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tree = _tree(REPO / "operator_agent" / "remote_executor.py")
+        self.tree = _tree(REPO / "operator_agent" / "execute" / "remote_executor.py")
         self.cls = _class_def(self.tree, "RemoteExecutor")
         self.methods = {n.name: n for n in self.cls.body
                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
@@ -431,7 +431,7 @@ class TestRequireHasAConsumer(unittest.TestCase):
 
     def test_require_is_called_outside_its_own_module(self):
         sites = [s for s in self._call_sites()
-                 if not s.startswith("operator_agent/backend_caps.py")]
+                 if not s.startswith("operator_agent/core/backend_caps.py")]
         self.assertTrue(sites, "require() 没有任何真实消费方 —— 它就是死词汇")
 
     def test_require_raises_with_every_missing_cap(self):

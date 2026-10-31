@@ -24,7 +24,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from operator_agent.prompt_manager import PromptManager  # noqa: E402
+from operator_agent.generate.prompt_manager import PromptManager  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PKG = os.path.join(REPO_ROOT, "operator_agent")
@@ -65,43 +65,42 @@ def _string_values_assigned_to(fn_node, name: str) -> set:
 
 
 def _render_sites():
-    """枚举 `operator_agent/*.py` 里所有 `pm.render(<模板>, **kwargs)` 调用点。
+    """枚举 `operator_agent/**/*.py` 里所有 `pm.render(<模板>, **kwargs)` 调用点。
 
     返回 `[(文件, 行号, 模板名, {传出去的变量名})]` —— 动态模板名会展开成多条。
+    2026-10-31: 包分五层后必须递归枚举；平铺 `listdir` 只会看到 `__init__.py`，
+    于是这份守卫会「绿在什么都没看上」。
     """
     sites = []
-    for fname in sorted(os.listdir(PKG)):
-        if not fname.endswith(".py"):
-            continue
-        path = os.path.join(PKG, fname)
-        tree = ast.parse(io.open(path, encoding="utf-8").read())
-        parents = {}
-        for node in ast.walk(tree):
-            for child in ast.iter_child_nodes(node):
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    parents[child] = node
-        for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "render" and node.args):
+    for dirpath, _dirs, names in os.walk(PKG):
+        for fname in sorted(names):
+            if not fname.endswith(".py"):
                 continue
-            kwargs = {kw.arg for kw in node.keywords if kw.arg} - CONTROL
-            first = node.args[0]
-            if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                names = {first.value}
-            elif isinstance(first, ast.Name):
-                owner = next((n for n in ast.walk(tree)
-                              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                              and any(a is node for a in ast.walk(n))), None)
-                names = _string_values_assigned_to(owner, first.id) if owner else set()
-                if not names:
-                    raise AssertionError(
-                        f"{path}:{node.lineno} render 的模板名是变量 {first.id} 但找不到"
-                        f"它的字面量赋值 —— 枚举会漏掉这一处, 守卫必须报错而不是静默少覆盖")
-            else:
-                raise AssertionError(f"{path}:{node.lineno} render 的模板名形态不认识: "
-                                     f"{type(first).__name__}")
-            for tpl in sorted(names):
-                sites.append((f"operator_agent/{fname}", node.lineno, tpl, kwargs))
+            path = os.path.join(dirpath, fname)
+            rel = os.path.relpath(path, PKG).replace(os.sep, "/")
+            tree = ast.parse(io.open(path, encoding="utf-8").read())
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "render" and node.args):
+                    continue
+                kwargs = {kw.arg for kw in node.keywords if kw.arg} - CONTROL
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    names_ = {first.value}
+                elif isinstance(first, ast.Name):
+                    owner = next((n for n in ast.walk(tree)
+                                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                  and any(a is node for a in ast.walk(n))), None)
+                    names_ = _string_values_assigned_to(owner, first.id) if owner else set()
+                    if not names_:
+                        raise AssertionError(
+                            f"{path}:{node.lineno} render 的模板名是变量 {first.id} 但找不到"
+                            f"它的字面量赋值 —— 枚举会漏掉这一处, 守卫必须报错而不是静默少覆盖")
+                else:
+                    raise AssertionError(f"{path}:{node.lineno} render 的模板名形态不认识: "
+                                         f"{type(first).__name__}")
+                for tpl in sorted(names_):
+                    sites.append((f"operator_agent/{rel}", node.lineno, tpl, kwargs))
     return sites
 
 

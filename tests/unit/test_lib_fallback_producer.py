@@ -13,17 +13,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.anticheat import (
+from operator_agent.decide.anticheat import (
     CheatDetectedError, lib_fallback_from_error, lib_fallback_metrics, shield_torch,
     static_audit,
 )
-from operator_agent.eligibility import ALL_FALSE, derive_eligibility
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (
+from operator_agent.decide.eligibility import ALL_FALSE, derive_eligibility
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity,
     TaskSchema, TaskType, VerificationLevel,
 )
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 
 from backend_fakes import DeclaredFakeBackend
 

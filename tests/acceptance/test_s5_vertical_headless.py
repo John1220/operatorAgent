@@ -5,7 +5,7 @@ import shutil
 import pytest
 from benchmarks.experiments.s5.s5_fake_http import FakeHTTPServer
 from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT, run_headless
-from operator_agent import s5_shared_budget as shared
+from operator_agent.execute import s5_shared_budget as shared
 
 
 @pytest.mark.skipif(not shutil.which('node') or not (DSH_ROOT/'dsh/lib/bin.js').is_file(),

@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.escalation import (  # noqa: E402
+from operator_agent.decide.escalation import (  # noqa: E402
     OCCUPANCY_FLOOR_CTAS, occupancy_bound_evidence, smem_bound_evidence)
 
 FULL = dict(shared_mem_per_sm_kb=228, max_threads_per_sm=2048)
@@ -74,7 +74,7 @@ class TestTheInstrumentHasAProducerOnTheRealPath(unittest.TestCase):
 
     def test_the_caps_publish_carries_the_thread_bound(self):
         from operator_agent import MockGPU
-        from operator_agent.verifier import Verifier
+        from operator_agent.decide.verifier import Verifier
 
         metrics = Verifier(MockGPU())._detect_theoretical_peak()
         self.assertIn("max_threads_per_sm", metrics,
@@ -87,8 +87,8 @@ class TestTheInstrumentHasAProducerOnTheRealPath(unittest.TestCase):
     def test_it_is_the_same_number_as_the_caps_field(self):
         """与 `shared_mem_per_sm_kb` 同一条真源纪律: 不许在这里另抄一个数字"""
         from operator_agent import MockGPU
-        from operator_agent.hardware_caps import detect_hardware_caps
-        from operator_agent.verifier import Verifier
+        from operator_agent.core.hardware_caps import detect_hardware_caps
+        from operator_agent.decide.verifier import Verifier
 
         v = Verifier(MockGPU())
         metrics = v._detect_theoretical_peak()

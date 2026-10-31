@@ -28,9 +28,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.bandit import Bandit
-from operator_agent.budget import BudgetLedger, BudgetPlan
-from operator_agent.selection import (DEFAULT_EPSILON, EXPLOIT, EXPLORE,
+from operator_agent.generate.bandit import Bandit
+from operator_agent.execute.budget import BudgetLedger, BudgetPlan
+from operator_agent.generate.selection import (DEFAULT_EPSILON, EXPLOIT, EXPLORE,
                                       MODE_TO_PHASE, choose, explore_draw,
                                       modes_from_phases, phase_of, score_candidate)
 
@@ -48,7 +48,7 @@ class TestTheDrawIsReproducible(unittest.TestCase):
     def test_no_random_module_is_used(self):
         """抽签不许有状态型随机源 —— 「跑完能离线复算」是这个仓的基本要求"""
         src = (Path(__file__).resolve().parents[2] / "operator_agent"
-               / "selection.py").read_text(encoding="utf-8")
+               / "generate/selection.py").read_text(encoding="utf-8")
         for forbidden in ("import random", "random.", "shuffle", "urandom"):
             self.assertNotIn(forbidden, src, f"{forbidden}: 抽签必须是纯函数")
 
@@ -229,9 +229,9 @@ class TestTheConductorUsesIt(unittest.TestCase):
 
     def _run(self, *, backend=None, plan=None, rounds=2, min_speedup=99.0,
              epsilon=None, search=None, space=True):
-        from operator_agent.conductor import Conductor
-        from operator_agent.kernel_db import KernelDatabase
-        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.app.conductor import Conductor
+        from operator_agent.core.kernel_db import KernelDatabase
+        from operator_agent.execute.mock_gpu import MockGPU
         from tests.unit.test_template_queue import (_TemplateBackend, _DesignerOnlyLLM,
                                                _inputs, _task)
         backend = backend or (_TemplateBackend() if space else MockGPU())
@@ -303,7 +303,7 @@ class TestTheConductorUsesIt(unittest.TestCase):
         而分相预算的全部意义就是让两格的花费分别看得见。
         """
         from tests.unit.test_template_queue import _TemplateBackend
-        from operator_agent.candidates import ParamSpace
+        from operator_agent.core.candidates import ParamSpace
         # A single declared point guarantees reuse; an unproved resource proxy
         # must not be used to silently reduce a larger space to that point.
         space = ParamSpace(template_id='phase-accounting-single-point', backend='fake',
@@ -356,9 +356,9 @@ class TestTheConductorUsesIt(unittest.TestCase):
         当场停 (`budget_exhausted`) —— 那是**正确**的 fail-closed, 与计划退化无关。
         「计划退化成 0」要在判据那一层测。
         """
-        from operator_agent.conductor import Conductor
-        from operator_agent.kernel_db import KernelDatabase
-        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.app.conductor import Conductor
+        from operator_agent.core.kernel_db import KernelDatabase
+        from operator_agent.execute.mock_gpu import MockGPU
         plan = BudgetPlan(oracle_total=20)            # 标定 1 / 探索 11 / 精修 6 / 预留 2
         c = Conductor(backend=MockGPU(), kernel_db=KernelDatabase(jsonl_path=None),
                       llm=None, budget=plan)
@@ -381,7 +381,7 @@ class TestTheConductorUsesIt(unittest.TestCase):
     def test_the_plan_constraint_is_passed_to_the_selector(self):
         """接线: 有格子时选择器拿到的就是那批格子 (计划真的参与选择)"""
         seen = []
-        import operator_agent.conductor as cond
+        import operator_agent.app.conductor as cond
         real = cond.choose
 
         def spy(cands, bandit, key, **kw):

@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import tempfile
 
-from operator_agent import hitl_tools as ht
+from operator_agent.app import hitl_tools as ht
 
 SKETCH = {"algorithm": "matmul",
           "tiling": {"block_m": 64, "block_n": 64, "block_k": 32},

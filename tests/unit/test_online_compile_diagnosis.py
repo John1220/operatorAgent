@@ -16,21 +16,21 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent.compile_evidence import capture_compile_failure
-from operator_agent.contract import freeze_from_task
-from operator_agent.correctness import as_suite
-from operator_agent.fixer import FixerAgent
-from operator_agent.measurement import TRANSPORT_ANSWERED
-from operator_agent.quality_suite import task_for
-from operator_agent.repair_diagnoser import (
+from operator_agent.decide.compile_evidence import capture_compile_failure
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.decide.correctness import as_suite
+from operator_agent.generate.fixer import FixerAgent
+from operator_agent.decide.measurement import TRANSPORT_ANSWERED
+from operator_agent.decide.quality_suite import task_for
+from operator_agent.generate.repair_diagnoser import (
     diagnose_candidate,
     validate_candidate_diagnosis,
 )
-from operator_agent.repair_loop import repair
-from operator_agent.repair_scalar_diagnoser import RECOGNIZER as SCALAR_RECOGNIZER
-from operator_agent.repair_stride_diagnoser import GUARDED_RECOGNIZER
-from operator_agent.run_contract import code_hash, digest
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.generate.repair_loop import repair
+from operator_agent.generate.repair_scalar_diagnoser import RECOGNIZER as SCALAR_RECOGNIZER
+from operator_agent.generate.repair_stride_diagnoser import GUARDED_RECOGNIZER
+from operator_agent.core.run_contract import code_hash, digest
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / 'fixtures'

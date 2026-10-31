@@ -2,7 +2,7 @@
 import collections
 import math
 import random
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 
 def aggregate(plan, records, bootstrap_samples=10000, seed=20261029):

@@ -122,7 +122,7 @@ def test_shared_gpu_pin_and_policy_are_frozen_for_all_services(tmp_path,monkeypa
 
 
 def test_shared_resource_policy_drift_refuses_before_credentials(tmp_path,monkeypatch):
-    from operator_agent.run_contract import digest
+    from operator_agent.core.run_contract import digest
     plan,policy=pilot.freeze(tmp_path/'plan',isolation_report='unit-fixture')
     policy['resources']=dict(mode='shared-known-processes',min_free_mib=8192,
                              max_util_pct=5,allowed_compute_pids=[1])

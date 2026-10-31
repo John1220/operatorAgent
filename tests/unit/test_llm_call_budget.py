@@ -7,9 +7,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent import llm_client as lc, llm_budget as lb, llm_transport as transport
-from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
-from operator_agent.llm_client import LLMClient
+from operator_agent.execute import llm_client as lc, llm_budget as lb, llm_transport as transport
+from operator_agent.execute.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
+from operator_agent.execute.llm_client import LLMClient
 
 
 def client(tmp_path, **changes):

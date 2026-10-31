@@ -16,8 +16,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from operator_agent.kernel_db import KernelDatabase, KernelRecord, _perf_weight
-from operator_agent.measurement import persist_decision
+from operator_agent.core.kernel_db import KernelDatabase, KernelRecord, _perf_weight
+from operator_agent.decide.measurement import persist_decision
 
 
 def _rec(kid="k1", algorithm="matmul", hardware="nvidia_gpu", dsl="triton",
@@ -217,21 +217,21 @@ class TestGateWiring(unittest.TestCase):
     """
 
     def _conductor(self, path):
-        from operator_agent.conductor import Conductor
-        from operator_agent.kernel_db import KernelDatabase
+        from operator_agent.app.conductor import Conductor
+        from operator_agent.core.kernel_db import KernelDatabase
         c = Conductor.__new__(Conductor)          # 绕开 LLM/后端的构造成本
         c.kernel_db = KernelDatabase(jsonl_path=path)
         return c
 
     def _artifact(self, metrics):
-        from operator_agent.schemas import KernelArtifact
+        from operator_agent.core.schemas import KernelArtifact
         # all_passed 是 KernelArtifact 上的只读 property, 由 verification_results 推出来;
         # _save_to_db 不看它 (调用方才看), 所以这里只塞 benchmark_data。
         return KernelArtifact(kernel_id="kw", task_id="t", code="# x",
                               language="triton", benchmark_data=metrics)
 
     def _task(self, dsl="triton"):
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+        from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                             TargetSpec, TaskComplexity, TaskSchema,
                                             TaskType)
         return TaskSchema(task_type=TaskType.OPERATOR_GENERATION,
@@ -252,7 +252,7 @@ class TestGateWiring(unittest.TestCase):
         return m
 
     def _confirmed(self, metrics):
-        from operator_agent.confirm import ConfirmRecord
+        from operator_agent.core.confirm import ConfirmRecord
         art = self._artifact(metrics)
         art.remeasure = ConfirmRecord(ok=True, speedup=1.4, validity="valid",
                                       independent=True)
@@ -296,7 +296,7 @@ class TestGateWiring(unittest.TestCase):
         —— 生产路径由 `_produce_remeasure` 无条件补上 (`tests/unit/test_spine_wiring.py`
         有端到端用例钉住), 这里直接给记录是为了只验「门的结果决定落盘」这一根线。
         """
-        from operator_agent.confirm import ConfirmRecord
+        from operator_agent.core.confirm import ConfirmRecord
         with tempfile.TemporaryDirectory() as d:
             p = str(Path(d) / "kernel_db.jsonl")
             c = self._conductor(p)
@@ -384,8 +384,8 @@ class TestHermetic(unittest.TestCase):
     def test_artifact_store_honours_the_output_dir_env(self):
         """产物目录也要能重定向, 否则「历史语料」里 99% 是单元测试现场
         (doc 43 第三节量到的正是这件事)。"""
-        from operator_agent.artifact_store import ArtifactStore
-        from operator_agent.schemas import KernelArtifact, SourceSpec, TargetSpec, \
+        from operator_agent.core.artifact_store import ArtifactStore
+        from operator_agent.core.schemas import KernelArtifact, SourceSpec, TargetSpec, \
             ConstraintSpec, TaskSchema, TaskType, TaskComplexity, Precision
         with tempfile.TemporaryDirectory() as d:
             task = TaskSchema(
@@ -417,7 +417,7 @@ class TestInjectedCorpusIsTheOneWritten(unittest.TestCase):
     """
 
     def _record(self, conductor, task_id="t-inject"):
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+        from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                              TargetSpec, TaskComplexity, TaskSchema,
                                              TaskType, VerificationLevel, VerificationResult)
         task = TaskSchema(
@@ -432,8 +432,8 @@ class TestInjectedCorpusIsTheOneWritten(unittest.TestCase):
         return task_id
 
     def test_empty_injected_failure_db_survives_conductor(self):
-        from operator_agent.conductor import Conductor
-        from operator_agent.kernel_db import FailureDatabase
+        from operator_agent.app.conductor import Conductor
+        from operator_agent.core.kernel_db import FailureDatabase
         repo_db = Path(__file__).resolve().parents[2] / "output" / "failure_db.jsonl"
         repo_before = repo_db.stat().st_size if repo_db.exists() else None
         with tempfile.TemporaryDirectory() as d:
@@ -453,7 +453,7 @@ class TestInjectedCorpusIsTheOneWritten(unittest.TestCase):
 
     def test_passing_none_still_gets_a_working_default(self):
         """对照: 不注入时仍然要有一个可用的默认实例, 否则这条修复改坏了默认分支"""
-        from operator_agent.conductor import Conductor
+        from operator_agent.app.conductor import Conductor
         with mock.patch.dict(os.environ, {"OPERATOR_AGENT_FAILURE_DB": "off"}):
             conductor = Conductor(kernel_db=KernelDatabase(jsonl_path="none"), llm=None)
             self._record(conductor)

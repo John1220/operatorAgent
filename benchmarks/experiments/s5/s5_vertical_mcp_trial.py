@@ -14,8 +14,8 @@ from pathlib import Path
 from benchmarks.experiments.s5.s5_fake_http import FakeHTTPServer
 from benchmarks.experiments.s5.s5_vertical_mcp_headless import run_mcp_headless
 from benchmarks.experiments.s5.s5_vertical_mcp_provider import ScriptedMCPProvider, TOOL_NAME
-from operator_agent import s5_shared_budget as shared
-from operator_agent.hitl_tools import prepare
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.app.hitl_tools import prepare
 
 TASK_ID='vertical-mcp-fixture-01'
 DECLARATION=dict(request='layernorm fp32',shapes=[[7,33]],hardware='mock_gpu',

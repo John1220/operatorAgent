@@ -8,7 +8,7 @@ from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
 from benchmarks.experiments.s5.s5_vertical_tool_headless import run_tool_headless
 from benchmarks.experiments.s5.s5_vertical_tool_service import MockValidationService
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
-from operator_agent import s5_shared_budget as shared
+from operator_agent.execute import s5_shared_budget as shared
 
 
 def chunk(delta, reason=None):

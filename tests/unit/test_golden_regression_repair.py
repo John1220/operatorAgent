@@ -11,8 +11,8 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from operator_agent.mock_gpu import ExecutionResult
-from operator_agent.verifier import Verifier
+from operator_agent.execute.mock_gpu import ExecutionResult
+from operator_agent.decide.verifier import Verifier
 from tests import golden_regression as gr
 from tests.backend_fakes import fake_backend
 

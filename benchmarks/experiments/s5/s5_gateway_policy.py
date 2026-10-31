@@ -18,7 +18,7 @@ import math
 from pathlib import Path
 import threading
 
-from operator_agent import s5_shared_budget as shared
+from operator_agent.execute import s5_shared_budget as shared
 from benchmarks.experiments.s5.s5_gateway_transport import MAX_RESPONSE_BYTES
 
 _ALLOWED = frozenset({'model','messages','max_tokens','max_completion_tokens',

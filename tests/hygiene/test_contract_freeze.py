@@ -8,7 +8,7 @@
 """
 import unittest
 
-from operator_agent.contract import (BaselineDef, ContractError, DTypeSemantics,
+from operator_agent.core.contract import (BaselineDef, ContractError, DTypeSemantics,
                                      FrozenContract, ShapeDist, assert_hash,
                                      freeze, load_dict)
 

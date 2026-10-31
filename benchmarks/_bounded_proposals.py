@@ -19,8 +19,8 @@ import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from operator_agent.llm_client import CostTracker, parse_usage, _estimate_tokens_from_text
-from operator_agent.run_contract import atomic_json, code_hash, digest
+from operator_agent.execute.llm_client import CostTracker, parse_usage, _estimate_tokens_from_text
+from operator_agent.core.run_contract import atomic_json, code_hash, digest
 
 LIMITS = dict(max_calls=2, max_prompt_bytes=16384, max_response_bytes=65536,
               max_output_tokens=512, total_output_token_reservations=1024,

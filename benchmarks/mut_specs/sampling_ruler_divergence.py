@@ -18,8 +18,8 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "ver": "operator_agent/verifier.py",
-    "tol": "operator_agent/tolerance.py",
+    "ver": "operator_agent/decide/verifier.py",
+    "tol": "operator_agent/core/tolerance.py",
 }
 
 TARGETS = [

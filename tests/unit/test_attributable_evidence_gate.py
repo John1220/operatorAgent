@@ -72,7 +72,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.drivers.harness_pass_rate import (compare_runs, format_comparison,  # noqa: E402
                                           pair_cases)
-from operator_agent.measurement import (ATTRIBUTABLE_OUTCOMES,  # noqa: E402
+from operator_agent.decide.measurement import (ATTRIBUTABLE_OUTCOMES,  # noqa: E402
                                         attributable_evidence)
 
 A_ROOT = Path("output/harness/20260928_174223/pass_rate.json")

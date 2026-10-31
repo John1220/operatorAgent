@@ -20,15 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.agents import CoderAgent
-from operator_agent.conductor import Conductor, Router
-from operator_agent.fixer import FixerAgent
-from operator_agent.kernel_db import KernelDatabase, FailureDatabase, FailureRecord
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.prompt_manager import PromptManager
-from operator_agent.remote_executor import RemoteExecutor, _get_exec_lock
-from operator_agent.verifier import Verifier
-from operator_agent.schemas import (
+from operator_agent.generate.agents import CoderAgent
+from operator_agent.app.conductor import Conductor, Router
+from operator_agent.generate.fixer import FixerAgent
+from operator_agent.core.kernel_db import KernelDatabase, FailureDatabase, FailureRecord
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.generate.prompt_manager import PromptManager
+from operator_agent.execute.remote_executor import RemoteExecutor, _get_exec_lock
+from operator_agent.decide.verifier import Verifier
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, UnifiedSketch,
     TaskType, TaskComplexity, Precision, RouteType, VerificationLevel,
     TilingStrategy, TritonCompileConfig, PipelineStage, DSLEnum,
@@ -228,7 +228,7 @@ class TestFailureDatabase(unittest.TestCase):
                             root_cause="docstring 起始引号丢失导致语法错误"))
         llm = MockLLM(chat_handler=lambda p: FENCED_VALID)
         fixer = FixerAgent(llm=llm, failure_db=db)
-        from operator_agent.schemas import VerificationResult
+        from operator_agent.core.schemas import VerificationResult
         fixer.run(BROKEN_MATMUL, _make_task(), [
             VerificationResult(level=VerificationLevel.L1_COMPILE,
                                passed=False, message="编译失败"),

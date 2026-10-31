@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent import cli, hitl_tools as ht, mcp_server
+from operator_agent.app import cli, hitl_tools as ht, mcp_server
 
 
 DEFAULT = dict(wall_clock_s=1800.0, max_llm_calls=24, oracle_total=20)
@@ -14,7 +14,7 @@ EXPLICIT = dict(wall_clock_s=12.5, max_llm_calls=7, oracle_total=11)
 
 @pytest.fixture
 def launcher(monkeypatch):
-    from operator_agent import exec_guard
+    from operator_agent.execute import exec_guard
     start = Mock(return_value=SimpleNamespace(pid=12345))
     monkeypatch.setattr(exec_guard, 'start_background_worker', start)
     monkeypatch.setattr(ht, '_llm_problem', lambda: None)

@@ -34,10 +34,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.confirm import UnableToEstablish
-from operator_agent.report import (REPORT_NAME, build_report, collect_unable,
+from operator_agent.core.confirm import UnableToEstablish
+from operator_agent.core.report import (REPORT_NAME, build_report, collect_unable,
                                    write_report)
-from operator_agent.schemas import (ConstraintSpec, KernelArtifact, Precision,
+from operator_agent.core.schemas import (ConstraintSpec, KernelArtifact, Precision,
                                     SourceSpec, TargetSpec, TaskComplexity,
                                     TaskSchema, TaskType)
 

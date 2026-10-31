@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.bandit import Bandit
+from operator_agent.generate.bandit import Bandit
 
 
 class TestColdStartKeepsThePrior(unittest.TestCase):
@@ -120,7 +120,7 @@ class TestOrdering(unittest.TestCase):
         self.assertEqual(build().order(["a", "b", "c", "d"]),
                          build().order(["a", "b", "c", "d"]))
         src = (Path(__file__).resolve().parents[2] / "operator_agent"
-               / "bandit.py").read_text(encoding="utf-8")
+               / "generate/bandit.py").read_text(encoding="utf-8")
         for forbidden in ("import random", "random.", "shuffle", "np.random"):
             self.assertNotIn(forbidden, src, f"{forbidden}: 排序不许有随机源")
 

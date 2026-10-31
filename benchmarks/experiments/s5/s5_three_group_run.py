@@ -23,8 +23,8 @@ from benchmarks.experiments.s5 import s5_arm_env, s5_preflight_plan, s5_verify_s
 from benchmarks.experiments.s5.s5_fake_http import FakeHTTPServer
 from benchmarks.experiments.s5.s5_vertical_headless import NODE
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
-from operator_agent import s5_shared_budget as shared
-from operator_agent.run_contract import digest
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.core.run_contract import digest
 
 SCHEMA_RECORD = 's5-preflight-arm-record-v1'
 _headless = s5_arm_env.start_headless

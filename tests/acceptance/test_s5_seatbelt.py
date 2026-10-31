@@ -99,7 +99,7 @@ def test_actual_dsh_bootstraps_inside_outer_file_boundary(tmp_path, staged, arm)
     from benchmarks.experiments.s5.s5_fake_responses_upstream import FakeResponsesUpstream
     from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
     from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
-    from operator_agent import s5_shared_budget as shared
+    from operator_agent.execute import s5_shared_budget as shared
     from benchmarks.experiments.s5.s5_formal_run import _final_text
     path=tmp_path/'budget.sqlite'
     shared.create(path,task_id='boot-'+arm,max_calls=1,max_output_tokens=256,
@@ -119,7 +119,7 @@ def test_actual_dsh_bootstraps_inside_outer_file_boundary(tmp_path, staged, arm)
 @pytest.mark.skipif(not READY, reason='macOS Seatbelt/runtime unavailable')
 def test_probe_report_binds_actual_dsh_visibility_and_feedback(tmp_path):
     from benchmarks.experiments.s5 import s5_isolation_probe as probe
-    from operator_agent.run_contract import digest
+    from operator_agent.core.run_contract import digest
     report=probe.run(tmp_path/'acceptance')
     assert report['passed'] and report['real_model_calls']==report['gpu_executions']==0
     path=tmp_path/'acceptance/summary.json'

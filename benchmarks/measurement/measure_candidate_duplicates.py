@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from operator_agent._harness_controls import enable_for_harness
+from operator_agent.app._harness_controls import enable_for_harness
 enable_for_harness()
 
 # 语料与日志都不该被一次测量写进仓库
@@ -27,10 +27,10 @@ os.environ.setdefault("OPERATOR_AGENT_LOG_DIR", "off")
 
 import numpy as np  # noqa: E402
 
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.llm_client import LLMClient  # noqa: E402
-from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.execute.llm_client import LLMClient  # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutor  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType,
 )

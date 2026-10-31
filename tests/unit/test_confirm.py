@@ -4,7 +4,7 @@
 """
 import unittest
 
-from operator_agent.confirm import (ConfirmRecord, UnableToEstablish,
+from operator_agent.core.confirm import (ConfirmRecord, UnableToEstablish,
                                     confirm_persist)
 
 

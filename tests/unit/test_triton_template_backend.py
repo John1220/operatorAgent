@@ -12,11 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.anticheat import static_audit  # noqa: E402
-from operator_agent.candidates import PruneResult, prune_by_smem  # noqa: E402
-from operator_agent.interface_contract import check_kernel_interface  # noqa: E402
-from operator_agent.resource_check import MemCaps  # noqa: E402
-from operator_agent.triton_matmul_template import (  # noqa: E402
+from operator_agent.decide.anticheat import static_audit  # noqa: E402
+from operator_agent.core.candidates import PruneResult, prune_by_smem  # noqa: E402
+from operator_agent.core.interface_contract import check_kernel_interface  # noqa: E402
+from operator_agent.decide.resource_check import MemCaps  # noqa: E402
+from operator_agent.generate.triton_matmul_template import (  # noqa: E402
     INSTANTIATOR_VER, TEMPLATE_ID, TritonMatmulTemplateBackend,
     TritonTemplateSSHExecutor, instantiate, param_space)
 
@@ -105,7 +105,7 @@ class TestTheProtocolIsHonoured(unittest.TestCase):
         用一个只补上执行侧抽象方法的宿主类, 验证**继承来的**两个默认:
         `param_space()` 返 None（有意义的答案）、`instantiate()` raise（没有默认实例化）。
         """
-        from operator_agent.backend_caps import Backend
+        from operator_agent.core.backend_caps import Backend
 
         class Hosted(Backend):
             @property
@@ -176,7 +176,7 @@ class TestTheComposedBackendServesBothHalves(unittest.TestCase):
         绿把地雷埋住了。证人必须是**子进程**: 类级污染跨不出本进程。
         """
         code = (
-            "from operator_agent.triton_matmul_template import ("
+            "from operator_agent.generate.triton_matmul_template import ("
             "TEMPLATE_ID, TritonTemplateSSHExecutor)\n"
             "class Exec:\n"
             "    label = 'exec'\n"

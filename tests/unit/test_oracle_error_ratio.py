@@ -80,8 +80,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from operator_agent import MockGPU, Verifier
-from operator_agent import tolerance
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.core import tolerance
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
 
 CORRECT = "import numpy as np\n\ndef kernel(A=None, B=None, **kw):\n    return A @ B\n"

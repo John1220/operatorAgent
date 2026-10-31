@@ -23,15 +23,15 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent import mock_gpu as mock_gpu_module  # noqa: E402
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.exec_guard import (  # noqa: E402
+from operator_agent.execute import mock_gpu as mock_gpu_module  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.execute.exec_guard import (  # noqa: E402
     STATUS_OK, GuardRefusal, GuardResult, Limits,
 )
-from operator_agent.kernel_db import failure_class_of  # noqa: E402
-from operator_agent.mock_gpu import MockGPU, TRITON_COMPILE_IMPORTS  # noqa: E402
-from operator_agent.remote_executor import LocalExecutor  # noqa: E402
-from operator_agent.verifier import Verifier  # noqa: E402
+from operator_agent.core.kernel_db import failure_class_of  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU, TRITON_COMPILE_IMPORTS  # noqa: E402
+from operator_agent.execute.remote_executor import LocalExecutor  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
 
 HANG = "while True:\n    pass\n"
 OK_CODE = "def kernel(**kwargs):\n    return 1\n"
@@ -143,7 +143,7 @@ class TestTheLimitsChainReachesTheGuard(unittest.TestCase):
 
     def test_no_limits_means_the_module_default(self):
         """`None` 不是「没有上限」：默认值在 `exec_guard` 里只有一处"""
-        from operator_agent.exec_guard import (COMPILE_LIMITS, MODE_COMPILE,
+        from operator_agent.execute.exec_guard import (COMPILE_LIMITS, MODE_COMPILE,
                                                MODE_RUN, limits_for)
         self.assertIsNone(MockGPU().compile_limits)
         self.assertEqual(MODE_RUN, "run")

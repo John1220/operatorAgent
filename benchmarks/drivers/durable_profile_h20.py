@@ -24,15 +24,15 @@ from benchmarks.drivers.correctness_profiles_h20 import ProfileSSH, compact_trac
 from benchmarks.drivers.input_fidelity_h20 import dumps
 from benchmarks.drivers.reference_profile_h20 import trial_code
 from operator_agent import Conductor, IntentParser, KernelDatabase
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.backend_caps import Cap
-from operator_agent.kernel_db import FailureDatabase
-from operator_agent.input_fidelity import MAX_STORAGE_BYTES
-from operator_agent.reference_contract import ReferenceIdentityError, registered_reference, validate_receipt
-from operator_agent.run_contract import atomic_json, code_hash, digest
-from operator_agent.run_layout import new_run_root
-from operator_agent.schemas import UnifiedSketch, VerificationLevel as Level
-from operator_agent.session_inputs import PROTOCOL as INPUT_CACHE_PROTOCOL
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.core.backend_caps import Cap
+from operator_agent.core.kernel_db import FailureDatabase
+from operator_agent.decide.input_fidelity import MAX_STORAGE_BYTES
+from operator_agent.decide.reference_contract import ReferenceIdentityError, registered_reference, validate_receipt
+from operator_agent.core.run_contract import atomic_json, code_hash, digest
+from operator_agent.core.run_layout import new_run_root
+from operator_agent.core.schemas import UnifiedSketch, VerificationLevel as Level
+from operator_agent.decide.session_inputs import PROTOCOL as INPUT_CACHE_PROTOCOL
 
 WORKLOADS = ((1024, 1024), (4096, 4096), (4096, 8192))
 EXTENDED_WORKLOADS = WORKLOADS + ((8192, 8192), (8192, 15360), (8192, 12288))
@@ -212,8 +212,8 @@ def corpus_readback(path, before, artifact, task, metrics):
 
 def run(args):
     workloads = selected_workloads(args)
-    from operator_agent.cuda_calibration import read_calibration
-    from operator_agent.cuda_ruler_profile import read_profile
+    from operator_agent.decide.cuda_calibration import read_calibration
+    from operator_agent.decide.cuda_ruler_profile import read_profile
     if getattr(args, "cuda_ruler_profile", None) and getattr(args, "cuda_calibration", None):
         raise ValueError("select either audit-only calibration or a versioned CUDA ruler profile")
     profile = read_profile(args.cuda_ruler_profile) if getattr(args, "cuda_ruler_profile", None) else None
@@ -294,7 +294,7 @@ def run(args):
             errors.extend(receipt_errors(t.constraints.reference_contract, trace))
             errors.extend(transfer_errors(trace))
             if calibration:
-                from operator_agent.cuda_calibration import validate_probe
+                from operator_agent.decide.cuda_calibration import validate_probe
                 probes = [r.get("response", {}) for r in trace
                           if r["request"]["action"] == "cuda_calibration_probe"]
                 if len(probes) != 2:
@@ -324,7 +324,7 @@ def run(args):
             elif after != before:
                 errors.append("denied admission nevertheless wrote corpus")
             if profile and l3 is not None:
-                from operator_agent.cuda_ruler_profile import anchor_reading
+                from operator_agent.decide.cuda_ruler_profile import anchor_reading
                 for probe in probes:
                     if not anchor_reading(probe, profile)["ok"]:
                         errors.append("native absolute anchor rejected")

@@ -11,7 +11,7 @@ from benchmarks.experiments.s5.s5_fake_responses_upstream import FakeResponsesUp
 from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
 from benchmarks.experiments.s5.s5_gateway_policy import GatewayPolicy, PolicyRefused
 from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
-from operator_agent import s5_shared_budget as shared
+from operator_agent.execute import s5_shared_budget as shared
 
 DSH_READY = bool(shutil.which('node')) and (DSH_ROOT / 'dsh' / 'lib' / 'bin.js').is_file()
 TASK_ID = 'responses-fixture'

@@ -8,7 +8,7 @@
 
 背景 (缺口 3 现在是有后果的了)
 ------------------------------
-`operator_agent/verifier.py:_PEAK_BY_NAME["h20"]` 写的是 `(31.6, 71.6, 138.2, 138.3,
+`operator_agent/decide/verifier.py:_PEAK_BY_NAME["h20"]` 写的是 `(31.6, 71.6, 138.2, 138.3,
 3680.0)`，注释说这些数是 2026-09-16 用 cuBLAS 8192³ / triad **实测**的，不是 datasheet。
 也就是说我们已经采纳了「measured peak」这条外部做法 —— 但把它当成了一个标量常数。
 

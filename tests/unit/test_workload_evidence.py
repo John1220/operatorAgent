@@ -13,16 +13,16 @@ import numpy as np
 import pytest
 
 from operator_agent import Conductor, KernelDatabase
-from operator_agent.backend_caps import Cap
-from operator_agent.confirm import ConfirmRecord, confirm_metrics, confirm_persist
-from operator_agent.contract import case_key
-from operator_agent.eligibility import aggregate_speedup, decision_speedup, performance_verdict
-from operator_agent.kernel_db import FailureDatabase
-from operator_agent.oracle import admit_to_corpus
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.core.backend_caps import Cap
+from operator_agent.core.confirm import ConfirmRecord, confirm_metrics, confirm_persist
+from operator_agent.core.contract import case_key
+from operator_agent.decide.eligibility import aggregate_speedup, decision_speedup, performance_verdict
+from operator_agent.core.kernel_db import FailureDatabase
+from operator_agent.decide.oracle import admit_to_corpus
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskSchema, UnifiedSketch)
-from operator_agent.verifier import Verifier
-from operator_agent.workload import confirmation_evidence
+from operator_agent.decide.verifier import Verifier
+from operator_agent.core.workload import confirmation_evidence
 from tests.backend_fakes import DeclaredFakeBackend
 
 CODE = "def kernel(A, B):\n    return A @ B\n"
@@ -146,7 +146,7 @@ def test_objective_can_pass_with_primary_below_threshold_and_persist(tmp_path):
     assert event["admission"]["event_hash"]
     assert confirm_metrics(m, art.remeasure, 1.05)[0]
     before = (tmp_path / "corpus.jsonl").read_bytes()
-    recovered = subprocess.run([sys.executable, "-m", "operator_agent.corpus_admission",
+    recovered = subprocess.run([sys.executable, "-m", "operator_agent.core.corpus_admission",
         "--artifact", art.saved_dir, "--corpus", str(tmp_path / "corpus.jsonl")],
         capture_output=True, text=True, timeout=30)
     assert recovered.returncode == 0, recovered.stdout + recovered.stderr

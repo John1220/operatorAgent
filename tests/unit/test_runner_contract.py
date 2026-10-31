@@ -666,7 +666,7 @@ def send(self):
             self.assertIn('unknown_protocol_key', rows[0][1] - contract.keys['verify'])
 
     def test_every_literal_action_in_the_real_transport_remains_covered(self):
-        path = CONTROL_DIR / 'remote_executor.py'
+        path = CONTROL_DIR / 'execute/remote_executor.py'
         expected = set()
         for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
             if isinstance(node, ast.Dict):
@@ -674,7 +674,7 @@ def send(self):
                     if _str_of(key) == 'action' and _str_of(value):
                         expected.add((_str_of(value), node.lineno))
         found = {(action, int(where.rsplit(':', 1)[1])) for action, _, where in SENT
-                 if where.startswith('operator_agent/remote_executor.py:')}
+                 if where.startswith('operator_agent/execute/remote_executor.py:')}
         self.assertEqual(expected, found,
                          'A new wire boundary/helper must not silently fall outside extraction')
         self.assertTrue({'verify', 'benchmark_with_baselines', 'input_begin', 'shutdown'}

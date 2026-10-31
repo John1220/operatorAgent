@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from operator_agent import hitl_tools as ht
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.app import hitl_tools as ht
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
 
 
 SOURCE = 'def kernel(A, B):\r\n    # 原始源码\r\n    return A @ B\r\n'
@@ -104,7 +104,7 @@ def test_recording_does_not_add_passed_stages_or_improve_validity(tmp_path, monk
 
 
 def test_result_write_failure_keeps_previous_round_and_next_call_skips_partial_round(tmp_path, monkeypatch):
-    from operator_agent.tool_evidence import RoundEvidence
+    from operator_agent.decide.tool_evidence import RoundEvidence
     run = prepared(tmp_path)
     fake_verifier(monkeypatch, [VerificationResult(Level.L1_COMPILE, True)])
     first = ht.verify(run, SOURCE, stop_after='L1')
@@ -153,7 +153,7 @@ def test_bench_retains_all_candidate_sources_and_full_per_arm_measurements(tmp_p
 
 @pytest.mark.parametrize('surface', ['cli', 'mcp'])
 def test_source_file_crlf_and_unicode_survive_public_entry(tmp_path, monkeypatch, capsys, surface):
-    from operator_agent import cli, mcp_server
+    from operator_agent.app import cli, mcp_server
     run = prepared(tmp_path)
     source = tmp_path / 'input.py'
     source.write_bytes(SOURCE.encode())
@@ -170,8 +170,8 @@ def test_source_file_crlf_and_unicode_survive_public_entry(tmp_path, monkeypatch
 
 
 def test_parallel_reservations_are_unique_and_legacy_gap_is_preserved(tmp_path):
-    from operator_agent.contract import freeze_from_task
-    from operator_agent.tool_evidence import RoundEvidence
+    from operator_agent.core.contract import freeze_from_task
+    from operator_agent.decide.tool_evidence import RoundEvidence
     run = prepared(tmp_path)
     declaration = json.loads((run/'declaration.json').read_text())
     contract = freeze_from_task(ht.build_task(declaration))
@@ -201,7 +201,7 @@ def test_complete_receipt_covers_full_bytes_and_nonfinite_values_stay_explicit(t
 
 
 def test_repair_keeps_initial_final_and_each_verified_source_with_complete_results(tmp_path, monkeypatch):
-    from operator_agent import llm_client
+    from operator_agent.execute import llm_client
     from tests.unit.test_fixer_generation_records import FIXED, ORIGINAL, Replies, reply
     from tests.unit.test_repair_loop import FakeVerifier, bad
     results = [bad(), [VerificationResult(Level.L1_COMPILE, True),
@@ -227,8 +227,8 @@ def test_repair_keeps_initial_final_and_each_verified_source_with_complete_resul
 
 
 def test_conductor_history_retains_admitted_source_but_refusal_is_hash_only(tmp_path):
-    from operator_agent.run_layout import run_layout
-    from operator_agent.tool_evidence import persist_conductor_round
+    from operator_agent.core.run_layout import run_layout
+    from operator_agent.decide.tool_evidence import persist_conductor_round
     task = ht.build_task(dict(request='matmul fp32', shapes=[[8, 8, 8]]))
     layout = run_layout(str(tmp_path/'autonomous'))
     first = persist_conductor_round(layout, task, SOURCE, outcomes(), 1, admitted=True)
@@ -244,14 +244,14 @@ def test_conductor_history_retains_admitted_source_but_refusal_is_hash_only(tmp_
 
 def test_independent_process_recovers_sources_after_both_producers_exit(tmp_path):
     run = tmp_path/'separate-process'
-    subprocess.run([sys.executable, '-m', 'operator_agent.cli', 'prepare',
+    subprocess.run([sys.executable, '-m', 'operator_agent.app.cli', 'prepare',
         '--request', 'matmul fp32', '--shapes', '8,8,8', '--run-dir', str(run)],
         check=True, capture_output=True, text=True)
     replies = []
     for index, source in enumerate((SOURCE, SOURCE+'# second\n')):
         path = tmp_path/f'input-{index}.py'
         path.write_bytes(source.encode())
-        result = subprocess.run([sys.executable, '-m', 'operator_agent.cli', 'verify',
+        result = subprocess.run([sys.executable, '-m', 'operator_agent.app.cli', 'verify',
             '--run-dir', str(run), '--code-file', str(path), '--stop-after', 'L1'],
             check=True, capture_output=True, text=True)
         replies.append(json.loads(result.stdout))

@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
-from operator_agent.resource_check import (
+from operator_agent.decide.resource_check import (
     MemCaps,
     SharedBuffer,
     SharedMemoryEvidence,
@@ -23,7 +23,7 @@ from operator_agent.resource_check import (
     check_resource_feasibility,
     source_resource_binding,
 )
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 from tests.backend_fakes import DeclaredFakeBackend
 
 

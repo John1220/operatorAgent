@@ -6,10 +6,10 @@ import pytest
 
 from benchmarks.drivers.input_fidelity_h20 import (AcceptanceSSH, GOOD, L2OnlyVerifier,
     assess, boundary_trials, case, gpu_evidence, select_gpu, shell_path, trials, validate_scratch)
-from operator_agent.correctness import as_suite
-from operator_agent.correctness_boundaries import lint_coverage
-from operator_agent.anticheat import static_audit
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult as Result
+from operator_agent.decide.correctness import as_suite
+from operator_agent.decide.correctness_boundaries import lint_coverage
+from operator_agent.decide.anticheat import static_audit
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult as Result
 
 
 def evidence():

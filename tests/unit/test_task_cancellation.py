@@ -13,9 +13,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from operator_agent.task_clock import monotonic
-from operator_agent import autonomous, exec_guard, hitl_tools as ht
-from operator_agent.task_cancellation import (cancellation, launch_identity, publish_json,
+from operator_agent.execute.task_clock import monotonic
+from operator_agent.app import autonomous, hitl_tools as ht
+from operator_agent.execute import exec_guard
+from operator_agent.execute.task_cancellation import (cancellation, launch_identity, publish_json,
                                              request_cancel, stop_event)
 
 DECL = dict(request='matmul fp32', dsl='python', shapes=[[8, 8, 8]], min_speedup=0)
@@ -25,7 +26,7 @@ REPO = Path(__file__).resolve().parents[2]
 def test_task_clock_has_the_same_epoch_in_independent_processes():
     before = monotonic()
     child = subprocess.run([sys.executable, '-c',
-        'from operator_agent.task_clock import monotonic;print(monotonic())'],
+        'from operator_agent.execute.task_clock import monotonic;print(monotonic())'],
         cwd=str(REPO), check=True, capture_output=True, text=True, timeout=10)
     assert before <= float(child.stdout) <= monotonic()
 
@@ -220,7 +221,8 @@ def test_cleanup_signal_failure_and_failed_discovery_remain_unknown(monkeypatch)
 def controlled_worker_patch():
     return '''
 import sys
-from operator_agent import tool_calls, exec_guard
+from operator_agent.app import tool_calls
+from operator_agent.execute import exec_guard
 def start(directory):
     code = "from pathlib import Path;import time;Path("+repr(str(directory/'ready'))+").touch();print('worker noise',flush=True);time.sleep(60)"
     return exec_guard.start_task_worker([sys.executable,'-c',code],cwd=str(directory),log_path=directory/'execution.log')
@@ -232,7 +234,7 @@ tool_calls._start_call_worker = start
 def test_mcp_cancellation_notification_is_live_and_correlated(tmp_path, tool):
     run = tmp_path/'run'
     ht.prepare(DECL, run)
-    script = controlled_worker_patch()+'\nfrom operator_agent.mcp_server import main\nmain()\n'
+    script = controlled_worker_patch()+'\nfrom operator_agent.app.mcp_server import main\nmain()\n'
     proc = subprocess.Popen([sys.executable, '-c', script], cwd=str(REPO),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     replies = queue.Queue()
@@ -270,7 +272,7 @@ def test_mcp_cancellation_notification_is_live_and_correlated(tmp_path, tool):
 def test_cli_interrupt_is_acknowledged_after_cleanup(tmp_path, sig):
     run = tmp_path/'run'
     ht.prepare(DECL, run)
-    script = controlled_worker_patch()+'\nfrom operator_agent.cli import main\nsys.exit(main())\n'
+    script = controlled_worker_patch()+'\nfrom operator_agent.app.cli import main\nsys.exit(main())\n'
     proc = subprocess.Popen([sys.executable, '-c', script, 'verify', '--run-dir', str(run),
         '--code', 'def kernel(A,B): return A@B'], cwd=str(REPO),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -291,7 +293,7 @@ def test_cli_interrupt_is_acknowledged_after_cleanup(tmp_path, sig):
 def test_mcp_transport_termination_cleans_foreground_call(tmp_path):
     run = tmp_path/'run'
     ht.prepare(DECL, run)
-    script = controlled_worker_patch()+'\nfrom operator_agent.mcp_server import main\nsys.exit(main())\n'
+    script = controlled_worker_patch()+'\nfrom operator_agent.app.mcp_server import main\nsys.exit(main())\n'
     proc = subprocess.Popen([sys.executable, '-c', script], cwd=str(REPO),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
@@ -312,7 +314,7 @@ def test_mcp_transport_termination_cleans_foreground_call(tmp_path):
 
 
 def test_explicit_mcp_cancel_and_status_use_the_same_invocation(tmp_path):
-    from operator_agent import mcp_server
+    from operator_agent.app import mcp_server
     run, identity = run_identity(tmp_path)
     result = mcp_server._call_tool('operator_cancel', dict(run_dir=str(run), invocation_id=identity))
     assert json.loads(result['content'][0]['text'])['accepted']
@@ -352,7 +354,7 @@ def test_real_mcp_repair_cancel_preserves_completed_verification(tmp_path, monke
         monkeypatch.setenv('LLM_BASE_URL', f'http://127.0.0.1:{server.server.server_port}/v1')
         monkeypatch.setenv('LLM_MODEL', 'local-repair-cancel-fixture')
         monkeypatch.setenv('LLM_API_KEY', 'synthetic-repair-cancel-key')
-        proc = subprocess.Popen([sys.executable, '-m', 'operator_agent.mcp_server'], cwd=str(REPO),
+        proc = subprocess.Popen([sys.executable, '-m', 'operator_agent.app.mcp_server'], cwd=str(REPO),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             request = dict(jsonrpc='2.0', id=7, method='tools/call', params=dict(name='operator_repair',

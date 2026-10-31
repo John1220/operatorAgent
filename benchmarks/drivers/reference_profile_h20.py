@@ -20,15 +20,15 @@ from benchmarks.calibration.calibrate_layernorm import candidate_source
 from benchmarks.drivers.correctness_profiles_h20 import ProfileSSH, assess, compact_trace, primary
 from benchmarks.drivers.input_fidelity_h20 import dumps, validate_scratch
 from operator_agent import Conductor, IntentParser, KernelDatabase
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.backend_caps import Cap
-from operator_agent.contract import freeze_from_task
-from operator_agent.correctness import as_suite
-from operator_agent.kernel_db import FailureDatabase
-from operator_agent.reference_contract import registered_reference, validate_receipt
-from operator_agent.run_layout import (new_run_root, run_layout, ROLE_HARNESS, ROLE_ORACLE,
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.core.backend_caps import Cap
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.decide.correctness import as_suite
+from operator_agent.core.kernel_db import FailureDatabase
+from operator_agent.decide.reference_contract import registered_reference, validate_receipt
+from operator_agent.core.run_layout import (new_run_root, run_layout, ROLE_HARNESS, ROLE_ORACLE,
                                         ROLE_REPORT_WRITER)
-from operator_agent.schemas import UnifiedSketch, VerificationLevel as Level
+from operator_agent.core.schemas import UnifiedSketch, VerificationLevel as Level
 
 
 def trial_code(variant):
@@ -115,7 +115,7 @@ def run(args):
         if closed.get("quiescent") is not True:
             raise RuntimeError("owned peer not quiescent; no drift mutation attempted")
         primitive = validate_scratch(backend.scratch) + "/builtin_layernorm.py"
-        original = (ROOT / "operator_agent" / "builtin_layernorm.py").read_bytes()
+        original = (ROOT / "operator_agent" / "decide" / "builtin_layernorm.py").read_bytes()
         backend.remote_python("import json; from pathlib import Path; p=Path(" + repr(primitive) + "); "
                               "p.write_bytes(p.read_bytes()+b'\\n# acceptance drift\\n'); print(json.dumps({'changed':True}))")
         try:

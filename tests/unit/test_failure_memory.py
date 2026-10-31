@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from operator_agent.kernel_db import (FailureDatabase, FailureRecord,
+from operator_agent.core.kernel_db import (FailureDatabase, FailureRecord,
                                       failure_signature, is_promotable_failure)
 
 # 一段真实的 Triton 远程编译失败的样子: 远端把异常名放在**开头**, 中间回显源码
@@ -106,7 +106,7 @@ class TestFailureSignature(unittest.TestCase):
         期望值取 `check_kernel_interface` **自己的输出**, 不抄文案 —— 处方文案改了措辞
         时这条会红, 而那正是该重新看一次归类的时候。
         """
-        from operator_agent.interface_contract import check_kernel_interface
+        from operator_agent.core.interface_contract import check_kernel_interface
         text = check_kernel_interface("def kernel(X, weight):\n    return X\n",
                                       {"X", "weight", "bias"}).problem
         self.assertIsNotNone(text, "前提: 这份代码确实与调用契约不符")
@@ -287,13 +287,13 @@ class TestConductorWiring(unittest.TestCase):
     """判据算出来没人用是本项目的传统失效方式, 所以这根线单独验"""
 
     def _conductor(self, path):
-        from operator_agent.conductor import Conductor
+        from operator_agent.app.conductor import Conductor
         c = Conductor.__new__(Conductor)
         c.failure_db = FailureDatabase(jsonl_path=path)
         return c
 
     def _task(self):
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+        from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                             TargetSpec, TaskComplexity, TaskSchema,
                                             TaskType)
         return TaskSchema(task_type=TaskType.OPERATOR_GENERATION,
@@ -303,7 +303,7 @@ class TestConductorWiring(unittest.TestCase):
                           constraints=ConstraintSpec(precision=Precision.FP16))
 
     def _failed(self, levels):
-        from operator_agent.schemas import VerificationLevel, VerificationResult
+        from operator_agent.core.schemas import VerificationLevel, VerificationResult
         by_name = {"L1": VerificationLevel.L1_COMPILE,
                    "L2": VerificationLevel.L2_FUNCTION,
                    "L3": VerificationLevel.L3_PERFORMANCE}
@@ -365,7 +365,7 @@ class TestMarkerTableIsNotRotting(unittest.TestCase):
     本类把那句话变成一个会红的检查。
 
     ⚠️ 两个**反空转**自核不是装饰：
-      · 不排除 `kernel_db.py` 的话，这张表自己就把五个字面量全提供了 —— 守卫会在
+      · 不排除 `core/kernel_db.py` 的话，这张表自己就把五个字面量全提供了 —— 守卫会在
         字面量从生产文案里消失的那一天照样绿 (本项目记过的「假件被当被测对象」同型)。
       · 不剥 docstring 的话，「文案里举了一个从未发出的异常名」这种注释也能喂饱它。
     """
@@ -374,11 +374,11 @@ class TestMarkerTableIsNotRotting(unittest.TestCase):
     def _emitted_strings(exclude_kernel_db: bool = True) -> str:
         import ast
         root = Path(__file__).resolve().parents[2]
-        files = sorted(list((root / "operator_agent").glob("*.py"))
+        files = sorted(list((root / "operator_agent").rglob("*.py"))
                        + list((root / "remote_scripts").glob("*.py")))
         out = []
         for f in files:
-            if exclude_kernel_db and f.name == "kernel_db.py":
+            if exclude_kernel_db and f.parent.name == "core" and f.name == "kernel_db.py":
                 continue
             tree = ast.parse(f.read_text(encoding="utf-8"))
             docstring_nodes = set()
@@ -397,7 +397,7 @@ class TestMarkerTableIsNotRotting(unittest.TestCase):
         return "\n".join(out)
 
     def test_every_marker_literal_is_still_emitted_by_production_code(self):
-        from operator_agent.kernel_db import _FAILURE_CLASS_MARKERS
+        from operator_agent.core.kernel_db import _FAILURE_CLASS_MARKERS
         corpus = self._emitted_strings()
         self.assertTrue(corpus.strip(), "取字面量这一步本身空转了")
         for literal, cls in _FAILURE_CLASS_MARKERS:
@@ -410,16 +410,16 @@ class TestMarkerTableIsNotRotting(unittest.TestCase):
         """反空转 ①: 表自己所在的那个文件确实会把字面量喂进来, 排除它不是装饰
 
         判据不是「排除后取不到」(那当然取不到, 生产文案才是来源)，而是**出现次数会变少** ——
-        这条不成立就意味着 `kernel_db.py` 里其实一份字面量都没有，那排除动作是白写的，
+        这条不成立就意味着 `core/kernel_db.py` 里其实一份字面量都没有，那排除动作是白写的，
         而哪天有人把它加回扫描列表时也无人会红。
         """
-        from operator_agent.kernel_db import _FAILURE_CLASS_MARKERS
+        from operator_agent.core.kernel_db import _FAILURE_CLASS_MARKERS
         with_table = self._emitted_strings(exclude_kernel_db=False)
         without = self._emitted_strings(exclude_kernel_db=True)
         dropped = [(lit, with_table.count(lit) - without.count(lit))
                    for lit, _ in _FAILURE_CLASS_MARKERS]
         self.assertTrue(all(n >= 1 for _, n in dropped),
-                        f"排除 kernel_db.py 后这些字面量的出现次数没有减少: {dropped} "
+                        f"排除 core/kernel_db.py 后这些字面量的出现次数没有减少: {dropped} "
                         f"⇒ 「表自己会喂饱守卫」这件事没被验证")
 
     def test_guard_is_not_satisfied_by_a_docstring(self):
@@ -457,7 +457,7 @@ class TestErrorSimilarityRetrievalDoesNotFabricateEvidence(unittest.TestCase):
     NO_OVERLAP = "shape mismatch in tl.dot BLOCK_M"
 
     def _db(self):
-        from operator_agent.kernel_db import FailureDatabase, FailureRecord
+        from operator_agent.core.kernel_db import FailureDatabase, FailureRecord
         db = FailureDatabase(jsonl_path="off")
         self.assertIsNone(db._jsonl, "持久化没关掉 ⇒ 用例会读到仓库自己的真语料")
         db.add(FailureRecord(failure_id="h-l3", task_id="t9", **self.PERF_REC))
@@ -492,8 +492,8 @@ class TestErrorSimilarityRetrievalDoesNotFabricateEvidence(unittest.TestCase):
 
     def test_the_fixer_labels_arrival_route_not_a_fabricated_similarity(self):
         """活路径: 中文报错的那一轮里, 历史栏仍可出现那条 L3, 但只能标「上下文命中」"""
-        from operator_agent.fixer import FixerAgent
-        from operator_agent.schemas import (TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
+        from operator_agent.generate.fixer import FixerAgent
+        from operator_agent.core.schemas import (TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
                                             TaskType, TaskComplexity, Precision,
                                             VerificationResult, VerificationLevel)
 

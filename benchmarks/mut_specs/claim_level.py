@@ -21,11 +21,11 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "el": "operator_agent/eligibility.py",
-    "or": "operator_agent/oracle.py",
-    "cu": "operator_agent/conductor.py",
-    "rp": "operator_agent/report.py",
-    "cf": "operator_agent/confirm.py",
+    "el": "operator_agent/decide/eligibility.py",
+    "or": "operator_agent/decide/oracle.py",
+    "cu": "operator_agent/app/conductor.py",
+    "rp": "operator_agent/core/report.py",
+    "cf": "operator_agent/core/confirm.py",
 }
 
 TARGETS = ["tests/unit/test_claim_level.py", "tests/unit/test_kernel_db_persistence.py"]

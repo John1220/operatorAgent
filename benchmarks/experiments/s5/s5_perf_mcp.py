@@ -177,7 +177,7 @@ class PerformanceRelay(rpc.MCPRelay):
                    OPERATOR_AGENT_KERNEL_DB='off')
         self.stderr=(self.output/'mcp-stderr.log').open('xb')
         try:
-            self.proc=subprocess.Popen([sys.executable,'-m','operator_agent.mcp_server'],cwd=str(rpc.ROOT),env=env,
+            self.proc=subprocess.Popen([sys.executable,'-m','operator_agent.app.mcp_server'],cwd=str(rpc.ROOT),env=env,
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.stderr,start_new_session=True,bufsize=0)
             self.cleanup='running';self.reader=threading.Thread(target=self._read,daemon=True);self.reader.start()
             self.server=rpc._HTTP(('127.0.0.1',0),rpc._Handler);self.server.owner=self

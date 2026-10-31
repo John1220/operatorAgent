@@ -11,9 +11,9 @@ from pathlib import Path
 import numpy as np
 
 from operator_agent.ops import csa_compress
-from operator_agent.reference import (ReferenceSourceError, load_reference_source,
+from operator_agent.decide.reference import (ReferenceSourceError, load_reference_source,
                                       resolve_reference)
-from operator_agent.schemas import ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskSchema, TaskType
+from operator_agent.core.schemas import ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskSchema, TaskType
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -142,8 +142,8 @@ class TestVerifierPicksUpTheExternalReference(unittest.TestCase):
     """`_build_reference_fn` 必须先认 reference_source, 而不是查内建表"""
 
     def _verifier(self):
-        from operator_agent.mock_gpu import MockGPU
-        from operator_agent.verifier import Verifier
+        from operator_agent.execute.mock_gpu import MockGPU
+        from operator_agent.decide.verifier import Verifier
         return Verifier(MockGPU())
 
     def test_external_reference_wins_over_kernel_type_lookup(self):
@@ -173,7 +173,7 @@ class TestRemotePayloadCarriesReferenceSource(unittest.TestCase):
     """控制端发出的 verify / benchmark_with_baselines 必须带 reference_source 键"""
 
     def test_ssh_executor_sends_the_key(self):
-        src = (REPO_ROOT / "operator_agent" / "remote_executor.py").read_text(encoding="utf-8")
+        src = (REPO_ROOT / "operator_agent" / "execute" / "remote_executor.py").read_text(encoding="utf-8")
         self.assertIn('"reference_source"', src)
 
     def test_both_runners_consume_the_key(self):
@@ -189,7 +189,7 @@ class TestRemotePayloadCarriesReferenceSource(unittest.TestCase):
         self.assertIn("_reference_torch(kernel_type", src)
 
     def test_verifier_passes_task_reference_into_remote_calls(self):
-        src = (REPO_ROOT / "operator_agent" / "verifier.py").read_text(encoding="utf-8")
+        src = (REPO_ROOT / "operator_agent" / "decide" / "verifier.py").read_text(encoding="utf-8")
         self.assertGreaterEqual(src.count("reference_source=task.source.reference_source"), 2,
                                 "L2/L3 至少两处远程调用都要带上 reference_source")
 

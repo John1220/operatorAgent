@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from operator_agent.hardware_caps import (
+from operator_agent.core.hardware_caps import (
     HardwareCaps,
     SM_COUNT_KEYS,
     UnknownHardware,
@@ -34,7 +34,7 @@ from operator_agent.hardware_caps import (
     sm_count_from,
     unknown_caps,
 )
-from operator_agent.optimization_planner import (
+from operator_agent.generate.optimization_planner import (
     CapsRequirementUnparsable,
     OptimizationPlanner,
     Recipe,
@@ -445,8 +445,8 @@ class TestProbedSmCountSurvivesTheFieldName(TableGuardedCase):
         这条才是原本会漏掉缺陷的那种覆盖: 上面几条即便全绿, 只说明我认识的两种拼法能用;
         一旦某个后端换用第三种键名, 探测值又会静默丢掉, 而这里会红。
         """
-        from operator_agent.mock_gpu import MockGPU
-        from operator_agent.remote_executor import LocalExecutor, SSHExecutor
+        from operator_agent.execute.mock_gpu import MockGPU
+        from operator_agent.execute.remote_executor import LocalExecutor, SSHExecutor
         from unittest.mock import patch
 
         ssh = SSHExecutor(host="probe.invalid")
@@ -582,7 +582,7 @@ class TestInferencePathClaimsOnlyWhatItDerives(TableGuardedCase):
 
     def test_the_inference_path_starts_from_unknown_caps(self):
         """源码守卫: 推断路径不许再直接构造 `HardwareCaps(...)` (裸默认就是缺陷本体)"""
-        source = Path("operator_agent/hardware_caps.py").read_text(encoding="utf-8")
+        source = Path("operator_agent/core/hardware_caps.py").read_text(encoding="utf-8")
         self.assertEqual([], _direct_calls(source, "detect_hardware_caps", "HardwareCaps"),
                          "又回到裸默认: 「认不出」会重新被读成「支持 CUDA C」")
         self.assertEqual(1, len(_direct_calls(source, "detect_hardware_caps", "unknown_caps")),
@@ -590,7 +590,7 @@ class TestInferencePathClaimsOnlyWhatItDerives(TableGuardedCase):
 
     def test_the_source_guard_is_not_vacuous(self):
         """解析器看不见调用时两条断言会同时「绿」—— 先证明它看得见。"""
-        source = Path("operator_agent/hardware_caps.py").read_text(encoding="utf-8")
+        source = Path("operator_agent/core/hardware_caps.py").read_text(encoding="utf-8")
         self.assertEqual(1, len(_direct_calls(source, "unknown_caps", "HardwareCaps")),
                          "_direct_calls 根本没在解析函数体, 上面那条守卫在空转")
         self.assertEqual([], _direct_calls(source, "no_such_function", "HardwareCaps"))

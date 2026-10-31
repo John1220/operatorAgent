@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from operator_agent import autonomous, hitl_tools
-from operator_agent.llm_client import LLMClient
+from operator_agent.app import autonomous, hitl_tools
+from operator_agent.execute.llm_client import LLMClient
 
 
 BASE_URL = "https://model.invalid/v1"
@@ -158,7 +158,7 @@ def prepare_run(tmp_path):
 
 def test_autonomous_worker_constructs_client_from_file_without_exporting_key(
         monkeypatch, tmp_path):
-    from operator_agent import conductor as conductor_module
+    from operator_agent.app import conductor as conductor_module
 
     configure_file(monkeypatch, credential_file(tmp_path))
     run = prepare_run(tmp_path)
@@ -172,7 +172,7 @@ def test_autonomous_worker_constructs_client_from_file_without_exporting_key(
 
     class NoExecutionConductor:
         def __init__(self, **kwargs):
-            from operator_agent.budget import BudgetLedger
+            from operator_agent.execute.budget import BudgetLedger
             self._budget = BudgetLedger(kwargs['budget'])
             received.append(kwargs["llm"].api_key)
             assert_key_not_exported()
@@ -195,7 +195,7 @@ def test_autonomous_worker_constructs_client_from_file_without_exporting_key(
 
 def test_repair_constructs_client_from_file_without_model_or_gpu(
         monkeypatch, tmp_path):
-    from operator_agent import fixer as fixer_module, repair_loop
+    from operator_agent.generate import fixer as fixer_module, repair_loop
 
     configure_file(monkeypatch, credential_file(tmp_path))
     run = prepare_run(tmp_path)

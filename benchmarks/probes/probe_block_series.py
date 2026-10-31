@@ -2,7 +2,7 @@
 
 在**远端 GPU 机**上跑（自包含, 只用 torch + triton + 标准库）：
 
-    scp remote_scripts/run_kernel.py remote_scripts/tolerance.py operator_agent/anticheat.py \\
+    scp remote_scripts/run_kernel.py remote_scripts/tolerance.py operator_agent/decide/anticheat.py \\
         <ssh别名>:~/operator_agent/ 2>/dev/null; \\
     scp benchmarks/probes/probe_block_series.py <ssh别名>:~/ && \\
       ssh <ssh别名> "cd ~/operator_agent && CUDA_VISIBLE_DEVICES=2 \\

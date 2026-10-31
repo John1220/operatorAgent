@@ -23,8 +23,8 @@ import sys
 import time
 
 from benchmarks.experiments.s5 import s5_runtime
-from operator_agent.hitl_tools import prepare
-from operator_agent.run_contract import code_hash, digest
+from operator_agent.app.hitl_tools import prepare
+from operator_agent.core.run_contract import code_hash, digest
 
 SCHEMA = 's5-remote-verification-v1'
 PLAN_SCHEMA = 's5-remote-verification-plan-v1'
@@ -49,9 +49,9 @@ def _local_identity():
     """Hash the service code and the production CLI entry it dispatches."""
     root = Path(__file__).resolve().parents[3]
     files = [root / 'benchmarks' / 'experiments/s5/s5_verify_remote.py',
-             root / 'operator_agent' / 'cli.py',
-             root / 'operator_agent' / 'hitl_tools.py',
-             root / 'operator_agent' / 'remote_executor.py',
+             root / 'operator_agent' / 'app/cli.py',
+             root / 'operator_agent' / 'app/hitl_tools.py',
+             root / 'operator_agent' / 'execute/remote_executor.py',
              root / 'remote_scripts' / 'run_kernel.py',
              root / 'remote_scripts' / 'runner_server.py',
              root / 'remote_scripts' / 'session_control.py']
@@ -116,7 +116,7 @@ def load_plan(plan_path, expected_sha256):
 
 
 def _command(plan, task_dir, candidate):
-    command = [sys.executable, '-m', 'operator_agent.cli', 'verify',
+    command = [sys.executable, '-m', 'operator_agent.app.cli', 'verify',
                '--run-dir', str(task_dir), '--code-file', str(candidate),
                '--stop-after', plan['stop_after'], '--backend', plan['mode'],
                '--timeout', str(plan['timeout'])]

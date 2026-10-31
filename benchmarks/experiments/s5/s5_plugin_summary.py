@@ -10,7 +10,7 @@ import collections
 import math
 import random
 
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 ARMS = ('A', 'C')
 ORDINARY_NONCOMPLETION = frozenset({

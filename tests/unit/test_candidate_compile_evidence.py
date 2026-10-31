@@ -12,11 +12,11 @@ import numpy as np
 import pytest
 
 from operator_agent import Verifier
-from operator_agent.compile_evidence import capture_compile_failure, validate_compile_failure
-from operator_agent.input_fidelity import PROTOCOL, describe_inputs
-from operator_agent.measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
-from operator_agent.quality_suite import get_case, task_for
-from operator_agent.schemas import VerificationLevel
+from operator_agent.decide.compile_evidence import capture_compile_failure, validate_compile_failure
+from operator_agent.decide.input_fidelity import PROTOCOL, describe_inputs
+from operator_agent.decide.measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
+from operator_agent.decide.quality_suite import get_case, task_for
+from operator_agent.core.schemas import VerificationLevel
 from tests.backend_fakes import gpu_fake
 
 

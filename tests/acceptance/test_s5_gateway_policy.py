@@ -5,7 +5,7 @@ import threading
 
 import pytest
 from benchmarks.experiments.s5.s5_gateway_policy import GatewayPolicy, PolicyRefused, PolicyUpstreamFailure
-from operator_agent import s5_shared_budget as shared
+from operator_agent.execute import s5_shared_budget as shared
 
 
 def make(tmp_path, adapter, max_calls=2, **options):

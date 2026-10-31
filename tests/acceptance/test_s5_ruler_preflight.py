@@ -29,7 +29,7 @@ def test_execution_is_one_shot_before_any_remote_backend(tmp_path):
     out=tmp_path/'plan'; ruler.freeze(out); digest=ruler.sha(out/'plan.json')
     (out/'execution-started.json').write_text('{}')
     frozen=json.loads((out/'plan.json').read_text())['remote_files']
-    with patch.object(ruler,'remote_files',return_value=frozen), patch('operator_agent.remote_executor.SSHExecutor') as backend:
+    with patch.object(ruler,'remote_files',return_value=frozen), patch('operator_agent.execute.remote_executor.SSHExecutor') as backend:
         with pytest.raises(FileExistsError): ruler.execute(out,digest)
         backend.assert_not_called()
 

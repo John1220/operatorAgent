@@ -24,12 +24,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.remote_executor import RemoteExecutor
-from operator_agent.verifier import Verifier
-from operator_agent.fixer import FixerAgent, prescribe
-from operator_agent.prompt_manager import PromptManager
-from operator_agent.llm_client import LLMClient
-from operator_agent.schemas import (
+from operator_agent.execute.remote_executor import RemoteExecutor
+from operator_agent.decide.verifier import Verifier
+from operator_agent.generate.fixer import FixerAgent, prescribe
+from operator_agent.generate.prompt_manager import PromptManager
+from operator_agent.execute.llm_client import LLMClient
+from operator_agent.core.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec,
     TaskComplexity, TaskSchema, TaskType,
 )

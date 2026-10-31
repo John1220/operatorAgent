@@ -39,18 +39,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from operator_agent._harness_controls import enable_for_harness
+from operator_agent.app._harness_controls import enable_for_harness
 enable_for_harness()
 
 import numpy as np  # noqa: E402
 
-from operator_agent import agent_runtime as ar  # noqa: E402
-from operator_agent.agent_runtime import ENVELOPE_FENCE  # noqa: E402
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.failure_route import classify  # noqa: E402
-from operator_agent.kernel_db import KernelDatabase  # noqa: E402
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.generate import agent_runtime as ar  # noqa: E402
+from operator_agent.generate.agent_runtime import ENVELOPE_FENCE  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.decide.failure_route import classify  # noqa: E402
+from operator_agent.core.kernel_db import KernelDatabase  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType, VerificationLevel, VerificationResult,
 )

@@ -11,14 +11,14 @@ import pytest
 
 from benchmarks import _numerical_repair as nr
 from benchmarks.drivers import workload_codegen_h20 as d
-from operator_agent import llm_client as lc
-from operator_agent.bounded_repair import repair_lineage, validate_repair
-from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
-from operator_agent.reference_contract import check_observed
-from operator_agent.run_contract import atomic_json, code_hash, digest, json_value
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
-from operator_agent.search_objective import results_dict
-from operator_agent.single_candidate_coder import SingleCandidateCoder, audit_generation
+from operator_agent.execute import llm_client as lc
+from operator_agent.generate.bounded_repair import repair_lineage, validate_repair
+from operator_agent.execute.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
+from operator_agent.decide.reference_contract import check_observed
+from operator_agent.core.run_contract import atomic_json, code_hash, digest, json_value
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.generate.search_objective import results_dict
+from operator_agent.generate.single_candidate_coder import SingleCandidateCoder, audit_generation
 from tests.unit.test_single_candidate_coder import conductor, response
 from tests.unit.test_workload_codegen_driver import retain_model
 from tests.unit.test_reference_contract import ProtocolSSH
@@ -136,7 +136,7 @@ def test_parent_loader_rejects_torn_unknown_or_ineligible_parent(parent,change):
     elif change=='source':(a/'code.py').write_text(CHANGED)
     elif change=='verification':mutate(a/'verification.json',lambda v:v[1].update(passed=True))
     elif change=='model':mutate(root/'model-journal/candidate.json',lambda v:v.update(code=CHANGED))
-    elif change=='snapshot':(root/'frozen-sources/operator_agent/verifier.py').chmod(0o600);(root/'frozen-sources/operator_agent/verifier.py').write_text('changed')
+    elif change=='snapshot':(root/'frozen-sources/operator_agent/decide/verifier.py').chmod(0o600);(root/'frozen-sources/operator_agent/decide/verifier.py').write_text('changed')
     elif change=='manifest':mutate(a/'run_manifest.json',lambda v:v.update(workload_hash='f'*64))
     elif change=='trace':mutate(root/'evidence.json',lambda v:v['trace'][-1]['response'].update(compared_elements=0))
     elif change=='chain':mutate(root/'plan.json',lambda v:v['generation'].update(repairs=1))

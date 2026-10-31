@@ -61,7 +61,7 @@ from typing import Any, Dict, List, Optional, Tuple
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.measurement import NOISE_BAND, Validity  # noqa: E402
+from operator_agent.decide.measurement import NOISE_BAND, Validity  # noqa: E402
 
 #: **跨运行**带宽: 两臂最终 best 的差异在这个相对值内 = 「一样好」。
 #:

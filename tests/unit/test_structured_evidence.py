@@ -27,17 +27,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent import agent_runtime as ar
-from operator_agent.contract import freeze_from_task
-from operator_agent.conductor import Conductor
-from operator_agent.failure_route import classify
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (
+from operator_agent.generate import agent_runtime as ar
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.app.conductor import Conductor
+from operator_agent.decide.failure_route import classify
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType, VerificationLevel, VerificationResult,
 )
-from operator_agent.verifier import COMPILE_FACT_KEYS
+from operator_agent.decide.verifier import COMPILE_FACT_KEYS
 
 #: L1 过、L2 挂 (结果错) ⇒ 走「数值修复」那一格, Fixer 被调用
 WRONG_NUMBERS = "import numpy as np\n\ndef kernel(A, B):\n    return A @ B + 1.0\n"
@@ -195,15 +195,15 @@ class TestTheDigestIsDerived(unittest.TestCase):
     def test_the_profiler_whitelist_has_one_source(self):
         """名单只有 `verifier.COMPILE_FACT_KEYS` 一份: 两处各写一遍就会各自漂"""
         src = (Path(__file__).resolve().parents[2] / "operator_agent"
-               / "verifier.py").read_text(encoding="utf-8")
+               / "decide/verifier.py").read_text(encoding="utf-8")
         self.assertIn("for k in COMPILE_FACT_KEYS if k in bench", src,
                       "L3 的 metrics 组装不再读那个常量 —— profiler 名单分成两份了")
         rt_src = (Path(__file__).resolve().parents[2] / "operator_agent"
-                  / "agent_runtime.py").read_text(encoding="utf-8")
+                  / "generate/agent_runtime.py").read_text(encoding="utf-8")
         self.assertNotIn("n_spills\"", rt_src,
                          "agent_runtime 里又抄了一份 profiler 键名 (应当只读常量)")
         cond = (Path(__file__).resolve().parents[2] / "operator_agent"
-                / "conductor.py").read_text(encoding="utf-8")
+                / "app/conductor.py").read_text(encoding="utf-8")
         self.assertIn("for k in COMPILE_FACT_KEYS", cond,
                       "采集那一侧没读常量")
 

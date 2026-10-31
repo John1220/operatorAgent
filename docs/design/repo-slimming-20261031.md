@@ -1,8 +1,8 @@
 # 仓库瘦身：已完成与未完成（2026-10-31）
 
-状态：**Phase 0/1（体积出仓 + 布局守卫）与 Phase 3（tests/、benchmarks/ 分目录）已完成并通过全量回归；Phase 2（`operator_agent/` 分包）尚未执行。**
+状态：**Phase 0/1（体积出仓 + 布局守卫）、Phase 2（`operator_agent/` 分包）、Phase 3（`tests/`、`benchmarks/` 分目录）全部完成并通过全量回归。**
 
-全量回归：`python -m pytest tests/ -q` → **6183 passed, 1 skipped**。插件侧 `npm test` 58/58。
+全量回归：`python -m pytest tests/ -q` → **6185 passed, 1 skipped**（含新增的层依赖棘轮两条）。插件侧 `npm test` **58/58**。
 
 ## 1. Phase 0/1：体积与守卫
 
@@ -97,3 +97,47 @@ python -m pytest tests/hygiene -q               # 布局/打包/凭据/契约冻
 cd integrations/dsh-operator && npm test        # 插件宿主契约 58 条
 shasum -a 256 output/... 2>/dev/null || true    # 证据在 ~/op-agent-evidence/output
 ```
+
+## 5. Phase 2 完成记录（2026-10-31）
+
+98 个平铺模块 → 五个层子包，包根只剩 `__init__.py`（公开再导出不变）与 `__main__.py`（`python -m operator_agent` 的委托入口）。
+
+| 层 | 模块数 | 收纳 |
+|---|---:|---|
+| `core/` | 23 | `schemas` `contract` `interface_contract` `run_contract` `artifact_store` `run_layout` `report` `kernel_db` `corpus_*` `candidates` `confirm` `environment` `tolerance` `source_lang` `*_templates` `execution_audit` `*_caps` `workload` `achievable` `novelty` |
+| `decide/` | 30 | `verifier` `measurement` `eligibility` `correctness*` `anticheat` `reference*` `input_fidelity` `session_inputs` `resource_check` `oracle` `compile_evidence` `tool_evidence` `bench_cases` `peak_probe` `calibration` `cuda_*` `quality_*` `failure_route` `exhaustion` `escalation` |
+| `execute/` | 15 | `remote_executor` `exec_guard` `backend_*` `mock_gpu` `placement` `task_budget` `task_cancellation` `task_clock` `budget` `llm_*` `s5_*_budget` `s5_verify_client` |
+| `generate/` | 21 | `agents` `coder_pipeline` `single_candidate_coder` `fixer` `repair_*` `bounded_repair` `generation_*` `prompt_manager` `triton_*` `planner` `optimization_planner` `selection` `search_objective` `bandit` `agent_logger` `agent_runtime` |
+| `app/` | 9 | `conductor` `cli` `mcp_server` `hitl_tools` `autonomous` `intent_parser` `tool_calls` `__main__` `_harness_controls` |
+
+### 分包过程中修掉的真坏点（都不是「文件放错」这么简单）
+
+1. **身份清单的键变了**：`quality_evaluation.evaluator_identity()`、
+   `workload_decision_h20.evaluator_sources()`、`s5_gateway_real_preflight._identities()`
+   用具名文件当哈希键，分目录后键从 `x.py` 变成 `<层>/x.py` ⇒ **这些实验的 evaluator 身份变了**。
+   不是判据或数值改动，但引用旧身份的冻结记录不能与新身份互换。
+2. **入口路径**：`pyproject` 的 console scripts 指向 `operator_agent.app.cli/mcp_server`；
+   `python -m operator_agent` 由包根 `__main__.py` 委托。插件宿主契约测试原来探
+   `import operator_agent.mcp_server`，分目录后**静默 skip** —— 改成探公开入口 `import operator_agent`。
+3. **远端部署契约**：`remote_executor._remote_files()` 的本地路径要带层、远端部署名必须保持裸名
+   （runner 按裸模块名 import）；`run_kernel.py` / `runner_server.py` 的仓库内 fallback 改走包路径。
+4. **平铺扫描静默变瞎**：多处守卫用 `glob("*.py")` 扫包，分包后只会看到 `__init__.py`。
+   全部改 `rglob` 并把标签改成包内相对路径（`decide/verifier.py` 这种），否则「扫不到 ⇒ 绿」。
+
+### 新增守卫：层依赖棘轮
+
+`tests/hygiene/test_repo_layout.py::TestLayerDirection` 钉住方向 `app → generate → decide → execute → core`。
+当前有 **23 处向上依赖**（几乎全是函数内延迟导入，为避免循环导入），全部逐条登记在
+`UPWARD_IMPORTS`：新增一处即红，拆掉一处也要求同步删表（`test_the_ratchet_table_has_no_stale_rows`）。
+
+### 预算下调
+
+`operator_agent: 4`、`core: 30`、`decide: 35`、`execute: 20`、`generate: 26`、`app: 12`
+（实际 1/23/30/15/21/9）。`tests`、`benchmarks` 的预算沿用 Phase 3 的值。
+
+### 未处理的已知项
+
+- 一次全量跑里出现过 1 条顺序相关的偶发（`test_hitl_tools::...gets_two_consequences`），
+  单独跑、`tests/unit` 整目录跑、`acceptance + 该用例` 组合跑均绿，复跑全量未再现。
+  未定位到污染源，记为待办而不是当作噪声。
+- `operator_agent/ops/` 与 `prompts/`、`skills/` 仍在包根（资源目录与内嵌子包），预算里按目录计。

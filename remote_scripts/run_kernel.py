@@ -37,12 +37,12 @@ try:
     from remote_input_fidelity import (JSON_PROTOCOL, InputFidelityError,
         decode_json_inputs, materialize_seed_inputs, seed_input_digest,
         to_torch_inputs, torch_input_readback, torch_output_digest)
-except ImportError:          # 仓库内直接运行: 模块还在 operator_agent/ 下
-    sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "operator_agent"))
-    import tolerance
-    from anticheat import shield_torch
-    from compile_evidence import capture_compile_failure
-    from remote_input_fidelity import (JSON_PROTOCOL, InputFidelityError,
+except ImportError:          # 仓库内直接运行: 走包路径 (2026-10-31 起模块分五层)
+    sys.path.insert(0, os.path.dirname(_HERE))          # 仓库根
+    from operator_agent.core import tolerance
+    from operator_agent.decide.anticheat import shield_torch
+    from operator_agent.decide.compile_evidence import capture_compile_failure
+    from operator_agent.decide.remote_input_fidelity import (JSON_PROTOCOL, InputFidelityError,
         decode_json_inputs, materialize_seed_inputs, seed_input_digest,
         to_torch_inputs, torch_input_readback, torch_output_digest)
 
@@ -51,8 +51,8 @@ try:
     from reference_contract import ReferenceIdentityError, execution_receipt, validate_gate
     from builtin_layernorm import native_layernorm
 except ImportError:
-    from operator_agent.reference_contract import ReferenceIdentityError, execution_receipt, validate_gate
-    from operator_agent.builtin_layernorm import native_layernorm
+    from operator_agent.decide.reference_contract import ReferenceIdentityError, execution_receipt, validate_gate
+    from operator_agent.decide.builtin_layernorm import native_layernorm
 
 
 # ─── GPU 自动选择 ─────────────────────────────────────────────
@@ -686,7 +686,7 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
         expected_f = expected.detach().to(torch.float32)
 
         # ---- 数值门禁: 绝对 + 相对 (AND 形式) ----
-        # 判据与容差表的定义在 operator_agent/tolerance.py, 由 deploy() 连同本文件
+        # 判据与容差表的定义在 operator_agent/core/tolerance.py, 由 deploy() 连同本文件
         # 一起推送到同目录。这里只做 torch 侧的元素级运算, 归约成标量后交给
         # tolerance.evaluate() —— 判定规则因此只有一份, 又不必把整个输出张量搬回
         # 主机 (attention 类算子的输出可以是 GB 量级)。
@@ -1409,7 +1409,7 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
             try:
                 from cuda_calibration import ruler_identity, CHANNEL, digest
             except ImportError:
-                from operator_agent.cuda_calibration import ruler_identity, CHANNEL, digest
+                from operator_agent.decide.cuda_calibration import ruler_identity, CHANNEL, digest
             timing_identity = ruler_identity(sys.modules[__name__])
         try:
             candidate_stats, base_stats, paired = _bench_pair_interleaved(

@@ -109,7 +109,7 @@ def build(arm, *, base_url, arm_dir, root=ROOT, deps=None, api='chat_completions
     if development is not None:
         if not tools:
             raise ValueError('development verification requires tools')
-        from operator_agent.s5_verify_client import PREFIX
+        from operator_agent.execute.s5_verify_client import PREFIX
         config_file = arm_dir / 'development-client.json'
         config_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with config_file.open('x', encoding='utf-8') as f:
@@ -129,13 +129,13 @@ def build(arm, *, base_url, arm_dir, root=ROOT, deps=None, api='chat_completions
         bindir = arm_dir / 'bin'
         bindir.mkdir(parents=True, exist_ok=True, mode=0o700)
         shim = bindir / 'operator-agent'
-        _write_shim(shim, (sys.executable, '-m', 'operator_agent.cli'))
+        _write_shim(shim, (sys.executable, '-m', 'operator_agent.app.cli'))
         env['PATH'] = str(bindir) + os.pathsep + env['PATH']
     if facts['plugin']:
         patch.append(dict(insert=[
             dict(id='mcp-operator', name=str(MCP_CLIENT), config=dict(
                 serverName='operator', transport='stdio', command=sys.executable,
-                args=['-m', 'operator_agent.mcp_server'],
+                args=['-m', 'operator_agent.app.mcp_server'],
                 toolCallTimeoutMs=((int(development['timeout']) + 30) * 1000
                                    if development is not None else 60000),
                 failOnStartupError=True,
@@ -148,7 +148,7 @@ def build(arm, *, base_url, arm_dir, root=ROOT, deps=None, api='chat_completions
         bindir = arm_dir / 'bin'
         bindir.mkdir(parents=True, exist_ok=True, mode=0o700)
         client = bindir / 's5_public_verify.py'
-        shutil.copyfile(root / 'operator_agent' / 's5_verify_client.py', client)
+        shutil.copyfile(root / 'operator_agent' / 'execute/s5_verify_client.py', client)
         _write_shim(bindir / 's5-verify', (sys.executable, client))
         env['PATH'] = str(bindir) + os.pathsep + env['PATH']
     body = dict(schema='s5-arm-launch-v1', arm=arm, surface=facts, model_api=api,

@@ -7,9 +7,9 @@ import urllib.request
 import pytest
 
 from benchmarks.experiments.s5.s5_fake_http import FakeHTTPServer
-from operator_agent import s5_shared_budget as shared
-from operator_agent.llm_budget import LLMCallLimits, ProductionLLMCallBudget
-from operator_agent.llm_client import LLMClient
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.execute.llm_budget import LLMCallLimits, ProductionLLMCallBudget
+from operator_agent.execute.llm_client import LLMClient
 
 
 def ledger(tmp_path, max_calls=2):

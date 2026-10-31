@@ -10,8 +10,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from operator_agent import autonomous, hitl_tools as ht
-from operator_agent.task_budget import TaskBudgetConfig, snapshot
+from operator_agent.app import autonomous, hitl_tools as ht
+from operator_agent.execute.task_budget import TaskBudgetConfig, snapshot
 from tests.unit.test_autonomous import SKETCH, CODE
 
 
@@ -145,7 +145,7 @@ def test_unknown_task_policy_fields_are_rejected():
 
 
 def test_deleted_reservation_is_unknown_instead_of_zero(tmp_path):
-    from operator_agent.llm_budget import ProductionLLMCallBudget
+    from operator_agent.execute.llm_budget import ProductionLLMCallBudget
     policy = TaskBudgetConfig()
     ledger = ProductionLLMCallBudget(policy.llm_limits(), tmp_path/'model-journal')
     identity = dict(model='fixture')

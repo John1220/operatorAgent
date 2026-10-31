@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.agents import CoderAgent
-from operator_agent.fixer import FixerAgent
-from operator_agent.generation_context import records_cursor, records_since, validate_candidate_record
-from operator_agent.repair_loop import repair
-from operator_agent.run_contract import code_hash
+from operator_agent.generate.agents import CoderAgent
+from operator_agent.generate.fixer import FixerAgent
+from operator_agent.generate.generation_context import records_cursor, records_since, validate_candidate_record
+from operator_agent.generate.repair_loop import repair
+from operator_agent.core.run_contract import code_hash
 from tests.unit.test_execute_inner_behavior import _CODE, _Llm, _task
 from tests.unit.test_fixer_generation_records import ORIGINAL, FIXED, Replies, task, failures, reply
 from tests.unit.test_repair_loop import FakeVerifier, bad, ok
@@ -79,7 +79,7 @@ def test_model_failure_is_persisted_before_finalize_without_retry(tmp_path):
 def test_evidence_write_failure_does_not_mask_model_error(tmp_path, monkeypatch):
     instance = conductor(tmp_path)
     fixer = FixerAgent(llm=Replies([TimeoutError('original model error')]))
-    from operator_agent import run_contract
+    from operator_agent.core import run_contract
     monkeypatch.setattr(run_contract, 'atomic_json', lambda *a, **k: (_ for _ in ()).throw(OSError('disk')))
     with pytest.raises(TimeoutError, match='original model error'):
         instance._call_generator(fixer, fixer.run_with_action, ORIGINAL, task(), failures())
@@ -161,7 +161,7 @@ def test_pipeline_failure_receipts_reach_coder_wrapper():
 
 @pytest.mark.parametrize('phase', ['done', 'failed'])
 def test_status_exposes_generation_evidence_after_success_or_failure(tmp_path, phase):
-    from operator_agent import hitl_tools
+    from operator_agent.app import hitl_tools
     evidence = str(tmp_path/'generation-records.json')
     status = dict(phase=phase, pid=1)
     if phase == 'failed':

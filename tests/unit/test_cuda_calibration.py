@@ -7,12 +7,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent import cuda_calibration as cc
-from operator_agent.backend_caps import Cap
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.remote_executor import SSHExecutor, RemoteExecutor
-from operator_agent.run_contract import atomic_json, protocol_identity
+from operator_agent.decide import cuda_calibration as cc
+from operator_agent.core.backend_caps import Cap
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.remote_executor import SSHExecutor, RemoteExecutor
+from operator_agent.core.run_contract import atomic_json, protocol_identity
 from tests.backend_fakes import DeclaredFakeBackend
 from tests.unit.test_session_inputs import real_session  # actual deployed CPU server fixture
 from tests.unit.test_oracle import _eval
@@ -221,9 +221,9 @@ def test_native_method_is_persistent_only_and_facade_only_forwards():
 
 
 def test_production_protocol_and_deployment_cover_shared_native_source():
-    assert "operator_agent/cuda_calibration.py" in protocol_identity()
+    assert "operator_agent/decide/cuda_calibration.py" in protocol_identity()
     files = [p.name for p, _ in SSHExecutor(host="h")._remote_files()]
-    assert files.index("cuda_calibration.py") < files.index("runner_server.py")
+    assert files.index("cuda_calibration.py") < files.index("runner_server.py")   # 远端部署名是裸名
 
 
 @pytest.mark.parametrize("req", [{"action": "cuda_calibration_probe", "mode": "other"},

@@ -27,14 +27,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from operator_agent.backend_caps import Cap, CapabilityMissing
-from operator_agent.remote_executor import (
+from operator_agent.core.backend_caps import Cap, CapabilityMissing
+from operator_agent.execute.remote_executor import (
     HardwareProbeFailed,
     HTTPExecutor,
     SSHExecutor,
 )
 
-_MODULE_SOURCE = Path("operator_agent/remote_executor.py").read_text(encoding="utf-8")
+_MODULE_SOURCE = Path("operator_agent/execute/remote_executor.py").read_text(encoding="utf-8")
 
 #: 旧写法在失败路径上编造的那几个具体值。任何一个重新出现在可执行语句里都算回归。
 FABRICATED = ("40GB", "2TB/s", "128KB/SM", "19TB/s", "NVIDIA GPU (Remote")

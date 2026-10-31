@@ -28,17 +28,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.measurement import (
+from operator_agent.decide.measurement import (
     CONTAMINATION_UTIL_PCT, DISPERSION_DEGRADED, DISPERSION_UNINFORMATIVE,
     INTRUDER_MAX_OVER_MEDIAN, LAUNCH_DOMINANCE_UNINFORMATIVE, LAUNCH_DOMINANCE_VALID,
     NOISE_BAND, MeasurementAssessment, Validity, Verdict, assess, binding_attainment,
     launch_dominance, reference_ceiling_reached, verdict,
 )
-from operator_agent.schemas import (
+from operator_agent.core.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType,
 )
-from operator_agent.verifier import Verifier, baseline_plan
+from operator_agent.decide.verifier import Verifier, baseline_plan
 from tests.backend_fakes import fake_backend
 
 # H20 launch 开销 (空 Triton 核, CUDA event 计时, 不冲刷 L2):
@@ -196,7 +196,7 @@ class TestNoNetOfFloorMetric(unittest.TestCase):
     """
 
     def test_module_exposes_no_net_of_floor(self):
-        import operator_agent.measurement as mod
+        import operator_agent.decide.measurement as mod
         self.assertFalse([n for n in dir(mod) if "net_of_floor" in n],
                          "net_of_floor* 已删除: 冲刷后的 median 本身就是净值")
 
@@ -599,7 +599,7 @@ class TestMeasurementDrivesLoopDirectly(unittest.TestCase):
     """_measurement_drives_loop 的契约: 缺键时沿用改动前行为"""
 
     def _l3(self, **metrics):
-        from operator_agent.schemas import VerificationLevel, VerificationResult
+        from operator_agent.core.schemas import VerificationLevel, VerificationResult
         return VerificationResult(level=VerificationLevel.L3_PERFORMANCE, passed=False,
                                   message="x", metrics=metrics)
 
@@ -1167,8 +1167,8 @@ class TestFourStateVerdict(unittest.TestCase):
         from unittest import mock
 
         from backend_fakes import DeclaredFakeBackend
-        from operator_agent import hardware_caps as hc
-        from operator_agent.verifier import Verifier
+        from operator_agent.core import hardware_caps as hc
+        from operator_agent.decide.verifier import Verifier
 
         fake = DeclaredFakeBackend(get_hardware_info=lambda: {
             "name": "h20", "device": "h20", "compute_capability": "9.0"})
@@ -1177,7 +1177,7 @@ class TestFourStateVerdict(unittest.TestCase):
         self.assertIs(peak["reference_lower_bound"], False, "但从来没探测过")
 
         real = hc.detect_hardware_caps
-        with mock.patch("operator_agent.verifier.detect_hardware_caps",
+        with mock.patch("operator_agent.decide.verifier.detect_hardware_caps",
                         lambda hw: dataclasses.replace(
                             real(hw), reference_lower_bound_tflops={"tf32": 150.0})):
             peak2 = Verifier(fake)._detect_theoretical_peak()

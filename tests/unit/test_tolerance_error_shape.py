@@ -22,8 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent import tolerance
-from operator_agent.tolerance import (ErrorShapeInputs, classify_error_shape,
+from operator_agent.core import tolerance
+from operator_agent.core.tolerance import (ErrorShapeInputs, classify_error_shape,
                                       error_shape_from_axis_flags,
                                       summarize_bad_axes, ERROR_SHAPES,
                                       ERROR_SHAPE_BROADCAST_AXIS,
@@ -189,7 +189,7 @@ class TestTwoProducersAgree(unittest.TestCase):
 
     @staticmethod
     def _local(mask, n_bad, total, *, has_nonfinite=False):
-        from operator_agent.verifier import Verifier
+        from operator_agent.decide.verifier import Verifier
         return Verifier._error_shape_of(mask, n_bad=n_bad, total=total,
                                         has_nonfinite=has_nonfinite)
 
@@ -226,7 +226,7 @@ class TestWiring(unittest.TestCase):
 
     def _tail_result(self):
         from operator_agent import MockGPU, Verifier
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+        from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                             TargetSpec, TaskComplexity, TaskSchema,
                                             TaskType)
         task = TaskSchema(
@@ -250,7 +250,7 @@ class TestWiring(unittest.TestCase):
 
     def test_route_carries_the_shape_and_a_repair_hint(self):
         """形态进路由的**理由与字段**, 但**不改路由决策** (证据不是判据)"""
-        from operator_agent.failure_route import (ROUTE_DEBUG_FIX, classify)
+        from operator_agent.decide.failure_route import (ROUTE_DEBUG_FIX, classify)
         r = self._tail_result()
         route = classify([r])
         self.assertEqual(route.route, ROUTE_DEBUG_FIX,
@@ -263,8 +263,8 @@ class TestWiring(unittest.TestCase):
     def test_route_says_so_when_the_shape_is_unestablished(self):
         """判不了也要说出来: 沉默会被读成"形态没问题" (空章节必须带依据同一条纪律)"""
         from operator_agent import MockGPU, Verifier
-        from operator_agent.failure_route import classify
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+        from operator_agent.decide.failure_route import classify
+        from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                             TargetSpec, TaskComplexity, TaskSchema,
                                             TaskType)
         task = TaskSchema(
@@ -285,7 +285,7 @@ class TestWiring(unittest.TestCase):
         self.assertIn("未确立", route.reason)
 
     def test_hint_table_covers_every_declared_label(self):
-        from operator_agent.failure_route import ERROR_SHAPE_HINTS
+        from operator_agent.decide.failure_route import ERROR_SHAPE_HINTS
         for label in ERROR_SHAPES:
             self.assertIn(label, ERROR_SHAPE_HINTS, f"{label} 没有对应的修复方向")
 
@@ -297,7 +297,7 @@ class TestWiring(unittest.TestCase):
         加一句"形态=…"若撞上某个 marker, 这条失败就会换一个类 —— 复发门于是数到别的桶里,
         而那是**静默的**: 形态看起来只是多了个标签。`broadcast_axis` 是最像 marker 的一个。
         """
-        from operator_agent.kernel_db import failure_signature
+        from operator_agent.core.kernel_db import failure_signature
         r = self._tail_result()
         suffix = ", 形态=tail_block"
         self.assertIn(suffix, r.message)

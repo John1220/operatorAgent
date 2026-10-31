@@ -4,10 +4,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent import quality_evaluation as q, quality_preflight as pf
-from operator_agent.remote_executor import SSHExecutor
-from operator_agent.run_contract import code_hash
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.decide import quality_evaluation as q, quality_preflight as pf
+from operator_agent.execute.remote_executor import SSHExecutor
+from operator_agent.core.run_contract import code_hash
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
 
 
 CASE = 'layernorm-tail'

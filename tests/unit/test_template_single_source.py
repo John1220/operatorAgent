@@ -13,7 +13,7 @@
 
 ⚠️ 本守卫**不**要求把已刻意分叉的两份 matmul 合并: 语料种子 (带边界 mask / BLOCK=128)
 与回退模板 (无 mask / BLOCK=64) 承担不同角色, 合并任一个都会改掉另一个的语义。
-理由写在 operator_agent/kernel_templates.py 的模块 docstring 里, 并由本文件的
+理由写在 operator_agent/core/kernel_templates.py 的模块 docstring 里, 并由本文件的
 TestTheDeliberateDivergenceIsRecorded 钉住。
 
 运行: python -m pytest tests/unit/test_template_single_source.py -q
@@ -28,10 +28,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from operator_agent import kernel_templates as kt
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.rule_templates import RuleTemplateCoder
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+from operator_agent.core import kernel_templates as kt
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.core.rule_templates import RuleTemplateCoder
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                     TargetSpec, TaskComplexity, TaskSchema,
                                     TaskType)
 
@@ -111,10 +111,11 @@ class TestOneDefinitionOfEachSharedTemplate(unittest.TestCase):
     def test_no_second_literal_copy_inside_the_package(self):
         offenders = []
         for p in sorted((REPO / "operator_agent").rglob("*.py")):
-            if "__pycache__" in str(p) or p.name == "kernel_templates.py":
+            rel = p.relative_to(REPO / "operator_agent").as_posix()
+            if "__pycache__" in str(p) or rel == "core/kernel_templates.py":
                 continue
             for name in _copies_in(p):
-                offenders.append("%s 里有一份逐字相同的 %s" % (p.name, name))
+                offenders.append("%s 里有一份逐字相同的 %s" % (rel, name))
         self.assertEqual([], offenders, "同一份模板出现了第二个定义处: %s" % offenders)
 
 
@@ -152,7 +153,7 @@ class TestTheDeliberateDivergenceIsRecorded(unittest.TestCase):
         self.assertEqual(1, len(seeds))
         seed_code = seeds[0].code
         self.assertNotEqual(seed_code, kt.MATMUL_TRITON,
-                            "两份 matmul 合并了 —— 请先读 kernel_templates.py 的模块 docstring")
+                            "两份 matmul 合并了 —— 请先读 core/kernel_templates.py 的模块 docstring")
         self.assertIn("mask=", seed_code, "语料正样本必须能处理不能整除的 shape")
         self.assertNotIn("mask=", kt.MATMUL_TRITON, "保底模板本来就不带 mask")
 

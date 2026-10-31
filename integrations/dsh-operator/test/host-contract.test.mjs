@@ -195,7 +195,9 @@ test("宿主读得到这张「脸」：标题/描述/图标（少一条 exports 
 function findPython() {
   const candidates = [process.env.OPERATOR_AGENT_PYTHON, "python3", "/usr/bin/python3"].filter(Boolean);
   return candidates.find((python) => {
-    const probe = spawnSync(python, ["-c", "import operator_agent.mcp_server"],
+    // 只探**公开**入口：包内布局会变（2026-10-31 分了 core/decide/execute/generate/app 五层），
+    // 探 `operator_agent.mcp_server` 这种内部路径会让这条守卫随分目录静默 skip。
+    const probe = spawnSync(python, ["-c", "import operator_agent"],
                             { cwd: REPO_ROOT, timeout: 30_000 });
     return probe.status === 0;
   });
@@ -215,7 +217,7 @@ test("server 的 instructions 真的到达 MCP 客户端（宿主据此渲染 mc
   const client = new Client({ name: "contract", version: "0" }, { capabilities: {} });
   await client.connect(new StdioClientTransport({
     command: python,
-    args: ["-m", "operator_agent.mcp_server"],
+    args: ["-m", "operator_agent.app.mcp_server"],
     cwd: REPO_ROOT,
     env: { PATH: process.env.PATH, HOME: process.env.HOME },
   }));

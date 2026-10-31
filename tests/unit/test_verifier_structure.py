@@ -18,7 +18,7 @@ import ast
 import unittest
 from pathlib import Path
 
-VERIFIER = Path(__file__).resolve().parents[2] / "operator_agent" / "verifier.py"
+VERIFIER = Path(__file__).resolve().parents[2] / "operator_agent" / "decide" / "verifier.py"
 
 _CLOSURE = "_publish_oracle_observation"
 _CALLER = "_assess_measurement"

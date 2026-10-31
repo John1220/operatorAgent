@@ -173,8 +173,8 @@ class TestRealDriverIsCovered(unittest.TestCase):
     """C 组 (真仓库那半): 上一轮不可归属的事故, 今天必须被这份名单抓住"""
 
     # doc 50 §7.5: 那次跑动窗口内被并发会话改掉的就是这五个文件
-    INCIDENT = ["operator_agent/schemas.py", "operator_agent/remote_executor.py",
-                "operator_agent/verifier.py", "operator_agent/conductor.py",
+    INCIDENT = ["operator_agent/core/schemas.py", "operator_agent/execute/remote_executor.py",
+                "operator_agent/decide/verifier.py", "operator_agent/app/conductor.py",
                 "remote_scripts/run_kernel.py"]
 
     def test_the_five_files_that_broke_the_last_run_are_all_listed(self):
@@ -190,7 +190,7 @@ class TestRealDriverIsCovered(unittest.TestCase):
         self.assertGreaterEqual(len(found), 20, found)
 
     def test_local_imports_on_a_real_module_finds_relative_names(self):
-        mods = local_imports(Path(_ROOT) / "operator_agent" / "conductor.py", _ROOT)
+        mods = local_imports(Path(_ROOT) / "operator_agent" / "app" / "conductor.py", _ROOT)
         self.assertTrue(any(m.endswith("verifier") for m in mods), mods[:12])
 
     def test_driver_asks_twice_and_gates_its_conclusion_on_the_answer(self):

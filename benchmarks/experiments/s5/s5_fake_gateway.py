@@ -19,7 +19,7 @@ import math
 from pathlib import Path
 import threading
 
-from operator_agent import s5_shared_budget as shared
+from operator_agent.execute import s5_shared_budget as shared
 
 
 class GatewayRefused(RuntimeError):

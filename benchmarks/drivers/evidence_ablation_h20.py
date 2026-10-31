@@ -62,7 +62,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from operator_agent._harness_controls import enable_for_harness
+from operator_agent.app._harness_controls import enable_for_harness
 enable_for_harness()
 # 「跑测试/探针不得改动仓库状态」的三条逃生门 (§3.5 硬伤二记过它们的账): 这一跑要的是
 # **干净两臂**, 而失败库与长期记忆会跨臂串味 —— 第一臂写进去的案例会出现在第二臂的
@@ -75,8 +75,8 @@ os.environ.setdefault("OPERATOR_AGENT_LOG_KEEP", "100")
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
-from operator_agent.rule_templates import RuleTemplateCoder  # noqa: E402
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,  # noqa: E402
+from operator_agent.core.rule_templates import RuleTemplateCoder  # noqa: E402
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,  # noqa: E402
                                     TaskComplexity, TaskSchema, TaskType,
                                     TargetSpec, VerificationLevel)
 
@@ -389,7 +389,7 @@ def run_one(scenario, *, structured_evidence, llm, backend, task, inputs,
     结论句里再逐条点名 —— 崩掉的臂**不许**被当成「那一臂没通过」。
     """
     from operator_agent import Conductor
-    from operator_agent.kernel_db import FailureDatabase, KernelDatabase
+    from operator_agent.core.kernel_db import FailureDatabase, KernelDatabase
 
     arm = "on" if structured_evidence else "off"
     sent_before = len(getattr(llm, "sent", []))
@@ -551,8 +551,8 @@ def _file_hashes() -> dict:
     NameError)。读数落盘时若不带文件指纹, 事后无从判断那次读数量的是哪一版流水线。
     """
     import hashlib
-    keys = ("operator_agent/conductor.py", "operator_agent/agent_runtime.py",
-            "operator_agent/fixer.py", "operator_agent/prompts/fixer_repair.md",
+    keys = ("operator_agent/app/conductor.py", "operator_agent/generate/agent_runtime.py",
+            "operator_agent/generate/fixer.py", "operator_agent/prompts/fixer_repair.md",
             "benchmarks/drivers/evidence_ablation_h20.py")
     out = {}
     for key in keys:
@@ -640,8 +640,8 @@ def main() -> int:
     if arm_diff() != {"structured_evidence"}:
         sys.exit("两臂不止差一个开关 ⇒ 这不是对照实验, 停下")
 
-    from operator_agent.kernel_db import FailureDatabase, KernelDatabase
-    from operator_agent.mock_gpu import MockGPU
+    from operator_agent.core.kernel_db import FailureDatabase, KernelDatabase
+    from operator_agent.execute.mock_gpu import MockGPU
 
     task = _task(dsl=dsl, hardware=hardware, min_speedup=args.min_speedup)
     inputs = _inputs(shape)

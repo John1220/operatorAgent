@@ -15,7 +15,7 @@ import time
 
 from benchmarks.experiments.s5 import s5_formal_run as workflow
 from benchmarks.experiments.s5.s5_ruler_preflight import device_snapshot
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 from benchmarks.experiments.s5.s5_outcomes import fatal, classify
 
 TASKS = ('matmul-tail-fp16', 'layernorm-tail', 'softmax-extreme')

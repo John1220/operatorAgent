@@ -13,9 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
 from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
-from operator_agent import s5_shared_budget as budget
-from operator_agent.llm_budget import LLMCallLimits, ProductionLLMCallBudget
-from operator_agent.llm_client import LLMClient
+from operator_agent.execute import s5_shared_budget as budget
+from operator_agent.execute.llm_budget import LLMCallLimits, ProductionLLMCallBudget
+from operator_agent.execute.llm_client import LLMClient
 
 ROOT=Path('/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai')
 FIXTURE=Path(__file__).resolve().parents[1]/'fixtures'/'s5_dsh_pi_ai_client.mjs'

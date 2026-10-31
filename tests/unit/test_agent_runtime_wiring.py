@@ -25,14 +25,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.agent_runtime import candidate_path
-from operator_agent.coder_pipeline import CoderPipeline
-from operator_agent.conductor import Conductor
-from operator_agent.failure_route import classify
-from operator_agent.fixer import FixerAgent
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (
+from operator_agent.generate.agent_runtime import candidate_path
+from operator_agent.generate.coder_pipeline import CoderPipeline
+from operator_agent.app.conductor import Conductor
+from operator_agent.decide.failure_route import classify
+from operator_agent.generate.fixer import FixerAgent
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, VerificationLevel,
     VerificationResult, TaskType, TaskComplexity, Precision,
 )
@@ -321,7 +321,7 @@ class TestTheActionKindFollowsTheLoop(unittest.TestCase):
         self.assertEqual(FixerAgent.FIX_MAX_TOKENS,
                          Conductor._llm_tokens_budget_claim("fix"))
         src = (Path(__file__).resolve().parents[2] / "operator_agent"
-               / "fixer.py").read_text(encoding="utf-8")
+               / "generate/fixer.py").read_text(encoding="utf-8")
         self.assertIn("max_tokens=self.FIX_MAX_TOKENS", src,
                       "Fixer 那次调用的 max_tokens 不再读常量了 —— 声明与实际又分家了")
         self.assertEqual(1, Conductor._llm_tokens_budget_claim("template"),
@@ -332,7 +332,7 @@ class TestTheRefusalResult(unittest.TestCase):
     """拒绝的**后果**是定义好的: 一条 L1 失败 + 两条给读者用的字"""
 
     def test_it_is_an_l1_failure_that_says_it_never_compiled(self):
-        from operator_agent import agent_runtime as ar
+        from operator_agent.generate import agent_runtime as ar
         rt = ar.AgentRuntime()
         action = ar.AgentAction("r1-fix", ar.KIND_REPAIR_COMPILE, "修",
                                 parent_candidate="src:x",

@@ -49,13 +49,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
-from operator_agent.backend_caps import Cap  # noqa: E402
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.bench_cases import case_from_inputs, case_key  # noqa: E402
-from operator_agent.run_layout import new_run_root  # noqa: E402
-from operator_agent.llm_client import (  # noqa: E402
+from operator_agent.core.backend_caps import Cap  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.decide.bench_cases import case_from_inputs, case_key  # noqa: E402
+from operator_agent.core.run_layout import new_run_root  # noqa: E402
+from operator_agent.execute.llm_client import (  # noqa: E402
     LLMClient, format_sampling_configs)
-from operator_agent.measurement import (BAND_SAME, BAND_SPEC_DRIFT,  # noqa: E402
+from operator_agent.decide.measurement import (BAND_SAME, BAND_SPEC_DRIFT,  # noqa: E402
                                         BAND_TIER_EXPLAINED, BAND_UNEXPLAINED,
                                         BAND_UNMEASURABLE, LINEAGE_BAND_KEY,
                                         LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
@@ -64,8 +64,8 @@ from operator_agent.measurement import (BAND_SAME, BAND_SPEC_DRIFT,  # noqa: E40
                                         band_note, attributable_evidence,
                                         correctness_verified_levels, cross_round_band,
                                         cross_round_ruler, persist_decision)
-from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutor  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema, TaskType,
 )
 
@@ -461,7 +461,7 @@ def min_detectable_delta(n_per_arm, p_a=0.5, alpha=0.05, power=0.8):
 
 def _collect_unable(rounds, runs) -> list:
     """从逐轮 metrics 里捞「说不清」的信号 (设计 §17)。只搬事实, 不猜数字。"""
-    from operator_agent.confirm import UnableToEstablish
+    from operator_agent.core.confirm import UnableToEstablish
     u = UnableToEstablish()
     for r in rounds:
         m = r if isinstance(r, dict) else {}

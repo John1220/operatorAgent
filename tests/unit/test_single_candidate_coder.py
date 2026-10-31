@@ -9,15 +9,16 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from operator_agent import Conductor, KernelDatabase, llm_client as lc
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.budget import BudgetPlan
-from operator_agent.kernel_db import FailureDatabase
-from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
-from operator_agent.llm_client import LLMClient
-from operator_agent.run_contract import code_hash, load_checkpoint, protocol_identity
-from operator_agent.schemas import UnifiedSketch, VerificationLevel as Level, VerificationResult
-from operator_agent.single_candidate_coder import (SingleCandidateCoder, SingleCandidatePolicy,
+from operator_agent import Conductor, KernelDatabase
+from operator_agent.execute import llm_client as lc
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.execute.budget import BudgetPlan
+from operator_agent.core.kernel_db import FailureDatabase
+from operator_agent.execute.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
+from operator_agent.execute.llm_client import LLMClient
+from operator_agent.core.run_contract import code_hash, load_checkpoint, protocol_identity
+from operator_agent.core.schemas import UnifiedSketch, VerificationLevel as Level, VerificationResult
+from operator_agent.generate.single_candidate_coder import (SingleCandidateCoder, SingleCandidatePolicy,
                                                   audit_generation, input_metadata, precheck)
 from tests.unit.test_workload_evidence import task, inputs, backend
 
@@ -81,7 +82,7 @@ def test_one_request_exact_model_source_frozen_context_and_offline_audit(tmp_pat
     assert before == {p.name: p.read_bytes() for p in root.iterdir()}
     assert (root / 'candidate.json').stat().st_mode & 0o777 == 0o444
     assert coder.last_generation['candidate_hash'] == code_hash(CODE)
-    from operator_agent.generation_context import validate_candidate_record
+    from operator_agent.generate.generation_context import validate_candidate_record
     record = json.loads((root / 'candidate-record.json').read_text())
     assert validate_candidate_record(record) == coder.last_candidate_record
     assert record['source_hash'] == code_hash(CODE)
@@ -307,4 +308,4 @@ def test_resume_and_execution_drift_refused_before_hardware_or_model(tmp_path, m
 def test_generation_sources_are_in_production_protocol_identity():
     files = protocol_identity()
     assert all('operator_agent/'+name in files for name in
-        ('llm_client.py', 'llm_budget.py', 'llm_transport.py', 'single_candidate_coder.py'))
+        ('execute/llm_client.py', 'execute/llm_budget.py', 'execute/llm_transport.py', 'generate/single_candidate_coder.py'))

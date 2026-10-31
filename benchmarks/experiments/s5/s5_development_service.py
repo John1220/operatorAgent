@@ -16,7 +16,7 @@ import threading
 import time
 
 from benchmarks.experiments.s5 import s5_verify_remote
-from operator_agent.run_contract import code_hash
+from operator_agent.core.run_contract import code_hash
 
 MAX_BODY = 131072
 MAX_SOURCE = 65536

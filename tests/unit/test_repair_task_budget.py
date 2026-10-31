@@ -6,9 +6,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent import cli, hitl_tools as ht, llm_client, mcp_server, repair_loop
-from operator_agent import task_budget, task_cancellation, tool_calls
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.app import cli, hitl_tools as ht, mcp_server
+from operator_agent.execute import llm_client
+from operator_agent.generate import repair_loop
+from operator_agent.execute import task_budget, task_cancellation
+from operator_agent.app import tool_calls
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
 
 
 DECL = dict(request='matmul fp32', shapes=[[8, 8, 8]], min_speedup=1)
@@ -44,7 +47,7 @@ def prepared(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_client, 'LLMClient', OfflineClient)
     monkeypatch.setattr(ht, '_make_backend', lambda *a, **kw: (object(), {}))
     monkeypatch.setattr(ht, 'Verifier', lambda backend: object())
-    from operator_agent import fixer
+    from operator_agent.generate import fixer
     monkeypatch.setattr(fixer, 'FixerAgent', lambda llm: SimpleNamespace(llm=llm))
     monkeypatch.setattr(tool_calls, '_REPAIR_CONTEXT', None)
     return run
@@ -142,7 +145,7 @@ def test_backend_exception_keeps_reserved_budget_and_failure_evidence(prepared, 
 
 
 def test_real_repair_loop_consumes_the_shared_ledger_and_stops_at_the_model_limit(prepared, monkeypatch):
-    from operator_agent import fixer as fixer_module
+    from operator_agent.generate import fixer as fixer_module
     from tests.unit.test_repair_loop import FakeVerifier
     bad = [VerificationResult(Level.L1_COMPILE, False, 'synthetic compiler failure')]
     verifier = FakeVerifier([bad])
@@ -167,8 +170,8 @@ def test_real_repair_loop_consumes_the_shared_ledger_and_stops_at_the_model_limi
 
 
 def test_direct_library_expiry_does_not_claim_hard_worker_termination(prepared, monkeypatch):
-    from operator_agent import task_clock
-    from operator_agent import llm_budget
+    from operator_agent.execute import task_clock
+    from operator_agent.execute import llm_budget
     clock = [1000.]
     for module in (task_clock, task_budget, llm_budget):
         monkeypatch.setattr(module, 'monotonic', lambda: clock[0])

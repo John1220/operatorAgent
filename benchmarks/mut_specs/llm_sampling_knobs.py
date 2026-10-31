@@ -18,7 +18,7 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "llm": "operator_agent/llm_client.py",
+    "llm": "operator_agent/execute/llm_client.py",
     "hrn": "benchmarks/drivers/harness_pass_rate.py",
 }
 

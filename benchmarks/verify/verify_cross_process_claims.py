@@ -38,11 +38,11 @@ def run_arm(arm_id: str) -> int:
     """一个臂 = 一个独立 harness 进程 (真机 L3)。由 main() 以子进程方式再入本文件。"""
     import numpy as np
 
-    from operator_agent.remote_executor import RemoteExecutor
-    from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+    from operator_agent.execute.remote_executor import RemoteExecutor
+    from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                         TaskSchema, TaskType, TargetSpec)
-    from operator_agent.triton_matmul_template import instantiate
-    from operator_agent.verifier import Verifier
+    from operator_agent.generate.triton_matmul_template import instantiate
+    from operator_agent.decide.verifier import Verifier
 
     # 已知点 (I70 实测 5.7~6.2ms 串行): 足够大, launch 地板不支配; 足够快, 一臂 <1min
     inst = instantiate({"BLOCK_M": 64, "BLOCK_N": 64, "BLOCK_K": 32,

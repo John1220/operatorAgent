@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.llm_client import CostTracker  # noqa: E402
+from operator_agent.execute.llm_client import CostTracker  # noqa: E402
 
 
 def _rec(tracker: CostTracker, model: str, reported, calls: int = 1) -> CostTracker:
@@ -95,7 +95,7 @@ class TestTheLedgerKeepsBothNames(unittest.TestCase):
 class TestTheWiringIsLive(unittest.TestCase):
     """记账函数写好了不等于有人调它 —— 这两条钉的是接线, 不是逻辑"""
 
-    SRC = Path("operator_agent/llm_client.py")
+    SRC = Path("operator_agent/execute/llm_client.py")
 
     def _call_model_body(self):
         tree = ast.parse(self.SRC.read_text(encoding="utf-8"))

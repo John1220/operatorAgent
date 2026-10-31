@@ -13,9 +13,9 @@ sys.path.insert(0, str(ROOT))
 
 from benchmarks.measurement.measure_prompt_layers import (  # noqa: E402
     CapturingLLM, EmptyDB, initial_sketch, perf_data, task)
-from operator_agent.agents import CoderAgent, SearchAgent, _clean, _hint_log  # noqa: E402
-from operator_agent.interface_contract import broadcast_calling_convention  # noqa: E402
-from operator_agent.schemas import UnifiedSketch  # noqa: E402
+from operator_agent.generate.agents import CoderAgent, SearchAgent, _clean, _hint_log  # noqa: E402
+from operator_agent.core.interface_contract import broadcast_calling_convention  # noqa: E402
+from operator_agent.core.schemas import UnifiedSketch  # noqa: E402
 
 
 def _coder_prompt(sketch):
@@ -134,7 +134,7 @@ class TestPromptIsHotOnly(unittest.TestCase):
         行为断言而不是「源码里还有 hot_hints() 字样」: 后者在 K5 那种「把这一处改回
         冷层、另一处留着」的变异下会跟着文本走, 量不到实际注入的内容。
         """
-        from operator_agent.coder_pipeline import CoderPipeline
+        from operator_agent.generate.coder_pipeline import CoderPipeline
 
         llm = CapturingLLM()
         pipe = CoderPipeline(llm=llm, kernel_db=EmptyDB())
@@ -171,7 +171,7 @@ class TestRenderSitesUseTheHotLayer(unittest.TestCase):
     """
 
     def test_cold_log_is_read_only_by_the_dedup_helper(self):
-        src = (ROOT / "operator_agent" / "agents.py").read_text(encoding="utf-8")
+        src = (ROOT / "operator_agent" / "generate" / "agents.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         readers = sorted({n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                           and any(isinstance(x, ast.Attribute)
@@ -183,7 +183,7 @@ class TestRenderSitesUseTheHotLayer(unittest.TestCase):
                          f"这些地方还在直接读冷层: {readers}")
 
     def test_both_coder_paths_render_hot_hints(self):
-        for rel in ("operator_agent/agents.py", "operator_agent/coder_pipeline.py"):
+        for rel in ("operator_agent/generate/agents.py", "operator_agent/generate/coder_pipeline.py"):
             with self.subTest(path=rel):
                 src = (ROOT / rel).read_text(encoding="utf-8")
                 self.assertIn("hot_hints()", src, f"{rel} 不再经热层")

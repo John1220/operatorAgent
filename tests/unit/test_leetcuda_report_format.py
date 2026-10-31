@@ -9,9 +9,9 @@ import unittest
 
 import numpy as np
 
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskSchema, TaskType
-from operator_agent.verifier import _REMOTE_L2_METRIC_KEYS, Verifier
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskSchema, TaskType
+from operator_agent.decide.verifier import _REMOTE_L2_METRIC_KEYS, Verifier
 
 
 def _task(max_error=1e-4, kernel_type="matmul"):
@@ -99,7 +99,7 @@ class TestRatioTripleShowsBothSidesOfTheComparison(unittest.TestCase):
     """LeetCUDA 的 `%.1f/%.1f (%.2fx)`: 只报 1.04x 看不见绝对量级"""
 
     def test_l3_message_contains_cand_over_base_and_ratio(self):
-        from operator_agent.verifier import Verifier as V
+        from operator_agent.decide.verifier import Verifier as V
         # 用一个假 bench 装置太重; 直接测格式化约定 —— 三元组必须同时含
         # 两个数与括号倍率, 且 cand 在前。
         kernel_ms, base_ms = 1.234, 1.185
@@ -111,7 +111,7 @@ class TestRatioTripleShowsBothSidesOfTheComparison(unittest.TestCase):
 
     def test_verifier_source_uses_the_triple_in_l3_messages(self):
         from pathlib import Path
-        src = Path("operator_agent/verifier.py").read_text(encoding="utf-8")
+        src = Path("operator_agent/decide/verifier.py").read_text(encoding="utf-8")
         self.assertIn("ratio_triple", src)
         self.assertGreaterEqual(src.count("加速比 {ratio_triple}"), 2,
                                 "远程与本地两条 L3 出口都要用三元组")

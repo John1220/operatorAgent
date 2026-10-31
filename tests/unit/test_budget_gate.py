@@ -24,12 +24,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.budget import BudgetPlan
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.resource_check import (SharedMemoryEvidence, assess_shared_memory,
+from operator_agent.execute.budget import BudgetPlan
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.decide.resource_check import (SharedMemoryEvidence, assess_shared_memory,
                                            source_resource_binding)
-from operator_agent.schemas import (
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision,
 )
@@ -175,7 +175,7 @@ class TestTheRulerIsNotStarvedByTheBudget(unittest.TestCase):
     def test_heartbeats_keep_running_after_the_calibration_share_is_used_up(self):
         # This fixture reports CUDA, so explicitly supply the native channel.
         # CPU proxy heartbeats no longer certify CUDA; timings remain offline fakes.
-        from operator_agent.backend_caps import Cap
+        from operator_agent.core.backend_caps import Cap
         from tests.unit.test_cuda_calibration import receipt
         class NativeTimer(LaunchDominatedGPU):
             @property
@@ -224,7 +224,7 @@ class TestTheTokenBudgetDegradesToNumericSearch(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="token-budget-output-") as output_dir:
             with patch.dict(os.environ, {"OPERATOR_AGENT_OUTPUT_DIR": output_dir}), \
-                    patch("operator_agent.conductor.check_resource_feasibility", native_report), \
+                    patch("operator_agent.app.conductor.check_resource_feasibility", native_report), \
                     contextlib.redirect_stdout(io.StringIO()) as buf:
                 art = c.execute(_task(), _inputs(), None, target_gflops=0.0)
         return llm, art, buf.getvalue()

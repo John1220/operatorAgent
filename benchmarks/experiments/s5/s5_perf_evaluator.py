@@ -20,10 +20,10 @@ import time
 from benchmarks.experiments.s5 import s5_runtime
 from benchmarks.experiments.s5 import s5_shared_gpu
 from benchmarks.experiments.s5.s5_verify_remote import _l1_rejection_is_decisive
-from operator_agent.contract import freeze_from_task
-from operator_agent.correctness import as_suite
-from operator_agent.hitl_tools import build_task, prepare
-from operator_agent.run_contract import digest, protocol_identity
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.decide.correctness import as_suite
+from operator_agent.app.hitl_tools import build_task, prepare
+from operator_agent.core.run_contract import digest, protocol_identity
 
 PLAN_SCHEMA = 's5-performance-evaluation-plan-v1'
 RESULT_SCHEMA = 's5-performance-evaluation-v1'
@@ -162,7 +162,7 @@ def environment(plan):
 
 
 def _command(plan, out):
-    return [sys.executable, '-m', 'operator_agent.cli', 'verify',
+    return [sys.executable, '-m', 'operator_agent.app.cli', 'verify',
             '--run-dir', str(out/'task'), '--code-file', str(out/'candidate.py'),
             '--candidate-origin', plan['candidate_origin'], '--stop-after', plan['stop_after'],
             '--backend', 'ssh', '--host', plan['pin']['host'], '--persistent',

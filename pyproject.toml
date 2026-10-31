@@ -18,8 +18,8 @@ classifiers = [
 ]
 
 [project.scripts]
-operator-agent = "operator_agent.cli:main"
-operator-agent-mcp = "operator_agent.mcp_server:main"
+operator-agent = "operator_agent.app.cli:main"
+operator-agent-mcp = "operator_agent.app.mcp_server:main"
 
 [tool.setuptools]
 include-package-data = false

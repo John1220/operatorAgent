@@ -8,10 +8,10 @@
 """
 import unittest
 
-from operator_agent.calibration import HeartbeatResult
-from operator_agent.confirm import ConfirmRecord
-from operator_agent.contract import BaselineDef, DTypeSemantics, ShapeDist, freeze
-from operator_agent.oracle import admit_to_corpus, evaluate
+from operator_agent.decide.calibration import HeartbeatResult
+from operator_agent.core.confirm import ConfirmRecord
+from operator_agent.core.contract import BaselineDef, DTypeSemantics, ShapeDist, freeze
+from operator_agent.decide.oracle import admit_to_corpus, evaluate
 
 
 def _contract():

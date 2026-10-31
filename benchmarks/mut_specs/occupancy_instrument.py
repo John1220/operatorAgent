@@ -1,6 +1,6 @@
 import shutil, subprocess, sys, tempfile
 from pathlib import Path
-R = Path(__file__).resolve().parents[2]   # 仓库根: 相对定位 (公开仓不许出现绝对路径); F = R / "operator_agent/escalation.py"
+R = Path(__file__).resolve().parents[2]   # 仓库根: 相对定位 (公开仓不许出现绝对路径); F = R / "operator_agent/decide/escalation.py"
 M = [
  ("M1 smem 未知也敢报", """    for value in (tile_smem_bytes, num_warps, max_threads_per_sm, shared_mem_per_sm_kb):""",
   """    for value in (tile_smem_bytes, num_warps, max_threads_per_sm):"""),

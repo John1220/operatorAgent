@@ -25,7 +25,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from operator_agent.remote_executor import SessionError, _RemoteSession
+from operator_agent.execute.remote_executor import SessionError, _RemoteSession
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVER = ROOT / "remote_scripts" / "runner_server.py"
@@ -216,7 +216,7 @@ class TestSessionStartup(unittest.TestCase):
     """
 
     def _executor(self, argv_factory):
-        from operator_agent.remote_executor import SSHExecutor
+        from operator_agent.execute.remote_executor import SSHExecutor
         ex = SSHExecutor(persistent=True, timeout=30)
         ex._deployed = True          # 测试不碰远端, 跳过 deploy
         ex._gpu_pin = -1             # 已解析成「不固定」⇒ _pinned_gpu() 不再走 ssh
@@ -241,7 +241,7 @@ class TestSessionStartup(unittest.TestCase):
 
     def test_persistent_is_refused_on_platforms_without_run_action(self):
         """不给「悄悄退化成一次性」的路 —— 声明了常驻就得真常驻"""
-        from operator_agent.remote_executor import SSHExecutor
+        from operator_agent.execute.remote_executor import SSHExecutor
         with self.assertRaises(ValueError):
             SSHExecutor(platform="kunlunxin", persistent=True)
 

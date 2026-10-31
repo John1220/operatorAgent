@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-CONDUCTOR = Path(__file__).resolve().parents[2] / "operator_agent" / "conductor.py"
+CONDUCTOR = Path(__file__).resolve().parents[2] / "operator_agent" / "app" / "conductor.py"
 NL = chr(10)
 
 #: _restore_state_from_snapshot 的恢复清单 -> RunState 字段名。两处故意不同名:

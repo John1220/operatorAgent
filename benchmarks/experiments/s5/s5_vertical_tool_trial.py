@@ -17,8 +17,8 @@ from benchmarks.experiments.s5.s5_vertical_tool_headless import run_tool_headles
 from benchmarks.experiments.s5.s5_vertical_tool_provider import ScriptedToolProvider, TOOL_NAME
 from benchmarks.experiments.s5.s5_vertical_tool_service import MockValidationService
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
-from operator_agent import s5_shared_budget as shared
-from operator_agent.run_contract import code_hash
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.core.run_contract import code_hash
 
 TASK_ID='vertical-tool-fixture-01'
 TASK=('Validate the supplied Python kernel using validate_kernel. '

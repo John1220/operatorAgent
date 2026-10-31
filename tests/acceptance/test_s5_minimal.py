@@ -3,7 +3,7 @@ import json
 import pytest
 from benchmarks.experiments.s5 import s5_formal_run as flow, s5_minimal_tasks as tasks, s5_minimal_summary as stats
 from benchmarks.experiments.s5.s5_outcomes import classify,fatal
-from operator_agent.hitl_tools import prepare
+from operator_agent.app.hitl_tools import prepare
 
 
 def test_new_tasks_have_disjoint_primary_specs_and_correct_operands(tmp_path):

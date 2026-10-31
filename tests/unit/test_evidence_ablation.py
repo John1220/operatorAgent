@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 from benchmarks.drivers import evidence_ablation_h20 as ab            # noqa: E402
 from benchmarks.drivers.harness_pass_rate import min_detectable_delta  # noqa: E402
-from operator_agent.mock_gpu import MockGPU                    # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU                    # noqa: E402
 
 #: 越界断言的形状 (不包括结论里那句「不许声称收益, 也不许声称无收益」—— 那句是**边界**本身,
 #: 它不含「有收益」这三个连续字符, 所以不会被这张名单误伤)

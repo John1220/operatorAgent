@@ -152,7 +152,7 @@ class TestTheDshShim(unittest.TestCase):
 
         所以契约钉在**产出侧**（这里），而不是只靠 JS 侧的 fixture。
         """
-        from operator_agent.hitl_tools import autonomous_status, capabilities
+        from operator_agent.app.hitl_tools import autonomous_status, capabilities
 
         cap = capabilities()
         for key in ("ok", "version", "tool_version", "backends", "runtime",

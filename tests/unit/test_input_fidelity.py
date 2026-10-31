@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 
 from operator_agent import MockGPU
-from operator_agent.exec_guard import run_candidate
-from operator_agent.input_fidelity import (
+from operator_agent.execute.exec_guard import run_candidate
+from operator_agent.decide.input_fidelity import (
     InputFidelityError, encode_inputs, decode_inputs, describe_inputs, check_readback,
 )
-from operator_agent.schemas import KernelArtifact
-from operator_agent.report import build_report
+from operator_agent.core.schemas import KernelArtifact
+from operator_agent.core.report import build_report
 from tests.unit.test_correctness_suite import case, verify, GOOD, CorrectnessSuite
 
 
@@ -68,7 +68,7 @@ def test_encode_rejects_object_subclass_and_unknown_backing():
 
 
 def test_storage_and_logical_size_caps_are_checked(monkeypatch):
-    import operator_agent.input_fidelity as fidelity
+    import operator_agent.decide.input_fidelity as fidelity
     monkeypatch.setattr(fidelity, "MAX_STORAGE_BYTES", 32)
     with pytest.raises(InputFidelityError, match="上限"):
         encode_inputs({"X": np.ones(100, dtype=np.float32)[:1]})
@@ -79,7 +79,7 @@ def test_storage_and_logical_size_caps_are_checked(monkeypatch):
 
 
 def test_seed_path_can_opt_into_a_larger_explicit_limit(monkeypatch):
-    import operator_agent.input_fidelity as fidelity
+    import operator_agent.decide.input_fidelity as fidelity
     monkeypatch.setattr(fidelity, "MAX_STORAGE_BYTES", 32)
     monkeypatch.setattr(fidelity, "MAX_SEED_STORAGE_BYTES", 128)
     inputs = {"X": np.ones(20, dtype=np.float32)}      # 80 B: 过 seed 上限, 不过 JSON 上限

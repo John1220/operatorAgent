@@ -30,9 +30,9 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "ver": "operator_agent/verifier.py",
-    "ac": "operator_agent/anticheat.py",
-    "mgpu": "operator_agent/mock_gpu.py",
+    "ver": "operator_agent/decide/verifier.py",
+    "ac": "operator_agent/decide/anticheat.py",
+    "mgpu": "operator_agent/execute/mock_gpu.py",
 }
 
 TARGETS = [

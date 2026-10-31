@@ -27,8 +27,8 @@ import time
 sys.path.insert(0, ".")
 
 from benchmarks.verify.verify_util_decontamination import TRITON_MM, make_task, mm_inputs
-from operator_agent.remote_executor import RemoteExecutor
-from operator_agent.verifier import Verifier
+from operator_agent.execute.remote_executor import RemoteExecutor
+from operator_agent.decide.verifier import Verifier
 
 # 复现历史现场的形态: 注意力 wrapper 只声明 Q/K/V, 而调用方会多传一个 causal
 ATTENTION_STUB = '''

@@ -29,11 +29,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.calibration import HeartbeatResult  # noqa: E402
-from operator_agent.confirm import UnableToEstablish  # noqa: E402
-from operator_agent.contract import (BaselineDef, DTypeSemantics, ShapeDist,  # noqa: E402
+from operator_agent.decide.calibration import HeartbeatResult  # noqa: E402
+from operator_agent.core.confirm import UnableToEstablish  # noqa: E402
+from operator_agent.core.contract import (BaselineDef, DTypeSemantics, ShapeDist,  # noqa: E402
                                      freeze)
-from operator_agent.oracle import evaluate  # noqa: E402
+from operator_agent.decide.oracle import evaluate  # noqa: E402
 
 
 def contract(**over):
@@ -119,10 +119,10 @@ def scene_2():
     print("        两臂分不出快慢 = 尺子坏了。")
     print("        ⚠️ 边界: 参照核走 runner 的 Python/perf_counter 分支, 覆盖不到 triton")
     print("           候选的 CUDA event 分支 (要那个得按 DSL 塞一对 triton 参照核)。\n")
-    from operator_agent.conductor import Conductor
-    from operator_agent.kernel_db import KernelDatabase
-    from operator_agent.mock_gpu import MockGPU
-    from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+    from operator_agent.app.conductor import Conductor
+    from operator_agent.core.kernel_db import KernelDatabase
+    from operator_agent.execute.mock_gpu import MockGPU
+    from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                         TargetSpec, TaskComplexity, TaskSchema,
                                         TaskType)
 
@@ -207,10 +207,10 @@ def scene_4():
     print("  §10.2 把「最后 10% 预算」留给最终确认: 任何要写进长期记忆的结论,")
     print("  必须留有**一次独立重测**的预算；而 §3.5 把「长期记忆的独立确认」列在")
     print("  **不允许配置**那一栏 —— 所以它今天没有开关, 消融只能在 harness 侧 patch。\n")
-    from operator_agent.conductor import Conductor
-    from operator_agent.kernel_db import KernelDatabase
-    from operator_agent.mock_gpu import MockGPU
-    from operator_agent.schemas import (ConstraintSpec, KernelArtifact, Precision,
+    from operator_agent.app.conductor import Conductor
+    from operator_agent.core.kernel_db import KernelDatabase
+    from operator_agent.execute.mock_gpu import MockGPU
+    from operator_agent.core.schemas import (ConstraintSpec, KernelArtifact, Precision,
                                         SourceSpec, TargetSpec, TaskSchema, TaskType)
     import numpy as np
 
@@ -283,8 +283,8 @@ def scene_5():
     head("场景 5  报告产物: best-known-good + 证据链 + 「我无法确立的事」(设计 §17)")
     print("  §17 的第 3 件交付物是「报告 (含『我无法确立的事』)」, 设计把它写成")
     print("  「自动跑系统的信誉所在」。看两份读数怎么变成两份不同的报告。\n")
-    from operator_agent.report import build_report
-    from operator_agent.schemas import KernelArtifact
+    from operator_agent.core.report import build_report
+    from operator_agent.core.schemas import KernelArtifact
 
     def _art(**m):
         a = KernelArtifact(kernel_id="demo0001", code="def kernel(A, B):\n    return A @ B\n")

@@ -27,11 +27,11 @@ sys.path.insert(0, str(ROOT))
 
 import numpy as np  # noqa: E402
 
-from operator_agent.calibration import (KNOWN_GOOD_SOURCE,  # noqa: E402
+from operator_agent.decide.calibration import (KNOWN_GOOD_SOURCE,  # noqa: E402
                                        KNOWN_SLOW_SOURCE, backend_bench_fn,
                                        default_inputs, heartbeat)
-from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
-from operator_agent.kernel_templates import (  # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutor  # noqa: E402
+from operator_agent.core.kernel_templates import (  # noqa: E402
     MATMUL_TRITON, jit_kernel_source,
 )
 

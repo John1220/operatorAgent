@@ -22,8 +22,8 @@ from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.backend_caps import Backend, Instantiation
-from operator_agent.candidates import (BuiltCandidate, ParamSpace,
+from operator_agent.core.backend_caps import Backend, Instantiation
+from operator_agent.core.candidates import (BuiltCandidate, ParamSpace,
                                       dedup_key, instantiate_candidate,
                                       instantiate_points, instantiator_available,
                                       require_supported_space,
@@ -33,7 +33,7 @@ from tests.backend_fakes import DeclaredFakeBackend
 
 _CONDUCTOR_STOP_REASONS = tuple(
     line.split('"')[1] for line in
-    (Path(__file__).resolve().parents[2] / "operator_agent/conductor.py")
+    (Path(__file__).resolve().parents[2] / "operator_agent/app/conductor.py")
     .read_text(encoding="utf-8").splitlines()
     if "_record_stop(" in line and '"' in line and "def " not in line)
 

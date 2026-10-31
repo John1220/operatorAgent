@@ -16,17 +16,17 @@ import pytest
 
 from benchmarks.drivers import workload_decision_h20 as driver
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.confirm import ConfirmRecord, confirm_metrics
-from operator_agent.contract import freeze_from_task
-from operator_agent.corpus_journal import confirmed_key
-from operator_agent.eligibility import ALL_FALSE, ALL_TRUE, DEGRADED, case_speedups, decision_speedup
-from operator_agent.kernel_db import KernelRecord
-from operator_agent.reference_contract import check_observed, registered_reference
-from operator_agent import run_contract as rc
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
-from operator_agent.workload import apply_qualification, confirmation_evidence
-from operator_agent.verifier import Verifier
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.core.confirm import ConfirmRecord, confirm_metrics
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.core.corpus_journal import confirmed_key
+from operator_agent.decide.eligibility import ALL_FALSE, ALL_TRUE, DEGRADED, case_speedups, decision_speedup
+from operator_agent.core.kernel_db import KernelRecord
+from operator_agent.decide.reference_contract import check_observed, registered_reference
+from operator_agent.core import run_contract as rc
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.core.workload import apply_qualification, confirmation_evidence
+from operator_agent.decide.verifier import Verifier
 
 
 @pytest.fixture
@@ -48,8 +48,8 @@ def test_fixed_plan_freezes_all_identities_and_criteria_without_allocating(decla
     assert p["candidate"] == dict(variant="unfused-fp32", source=code, hash=rc.code_hash(code))
     assert p["reference"]["hash"] == registered_reference().digest()
     assert p["measurement_protocol"] == rc.protocol_identity()
-    assert "operator_agent/workload.py" in p["measurement_protocol"]
-    assert p["evaluator_sources"]["operator_agent/workload.py"] == rc.code_hash((driver.ROOT / "operator_agent/workload.py").read_text())
+    assert "operator_agent/core/workload.py" in p["measurement_protocol"]
+    assert p["evaluator_sources"]["operator_agent/core/workload.py"] == rc.code_hash((driver.ROOT / "operator_agent/core/workload.py").read_text())
     assert [t["name"] for t in p["trials"]] == list(driver.TRIAL_NAMES)
     assert p["trials"][0]["supplied_cases"] == ["X=8192x15360", "X=8192x12288"]
     assert p["trials"][1]["supplied_cases"] == ["X=8192x15360", "X=8192x12288", "X=32x64"]
@@ -514,8 +514,8 @@ def test_failed_preparation_keeps_frozen_plan_lifecycle_and_honest_summary(tmp_p
 def test_dispatch_contract_uses_json_normal_form_and_still_rejects_real_drift():
     import copy
     from benchmarks.drivers import workload_decision_h20 as driver
-    from operator_agent.contract import freeze_from_task
-    from operator_agent.run_contract import json_value
+    from operator_agent.core.contract import freeze_from_task
+    from operator_agent.core.run_contract import json_value
     for t in driver.tasks():
         expected = json_value(freeze_from_task(t).as_dict())
         driver.check_trial_contract(t, expected)

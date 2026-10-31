@@ -21,7 +21,7 @@ if _ROOT not in sys.path:
 
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
-FILES = {"tmt": "operator_agent/triton_matmul_template.py"}
+FILES = {"tmt": "operator_agent/generate/triton_matmul_template.py"}
 
 TARGETS = ["tests/unit/test_triton_template_backend.py"]
 

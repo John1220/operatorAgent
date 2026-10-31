@@ -10,8 +10,9 @@ import time
 
 import pytest
 
-from operator_agent import autonomous, backend_ownership as ownership, exec_guard, tool_calls
-from operator_agent.task_cancellation import launch_identity, request_cancel
+from operator_agent.app import autonomous, tool_calls
+from operator_agent.execute import backend_ownership as ownership, exec_guard
+from operator_agent.execute.task_cancellation import launch_identity, request_cancel
 
 ROOT = Path(__file__).resolve().parents[2]
 INVOCATION = 'a' * 32
@@ -21,7 +22,7 @@ INVOCATION = 'a' * 32
 WORKER = '''
 import signal,sys,time
 from pathlib import Path
-from operator_agent import backend_ownership as ownership
+from operator_agent.execute import backend_ownership as ownership
 
 def block(directory):
     class Backend:
@@ -65,7 +66,7 @@ def test_foreground_defaults_close_owned_sessions_before_terminal_result(
     monkeypatch.delenv('OPERATOR_AGENT_S4_GRACEFUL_CLEANUP', raising=False)
     (tmp_path / 'declaration.json').write_text('{}')
     script = WORKER + '''
-from operator_agent import mcp_server, tool_calls
+from operator_agent.app import mcp_server, tool_calls
 mcp_server.handle_message = lambda request: block(Path(sys.argv[1]))
 sys.exit(tool_calls.main([sys.argv[1]]))
 '''
@@ -110,7 +111,7 @@ def test_autonomous_defaults_close_owned_sessions_on_cancel_and_deadline(
         invocation_id=INVOCATION, backend='ssh', persistent=True,
         task_budget=dict(wall_clock_s=3))))
     script = WORKER + '''
-from operator_agent import autonomous
+from operator_agent.app import autonomous
 autonomous._worker_main = lambda run, *args: block(run)
 sys.exit(autonomous.main(['--worker', *sys.argv[1:]]))
 '''

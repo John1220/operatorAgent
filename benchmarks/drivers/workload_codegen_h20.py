@@ -27,18 +27,18 @@ from benchmarks import _numerical_repair as nr
 from benchmarks._preparation import PreparationJournal, POLICY as PREPARATION_POLICY, gpu_snapshot
 from benchmarks.drivers.input_fidelity_h20 import gpu_evidence
 from operator_agent import Conductor, KernelDatabase
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.budget import BudgetPlan
-from operator_agent.contract import case_key, freeze_from_task, load_dict
-from operator_agent.kernel_db import FailureDatabase
-from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, strict_object, validated_usage
-from operator_agent.llm_client import LLMClient, CostTracker, parse_usage, _estimate_tokens_from_text
-from operator_agent.reference_contract import registered_reference, validate_receipt
-from operator_agent.run_contract import (atomic_json, audit_value, code_hash, digest,
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.execute.budget import BudgetPlan
+from operator_agent.core.contract import case_key, freeze_from_task, load_dict
+from operator_agent.core.kernel_db import FailureDatabase
+from operator_agent.execute.llm_budget import LLMCallBudget, LLMCallLimits, strict_object, validated_usage
+from operator_agent.execute.llm_client import LLMClient, CostTracker, parse_usage, _estimate_tokens_from_text
+from operator_agent.decide.reference_contract import registered_reference, validate_receipt
+from operator_agent.core.run_contract import (atomic_json, audit_value, code_hash, digest,
                                         json_value, load_checkpoint, protocol_identity)
-from operator_agent.schemas import UnifiedSketch, VerificationLevel as Level
-from operator_agent.search_objective import reading, results_dict
-from operator_agent.single_candidate_coder import (PROMPT, SingleCandidateCoder,
+from operator_agent.core.schemas import UnifiedSketch, VerificationLevel as Level
+from operator_agent.generate.search_objective import reading, results_dict
+from operator_agent.generate.single_candidate_coder import (PROMPT, SingleCandidateCoder,
     SingleCandidatePolicy, audit_generation, generation_failure, wrapper_calling_convention,
     generation_declaration as describe_generation, generation_mode)
 
@@ -525,7 +525,7 @@ def audit_durable(artifact, rounds, plan, model, *, task, input_sets, controls):
                     or (l3 is not None and (loaded.metadata.get('corpus_admission') or {}).get('kept') is not False)
                     or any((directory/n).exists() or (directory/n).is_symlink() for n in ('confirmation.json', 'admission.json'))):
                 raise ValueError('failed single candidate granted confirmation/admission')
-        from operator_agent.report import build_report
+        from operator_agent.core.report import build_report
         report = (directory/'report.md').read_text()
         regenerated = build_report(artifact=loaded, task=task, generated_at='audit-only')
         start = '### 声明 workload 的搜索选优'; end = '## 2. 证据链 (逐轮)'

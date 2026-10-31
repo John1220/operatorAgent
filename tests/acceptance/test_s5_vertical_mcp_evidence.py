@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from benchmarks.experiments.s5.s5_vertical_mcp_evidence import evaluate
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
-from operator_agent.hitl_tools import prepare
-from operator_agent.tool_calls import run_tool_call
+from operator_agent.app.hitl_tools import prepare
+from operator_agent.app.tool_calls import run_tool_call
 
 TOOL='mcp__operator__operator_verify'
 

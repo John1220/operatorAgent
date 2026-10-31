@@ -29,20 +29,20 @@ from pathlib import Path
 
 import numpy as np
 
-from operator_agent.calibration import (HeartbeatResult, heartbeat,
+from operator_agent.decide.calibration import (HeartbeatResult, heartbeat,
                                         ruler_broken_window)
-from operator_agent.confirm import ConfirmRecord
-from operator_agent.contract import (BaselineDef, ContractError, DTypeSemantics,
+from operator_agent.core.confirm import ConfirmRecord
+from operator_agent.core.contract import (BaselineDef, ContractError, DTypeSemantics,
                                      ShapeDist, assert_hash, freeze)
-from operator_agent.eligibility import ALL_FALSE as ELIG_ALL_FALSE
-from operator_agent.eligibility import derive_eligibility
-from operator_agent.measurement import Validity, assess, verdict, Verdict
-from operator_agent.oracle import admit_to_corpus, evaluate
-from operator_agent.confirm import UnableToEstablish
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.decide.eligibility import ALL_FALSE as ELIG_ALL_FALSE
+from operator_agent.decide.eligibility import derive_eligibility
+from operator_agent.decide.measurement import Validity, assess, verdict, Verdict
+from operator_agent.decide.oracle import admit_to_corpus, evaluate
+from operator_agent.core.confirm import UnableToEstablish
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 
 
 def _metrics_from(obs, **extra):
@@ -95,7 +95,7 @@ class Acceptance1_KnownGoodIsVALID(unittest.TestCase):
 
     def test_heartbeat_uses_the_same_good_anchor(self):
         """成对参照里的「已知好」与 §14-1 是同一把锚 (calibration.expected_good)"""
-        from operator_agent.calibration import (default_bench_fn, default_inputs,
+        from operator_agent.decide.calibration import (default_bench_fn, default_inputs,
                                                 known_good_kernel)
         A, B = default_inputs()
         out = known_good_kernel(A, B)
@@ -182,7 +182,7 @@ class Acceptance5_KillAndResume(unittest.TestCase):
     def test_snapshot_json_is_valid_after_partial_write(self):
         """§14-5: 快照要么是完整 JSON, 要么读侧显式报损坏 —— 不许静默从头跑"""
         # 本条的生产语义在 doc 50 (原子 rename); 这里验「读侧区分损坏与不存在」
-        from operator_agent.artifact_store import ArtifactStore  # noqa: F401
+        from operator_agent.core.artifact_store import ArtifactStore  # noqa: F401
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "execution_snapshot.json"
             p.write_text('{"round_done": 1, "truncated', encoding="utf-8")
@@ -195,7 +195,7 @@ class Acceptance5_KillAndResume(unittest.TestCase):
 
     def test_kernel_db_append_only_survives_restart(self):
         """best 不因一次崩溃丢失 —— 追加式 JSONL 重放可恢复"""
-        from operator_agent.kernel_db import KernelDatabase, KernelRecord
+        from operator_agent.core.kernel_db import KernelDatabase, KernelRecord
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "kernel_db.jsonl"
             db = KernelDatabase(jsonl_path=str(path))
@@ -244,7 +244,7 @@ class Acceptance6_TamperedContractIsRefused(unittest.TestCase):
 # ─── §14-7 跨卡配对 → 拒绝该观测 ────────────────────────────────
 # `pairing_conflict` 现在在 `operator_agent.placement` (spine-review P3-16:
 # 验收不该测测试自己的函数)。本组测的是**库** + oracle 的运行时复核。
-from operator_agent.placement import pairing_conflict  # noqa: E402
+from operator_agent.execute.placement import pairing_conflict  # noqa: E402
 
 
 class Acceptance7_CrossDevicePairingIsRejected(unittest.TestCase):

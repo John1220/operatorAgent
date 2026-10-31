@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from operator_agent import agent_logger
-from operator_agent import _harness_controls
-from operator_agent.agent_logger import capture_execution
-from operator_agent.conductor import Conductor, MAX_HEARTBEAT_INTERVAL
-from operator_agent.kernel_db import FailureDatabase, KernelDatabase
+from operator_agent.generate import agent_logger
+from operator_agent.app import _harness_controls
+from operator_agent.generate.agent_logger import capture_execution
+from operator_agent.app.conductor import Conductor, MAX_HEARTBEAT_INTERVAL
+from operator_agent.core.kernel_db import FailureDatabase, KernelDatabase
 
 
 def test_kernel_db_off_env_cannot_disable_persistence(monkeypatch):
@@ -43,7 +43,7 @@ def test_log_dir_off_env_cannot_disable_audit(monkeypatch, tmp_path):
     monkeypatch.setenv("OPERATOR_AGENT_LOG_DIR", "off")
     # Redirect the module's default project root into tmp_path so this assertion
     # never touches the repository logs directory.
-    fake_file = tmp_path / "operator_agent" / "agent_logger.py"
+    fake_file = tmp_path / "operator_agent" / "generate" / "agent_logger.py"
     monkeypatch.setattr(agent_logger, "__file__", str(fake_file))
     with capture_execution(task_id="security-default") as log_path:
         print("audit remains enabled")

@@ -19,7 +19,7 @@
 
 __version__ = "0.6.1"
 
-from .schemas import (
+from .core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskState, TaskComplexity, RouteType,
     DSLEnum, TritonCompileConfig,
@@ -27,18 +27,18 @@ from .schemas import (
     UnifiedSketch, TilingStrategy, MemoryPlan, PipelineStage,
     KernelArtifact,
 )
-from .kernel_db import KernelDatabase, KernelRecord
-from .mock_gpu import MockGPU, ExecutionResult
-from .remote_executor import RemoteExecutor, RemoteExecutionResult, SSHExecutor
-from .llm_client import LLMClient
-from .prompt_manager import PromptManager
-from .artifact_store import ArtifactStore
-from .agent_logger import capture_execution, get_logger, get_latest_logs, read_log
-from .agents import DesignerAgent, CoderAgent, SearchAgent
-from .verifier import Verifier
-from .correctness import CorrectnessCase, CorrectnessSuite
-from .correctness_boundaries import (BoundaryAxis, TensorAxes, BoundaryPolicy,
+from .core.kernel_db import KernelDatabase, KernelRecord
+from .execute.mock_gpu import MockGPU, ExecutionResult
+from .execute.remote_executor import RemoteExecutor, RemoteExecutionResult, SSHExecutor
+from .execute.llm_client import LLMClient
+from .generate.prompt_manager import PromptManager
+from .core.artifact_store import ArtifactStore
+from .generate.agent_logger import capture_execution, get_logger, get_latest_logs, read_log
+from .generate.agents import DesignerAgent, CoderAgent, SearchAgent
+from .decide.verifier import Verifier
+from .decide.correctness import CorrectnessCase, CorrectnessSuite
+from .decide.correctness_boundaries import (BoundaryAxis, TensorAxes, BoundaryPolicy,
                                      generate_correctness_suite, lint_coverage)
-from .correctness_profiles import with_default_correctness
-from .conductor import Conductor, Router
-from .intent_parser import IntentParser, TestInputGenerator
+from .decide.correctness_profiles import with_default_correctness
+from .app.conductor import Conductor, Router
+from .app.intent_parser import IntentParser, TestInputGenerator

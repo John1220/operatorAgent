@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from operator_agent.compile_evidence import validate_compile_failure
-from operator_agent.repair_scalar_diagnoser import RECOGNIZER, scalar_conversion_sites
+from operator_agent.decide.compile_evidence import validate_compile_failure
+from operator_agent.generate.repair_scalar_diagnoser import RECOGNIZER, scalar_conversion_sites
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / 'fixtures'

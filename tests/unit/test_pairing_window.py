@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "remote_scripts"))
 
 import torch  # noqa: F401  (run_kernel 的计时路径需要 torch)
 
-from operator_agent.placement import (WINDOW_DIFFERENT, WINDOW_SAME,
+from operator_agent.execute.placement import (WINDOW_DIFFERENT, WINDOW_SAME,
                                       WINDOW_UNOBSERVED, observed_windows)
 from tests.unit.test_measurement_validity import _matmul_inputs, _task  # noqa: F401
 
@@ -86,8 +86,8 @@ class TestTheRefusalPath(unittest.TestCase):
         import contextlib
         import io
 
-        from operator_agent.calibration import HeartbeatResult
-        from operator_agent.verifier import Verifier
+        from operator_agent.decide.calibration import HeartbeatResult
+        from operator_agent.decide.verifier import Verifier
         from tests.backend_fakes import fake_backend
         from tests.unit.test_measurement_validity import H20_HW_INFO
 
@@ -180,7 +180,7 @@ class TestTheControlSideReuseIsVisible(unittest.TestCase):
         import io
 
         from operator_agent import MockGPU
-        from operator_agent.verifier import Verifier
+        from operator_agent.decide.verifier import Verifier
 
         verifier = Verifier(MockGPU())
         task = _task()
@@ -201,7 +201,7 @@ class TestTheControlSideReuseIsVisible(unittest.TestCase):
 
     def test_a_fresh_baseline_is_not_labelled_as_reused(self):
         from operator_agent import MockGPU
-        from operator_agent.verifier import Verifier
+        from operator_agent.decide.verifier import Verifier
 
         verifier = Verifier(MockGPU())
         baseline = verifier._measure_baseline(_task(), _matmul_inputs())

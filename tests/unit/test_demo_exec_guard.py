@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.demos import demo_exec_guard as demo  # noqa: E402
-from operator_agent import exec_guard as eg  # noqa: E402
+from operator_agent.execute import exec_guard as eg  # noqa: E402
 
 
 class TestTheExecGuardDemo(unittest.TestCase):

@@ -12,7 +12,7 @@ import re
 from pathlib import Path
 
 from benchmarks.experiments.s5.s5_task_manifest import manifest
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 ARMS = ('A', 'B', 'C')
 ROTATION = (('A', 'B', 'C'), ('B', 'C', 'A'), ('C', 'A', 'B'))

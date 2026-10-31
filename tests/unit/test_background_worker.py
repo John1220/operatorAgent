@@ -11,7 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from operator_agent import exec_guard, hitl_tools
+from operator_agent.execute import exec_guard
+from operator_agent.app import hitl_tools
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -99,7 +100,7 @@ print('detached worker finished', flush=True)
 ''')
     wrapper_script = tmp_path/'launcher.py'
     wrapper_script.write_text('''import json, sys
-from operator_agent.exec_guard import start_background_worker
+from operator_agent.execute.exec_guard import start_background_worker
 proc = start_background_worker(sys.argv[3:], cwd=sys.argv[1], log_path=sys.argv[2])
 print(json.dumps(dict(pid=proc.pid)), flush=True)
 ''')
@@ -180,7 +181,7 @@ def test_public_autonomous_entry_uses_central_trusted_worker_launcher(tmp_path, 
     assert result['pid'] == 12345 and result['phase'] == 'running'
     assert result['contract_hash'] == 'synthetic-contract'
     argv, options = calls[0]
-    assert argv == [sys.executable, '-m', 'operator_agent.autonomous', str(run)]
+    assert argv == [sys.executable, '-m', 'operator_agent.app.autonomous', str(run)]
     assert Path(options['cwd']) == REPO
     assert options['log_path'] == run/'autonomous.log'
     config = json.loads((run/hitl_tools.CONFIG_FILE).read_text())

@@ -10,12 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from operator_agent import corpus_admission as a, corpus_journal as j, run_contract as rc
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.conductor import Conductor
-from operator_agent.confirm import ConfirmRecord
-from operator_agent.kernel_db import KernelDatabase, KernelRecord
-from operator_agent.schemas import KernelArtifact, VerificationResult, VerificationLevel as L
+from operator_agent.core import corpus_admission as a, corpus_journal as j, run_contract as rc
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.confirm import ConfirmRecord
+from operator_agent.core.kernel_db import KernelDatabase, KernelRecord
+from operator_agent.core.schemas import KernelArtifact, VerificationResult, VerificationLevel as L
 from tests.unit.test_resume_integrity import _task, _inputs, PYTHON_MATMUL
 
 
@@ -128,7 +128,7 @@ def test_readback_mismatch_cannot_install_memory_or_issue_success(f,monkeypatch)
 
 
 def test_qualification_is_preserved_when_writing_fails_and_report_does_not_lie(f,monkeypatch):
-    from operator_agent.report import write_report
+    from operator_agent.core.report import write_report
     monkeypatch.setattr(j,"locked_file",lambda *x,**kw: (_ for _ in ()).throw(PermissionError("disk readonly")))
     assert not f.c._save_to_db(f.art,f.task)
     meta=f.art.metadata["corpus_admission"]
@@ -426,7 +426,7 @@ def test_publication_failure_keeps_journal_truth_and_retry_repairs_artifacts(f,m
 
 def test_explicit_recovery_cli_is_idempotent_and_wrong_corpus_holds(f):
     prepared(f)
-    cmd=[sys.executable,"-m","operator_agent.corpus_admission","--artifact",str(f.folder),"--corpus",str(f.path)]
+    cmd=[sys.executable,"-m","operator_agent.core.corpus_admission","--artifact",str(f.folder),"--corpus",str(f.path)]
     for status in ("committed","already_committed"):
         result=subprocess.run(cmd,capture_output=True,text=True,timeout=30)
         assert result.returncode==0,result.stdout+result.stderr
@@ -445,7 +445,7 @@ def test_production_confirmation_producer_feeds_prepared_commit_without_replay_w
     c._environment={"fingerprint":f.binding["manifest"]["environment"]}
     c._heartbeat_for_next_measurement=lambda:(None,False)
     import time
-    from operator_agent.budget import BudgetLedger, BudgetPlan
+    from operator_agent.execute.budget import BudgetLedger, BudgetPlan
     calls=[]
     def verify(**kw):
         calls.append(kw)
@@ -471,8 +471,8 @@ def test_actual_process_death_recovers_one_event_without_remeasuring(f,stage):
     script=r'''
 import os,sys,json
 from pathlib import Path
-from operator_agent import corpus_admission as a,corpus_journal as j,run_contract as rc
-from operator_agent.kernel_db import KernelDatabase
+from operator_agent.core import corpus_admission as a, corpus_journal as j, run_contract as rc
+from operator_agent.core.kernel_db import KernelDatabase
 db=KernelDatabase(sys.argv[2],persist_retrievals=False); stage=sys.argv[3]
 if stage in ('before-append','partial-line','after-append'):
  original=j.append

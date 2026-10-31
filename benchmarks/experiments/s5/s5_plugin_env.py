@@ -17,7 +17,7 @@ def stage_runtime(dest):
     sources={'plugin/index.mjs':ROOT/'integrations/dsh-operator/index.mjs',
              'plugin/package.json':ROOT/'integrations/dsh-operator/package.json',
              'proxy.py':ROOT/'benchmarks/experiments/s5/s5_plugin_proxy.py',
-             'check.py':ROOT/'operator_agent/s5_verify_client.py'}
+             'check.py':ROOT/'operator_agent/execute/s5_verify_client.py'}
     files={}
     for name,source in sources.items():
         target=root/name;target.parent.mkdir(exist_ok=True)
@@ -30,7 +30,7 @@ def verify_runtime(runtime):
     expected={'plugin/index.mjs':ROOT/'integrations/dsh-operator/index.mjs',
               'plugin/package.json':ROOT/'integrations/dsh-operator/package.json',
               'proxy.py':ROOT/'benchmarks/experiments/s5/s5_plugin_proxy.py',
-              'check.py':ROOT/'operator_agent/s5_verify_client.py'}
+              'check.py':ROOT/'operator_agent/execute/s5_verify_client.py'}
     if runtime.get('schema')!='s5-plugin-runtime-v1' or not root.is_dir() or root.is_symlink():
         raise ValueError('plugin runtime missing')
     if any(f.is_symlink() for f in root.rglob('*')):raise ValueError('plugin runtime symlink')

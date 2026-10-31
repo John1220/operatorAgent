@@ -201,7 +201,7 @@ def _ssh_exec_base(host: str, port, user, key_path: str = "") -> list:
     """Build SSH command base
 
     port / user / key_path 为 None 或空时不写进命令行, 交由 ~/.ssh/config 的
-    Host 块解析 —— 与 operator_agent/remote_executor.py 的 SSHExecutor 同一套
+    Host 块解析 —— 与 operator_agent/execute/remote_executor.py 的 SSHExecutor 同一套
     约定, 这样仓库里只需保留一个 ssh 别名, 不必写死真实 IP、端口、用户名和密钥。
     """
     cmd = ["ssh", "-o", "StrictHostKeyChecking=no",

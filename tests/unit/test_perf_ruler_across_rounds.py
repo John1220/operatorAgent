@@ -47,19 +47,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 import numpy as np  # noqa: E402
 
-from operator_agent import measurement as ms  # noqa: E402
-from operator_agent.measurement import (  # noqa: E402
+from operator_agent.decide import measurement as ms  # noqa: E402
+from operator_agent.decide.measurement import (  # noqa: E402
     BOUND_AXIS_KEY, BOUND_AXIS_UNKNOWN, LINEAGE_PERF_RULER_KEY, LINEAGE_RULER_KEY,
     PERF_CRITERION_ABSOLUTE_GFLOPS, PERF_CRITERION_SPEEDUP, PERF_GATE_PARAM_KEYS,
     RULER_REPORTED, RULER_UNREPORTED, cross_round_ruler, l3_ruler_reading, ruler_note)
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType, VerificationLevel)
-from operator_agent.verifier import Verifier  # noqa: E402
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_VERIFIER_SRC = open(os.path.join(_ROOT, "operator_agent", "verifier.py"),
+_VERIFIER_SRC = open(os.path.join(_ROOT, "operator_agent", "decide", "verifier.py"),
                      encoding="utf-8").read()
 
 GOOD = "import numpy as np\n\ndef kernel(A, B):\n    return A @ B\n"
@@ -242,7 +242,7 @@ class TestTheSameRuleServesBothHalves(unittest.TestCase):
         给出同一个 dict ⇒ 行为层永远撞不到它。而「一份判据被抄成两份」正是本仓反复登记的
         失效起点 (I22/H4), 它的症状通常在几周之后才出现 —— 到那时已经没人记得哪份是权威。
         """
-        src = open(os.path.join(_ROOT, "operator_agent", "measurement.py"),
+        src = open(os.path.join(_ROOT, "operator_agent", "decide", "measurement.py"),
                    encoding="utf-8").read()
         tree = ast.parse(src)
         checked = 0
@@ -300,7 +300,7 @@ class TestBothHalvesHaveReaders(unittest.TestCase):
     """第 4 层: 写了就要有人读 (#40/#61 那一族的规矩)"""
 
     def test_the_conductor_writes_the_perf_reading_into_lineage(self):
-        from operator_agent.conductor import _round_perf_ruler
+        from operator_agent.app.conductor import _round_perf_ruler
         res = [type("R", (), {"level": VerificationLevel.L3_PERFORMANCE,
                               "metrics": _l3_legacy().metrics})()]
         got = _round_perf_ruler(res)
@@ -308,7 +308,7 @@ class TestBothHalvesHaveReaders(unittest.TestCase):
         self.assertEqual(PERF_CRITERION_ABSOLUTE_GFLOPS, got["perf_criterion"])
 
     def test_a_round_without_l3_writes_unreported_not_a_copy_of_the_previous(self):
-        from operator_agent.conductor import _round_perf_ruler
+        from operator_agent.app.conductor import _round_perf_ruler
         self.assertEqual(RULER_UNREPORTED, _round_perf_ruler([])["state"],
                          "L1/L2 就死了的那轮没有性能尺读数 —— 而它绝不能被读成「与上轮同尺」")
 

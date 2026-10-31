@@ -21,7 +21,7 @@ import threading
 from urllib.parse import urlsplit
 
 from benchmarks.experiments.s5 import s5_plugin_env
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 SCHEMA = 's5-loopback-network-gap-probe-v1'
 

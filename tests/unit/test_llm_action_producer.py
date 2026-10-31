@@ -31,17 +31,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent import agent_runtime as ar
-from operator_agent.agent_runtime import (
+from operator_agent.generate import agent_runtime as ar
+from operator_agent.generate.agent_runtime import (
     ACTION_KINDS, ENVELOPE_ABSENT, ENVELOPE_FENCE, ENVELOPE_MALFORMED,
     ENVELOPE_PARSED, SIDE_EFFECT_FREE_KINDS, TOOL_PROFILER,
     AgentAction, AgentRuntime, ask_unavailable_reason, parse_action_envelope,
 )
-from operator_agent.conductor import Conductor
-from operator_agent.fixer import FixerAgent
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (
+from operator_agent.app.conductor import Conductor
+from operator_agent.generate.fixer import FixerAgent
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType, VerificationLevel, VerificationResult,
 )
@@ -330,12 +330,12 @@ class TestTheModelAuthoredActionReachesTheGate(unittest.TestCase):
     def test_the_parser_is_the_only_way_in(self):
         """解析只有一处: 别的模块自己 `re.search` 一遍就是第二个真源"""
         users = []
-        for p in sorted((ROOT / "operator_agent").glob("*.py")):
+        for p in sorted((ROOT / "operator_agent").rglob("*.py")):
             if "parse_action_envelope" in p.read_text(encoding="utf-8"):
-                users.append(p.name)
-        self.assertEqual(["agent_runtime.py", "fixer.py"], users,
+                users.append(p.relative_to(ROOT / "operator_agent").as_posix())
+        self.assertEqual(["generate/agent_runtime.py", "generate/fixer.py"], users,
                          f"信封解析/定义出现在了 {users} —— 单源被破坏")
-        calls = (ROOT / "operator_agent" / "fixer.py").read_text(encoding="utf-8")
+        calls = (ROOT / "operator_agent" / "generate" / "fixer.py").read_text(encoding="utf-8")
         self.assertEqual(1, calls.count("parse_action_envelope("),
                          "Fixer 里解析了不止一次")
 
@@ -346,7 +346,7 @@ class TestTheModelAuthoredActionReachesTheGate(unittest.TestCase):
         消费时清空 / 修复轮武装 / 提前 break 时清空。写多一处不是错, 但它必须是有意的 ——
         本仓 I77/I78 两个缺陷的形状正是「一个写进去、没人负责清的留痕」。
         """
-        tree = ast.parse((ROOT / "operator_agent" / "conductor.py").read_text(encoding="utf-8"))
+        tree = ast.parse((ROOT / "operator_agent" / "app" / "conductor.py").read_text(encoding="utf-8"))
         loads, stores = 0, 0
         for node in ast.walk(tree):
             if (isinstance(node, ast.Attribute)
@@ -371,7 +371,7 @@ class TestTheModelAuthoredActionReachesTheGate(unittest.TestCase):
         路由拼了动作」, 而**不是**凭空造一份模型理由。哪天有人真把信封写进快照, 这条
         守卫会红, 那时要把 `_restore_state_from_snapshot` 一起接上。
         """
-        tree = ast.parse((ROOT / "operator_agent" / "conductor.py").read_text(encoding="utf-8"))
+        tree = ast.parse((ROOT / "operator_agent" / "app" / "conductor.py").read_text(encoding="utf-8"))
         def body_src(name):
             node = next(n for n in ast.walk(tree)
                         if isinstance(n, ast.FunctionDef) and n.name == name)

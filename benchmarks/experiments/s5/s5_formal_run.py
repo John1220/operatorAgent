@@ -25,8 +25,8 @@ from benchmarks.experiments.s5 import s5_arm_env, s5_runtime, s5_task_manifest, 
 from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
 from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
 from benchmarks.experiments.s5.s5_development_service import DevelopmentService
-from operator_agent import s5_shared_budget as shared
-from operator_agent.run_contract import digest, protocol_identity
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.core.run_contract import digest, protocol_identity
 
 SCHEMA = 's5-workflow-plan-v2'
 ARMS = ('A', 'B', 'C')
@@ -59,10 +59,10 @@ def runtime_identity():
              'benchmarks/experiments/s5/s5_gateway_policy.py', 'benchmarks/experiments/s5/s5_gateway_supervisor.py',
              'benchmarks/experiments/s5/s5_gateway_transport.py',
              'benchmarks/experiments/s5/s5_seatbelt.py', 'benchmarks/experiments/s5/s5_isolation_probe.py',
-             'benchmarks/experiments/s5/s5_runtime.py', 'operator_agent/cli.py',
+             'benchmarks/experiments/s5/s5_runtime.py', 'operator_agent/app/cli.py',
              'benchmarks/experiments/s5/s5_outcomes.py',
              'benchmarks/experiments/s5/s5_minimal_tasks.py', 'benchmarks/experiments/s5/s5_minimal_summary.py',
-             'operator_agent/mcp_server.py', 'integrations/dsh-operator/index.mjs']
+             'operator_agent/app/mcp_server.py', 'integrations/dsh-operator/index.mjs']
     return dict(protocol=protocol_identity(), harness={name: hashlib.sha256(
         (root / name).read_bytes()).hexdigest() for name in files})
 
@@ -357,7 +357,7 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=None):
             Path(built['work']).mkdir(parents=True, exist_ok=True, mode=0o700)
             prepared_run = Path(built['work']) / 'task'
             if arm != 'A':
-                from operator_agent.hitl_tools import prepare
+                from operator_agent.app.hitl_tools import prepare
                 prepared = prepare(service_plan['declaration'], prepared_run)
                 if prepared['contract_hash'] != service_plan['contract_hash']:
                     raise ValueError('prepared development contract drift')
@@ -396,7 +396,7 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=None):
                     candidate, normalization = normalize_candidate(candidate)
                     record['normalization'] = normalization
                     (run_dir / 'candidate.txt').write_text(candidate, encoding='utf-8')
-                    from operator_agent.run_contract import code_hash
+                    from operator_agent.core.run_contract import code_hash
                     record['candidate_sha256'] = code_hash(candidate)
                     # The model has ended. This result is never fed back into DSH.
                     verdict = service.final(candidate)

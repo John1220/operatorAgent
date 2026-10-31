@@ -50,13 +50,13 @@ from pathlib import Path
 
 import numpy as np
 
-from operator_agent.agent_runtime import ENVELOPE_ABSENT, ActionEnvelope
-from operator_agent.conductor import (Conductor, correctness_verified,
+from operator_agent.generate.agent_runtime import ENVELOPE_ABSENT, ActionEnvelope
+from operator_agent.app.conductor import (Conductor, correctness_verified,
                                       verified_parent_from)
-from operator_agent.fixer import FixOutcome
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.generate.fixer import FixOutcome
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType,
                                     VerificationLevel, VerificationResult)
 
@@ -340,7 +340,7 @@ class TestTheGuardIsWiredInTheRightOrder(unittest.TestCase):
     一个 `if na:` 就能满足, 要的正是「那次退回赋值发生在 fixer.run 之前」。
     """
 
-    SRC = Path("operator_agent/conductor.py")
+    SRC = Path("operator_agent/app/conductor.py")
 
     def _holder(self):
         """主循环那一处调用 (起点规则管的就是它)

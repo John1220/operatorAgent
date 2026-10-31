@@ -26,15 +26,15 @@ from benchmarks._scratch import unmatchable  # noqa: E402
 from operator_agent import (CorrectnessCase, CorrectnessSuite, ConstraintSpec,  # noqa: E402
                             SourceSpec, TargetSpec, TaskSchema, Verifier,
                             BoundaryAxis, BoundaryPolicy, TensorAxes)
-from operator_agent.correctness import as_suite  # noqa: E402
-from operator_agent.bench_cases import BenchmarkCase, TensorSpec  # noqa: E402
-from operator_agent.contract import freeze_from_task  # noqa: E402
-from operator_agent.input_fidelity import describe_inputs  # noqa: E402
-from operator_agent.remote_executor import SSHExecutor  # noqa: E402
-from operator_agent.report import build_report  # noqa: E402
-from operator_agent.run_layout import (new_run_root, run_layout, ROLE_HARNESS,  # noqa: E402
+from operator_agent.decide.correctness import as_suite  # noqa: E402
+from operator_agent.decide.bench_cases import BenchmarkCase, TensorSpec  # noqa: E402
+from operator_agent.core.contract import freeze_from_task  # noqa: E402
+from operator_agent.decide.input_fidelity import describe_inputs  # noqa: E402
+from operator_agent.execute.remote_executor import SSHExecutor  # noqa: E402
+from operator_agent.core.report import build_report  # noqa: E402
+from operator_agent.core.run_layout import (new_run_root, run_layout, ROLE_HARNESS,  # noqa: E402
     ROLE_CANDIDATE, ROLE_ORACLE, ROLE_REPORT_WRITER)
-from operator_agent.schemas import KernelArtifact, VerificationLevel, VerificationResult  # noqa: E402
+from operator_agent.core.schemas import KernelArtifact, VerificationLevel, VerificationResult  # noqa: E402
 
 GOOD = '''import torch
 import triton

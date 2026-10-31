@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from benchmarks.experiments.s5 import s5_minimal_tasks, s5_plugin_summary
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 PLAN_SCHEMA = 's5-plugin-study-plan-v1'
 SCHEMA = 's5-plugin-study-summary-v1'

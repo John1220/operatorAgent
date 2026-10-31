@@ -9,12 +9,12 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from operator_agent.quality_evaluation import make_plan, run_plan, run_preflight
-from operator_agent.quality_pairing import (PAIRED_PLAN_SCHEMAS, make_paired_plan,
+from operator_agent.decide.quality_evaluation import make_plan, run_plan, run_preflight
+from operator_agent.decide.quality_pairing import (PAIRED_PLAN_SCHEMAS, make_paired_plan,
     make_seeded_paired_plan, run_paired_plan, validate_paired_plan)
-from operator_agent.quality_portfolio import (make_portfolio_plan, run_portfolio_plan,
+from operator_agent.decide.quality_portfolio import (make_portfolio_plan, run_portfolio_plan,
     validate_portfolio_plan)
-from operator_agent.quality_suite import compare_reports
+from operator_agent.decide.quality_suite import compare_reports
 
 PORTFOLIO_PLAN_SCHEMA = 'operator-portfolio-quality-plan-v1'
 

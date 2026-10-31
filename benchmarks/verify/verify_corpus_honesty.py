@@ -58,15 +58,15 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from operator_agent.backend_caps import Cap  # noqa: E402
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.kernel_db import (  # noqa: E402
+from operator_agent.core.backend_caps import Cap  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.core.kernel_db import (  # noqa: E402
     FailureDatabase, FailureRecord, KernelDatabase, _perf_weight, is_promotable_failure)
-from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutor  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, KernelArtifact, Precision, SourceSpec, TargetSpec, TaskComplexity,
     TaskSchema, TaskType)
-from operator_agent.verifier import Verifier  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
 
 BASE = (Cap.REAL_DEVICE, Cap.SAME_DEVICE_BASELINE)
 ROWS, COLS = 16384, 6144

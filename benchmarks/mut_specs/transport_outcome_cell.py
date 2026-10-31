@@ -23,10 +23,10 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "ms": "operator_agent/measurement.py",
-    "re": "operator_agent/remote_executor.py",
-    "vf": "operator_agent/verifier.py",
-    "cd": "operator_agent/conductor.py",
+    "ms": "operator_agent/decide/measurement.py",
+    "re": "operator_agent/execute/remote_executor.py",
+    "vf": "operator_agent/decide/verifier.py",
+    "cd": "operator_agent/app/conductor.py",
     "hp": "benchmarks/drivers/harness_pass_rate.py",
 }
 

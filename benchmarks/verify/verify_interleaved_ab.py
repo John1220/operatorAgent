@@ -32,8 +32,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _scratch import private_dir, remote_scratch_path, stop_interferer, write_private
-from operator_agent.remote_executor import RemoteExecutor
-from operator_agent.verifier import baseline_plan
+from operator_agent.execute.remote_executor import RemoteExecutor
+from operator_agent.decide.verifier import baseline_plan
 
 REPS = 5
 SHAPES = ((16384, 6144), (1024, 768))

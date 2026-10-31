@@ -1,5 +1,5 @@
 """Prospectively declared small tasks, not a model-training-unseen claim."""
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 SPECS = (
  ('study-matmul-fp16-aligned','matmul',(96,128,64),'fp16'),

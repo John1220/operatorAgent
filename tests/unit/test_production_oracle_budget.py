@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.budget import BudgetPlan
-from operator_agent.schemas import KernelArtifact, VerificationLevel as Level, VerificationResult
+from operator_agent.execute.budget import BudgetPlan
+from operator_agent.core.schemas import KernelArtifact, VerificationLevel as Level, VerificationResult
 from tests.unit.test_execute_inner_behavior import _Llm, _task
 
 

@@ -39,7 +39,7 @@ def test_stopped_reader_requires_witness_of_partial_send(sent):
 
 
 def test_numeric_gate_cannot_be_satisfied_by_no_gpu_or_partial_evidence():
-    from operator_agent.input_fidelity import describe_inputs
+    from operator_agent.decide.input_fidelity import describe_inputs
     expected = describe_inputs({"X": np.ones((2,3),np.float32)})
     for response in ({}, {"success": True, "max_error": 0, "coverage": 1.0, "output_digest": "fake"}):
         assert assess_numeric(response, expected)

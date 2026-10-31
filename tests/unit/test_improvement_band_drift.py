@@ -75,16 +75,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.drivers.harness_pass_rate import (aggregate, format_report,  # noqa: E402
                                           record_rounds)
-from operator_agent import measurement as ms  # noqa: E402
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.kernel_db import KernelDatabase  # noqa: E402
-from operator_agent.measurement import (BAND_SAME, BAND_SPEC_DRIFT, BAND_TIER_EXPLAINED,
+from operator_agent.decide import measurement as ms  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.core.kernel_db import KernelDatabase  # noqa: E402
+from operator_agent.decide.measurement import (BAND_SAME, BAND_SPEC_DRIFT, BAND_TIER_EXPLAINED,
                                         BAND_UNEXPLAINED, BAND_UNMEASURABLE,
                                         LINEAGE_BAND_KEY, NOISE_BAND, Validity, Verdict,
                                         band_note, cross_round_band, noise_band_for,
                                         verdict)
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType, VerificationLevel)
 
@@ -245,7 +245,7 @@ class TestThroughARealRun(unittest.TestCase):
         按输入组跑好几次, 而四态判决每轮最多一次 —— 「两次判决之间换过一次表」要量的正是后者,
         挂在前者上会让用例的构造前提依赖一个与本题无关的计数。
         """
-        import operator_agent.conductor as cond
+        import operator_agent.app.conductor as cond
         c = Conductor(backend=MockGPU(), kernel_db=KernelDatabase(jsonl_path=None),
                       llm=TestThroughARealRun._Llm(), max_optimize_rounds=3)
         c.store.output_dir = Path(self.tmp.name)

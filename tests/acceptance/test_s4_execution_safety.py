@@ -9,10 +9,10 @@ import time
 
 import pytest
 
-from operator_agent import exec_guard
-from operator_agent.backend_ownership import cleanup_state
-from operator_agent.remote_executor import HardwareProbeFailed, SSHExecutor
-from operator_agent import remote_executor
+from operator_agent.execute import exec_guard
+from operator_agent.execute.backend_ownership import cleanup_state
+from operator_agent.execute.remote_executor import HardwareProbeFailed, SSHExecutor
+from operator_agent.execute import remote_executor
 
 UUID = 'GPU-52ca6155-d8bc-a416-847a-6f0c71db1552'
 INVOCATION = 'a'*32
@@ -119,7 +119,7 @@ def wait_for(path):
 def test_graceful_owned_worker_publishes_cleanup_before_parent_reaps(tmp_path):
     script = '''
 import signal,sys,time
-from operator_agent.backend_ownership import begin_scope,register_backend,session_starting,session_ready,finish_scope
+from operator_agent.execute.backend_ownership import begin_scope,register_backend,session_starting,session_ready,finish_scope
 begin_scope(sys.argv[1],sys.argv[2])
 class Backend:
  def close(self,grace=10): return {'quiescent':True}
@@ -167,7 +167,7 @@ def test_cleanup_receipt_rejects_non_boolean_proof(tmp_path):
 
 
 def test_invalid_runner_identity_cannot_publish_ready(tmp_path):
-    from operator_agent.backend_ownership import begin_scope, session_starting, session_ready, finish_scope
+    from operator_agent.execute.backend_ownership import begin_scope, session_starting, session_ready, finish_scope
     begin_scope(tmp_path, INVOCATION)
     try:
         session_starting()
@@ -179,7 +179,7 @@ def test_invalid_runner_identity_cannot_publish_ready(tmp_path):
 
 
 def test_interruption_before_handshake_cannot_claim_remote_quiescence(tmp_path):
-    from operator_agent.backend_ownership import begin_scope, register_backend, session_starting, finish_scope
+    from operator_agent.execute.backend_ownership import begin_scope, register_backend, session_starting, finish_scope
     class Backend:
         def close(self, grace=10):
             return {'quiescent': True}

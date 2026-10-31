@@ -29,10 +29,10 @@ import numpy as np  # noqa: E402
 
 from benchmarks.leetcuda_bench.problems import (PROBLEMS, Problem, by_id,  # noqa: E402
                                                 make_inputs)
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,  # noqa: E402
                                     TargetSpec, TaskComplexity, TaskSchema, TaskType)
-from operator_agent.verifier import Verifier  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
 
 
 def task_for(p: Problem) -> TaskSchema:

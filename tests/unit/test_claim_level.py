@@ -19,17 +19,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent import agent_runtime as ar  # noqa: E402
-from operator_agent.agent_runtime import precompile_checks  # noqa: E402
-from operator_agent.confirm import ConfirmRecord  # noqa: E402
-from operator_agent.eligibility import (  # noqa: E402
+from operator_agent.generate import agent_runtime as ar  # noqa: E402
+from operator_agent.generate.agent_runtime import precompile_checks  # noqa: E402
+from operator_agent.core.confirm import ConfirmRecord  # noqa: E402
+from operator_agent.decide.eligibility import (  # noqa: E402
     ALL_FALSE, ALL_TRUE, CLAIM_LEVELS, CLAIM_OBSERVED, CLAIM_PERSISTED,
     CLAIM_PROMOTABLE, CLAIM_PROVISIONAL, CLAIM_UNOBSERVED, CLAIM_VALIDATED,
     DEGRADED, Eligibility, at_least, claim_ceiling, claim_level, claim_rank,
 )
-from operator_agent.oracle import admit_to_corpus  # noqa: E402
-from operator_agent.source_lang import COVERAGE_AST, COVERAGE_NONE, COVERAGE_REGEX  # noqa: E402
-from operator_agent.source_lang import classify  # noqa: E402
+from operator_agent.decide.oracle import admit_to_corpus  # noqa: E402
+from operator_agent.core.source_lang import COVERAGE_AST, COVERAGE_NONE, COVERAGE_REGEX  # noqa: E402
+from operator_agent.core.source_lang import classify  # noqa: E402
 from tests.unit.test_agent_runtime import _action, _ctx  # noqa: E402
 
 
@@ -313,7 +313,7 @@ class TestTheReportAndTheUnableSectionReadIt(unittest.TestCase):
     """等级必须有**人**读: 一行进报告, 受限时进「我无法确立的事」"""
 
     def _artifact(self, metrics):
-        from operator_agent.schemas import KernelArtifact
+        from operator_agent.core.schemas import KernelArtifact
         return KernelArtifact(kernel_id="kw", task_id="t", code="# x",
                               language="triton", benchmark_data=metrics)
 
@@ -323,7 +323,7 @@ class TestTheReportAndTheUnableSectionReadIt(unittest.TestCase):
                            coverage_mode=COVERAGE_REGEX).as_dict()
 
     def test_the_report_prints_the_level_and_its_cap(self):
-        from operator_agent.report import build_report
+        from operator_agent.core.report import build_report
         text = build_report(artifact=self._artifact(
             {"measurement_validity": "valid", "gflops": 1.0,
              "claim_level": self._capped()}))
@@ -332,19 +332,19 @@ class TestTheReportAndTheUnableSectionReadIt(unittest.TestCase):
 
     def test_no_claim_key_means_no_line(self):
         """缺键不许印一个默认等级出来（那会让「没算」读成「算出来是它」）"""
-        from operator_agent.report import build_report
+        from operator_agent.core.report import build_report
         text = build_report(artifact=self._artifact({"measurement_validity": "valid"}))
         self.assertNotIn("声明等级", text)
 
     def test_a_capped_level_shows_up_in_the_unable_section(self):
-        from operator_agent.report import build_report
+        from operator_agent.core.report import build_report
         text = build_report(artifact=self._artifact(
             {"measurement_validity": "valid", "gflops": 1.0,
              "claim_level": self._capped()}))
         self.assertIn("声明等级受限", text)
 
     def test_an_uncapped_level_adds_no_unable_item(self):
-        from operator_agent.report import build_report
+        from operator_agent.core.report import build_report
         good = claim_level(eligibility=ALL_TRUE, validity="valid",
                            correctness_verified=True,
                            coverage_mode=COVERAGE_AST).as_dict()
@@ -358,7 +358,7 @@ class TestTheOnlyProducerFeedsTheOnlyGate(unittest.TestCase):
 
     def test_the_conductor_writes_the_claim_level_before_calling_the_gate(self):
         src = (Path(__file__).resolve().parents[2] / "operator_agent"
-               / "conductor.py").read_text(encoding="utf-8")
+               / "app/conductor.py").read_text(encoding="utf-8")
         written = src.index('metrics["claim_level"] =')
         called = src.index("admit_to_corpus(")
         self.assertLess(written, called,

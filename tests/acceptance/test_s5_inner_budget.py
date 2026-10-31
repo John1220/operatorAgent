@@ -1,11 +1,11 @@
 """Experimental shared pool must constrain the real bounded inner client."""
 import json
 import pytest
-from operator_agent import s5_shared_budget as shared
-from operator_agent.llm_budget import LLMCallLimits, LLMCallRefused
-from operator_agent.llm_client import LLMClient
-from operator_agent.s5_inner_budget import SharedProductionBudget, production_budget, _provider_counters
-from operator_agent.llm_budget import ProductionLLMCallBudget
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.execute.llm_budget import LLMCallLimits, LLMCallRefused
+from operator_agent.execute.llm_client import LLMClient
+from operator_agent.execute.s5_inner_budget import SharedProductionBudget, production_budget, _provider_counters
+from operator_agent.execute.llm_budget import ProductionLLMCallBudget
 
 
 def create(tmp_path, max_calls=2):
@@ -27,7 +27,7 @@ def test_outer_and_actual_inner_client_share_dispatch_limit(tmp_path, monkeypatc
         seen.append(True)
         return json.dumps({'model':'test','choices':[{'message':{'content':'ok'},'finish_reason':'stop'}],
                            'usage':{'prompt_tokens':11,'completion_tokens':2,'total_tokens':13}})
-    monkeypatch.setattr('operator_agent.llm_client.bounded_dispatch',send)
+    monkeypatch.setattr('operator_agent.execute.llm_client.bounded_dispatch',send)
     client=LLMClient(base_url='https://example.test/v1',model='test',api_key='test',max_tokens=20,
                      call_budget=budget,timeout=10)
     assert client.chat([{'role':'user','content':'x'}],caller_tag='Coder')=='ok'
@@ -58,7 +58,7 @@ def test_replaced_or_wrong_ledger_fails_closed(tmp_path):
 
 def test_missing_usage_remains_unknown(tmp_path, monkeypatch):
     path,budget=create(tmp_path)
-    monkeypatch.setattr('operator_agent.llm_client.bounded_dispatch',lambda *_:json.dumps(
+    monkeypatch.setattr('operator_agent.execute.llm_client.bounded_dispatch',lambda *_:json.dumps(
         {'model':'test','choices':[{'message':{'content':'ok'},'finish_reason':'stop'}]}))
     client=LLMClient(base_url='https://example.test/v1',model='test',api_key='test',max_tokens=20,
                      call_budget=budget,timeout=10)
@@ -129,7 +129,7 @@ def test_unexpected_dispatch_exception_poisoned_globally(tmp_path, monkeypatch):
 def test_local_binding_failure_stops_other_participants(tmp_path, monkeypatch):
     path,budget=create(tmp_path)
     def fail(*args,**kwargs): raise OSError('injected journal error')
-    monkeypatch.setattr('operator_agent.llm_budget.atomic_json',fail)
+    monkeypatch.setattr('operator_agent.execute.llm_budget.atomic_json',fail)
     with pytest.raises(LLMCallRefused,match='local_binding'): budget.bind({'model':'test'})
     assert shared.snapshot(path)['aborted']
 
@@ -190,8 +190,10 @@ def test_production_factory_requires_complete_explicit_binding(tmp_path, monkeyp
 
 def test_repair_entry_routes_inner_calls_to_shared_ledger(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from operator_agent import hitl_tools as ht, llm_client, fixer, repair_loop, tool_calls
-    from operator_agent.schemas import VerificationLevel, VerificationResult
+    from operator_agent.app import hitl_tools as ht, tool_calls
+    from operator_agent.execute import llm_client
+    from operator_agent.generate import fixer, repair_loop
+    from operator_agent.core.schemas import VerificationLevel, VerificationResult
     ledger_path=tmp_path/'shared.sqlite'
     shared.create(ledger_path,task_id='task-01',max_calls=1,max_output_tokens=40960,
                   total_output_tokens=40960,wall_clock_s=120)

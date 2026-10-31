@@ -11,7 +11,7 @@ from benchmarks.experiments.s5 import s5_formal_run
 from benchmarks.experiments.s5.s5_fake_responses_upstream import FakeResponsesUpstream
 from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
 from benchmarks.experiments.s5.s5_gateway_supervisor import SupervisedTransport
-from operator_agent import s5_shared_budget as budget
+from operator_agent.execute import s5_shared_budget as budget
 
 READY = bool(arms.NODE) and (arms.DSH_ROOT / 'dsh/lib/bin.js').is_file()
 

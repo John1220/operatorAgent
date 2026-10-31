@@ -66,22 +66,22 @@ import numpy as np
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
-from operator_agent.agent_runtime import ENVELOPE_ABSENT, ActionEnvelope  # noqa: E402
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.fixer import (  # noqa: E402
+from operator_agent.generate.agent_runtime import ENVELOPE_ABSENT, ActionEnvelope  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.generate.fixer import (  # noqa: E402
     FixOutcome, FixerAgent, _ATTRIBUTION, _HOLD_NOTE, _L1_INPLACE, _L1_INTERFACE,
     _L2_RETREAT, _REFERENCE_HOLD, failure_class, stage_directive,
 )
-from operator_agent.kernel_db import (  # noqa: E402
+from operator_agent.core.kernel_db import (  # noqa: E402
     FAILURE_CLASS_INTERFACE, FAILURE_CLASS_REFERENCE, FailureDatabase, FailureRecord,
     KernelDatabase, failure_class_of, failure_signature, is_promotable_failure,
 )
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType, VerificationLevel, VerificationResult,
 )
-from operator_agent.verifier import Verifier  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
 from tests.unit import test_reference_nonfinite as refn  # noqa: E402
 from tests.unit import test_verified_parent_retreat as vpr  # noqa: E402
 
@@ -159,19 +159,19 @@ class TestTheClassifierCarriesTheClass(unittest.TestCase):
     def test_the_marker_has_exactly_the_files_we_expect(self):
         """「本级判不出」这个串在 `operator_agent/` 里出现在哪几个文件, 必须是登记过的四个
 
-        四种角色各有各的理由: `verifier.py` 产它 (两处 L2 分支), `kernel_db.py` 认它
-        (词表里那条 marker), `conductor.py` 与 `fixer.py` 在注释与日志文案里引用它。
+        四种角色各有各的理由: `decide/verifier.py` 产它 (两处 L2 分支), `core/kernel_db.py` 认它
+        (词表里那条 marker), `app/conductor.py` 与 `generate/fixer.py` 在注释与日志文案里引用它。
         多一个文件 ⇒ 有人新写了一句相同措辞, 不相干的失败会被领进这条分流;
         少一个 (只剩词表自己) ⇒ 门改了措辞, 词表与判决一起哑掉。
         两边都该红, 所以数**文件集合**而不是数出现次数。
         """
         holders = []
-        for name in sorted(os.listdir(_ROOT / "operator_agent")):
-            if not name.endswith(".py"):
-                continue
-            if "本级判不出" in (_ROOT / "operator_agent" / name).read_text(encoding="utf-8"):
-                holders.append(name)
-        self.assertEqual(["conductor.py", "fixer.py", "kernel_db.py", "verifier.py"], holders,
+        pkg = _ROOT / "operator_agent"
+        # 2026-10-31: 包分五层 ⇒ 递归枚举，标签用包内相对路径
+        for path in sorted(pkg.rglob("*.py")):
+            if "本级判不出" in path.read_text(encoding="utf-8"):
+                holders.append(path.relative_to(pkg).as_posix())
+        self.assertEqual(["app/conductor.py", "core/kernel_db.py", "decide/verifier.py", "generate/fixer.py"], holders,
                          "产它的只有 verifier, 认它的只有词表, 另两处是引用 —— 见本条 docstring")
 
     def test_a_numeric_failure_still_classifies_as_numeric(self):
@@ -327,7 +327,7 @@ class TestTheCorpusIsNotWritten(unittest.TestCase):
 class TestTheWiringIsStructural(unittest.TestCase):
     """结构分母: 两个写库点都必须问同一个分类器, 而不是各自看一遍文案"""
 
-    SRC = _ROOT / "operator_agent" / "conductor.py"
+    SRC = _ROOT / "operator_agent" / "app" / "conductor.py"
 
     def _func_src(self, name: str) -> str:
         text = self.SRC.read_text(encoding="utf-8")

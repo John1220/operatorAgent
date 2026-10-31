@@ -20,10 +20,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.agents import SearchAgent
-from operator_agent.verifier import Verifier, baseline_plan
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (
+from operator_agent.generate.agents import SearchAgent
+from operator_agent.decide.verifier import Verifier, baseline_plan
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, UnifiedSketch,
     TaskType, TaskComplexity, Precision, VerificationLevel,
 )

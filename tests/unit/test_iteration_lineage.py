@@ -16,12 +16,12 @@ import unittest
 
 import numpy as np
 
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.llm_client import CostTracker
-from operator_agent.measurement import Validity
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.llm_client import CostTracker
+from operator_agent.decide.measurement import Validity
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
 
 # 正确的 matmul (对角加权): MockGPU 的参考实现能对上

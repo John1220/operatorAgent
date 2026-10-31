@@ -11,16 +11,16 @@ import ast
 import math
 
 from benchmarks.experiments.s5 import s5_task_manifest as draft
-from operator_agent.contract import freeze_from_task
-from operator_agent.correctness import CorrectnessCase, as_suite
-from operator_agent.correctness_profiles import with_default_correctness
-from operator_agent.input_fidelity import describe_inputs
-from operator_agent.measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
-from operator_agent.quality_suite import get_case, input_cases_for, task_for
-from operator_agent.repair_loop import _full_l2_passed
-from operator_agent.run_contract import audit_value, code_hash, digest
-from operator_agent.schemas import ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskSchema, VerificationLevel
-from operator_agent.tool_evidence import verification_data
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.decide.correctness import CorrectnessCase, as_suite
+from operator_agent.decide.correctness_profiles import with_default_correctness
+from operator_agent.decide.input_fidelity import describe_inputs
+from operator_agent.decide.measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
+from operator_agent.decide.quality_suite import get_case, input_cases_for, task_for
+from operator_agent.generate.repair_loop import _full_l2_passed
+from operator_agent.core.run_contract import audit_value, code_hash, digest
+from operator_agent.core.schemas import ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskSchema, VerificationLevel
+from operator_agent.decide.tool_evidence import verification_data
 
 # Deliberately conservative for a local mock prototype: never allocate a new
 # large candidate workload just to prove that its output remains unknown.
@@ -178,8 +178,8 @@ def evaluate_mock_fixture(code, case_id, arm, *, expected_manifest_hash=None):
 
     # Semantic contracts can coincide across mock/python and nvidia/triton;
     # record the actual target separately and never promote a mock result.
-    from operator_agent.mock_gpu import MockGPU
-    from operator_agent.verifier import Verifier
+    from operator_agent.execute.mock_gpu import MockGPU
+    from operator_agent.decide.verifier import Verifier
     verifier = Verifier(MockGPU())
     evidence=[]
     for case in cases:

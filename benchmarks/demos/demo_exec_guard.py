@@ -39,7 +39,7 @@ sys.path.insert(0, str(ROOT))
 
 import numpy as np  # noqa: E402
 
-from operator_agent import exec_guard as eg  # noqa: E402
+from operator_agent.execute import exec_guard as eg  # noqa: E402
 
 A = np.arange(6, dtype=np.float64).reshape(2, 3)
 B = np.arange(12, dtype=np.float64).reshape(3, 4)

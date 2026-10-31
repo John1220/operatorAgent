@@ -58,14 +58,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.drivers.harness_pass_rate import (aggregate, format_report,  # noqa: E402
                                           record_rounds)
-from operator_agent import tolerance  # noqa: E402
-from operator_agent.conductor import Conductor, _round_ruler  # noqa: E402
-from operator_agent.kernel_db import KernelDatabase  # noqa: E402
-from operator_agent.measurement import (  # noqa: E402
+from operator_agent.core import tolerance  # noqa: E402
+from operator_agent.app.conductor import Conductor, _round_ruler  # noqa: E402
+from operator_agent.core.kernel_db import KernelDatabase  # noqa: E402
+from operator_agent.decide.measurement import (  # noqa: E402
     GATE_PARAM_KEYS, LINEAGE_RULER_KEY, RULER_CONFLICT, RULER_REPORTED,
     RULER_UNREPORTED, cross_round_ruler, l2_ruler_reading, ruler_note)
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity,
     TaskSchema, TaskType, VerificationLevel, VerificationResult)
 
@@ -346,7 +346,7 @@ class TestThroughARealRun(unittest.TestCase):
         只会退成「测不到」—— 一个听起来已经尽职的词, 所以它必须有一条从**产它的那一侧**
         出发的用例, 而不是从读它的那一侧。
         """
-        from operator_agent.measurement import (LINEAGE_PERF_RULER_KEY,
+        from operator_agent.decide.measurement import (LINEAGE_PERF_RULER_KEY,
                                                 PERF_CRITERION_SPEEDUP,
                                                 PERF_GATE_PARAM_KEYS)
         history, _, _ = self._run()

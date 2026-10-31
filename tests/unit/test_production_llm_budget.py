@@ -6,7 +6,7 @@ import threading
 
 import pytest
 
-from operator_agent import llm_budget as lb, llm_client as lc
+from operator_agent.execute import llm_budget as lb, llm_client as lc
 
 
 def limits(**overrides):

@@ -42,11 +42,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.agents import CoderAgent                      # noqa: E402
-from operator_agent.coder_pipeline import CoderPipeline           # noqa: E402
-from operator_agent.interface_contract import (                   # noqa: E402
+from operator_agent.generate.agents import CoderAgent                      # noqa: E402
+from operator_agent.generate.coder_pipeline import CoderPipeline           # noqa: E402
+from operator_agent.core.interface_contract import (                   # noqa: E402
     broadcast_calling_convention, check_kernel_interface, input_key_sets)
-from operator_agent.schemas import (                              # noqa: E402
+from operator_agent.core.schemas import (                              # noqa: E402
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, UnifiedSketch,
     TaskType, TaskComplexity, Precision)
 
@@ -255,7 +255,7 @@ class TestAssemblyContract(unittest.TestCase):
     def test_conductor_hands_test_inputs_to_the_coder(self):
         """链路首环: conductor 调 Coder 时必须带 test_inputs（含统一记录包装器）。
         结构断言 (AST 上的调用点) 而不是跑一次 conductor —— conductor 的其余部分要 SSH。"""
-        src = (PKG / "conductor.py").read_text(encoding="utf-8")
+        src = (PKG / "app/conductor.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         funcs = [n for n in ast.walk(tree)
                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
@@ -277,7 +277,7 @@ class TestAssemblyContract(unittest.TestCase):
         self.assertEqual(1, len(calls), f"conductor 里的 coder.run 调用点数变了: {calls}")
         fname, kwargs = calls[0]
         self.assertIn("test_inputs", kwargs,
-                      f"conductor.py 的 {fname}() 没把 test_inputs 交给 coder ⇒ "
+                      f"app/conductor.py 的 {fname}() 没把 test_inputs 交给 coder ⇒ "
                       f"广播在生产路径上恒为「没有拿到输入名」")
 
 

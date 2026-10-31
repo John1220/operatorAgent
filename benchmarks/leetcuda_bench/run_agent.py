@@ -24,13 +24,13 @@ sys.path.insert(0, str(ROOT))
 
 from benchmarks.leetcuda_bench.evaluate import aggregate, evaluate_one, format_curve  # noqa: E402
 from benchmarks.leetcuda_bench.problems import PROBLEMS, Problem, make_inputs  # noqa: E402
-from operator_agent.kernel_db import KernelDatabase  # noqa: E402
-from operator_agent.llm_client import LLMClient  # noqa: E402
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
-from operator_agent.schemas import (ConstraintSpec, DSLEnum, Precision, SourceSpec,  # noqa: E402
+from operator_agent.core.kernel_db import KernelDatabase  # noqa: E402
+from operator_agent.execute.llm_client import LLMClient  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.core.schemas import (ConstraintSpec, DSLEnum, Precision, SourceSpec,  # noqa: E402
                                     TargetSpec, TaskComplexity, TaskSchema, TaskType,
                                     TilingStrategy, UnifiedSketch)
-from operator_agent.verifier import Verifier  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
 
 
 def llm_from_config() -> LLMClient:
@@ -125,7 +125,7 @@ def main() -> int:
 
     llm = llm_from_config()
     print(f"[leetcuda] model={getattr(llm, 'model', '?')}  题数={len(pool)}")
-    from operator_agent.agents import CoderAgent
+    from operator_agent.generate.agents import CoderAgent
     coder = CoderAgent(kernel_db=KernelDatabase(), llm=llm)
 
     runs = []

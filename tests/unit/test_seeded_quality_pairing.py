@@ -7,11 +7,11 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from operator_agent import quality_evaluation as q
-from operator_agent import quality_pairing as paired
-from operator_agent import quality_suite
-from operator_agent.run_contract import code_hash, digest
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.decide import quality_evaluation as q
+from operator_agent.decide import quality_pairing as paired
+from operator_agent.decide import quality_suite
+from operator_agent.core.run_contract import code_hash, digest
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
 
 
 CASE = 'layernorm-tail'

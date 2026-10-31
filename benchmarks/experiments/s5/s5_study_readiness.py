@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import re
 
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 REPORT_SCHEMA = 's5-formal-readiness-v1'
 REQUIRED_CAPABILITIES = frozenset({

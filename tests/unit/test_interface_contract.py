@@ -6,9 +6,9 @@
 """
 import unittest
 
-from operator_agent.backend_caps import Backend
-from operator_agent.interface_contract import check_kernel_interface
-from operator_agent.verifier import Verifier
+from operator_agent.core.backend_caps import Backend
+from operator_agent.core.interface_contract import check_kernel_interface
+from operator_agent.decide.verifier import Verifier
 
 
 def _msg(src, keys):

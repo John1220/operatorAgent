@@ -9,13 +9,13 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from operator_agent.hardware_caps import HardwareCaps
-from operator_agent.resource_check import (check_resource_feasibility,
+from operator_agent.core.hardware_caps import HardwareCaps
+from operator_agent.decide.resource_check import (check_resource_feasibility,
                                            check_shape_divisibility,
                                            estimate_matmul_smem_bytes,
                                            SharedBuffer, SharedMemoryEvidence,
                                            source_resource_binding)
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 from tests.backend_fakes import DeclaredFakeBackend
 
 MATMUL_BIG = """
@@ -235,7 +235,7 @@ class TestVerifierRunsTheResourcePrecheck(unittest.TestCase):
             MATMUL_SINGLE_LAUNCH, v._l1_caps, "matmul",
             resource_evidence=_three_half_staging_tiles(MATMUL_SINGLE_LAUNCH))
         self.assertEqual("over_limit", report.assessment)
-        with patch("operator_agent.resource_check.check_resource_feasibility", return_value=report):
+        with patch("operator_agent.decide.resource_check.check_resource_feasibility", return_value=report):
             r = v._verify_compile(MATMUL_SINGLE_LAUNCH, dsl="triton", input_key_sets=[{"A", "B"}])
         self.assertFalse(r.passed)
         self.assertEqual("resource_infeasible", r.metrics.get("compile_status"))
@@ -329,5 +329,5 @@ class TestProseIsNotAConfiguration(unittest.TestCase):
     def test_unparseable_source_still_strips_line_comments(self):
         """语法坏掉的源码走兜底路径，但注释仍然要被去掉。"""
         code = "def kernel(:\n    # BLOCK_M=1024\n    pass\n"
-        from operator_agent.resource_check import _extract_block_sizes
+        from operator_agent.decide.resource_check import _extract_block_sizes
         self.assertEqual(_extract_block_sizes(code), [])

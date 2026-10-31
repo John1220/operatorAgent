@@ -28,15 +28,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.placement import (SCOPE_CROSS, SCOPE_SAME, SCOPE_UNOBSERVED,
+from operator_agent.execute.placement import (SCOPE_CROSS, SCOPE_SAME, SCOPE_UNOBSERVED,
                                      device_label, observed_pairing,
                                      pairing_conflict)
-from operator_agent.schemas import (
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision,
 )
-from operator_agent.verifier import Verifier
-from operator_agent.mock_gpu import MockGPU
+from operator_agent.decide.verifier import Verifier
+from operator_agent.execute.mock_gpu import MockGPU
 from tests.backend_fakes import fake_backend
 
 PYTHON_MATMUL = """import numpy as np

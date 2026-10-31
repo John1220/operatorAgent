@@ -1,4 +1,4 @@
-"""HITL 工具壳的守卫：`operator_agent/hitl_tools.py` 的两条纪律必须一直成立
+"""HITL 工具壳的守卫：`operator_agent/app/hitl_tools.py` 的两条纪律必须一直成立
 
 这一层被包给外层宿主（DSH 插件 / MCP / 脚本）调用，所以它的**失败形态**比成功形态更重要。
 这里钉住四件事：
@@ -22,8 +22,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from operator_agent import hitl_tools as ht
-from operator_agent.cli import main as cli_main
+from operator_agent.app import hitl_tools as ht
+from operator_agent.app.cli import main as cli_main
 
 CORRECT = "def kernel(A, B):\n    return A @ B\n"
 WRONG = "def kernel(A, B):\n    return (A @ B) * 0.9\n"
@@ -207,7 +207,7 @@ class TestVerifyReturnsOrthogonalFacts(unittest.TestCase):
         out = ht.verify(self.round_dir, CORRECT, stop_after="L2")
         self.assertEqual(out["notes"], [])          # 只跑到 L2：没有基线可谈
 
-        from operator_agent.contract import freeze_from_task
+        from operator_agent.core.contract import freeze_from_task
         contract = freeze_from_task(ht.build_task(declaration()))
         notes = ht._judgement_notes(contract, {"baseline_type": "pytorch_eager_tf32"})
         self.assertTrue(notes and "不是同数值语义的比较" in notes[0])
@@ -336,12 +336,13 @@ class TestTheCliKeepsStdoutParseable(unittest.TestCase):
         """
         import sys
         from unittest import mock
-        from operator_agent import hitl_tools as real, tool_calls, exec_guard
+        from operator_agent.app import hitl_tools as real, tool_calls
+        from operator_agent.execute import exec_guard
         # S2 executes tools in a child: inject the noisy backend in that child,
         # so this still checks the actual CLI/worker/log boundary.
         script = '''
 import sys
-from operator_agent import hitl_tools as ht, tool_calls
+from operator_agent.app import hitl_tools as ht, tool_calls
 class Noisy:
     name = "NoisyBackend"
     capabilities = frozenset()
@@ -534,8 +535,8 @@ class TestCandidateOriginIsAttributionNotJudgement(unittest.TestCase):
         无条件加行会改动既有报告（含 golden 产物），而那条路的「谁写的核」
         不是这一格要回答的问题。
         """
-        from operator_agent.report import build_report
-        from operator_agent.schemas import KernelArtifact
+        from operator_agent.core.report import build_report
+        from operator_agent.core.schemas import KernelArtifact
 
         def report(history):
             return build_report(artifact=KernelArtifact(
@@ -550,7 +551,7 @@ class TestCandidateOriginIsAttributionNotJudgement(unittest.TestCase):
 
     def test_the_schema_enum_and_the_runtime_vocabulary_are_one_list(self):
         """schema 与实现各写一份词表 = 「工具说收 A、实现只认 B」。"""
-        from operator_agent.mcp_server import _tool_definitions
+        from operator_agent.app.mcp_server import _tool_definitions
         tools = {t["name"]: t for t in _tool_definitions()}
         for name in ("operator_verify", "operator_repair"):
             enum = tools[name]["inputSchema"]["properties"]["candidate_origin"]["enum"]
@@ -575,7 +576,8 @@ class TestRepairAttributesTheFinalCodeNotTheInput(unittest.TestCase):
     def _repair(self, rounds, origin=None):
         from unittest import mock
 
-        from operator_agent import fixer as fixer_module, llm_client, repair_loop
+        from operator_agent.generate import fixer as fixer_module, repair_loop
+        from operator_agent.execute import llm_client
 
         def fake_loop(code, *args, **kwargs):
             return {"passed": False, "rounds": rounds, "code": code, "log": "",

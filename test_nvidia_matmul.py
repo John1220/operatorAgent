@@ -30,7 +30,7 @@ from operator_agent import (
     TaskType, TaskComplexity, Precision,
     get_latest_logs,
 )
-from operator_agent.backend_caps import Cap
+from operator_agent.core.backend_caps import Cap
 
 
 # ─── 连接配置 (唯一来源) ─────────────────────────────────────

@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
-from operator_agent.agent_logger import capture_execution
+from operator_agent.generate.agent_logger import capture_execution
 
 REPO_LOGS = Path(__file__).resolve().parents[2] / "logs"
 

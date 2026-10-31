@@ -12,7 +12,7 @@ from benchmarks.experiments.s5 import s5_runtime, s5_verify_remote
 from benchmarks.experiments.s5.s5_plugin_rpc import MCPRelay
 from benchmarks.experiments.s5.s5_development_service import DevelopmentService
 from benchmarks.experiments.s5.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
-from operator_agent.hitl_tools import prepare
+from operator_agent.app.hitl_tools import prepare
 
 DECL = dict(request='layernorm fp32', shapes=[[7,33]], hardware='mock_gpu',
             dsl='python', precision='fp32')

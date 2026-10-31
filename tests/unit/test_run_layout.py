@@ -30,9 +30,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent import agent_runtime as ar
-from operator_agent import run_layout as rl
-from operator_agent.run_layout import (
+from operator_agent.generate import agent_runtime as ar
+from operator_agent.core import run_layout as rl
+from operator_agent.core.run_layout import (
     ARTIFACT_MODE, DIR_NAMES, PROTECTED_DIR_MODE, PROTECTED_DIR_NAMES, ROLES,
     ROLE_CANDIDATE, ROLE_ORACLE, ROLE_REPORT_WRITER, ROLE_BUILD, ROLE_HARNESS,
     ROLE_WRITERS, WRITABLE_DIR_MODE, WRITABLE_DIR_NAMES,
@@ -332,7 +332,7 @@ class TestOnlyOneDoorInTheHarness(unittest.TestCase):
         pkg = Path(__file__).resolve().parents[2] / "operator_agent"
         offenders = []
         for path in sorted(pkg.glob("*.py")):
-            if path.name == "run_layout.py":
+            if path.name == "core/run_layout.py":
                 continue  # 它**就是**那扇门（本用例要钉的是「只有它一扇」）
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
@@ -354,9 +354,9 @@ class TestOnlyOneDoorInTheHarness(unittest.TestCase):
     def test_the_module_is_wired_into_the_conductor(self):
         """接线也是不变量的一部分: 模块写得再好, 没人调就是死词汇"""
         src = (Path(__file__).resolve().parents[2]
-               / "operator_agent" / "conductor.py").read_text(encoding="utf-8")
+               / "operator_agent" / "app" / "conductor.py").read_text(encoding="utf-8")
         # 逐字钉住接线那一行（名字随调用点增长而变：§22.1 落盘那一格读 `ROLE_CANDIDATE`）
-        self.assertIn("from .run_layout import ROLE_CANDIDATE, RunLayout, run_layout", src)
+        self.assertIn("from ..core.run_layout import ROLE_CANDIDATE, RunLayout, run_layout", src)
         self.assertIn("self.layout = run_layout(self.run_root) if self.run_root.strip() else None",
                       src, "布局的创建点变了 —— 复核「一次 execute 一次」与「空根不建」")
         self.assertIn("self.layout: Optional[RunLayout] = None", src)
@@ -371,7 +371,7 @@ class TestTheLayoutIsBuiltOncePerExecute(unittest.TestCase):
 
     def _conductor(self, run_root):
         from operator_agent import Conductor
-        from operator_agent.kernel_db import KernelDatabase
+        from operator_agent.core.kernel_db import KernelDatabase
         return Conductor(run_root=run_root, kernel_db=KernelDatabase(jsonl_path=None))
 
     def test_no_run_root_means_no_layout(self):
@@ -380,7 +380,7 @@ class TestTheLayoutIsBuiltOncePerExecute(unittest.TestCase):
         self.assertEqual("candidate/code.py", ar.candidate_path(c.run_root))
 
     def test_execute_builds_it_before_the_inner_run(self):
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+        from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                             TargetSpec, TaskSchema, TaskType)
         root = _tmp_root()
         c = self._conductor(root)

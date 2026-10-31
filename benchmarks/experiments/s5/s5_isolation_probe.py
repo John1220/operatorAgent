@@ -18,9 +18,9 @@ from benchmarks.experiments.s5.s5_development_evidence import audit, _feedback
 from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
 from benchmarks.experiments.s5.s5_vertical_tool_provider import _sse
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE, BAD_FIXTURE
-from operator_agent import s5_shared_budget as shared
-from operator_agent.hitl_tools import prepare
-from operator_agent.run_contract import digest
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.app.hitl_tools import prepare
+from operator_agent.core.run_contract import digest
 
 DECLARATION = dict(request='layernorm fp32', shapes=[[7,33]], hardware='mock_gpu',
                    dsl='python', precision='fp32')
@@ -51,7 +51,7 @@ class BoundaryProvider:
         paths=dict(other=self.private/'other-arm/candidate.py',
             credentials=self.private/'host-home/credentials',
             ledger=self.private/'supervisor-ledger',
-            source_repository=s5_seatbelt.ROOT/'operator_agent/hitl_tools.py',
+            source_repository=s5_seatbelt.ROOT/'operator_agent/app/hitl_tools.py',
             core=root/'core/operator_agent/__init__.py',plugin=root/'plugin/index.mjs')
         source=('import json,pathlib\n'
                 'result={"probe":"s5-read-matrix"}\n'

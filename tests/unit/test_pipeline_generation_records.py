@@ -9,12 +9,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from operator_agent.coder_pipeline import CoderPipeline
-from operator_agent.generation_context import CONTEXT_SCHEMA, RECORD_SCHEMA
-from operator_agent.interface_contract import broadcast_calling_convention
-from operator_agent.prompt_manager import PromptManager
-from operator_agent.run_contract import code_hash, digest
-from operator_agent.schemas import (
+from operator_agent.generate.coder_pipeline import CoderPipeline
+from operator_agent.generate.generation_context import CONTEXT_SCHEMA, RECORD_SCHEMA
+from operator_agent.core.interface_contract import broadcast_calling_convention
+from operator_agent.generate.prompt_manager import PromptManager
+from operator_agent.core.run_contract import code_hash, digest
+from operator_agent.core.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskSchema, UnifiedSketch,
 )
 

@@ -17,11 +17,11 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0,str(ROOT))
-from operator_agent.bounded_repair import source_change
-from operator_agent.llm_budget import strict_object
-from operator_agent.repair_diagnoser import diagnose_repair
-from operator_agent.run_contract import atomic_json, code_hash, digest, protocol_identity
-from operator_agent.single_candidate_coder import generation_declaration, SingleCandidatePolicy
+from operator_agent.generate.bounded_repair import source_change
+from operator_agent.execute.llm_budget import strict_object
+from operator_agent.generate.repair_diagnoser import diagnose_repair
+from operator_agent.core.run_contract import atomic_json, code_hash, digest, protocol_identity
+from operator_agent.generate.single_candidate_coder import generation_declaration, SingleCandidatePolicy
 
 
 def parser():

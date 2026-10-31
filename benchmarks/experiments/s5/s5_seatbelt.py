@@ -56,7 +56,7 @@ def verify_runtime(runtime):
 
 
 def verify_source_version(runtime):
-    from operator_agent.run_contract import protocol_identity
+    from operator_agent.core.run_contract import protocol_identity
     for name, expected in protocol_identity().items():
         if runtime['files'].get('core/'+name)!=expected:
             raise ValueError('staged core no longer matches the supervisor source version')

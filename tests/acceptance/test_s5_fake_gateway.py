@@ -5,7 +5,7 @@ import threading
 import pytest
 
 from benchmarks.experiments.s5.s5_fake_gateway import FakeGateway, GatewayFakeFailure, GatewayRefused
-from operator_agent import s5_shared_budget as shared
+from operator_agent.execute import s5_shared_budget as shared
 
 
 def setup(tmp_path, adapter, *, max_calls=4, **options):

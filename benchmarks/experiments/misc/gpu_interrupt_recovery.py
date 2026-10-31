@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from benchmarks.drivers.input_fidelity_h20 import AcceptanceSSH, GOOD, gpu_evidence
-from operator_agent.anticheat import static_audit
-from operator_agent.measurement import TRANSPORT_UNKNOWN
+from operator_agent.decide.anticheat import static_audit
+from operator_agent.decide.measurement import TRANSPORT_UNKNOWN
 
 SLEEP_CYCLES = 40_000_000_000
 SLOW = GOOD.replace("    return out", f"    torch.cuda.synchronize()\n    torch.cuda._sleep({SLEEP_CYCLES})\n    return out")

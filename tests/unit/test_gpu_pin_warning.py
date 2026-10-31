@@ -10,7 +10,7 @@
      不由这个环境变量推翻 (钉一条同机同选择的对照)。
 """
 
-from operator_agent.remote_executor import SSHExecutor
+from operator_agent.execute.remote_executor import SSHExecutor
 
 #: nvidia-smi csv 的真实形状 (index, memory.free, utilization.gpu)。
 #: 两张卡里选 1 —— util 最低优先 (利用率优先于显存余量)。

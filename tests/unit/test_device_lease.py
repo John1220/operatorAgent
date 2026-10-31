@@ -22,11 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
-from operator_agent.placement import LEASE_CONTENDED, LEASE_UNOBSERVED
+from operator_agent.execute.placement import LEASE_CONTENDED, LEASE_UNOBSERVED
 from tests.unit.test_conductor_stagnation import (SLOW_MATMUL, ScriptedGflopsGPU,
                                              ScriptedLLM)
 

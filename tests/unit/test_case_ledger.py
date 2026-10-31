@@ -42,16 +42,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.contract import (CASE_AGGREGATE_MEAN, CASE_AGGREGATE_WORST_CASE,
+from operator_agent.core.contract import (CASE_AGGREGATE_MEAN, CASE_AGGREGATE_WORST_CASE,
                                      CASE_AGGREGATES, BaselineDef, ContractError,
                                      DTypeSemantics, ShapeDist, case_key, freeze,
                                      freeze_from_task, load_dict)
-from operator_agent.eligibility import aggregate_speedup
-from operator_agent.report import REPORT_NAME
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+from operator_agent.decide.eligibility import aggregate_speedup
+from operator_agent.core.report import REPORT_NAME
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                     TargetSpec, TaskComplexity, TaskSchema,
                                     TaskType)
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 
 CASE_A = "A=2x3|B=3x4"
 CASE_B = "A=4x5|B=5x6"
@@ -364,7 +364,7 @@ class TestOneProducerPerFact(unittest.TestCase):
         return (Path(__file__).resolve().parents[2] / rel).read_text(encoding="utf-8")
 
     def test_the_ledger_has_one_producer_and_two_declared_exits(self):
-        v = self._src("operator_agent/verifier.py")
+        v = self._src("operator_agent/decide/verifier.py")
         self.assertEqual(1, v.count("def _publish_case_ledger("))
         self.assertEqual(2, v.count("self._publish_case_ledger("),
                          "两条有主 case 读数的出口: 远端 / 本机有参考实现")
@@ -374,20 +374,20 @@ class TestOneProducerPerFact(unittest.TestCase):
                          "所有 case 都进入同一 L3 方法，不能另写简化测量路")
 
     def test_the_aggregate_has_one_derivation(self):
-        self.assertEqual(1, self._src("operator_agent/eligibility.py")
+        self.assertEqual(1, self._src("operator_agent/decide/eligibility.py")
                          .count("def aggregate_speedup("))
 
     def test_the_ledger_reader_has_one_definition_and_no_second_copy(self):
         """收口在判据层（I95 搬家: 评测侧的门也要读这份账, 而门里不 import 调用方）"""
-        el = self._src("operator_agent/eligibility.py")
+        el = self._src("operator_agent/decide/eligibility.py")
         self.assertEqual(1, el.count("def case_speedups("))
         self.assertEqual(1, el.count("def performance_verdict("))
-        for rel in ("operator_agent/conductor.py", "operator_agent/verifier.py"):
+        for rel in ("operator_agent/app/conductor.py", "operator_agent/decide/verifier.py"):
             self.assertNotIn("def case_speedups(", self._src(rel), rel)
-        self.assertIn("case_speedups(metrics)", self._src("operator_agent/conductor.py"))
+        self.assertIn("case_speedups(metrics)", self._src("operator_agent/app/conductor.py"))
 
     def test_the_reporter_derives_nothing(self):
-        rp = self._src("operator_agent/report.py")
+        rp = self._src("operator_agent/core/report.py")
         for forbidden in ("aggregate_speedup(", "case_key(", "regression_over_limit("):
             self.assertNotIn(forbidden, rp, forbidden)
 

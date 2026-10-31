@@ -26,17 +26,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.backend_caps import Backend, Instantiation
-from operator_agent.bandit import Bandit
-from operator_agent.candidates import (ParamSpace, TemplateCandidate,
+from operator_agent.core.backend_caps import Backend, Instantiation
+from operator_agent.generate.bandit import Bandit
+from operator_agent.core.candidates import (ParamSpace, TemplateCandidate,
                                       dedup_key, point_label,
                                       select_template_candidate, template_arm,
                                       template_points, template_resource_binding)
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.resource_check import MemCaps, SharedMemoryEvidence, caps_from_metrics
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.decide.resource_check import MemCaps, SharedMemoryEvidence, caps_from_metrics
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
 from tests.unit.test_conductor_stagnation import SLOW_MATMUL
 

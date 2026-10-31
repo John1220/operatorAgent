@@ -62,11 +62,11 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from operator_agent import MockGPU, Verifier
-from operator_agent.schemas import (
+from operator_agent.core.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity,
     TaskSchema, TaskType, VerificationLevel, VerificationResult,
 )
-from operator_agent.measurement import GATE_PARAM_KEYS, single_ruler
+from operator_agent.decide.measurement import GATE_PARAM_KEYS, single_ruler
 
 CORRECT_KERNEL = """import numpy as np
 

@@ -2,7 +2,7 @@
 import pytest
 from benchmarks.experiments.s5 import s5_summary as s5
 from benchmarks.experiments.s5.s5_task_manifest import manifest
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 
 def record(task, arm, passed, *, state='finished', usage=None):

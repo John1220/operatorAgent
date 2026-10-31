@@ -4,8 +4,8 @@ import json
 import pytest
 
 from benchmarks.experiments.misc import operator_quality as cli
-from operator_agent import quality_evaluation as q
-from operator_agent.run_contract import code_hash
+from operator_agent.decide import quality_evaluation as q
+from operator_agent.core.run_contract import code_hash
 
 
 CASE = 'layernorm-tail'

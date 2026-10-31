@@ -9,14 +9,14 @@ from types import SimpleNamespace
 import pytest
 
 from operator_agent import Conductor, KernelDatabase
-from operator_agent.agents import SearchAgent
-from operator_agent.bandit import Bandit
-from operator_agent.budget import BudgetPlan
-from operator_agent.contract import freeze_from_task
-from operator_agent.kernel_db import FailureDatabase
-from operator_agent import run_contract as rc
-from operator_agent.schemas import UnifiedSketch, TilingStrategy
-from operator_agent.search_objective import SearchObjective, reading, validate_snapshot
+from operator_agent.generate.agents import SearchAgent
+from operator_agent.generate.bandit import Bandit
+from operator_agent.execute.budget import BudgetPlan
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.core.kernel_db import FailureDatabase
+from operator_agent.core import run_contract as rc
+from operator_agent.core.schemas import UnifiedSketch, TilingStrategy
+from operator_agent.generate.search_objective import SearchObjective, reading, validate_snapshot
 from tests.unit.test_workload_evidence import A, B, CODE, backend, inputs, measure, task
 
 
@@ -196,7 +196,7 @@ def test_primary_roofline_ceiling_cannot_stop_workload_search(monkeypatch):
     def ceiling(m):
         seen.append(m)
         return m is r.metrics['cases'][A]
-    monkeypatch.setattr('operator_agent.search_objective.reference_ceiling_reached',ceiling)
+    monkeypatch.setattr('operator_agent.generate.search_objective.reference_ceiling_reached',ceiling)
     assert not obj.at_reference_ceiling(r.metrics)
     assert len(seen)==2
 

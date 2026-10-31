@@ -9,9 +9,9 @@ from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
 from benchmarks.experiments.s5.s5_vertical_mcp_headless import run_mcp_headless
 from benchmarks.experiments.s5.s5_vertical_mcp_provider import ScriptedMCPProvider, CALL_ID, TOOL_NAME
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
-from operator_agent import s5_shared_budget as shared
-from operator_agent.hitl_tools import prepare
-from operator_agent.run_contract import code_hash
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.app.hitl_tools import prepare
+from operator_agent.core.run_contract import code_hash
 
 
 @pytest.mark.skipif(not shutil.which('node') or not (DSH_ROOT/'dsh/lib/bin.js').is_file()

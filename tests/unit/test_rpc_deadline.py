@@ -13,12 +13,12 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from operator_agent import remote_executor as rx
-from operator_agent.failure_route import classify, ROUTE_HOLD
-from operator_agent.measurement import TRANSPORT_UNKNOWN, transport_outcome
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
-from operator_agent.verifier import Verifier
+from operator_agent.execute import remote_executor as rx
+from operator_agent.decide.failure_route import classify, ROUTE_HOLD
+from operator_agent.decide.measurement import TRANSPORT_UNKNOWN, transport_outcome
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.decide.verifier import Verifier
 from remote_scripts import session_control as control
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -60,7 +60,7 @@ def test_stopped_or_partial_reader_bounds_send_and_broken_close(partial):
             + ("sys.stdin.buffer.read(1024); " if partial else "") + "time.sleep(60)")
     row = controller(f"""
         import json,sys,time
-        from operator_agent.remote_executor import _RemoteSession,SessionError
+        from operator_agent.execute.remote_executor import _RemoteSession,SessionError
         s=_RemoteSession([sys.executable,'-u','-c',{peer!r}],.2,'fake')
         s.start()
         until=time.monotonic()+2
@@ -318,9 +318,9 @@ def test_missing_remote_identity_has_no_cleanup_authority(monkeypatch):
 @pytest.mark.parametrize("where", ["primary", "case", "repeat"])
 def test_suite_transport_unknown_stops_remaining_requests_and_preserves_hold(monkeypatch, where):
     from operator_agent import ConstraintSpec, SourceSpec, TargetSpec, TaskSchema
-    from operator_agent.bench_cases import BenchmarkCase, TensorSpec
-    from operator_agent.correctness import CorrectnessCase, CorrectnessSuite
-    from operator_agent.mock_gpu import MockGPU
+    from operator_agent.decide.bench_cases import BenchmarkCase, TensorSpec
+    from operator_agent.decide.correctness import CorrectnessCase, CorrectnessSuite
+    from operator_agent.execute.mock_gpu import MockGPU
     suite = CorrectnessSuite(tuple(CorrectnessCase(str(i), BenchmarkCase(
         tensors=(TensorSpec("X", (2, 3), "fp32"),))) for i in range(3)))
     task = TaskSchema(source=SourceSpec(kernel_type="relu"), target=TargetSpec(dsl="python"),
@@ -345,9 +345,9 @@ def test_suite_transport_unknown_stops_remaining_requests_and_preserves_hold(mon
 @pytest.mark.parametrize("level", [Level.L1_COMPILE, Level.L2_FUNCTION, Level.L3_PERFORMANCE])
 def test_conductor_unknown_transport_never_fixes_retries_or_enters_l3(tmp_path, monkeypatch, level):
     from operator_agent import ConstraintSpec, SourceSpec, TargetSpec, TaskSchema
-    from operator_agent.artifact_store import ArtifactStore
-    from operator_agent.conductor import Conductor
-    from operator_agent.mock_gpu import MockGPU
+    from operator_agent.core.artifact_store import ArtifactStore
+    from operator_agent.app.conductor import Conductor
+    from operator_agent.execute.mock_gpu import MockGPU
     from tests.golden_regression import _FixedCodeMockLLM
     code = "import numpy as np\ndef kernel(A, B): return A @ B"
     conductor = Conductor(backend=MockGPU(), llm=_FixedCodeMockLLM(code=code), max_optimize_rounds=3)

@@ -15,8 +15,8 @@ from pathlib import Path
 from benchmarks.experiments.s5.s5_fake_http import FakeHTTPServer
 from benchmarks.experiments.s5.s5_vertical_headless import run_headless
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE, VerticalValidator
-from operator_agent import s5_shared_budget as shared
-from operator_agent.run_contract import code_hash
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.core.run_contract import code_hash
 
 TASK = ('Implement a Python function kernel(X) for layer normalization on the '
         'last axis with epsilon 1e-5. Return only the source code.')

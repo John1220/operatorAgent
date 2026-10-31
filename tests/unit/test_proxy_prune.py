@@ -18,12 +18,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.agents import SearchAgent
-from operator_agent.candidates import ParamSpace, TemplateCandidate, template_resource_binding
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.resource_check import SharedMemoryEvidence
-from operator_agent.schemas import TilingStrategy, UnifiedSketch
+from operator_agent.generate.agents import SearchAgent
+from operator_agent.core.candidates import ParamSpace, TemplateCandidate, template_resource_binding
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.decide.resource_check import SharedMemoryEvidence
+from operator_agent.core.schemas import TilingStrategy, UnifiedSketch
 from tests.unit.test_measurement_validity import (
     LaunchDominatedGPU, NET_MS_MATMUL_4096,
 )

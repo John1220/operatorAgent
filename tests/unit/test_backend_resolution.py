@@ -21,9 +21,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import operator_agent.remote_executor as rx
-from operator_agent.backend_caps import Backend, Cap, concrete_backends
-from operator_agent.remote_executor import (
+import operator_agent.execute.remote_executor as rx
+from operator_agent.core.backend_caps import Backend, Cap, concrete_backends
+from operator_agent.execute.remote_executor import (
     BackendUnavailable, LocalExecutor, RemoteExecutor, Resolution,
 )
 from tests.backend_fakes import fake_backend

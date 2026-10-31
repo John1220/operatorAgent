@@ -21,13 +21,13 @@ from benchmarks.drivers import workload_search_h20 as fixed
 from benchmarks.drivers import workload_decision_h20 as wd
 from benchmarks._bounded_proposals import BoundedModel, LIMITS, model_config, model_identity
 from operator_agent import Conductor, KernelDatabase
-from operator_agent.budget import BudgetPlan
-from operator_agent.contract import case_key, freeze_from_task
-from operator_agent.kernel_db import FailureDatabase
-from operator_agent.reference_contract import registered_reference, validate_receipt
-from operator_agent.run_contract import atomic_json, audit_value, code_hash, digest, json_value, protocol_identity
-from operator_agent.schemas import UnifiedSketch, TilingStrategy, VerificationLevel as Level
-from operator_agent.search_objective import reading, results_dict
+from operator_agent.execute.budget import BudgetPlan
+from operator_agent.core.contract import case_key, freeze_from_task
+from operator_agent.core.kernel_db import FailureDatabase
+from operator_agent.decide.reference_contract import registered_reference, validate_receipt
+from operator_agent.core.run_contract import atomic_json, audit_value, code_hash, digest, json_value, protocol_identity
+from operator_agent.core.schemas import UnifiedSketch, TilingStrategy, VerificationLevel as Level
+from operator_agent.generate.search_objective import reading, results_dict
 
 WARPS = (4, 8, 16)
 PROMPT = ('You propose a bounded NVIDIA H20 Triton LayerNorm launch configuration. '
@@ -170,7 +170,7 @@ class ProposalSession:
         if len(self.proposals)==2 and len(self.rounds)==2:
             self.terminal_search_skips+=1
             return sketch, 'proposal cap reached; no model call or new candidate'
-        from operator_agent.contract import load_dict
+        from operator_agent.core.contract import load_dict
         previous=feedback(self.rounds,load_dict(self.plan['contract']))
         return self.propose('SearchProposal',previous), 'real bounded LLM launch proposal'
 

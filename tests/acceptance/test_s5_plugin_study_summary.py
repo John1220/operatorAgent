@@ -6,7 +6,7 @@ import pytest
 
 from benchmarks.experiments.s5 import s5_minimal_tasks, s5_plugin_summary
 from benchmarks.experiments.s5 import s5_plugin_study_summary as summary
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 
 def fixture():

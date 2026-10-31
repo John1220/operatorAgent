@@ -21,8 +21,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.agents import CoderAgent, SearchAgent          # noqa: E402
-from operator_agent.schemas import (ConstraintSpec, MemoryPlan,     # noqa: E402
+from operator_agent.generate.agents import CoderAgent, SearchAgent          # noqa: E402
+from operator_agent.core.schemas import (ConstraintSpec, MemoryPlan,     # noqa: E402
                                     PipelineStage, Precision,
                                     SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema,

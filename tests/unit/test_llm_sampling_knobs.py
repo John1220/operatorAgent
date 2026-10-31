@@ -18,7 +18,7 @@ Coder 0.1/40960、Fixer 0.1/1024、planner 0.2/2048。所以「把 `client.tempe
 `benchmarks/mut_specs/llm_sampling_knobs.py`，跑法是
 `python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/llm_sampling_knobs.py`。
 2026-09-30 实跑，基线 17 passed，**行为分母 12/12 拦住、结构分母 0/0**；
-L 组打在 `llm_client.py`，H 组打在 `harness_pass_rate.py`):
+L 组打在 `execute/llm_client.py`，H 组打在 `harness_pass_rate.py`):
     L1 body 里的 temperature 不看逐调用覆盖            → 2 红 (红在 msg=「发出去」那一侧)
     L2 账本里的 temperature 另读一遍构造参数            → 2 红 (红在 msg=「记下来」那一侧)
 
@@ -60,11 +60,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from benchmarks.drivers.harness_pass_rate import (  # noqa: E402
     MIN_DENOM, compare_runs, format_comparison, sampling_from_metadata,
     sampling_from_runs)
-from operator_agent import llm_client as lc  # noqa: E402
-from operator_agent.llm_client import (  # noqa: E402
+from operator_agent.execute import llm_client as lc  # noqa: E402
+from operator_agent.execute.llm_client import (  # noqa: E402
     CostTracker, LLMClient, format_sampling_configs)
 
-SRC = Path(__file__).resolve().parents[2] / "operator_agent" / "llm_client.py"
+SRC = Path(__file__).resolve().parents[2] / "operator_agent" / "execute" / "llm_client.py"
 
 
 # ───────────────────────── 假端点：只记录真发出去的 body ─────────────────────────

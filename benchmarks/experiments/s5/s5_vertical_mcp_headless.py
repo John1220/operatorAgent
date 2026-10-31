@@ -40,7 +40,7 @@ def run_mcp_headless(base_url, workspace, task, *, timeout=90):
         dict(insert=[
             dict(id='mcp-operator',name=str(MCP_CLIENT),config=dict(
                 serverName='operator',transport='stdio',command=sys.executable,
-                args=['-m','operator_agent.mcp_server'],toolCallTimeoutMs=60000,
+                args=['-m','operator_agent.app.mcp_server'],toolCallTimeoutMs=60000,
                 failOnStartupError=True,env=dict(PYTHONPATH=s5_runtime.python_path(ROOT),PYTHONNOUSERSITE='1'))),
             dict(id='operator-tools',name=str(PLUGIN),config=dict(
                 command=sys.executable,args=['-m','operator_agent'],

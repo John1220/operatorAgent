@@ -1,7 +1,7 @@
 """LLM 成本读数过落盘边界 (doc 53 §五.1 / #70)。
 
-现状：写侧 `conductor.py:926` 把账单放进 `artifact.metadata["llm_cost"]`，而
-`artifact_store.py:71-74` 的注释自己写着「`metadata` 整个不进 result.json (llm_cost 也一样
+现状：写侧 `app/conductor.py:926` 把账单放进 `artifact.metadata["llm_cost"]`，而
+`core/artifact_store.py:71-74` 的注释自己写着「`metadata` 整个不进 result.json (llm_cost 也一样
 只在内存里)」⇒ **每次生产运行的 `result.json` 里没有成本**。
 
 ⚠️ 这里本会话犯过一次数错，值得留在文件里：第一版写的是「全仓读者数 0」，那是我按手里那个
@@ -14,7 +14,7 @@
 
 本片补的是跨运行那一半：下一次运行与事后复盘没有内存对象可读。
 
-这与本仓已经修过的两处同族（环境指纹 `artifact_store.py:71-74`、`resume_status`
+这与本仓已经修过的两处同族（环境指纹 `core/artifact_store.py:71-74`、`resume_status`
 `:78-81`），所以修法也照那条先例：**单独立顶层键，不整包倒 metadata**。
 `metadata` 里还放着「执行快照路径」这类含真实路径的外挂，整包落盘会同时踩两条既有纪律
 （落盘键白名单、派生量先剥路径）。
@@ -26,7 +26,7 @@
 
 运行: python3 -B -m unittest tests.test_cost_persistence -v
 
-变异标定 6 条，**0 逃逸**（`operator_agent/artifact_store.py` 与 `conductor.py` 各改坏一次，
+变异标定 6 条，**0 逃逸**（`operator_agent/core/artifact_store.py` 与 `app/conductor.py` 各改坏一次，
 期望集合是按「这条变异让哪条断言的前提消失」推出来的，不是跑一遍抄的）：
 整块不搬→落盘等式/键名同源/证据质量位/AST 契约四条；`if True`（缺账单也写键）→
 `test_missing_cost_writes_no_key`；整包倒 `metadata`→上面三条 + 边界收窄 + AST 契约；
@@ -47,9 +47,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.artifact_store import ArtifactStore  # noqa: E402
-from operator_agent.llm_client import CostTracker  # noqa: E402
-from operator_agent.schemas import KernelArtifact  # noqa: E402
+from operator_agent.core.artifact_store import ArtifactStore  # noqa: E402
+from operator_agent.execute.llm_client import CostTracker  # noqa: E402
+from operator_agent.core.schemas import KernelArtifact  # noqa: E402
 
 
 def _tracker() -> CostTracker:
@@ -138,8 +138,8 @@ class TestTheBoundaryStaysNarrow(_StoreCase):
     def test_writer_and_reader_use_the_same_key(self):
         """装配环节的契约要两侧一起守: 写侧 `metadata["llm_cost"]` 与读侧 `.get("llm_cost")`
         必须是同一个字面量。只查一侧 = 半扇门 (改名时另一侧静默读到空)。"""
-        writer = io.open(ROOT / "operator_agent" / "conductor.py", encoding="utf-8").read()
-        reader = io.open(ROOT / "operator_agent" / "artifact_store.py", encoding="utf-8").read()
+        writer = io.open(ROOT / "operator_agent" / "app" / "conductor.py", encoding="utf-8").read()
+        reader = io.open(ROOT / "operator_agent" / "core" / "artifact_store.py", encoding="utf-8").read()
 
         def assigned_literal(src: str, dict_expr: str) -> set:
             out = set()

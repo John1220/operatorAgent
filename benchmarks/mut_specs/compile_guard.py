@@ -26,12 +26,12 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "guard": "operator_agent/exec_guard.py",
-    "gpu": "operator_agent/mock_gpu.py",
-    "local": "operator_agent/remote_executor.py",
-    "ver": "operator_agent/verifier.py",
-    "kdb": "operator_agent/kernel_db.py",
-    "cond": "operator_agent/conductor.py",
+    "guard": "operator_agent/execute/exec_guard.py",
+    "gpu": "operator_agent/execute/mock_gpu.py",
+    "local": "operator_agent/execute/remote_executor.py",
+    "ver": "operator_agent/decide/verifier.py",
+    "kdb": "operator_agent/core/kernel_db.py",
+    "cond": "operator_agent/app/conductor.py",
     "vch": "benchmarks/verify/verify_corpus_honesty.py",
 }
 

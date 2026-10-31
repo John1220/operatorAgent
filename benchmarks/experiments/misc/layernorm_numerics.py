@@ -12,7 +12,7 @@ import sys
 import numpy as np
 
 if __package__:
-    from operator_agent import tolerance
+    from operator_agent.core import tolerance
 else:  # Never pick a stale installed package over the SHA-checked siblings.
     import tolerance
 
@@ -64,7 +64,7 @@ def measure(inputs, reference, device, provenance):
     import torch
     import torch.nn.functional as F
     if __package__:
-        from operator_agent.remote_input_fidelity import to_torch_inputs, torch_input_readback
+        from operator_agent.decide.remote_input_fidelity import to_torch_inputs, torch_input_readback
     else:
         from remote_input_fidelity import to_torch_inputs, torch_input_readback
 
@@ -113,9 +113,9 @@ def measure(inputs, reference, device, provenance):
                     shared_source_hashes={name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
                         for name, path in (
                             ("layernorm_numerics.py", __file__),
-                            ("tolerance.py", tolerance.__file__),
-                            ("remote_input_fidelity.py", sys.modules[to_torch_inputs.__module__].__file__),
-                            ("input_fidelity.py", to_torch_inputs.__globals__["fidelity"].__file__))})
+                            ("core/tolerance.py", tolerance.__file__),
+                            ("decide/remote_input_fidelity.py", sys.modules[to_torch_inputs.__module__].__file__),
+                            ("decide/input_fidelity.py", to_torch_inputs.__globals__["fidelity"].__file__))})
     out = dict(reference_identity=identity, reference_identity_hash=digest(identity),
                input_fidelity=torch_input_readback(values),
                shape=list(x_np.shape), reference_output_dtype=str(native.dtype),
@@ -137,7 +137,7 @@ def measure(inputs, reference, device, provenance):
 def remote_probe(payload, run_kernel):
     """Harness-only dispatch; never installed in production action registry."""
     if __package__:
-        from operator_agent.remote_input_fidelity import decode_json_inputs
+        from operator_agent.decide.remote_input_fidelity import decode_json_inputs
     else:
         from remote_input_fidelity import decode_json_inputs
     inputs = decode_json_inputs(payload["inputs"])

@@ -10,8 +10,8 @@ import os
 from pathlib import Path
 import tempfile
 
-from operator_agent.bounded_repair import validate_repair
-from operator_agent.run_contract import code_hash, digest, seal
+from operator_agent.generate.bounded_repair import validate_repair
+from operator_agent.core.run_contract import code_hash, digest, seal
 
 ROOT = Path(__file__).resolve().parents[1]
 CLAIMS = ROOT / 'output' / 'workload_codegen_h20' / 'repair-claims'
@@ -120,7 +120,7 @@ def load_parent(root, task):
         if p.exists() or p.is_symlink(): raise ValueError('parent granted post-failure evidence')
     # Use the existing raw receipt/transfer checks, but never rebuild old arrays
     # or compare its historical evaluator identity to the new implementation.
-    from operator_agent.schemas import VerificationResult, VerificationLevel
+    from operator_agent.core.schemas import VerificationResult, VerificationLevel
     results = [VerificationResult(VerificationLevel(r['level']), r['passed'], r['message'],
                                   metrics=r['metrics']) for r in rounds[0]['results']]
     artifact = d.ArtifactStore(str(directory)).load(str(directory))
@@ -207,7 +207,7 @@ def require_available(parent):
 
 
 def check_claim(parent, plan_hash, root):
-    from operator_agent.llm_budget import strict_object
+    from operator_agent.execute.llm_budget import strict_object
     actual = strict_object(safe_bytes(CLAIMS, claim_path(parent).name).decode())
     if actual != dict(parent_identity_hash=parent['identity_hash'], plan_hash=plan_hash,
                       execution_root=str(root), resumable=False):

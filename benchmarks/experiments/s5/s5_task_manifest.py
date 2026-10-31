@@ -10,13 +10,13 @@ import argparse
 import json
 from pathlib import Path
 
-from operator_agent.bench_cases import BenchmarkCase, TensorSpec
-from operator_agent.contract import freeze_from_task
-from operator_agent.correctness import CorrectnessCase, as_suite
-from operator_agent.correctness_profiles import with_default_correctness
-from operator_agent.quality_suite import suite_manifest
-from operator_agent.run_contract import digest
-from operator_agent.schemas import ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskSchema
+from operator_agent.decide.bench_cases import BenchmarkCase, TensorSpec
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.decide.correctness import CorrectnessCase, as_suite
+from operator_agent.decide.correctness_profiles import with_default_correctness
+from operator_agent.decide.quality_suite import suite_manifest
+from operator_agent.core.run_contract import digest
+from operator_agent.core.schemas import ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskSchema
 
 # These are candidate tasks, not successful preflight or holdout claims.
 NEW_CASES = (

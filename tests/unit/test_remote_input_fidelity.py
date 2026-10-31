@@ -15,13 +15,13 @@ import pytest
 import torch
 
 from operator_agent import MockGPU, Verifier
-from operator_agent.input_fidelity import InputFidelityError, describe_inputs, check_readback
-from operator_agent.remote_input_fidelity import (JSON_PROTOCOL, encode_json_inputs,
+from operator_agent.decide.input_fidelity import InputFidelityError, describe_inputs, check_readback
+from operator_agent.decide.remote_input_fidelity import (JSON_PROTOCOL, encode_json_inputs,
     decode_json_inputs, to_torch_inputs, torch_input_readback, torch_output_digest)
-from operator_agent.remote_executor import SSHExecutor, RemoteExecutor
-from operator_agent.backend_caps import Cap
-from operator_agent.schemas import KernelArtifact, VerificationLevel, VerificationResult
-from operator_agent.report import build_report
+from operator_agent.execute.remote_executor import SSHExecutor, RemoteExecutor
+from operator_agent.core.backend_caps import Cap
+from operator_agent.core.schemas import KernelArtifact, VerificationLevel, VerificationResult
+from operator_agent.core.report import build_report
 from tests.unit.test_correctness_suite import case, task, CorrectnessSuite
 from tests.unit.test_input_wire_format import _runner
 
@@ -95,7 +95,7 @@ def test_malformed_wire_is_rejected_not_regenerated(bad):
 
 
 def test_json_caps_storage_and_scalar_payloads(monkeypatch):
-    import operator_agent.input_fidelity as fidelity
+    import operator_agent.decide.input_fidelity as fidelity
     packet = encode_json_inputs({"X": np.ones(32, dtype=np.float32)})
     monkeypatch.setattr(fidelity, "MAX_STORAGE_BYTES", 64)
     with pytest.raises(InputFidelityError, match="上限"):
@@ -324,9 +324,10 @@ def test_facade_forwards_support_and_unsupported_platforms_remain_unknown():
 def test_codec_deploy_sources_are_shared_and_precede_runner():
     files = SSHExecutor(host="offline")._remote_files()
     names = [Path(remote).name for _, remote in files]
-    for name in ("input_fidelity.py", "remote_input_fidelity.py"):
+    for name in ("input_fidelity.py", "remote_input_fidelity.py"):   # 远端部署名仍是裸名
         assert names.index(name) < names.index("run_kernel.py")
-        assert next(local for local, remote in files if Path(remote).name == name).parent.name == "operator_agent"
+        assert next(local for local, remote in files
+                    if Path(remote).name == name).parent.name == "decide"
 
 
 def test_deployed_standalone_runner_reads_exact_json_without_repo_imports(tmp_path):

@@ -18,14 +18,14 @@ ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
 from benchmarks.drivers import workload_decision_h20 as wd
 from operator_agent import Conductor, KernelDatabase
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.budget import BudgetPlan
-from operator_agent.contract import case_key, freeze_from_task
-from operator_agent.kernel_db import FailureDatabase
-from operator_agent.schemas import UnifiedSketch, TilingStrategy, VerificationLevel as Level
-from operator_agent.search_objective import reading, validate_snapshot, results_dict
-from operator_agent.run_contract import atomic_json, audit_value, code_hash, digest, json_value, protocol_identity, load_checkpoint
-from operator_agent.reference_contract import registered_reference, validate_receipt
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.execute.budget import BudgetPlan
+from operator_agent.core.contract import case_key, freeze_from_task
+from operator_agent.core.kernel_db import FailureDatabase
+from operator_agent.core.schemas import UnifiedSketch, TilingStrategy, VerificationLevel as Level
+from operator_agent.generate.search_objective import reading, validate_snapshot, results_dict
+from operator_agent.core.run_contract import atomic_json, audit_value, code_hash, digest, json_value, protocol_identity, load_checkpoint
+from operator_agent.decide.reference_contract import registered_reference, validate_receipt
 
 
 def parser():
@@ -101,8 +101,8 @@ def audit_durable(artifact, rounds, plan, *, task, input_sets, controls):
     errors=[];proof=dict(completed=False,errors=errors,read_only=True,
                         gpu_measurements=0,resumed=False)
     try:
-        from operator_agent.contract import load_dict
-        from operator_agent.report import build_report
+        from operator_agent.core.contract import load_dict
+        from operator_agent.core.report import build_report
         directory=Path(artifact.saved_dir)
         contract=load_dict(plan['contract'])
         if contract.hash!=freeze_from_task(task).hash or protocol_identity()!=plan['measurement_protocol']:
@@ -194,7 +194,7 @@ def audit_durable(artifact, rounds, plan, *, task, input_sets, controls):
 def audit(artifact, rounds, trace, plan, generated, corpus):
     """Independently reconstruct the ranking/reward from retained Oracle rows."""
     errors=[]
-    from operator_agent.contract import load_dict
+    from operator_agent.core.contract import load_dict
     contract=load_dict(plan['contract'])
     supplied=plan['supplied_cases'];expected_codes=[c['source'] for c in plan['candidates']]
     if [code for code,_ in rounds]!=expected_codes or generated!=expected_codes:

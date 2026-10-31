@@ -18,9 +18,9 @@ import tempfile
 import time
 
 from benchmarks.experiments.s5 import s5_arm_env, s5_development_service, s5_formal_run, s5_gateway_http, s5_gateway_supervisor, s5_plugin_env, s5_plugin_flow, s5_plugin_probe, s5_plugin_rpc, s5_plugin_summary, s5_outcomes, s5_seatbelt, s5_shared_gpu, s5_verify_remote, s5_task_manifest, s5_minimal_tasks
-from operator_agent import s5_shared_budget as shared
-from operator_agent.hitl_tools import prepare
-from operator_agent.run_contract import digest
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.app.hitl_tools import prepare
+from operator_agent.core.run_contract import digest
 
 SCHEMA = 's5-plugin-only-plan-v1'
 C_ONLY_SCHEMA = 's5-plugin-c-diagnostic-plan-v1'
@@ -85,9 +85,9 @@ def implementation_identity():
              'benchmarks/experiments/s5/s5_gateway_transport.py', 'benchmarks/experiments/s5/s5_outcomes.py',
              'benchmarks/experiments/s5/s5_shared_gpu.py', 'benchmarks/experiments/s5/s5_runtime.py',
              'benchmarks/experiments/s5/s5_vertical_headless.py', 'benchmarks/experiments/s5/s5_task_manifest.py',
-             'operator_agent/run_contract.py', 'operator_agent/s5_shared_budget.py',
-             'operator_agent/hitl_tools.py', 'operator_agent/s5_verify_client.py',
-             'operator_agent/mcp_server.py', 'integrations/dsh-operator/index.mjs',
+             'operator_agent/core/run_contract.py', 'operator_agent/execute/s5_shared_budget.py',
+             'operator_agent/app/hitl_tools.py', 'operator_agent/execute/s5_verify_client.py',
+             'operator_agent/app/mcp_server.py', 'integrations/dsh-operator/index.mjs',
              'integrations/dsh-operator/package.json',
              'benchmarks/fixtures/s5_layernorm_repair_seed.py',
              'benchmarks/experiments/s5/s5_minimal_tasks.py', 'benchmarks/experiments/s5/s5_plugin_study_summary.py',
@@ -541,7 +541,7 @@ def run_one(plan, case, arm, output, api_key, *, repeat_id=1):
                 else:
                     candidate, normalization = s5_formal_run.normalize_candidate(candidate)
                 (run_dir / 'candidate.txt').write_text(candidate, encoding='utf-8')
-                from operator_agent.run_contract import code_hash
+                from operator_agent.core.run_contract import code_hash
                 record['candidate_sha256'] = code_hash(candidate)
                 verdict = service.final(candidate)
                 record['verification'] = dict(verdict,

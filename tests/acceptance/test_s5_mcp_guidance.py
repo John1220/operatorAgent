@@ -3,7 +3,8 @@ import json
 
 import pytest
 
-from operator_agent import mcp_server as mcp, s5_verify_client as client
+from operator_agent.app import mcp_server as mcp
+from operator_agent.execute import s5_verify_client as client
 
 
 @pytest.mark.parametrize('content', ['Backend="ssh"; use existing task.',

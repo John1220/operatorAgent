@@ -27,9 +27,9 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "bc": "operator_agent/bench_cases.py",
-    "ct": "operator_agent/contract.py",
-    "co": "operator_agent/conductor.py",
+    "bc": "operator_agent/decide/bench_cases.py",
+    "ct": "operator_agent/core/contract.py",
+    "co": "operator_agent/app/conductor.py",
 }
 
 TARGETS = ["tests/unit/test_bench_cases.py"]

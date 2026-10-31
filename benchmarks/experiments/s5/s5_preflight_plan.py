@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 
 from benchmarks.experiments.s5 import s5_arm_env, s5_runtime, s5_task_manifest
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 SCHEMA = 's5-three-group-preflight-plan-v1'
 CASE_ID = 'layernorm-tail'

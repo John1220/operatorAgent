@@ -57,20 +57,20 @@ for _extra in (_BENCHMARKS, _BENCHMARKS / 'measurement'):
 
 import numpy as np  # noqa: E402
 
-from operator_agent.anticheat import lib_fallback_metrics, static_audit  # noqa: E402
-from operator_agent.backend_caps import Cap  # noqa: E402
-from operator_agent.calibration import backend_bench_fn, heartbeat  # noqa: E402
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.contract import freeze_from_task  # noqa: E402
-from operator_agent.kernel_db import KernelDatabase  # noqa: E402
-from operator_agent.measurement import Validity, Verdict, verdict  # noqa: E402
-from operator_agent.oracle import admit_to_corpus, evaluate  # noqa: E402
-from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
-from operator_agent.run_layout import new_run_root  # noqa: E402
-from operator_agent.schemas import (ConstraintSpec, KernelArtifact, Precision,  # noqa: E402
+from operator_agent.decide.anticheat import lib_fallback_metrics, static_audit  # noqa: E402
+from operator_agent.core.backend_caps import Cap  # noqa: E402
+from operator_agent.decide.calibration import backend_bench_fn, heartbeat  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.core.contract import freeze_from_task  # noqa: E402
+from operator_agent.core.kernel_db import KernelDatabase  # noqa: E402
+from operator_agent.decide.measurement import Validity, Verdict, verdict  # noqa: E402
+from operator_agent.decide.oracle import admit_to_corpus, evaluate  # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutor  # noqa: E402
+from operator_agent.core.run_layout import new_run_root  # noqa: E402
+from operator_agent.core.schemas import (ConstraintSpec, KernelArtifact, Precision,  # noqa: E402
                                     SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
                                     TaskType, VerificationLevel)
-from operator_agent.verifier import Verifier  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
 
 # 共享机的落点与拆除纪律 (#69 / test_shared_host_scratch_paths): 随机名 + 读回静默
 from _scratch import remote_scratch_path, stop_interferer  # noqa: E402
@@ -437,7 +437,7 @@ def main() -> int:
     # 缺口: 生产收口点**不传**这两个参数 ⇒ 这条检查在生产上从不执行。
     # 判据是**整个 verifier 模块**: 那两个名字只可能出现在喂给点上, 一处都没有就是没有。
     import inspect
-    import operator_agent.verifier as _vf
+    import operator_agent.decide.verifier as _vf
     src = inspect.getsource(_vf)
     fed = "candidate_device" in src or "baseline_device" in src
     note("§14-7 运行时检查的生产喂给者", "⚠️",

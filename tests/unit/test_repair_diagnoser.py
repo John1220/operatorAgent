@@ -10,13 +10,13 @@ import pytest
 
 from benchmarks.experiments.misc import repair_diagnosis as offline
 from benchmarks.drivers import workload_codegen_h20 as driver
-from operator_agent import llm_client as lc
-from operator_agent.bounded_repair import source_change
-from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused, strict_object
-from operator_agent.repair_diagnoser import diagnose_repair, validate_diagnosis
-from operator_agent.run_contract import code_hash, digest
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
-from operator_agent.single_candidate_coder import SingleCandidateCoder, audit_generation
+from operator_agent.execute import llm_client as lc
+from operator_agent.generate.bounded_repair import source_change
+from operator_agent.execute.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused, strict_object
+from operator_agent.generate.repair_diagnoser import diagnose_repair, validate_diagnosis
+from operator_agent.core.run_contract import code_hash, digest
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.generate.single_candidate_coder import SingleCandidateCoder, audit_generation
 from tests.unit.test_bounded_numerical_repair import parent
 from tests.unit.test_reference_contract import ProtocolSSH
 from tests.unit.test_single_candidate_coder import conductor, response

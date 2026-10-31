@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                     TargetSpec, TaskComplexity, TaskSchema,
                                     TaskType)
 

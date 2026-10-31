@@ -5,7 +5,7 @@ import urllib.error
 
 import pytest
 
-from operator_agent import llm_budget as lb, llm_client as lc
+from operator_agent.execute import llm_budget as lb, llm_client as lc
 
 
 def _limits(**overrides):

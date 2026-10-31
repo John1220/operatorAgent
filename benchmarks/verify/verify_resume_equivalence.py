@@ -38,11 +38,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.kernel_db import FailureDatabase, KernelDatabase  # noqa: E402
-from operator_agent.llm_client import LLMClient  # noqa: E402
-from operator_agent.remote_executor import RemoteExecutor  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.core.kernel_db import FailureDatabase, KernelDatabase  # noqa: E402
+from operator_agent.execute.llm_client import LLMClient  # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutor  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType,
 )
@@ -85,7 +85,7 @@ def check(idx: str, what: str, ok, reading: str) -> None:
 
 def make_backend():
     if DRY:
-        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.execute.mock_gpu import MockGPU
         return MockGPU()
     return RemoteExecutor(mode="ssh", timeout=600)
 
@@ -319,7 +319,7 @@ def main() -> int:
 
     backend = make_backend()
     caps = getattr(backend, "capabilities", frozenset())
-    from operator_agent.backend_caps import Cap
+    from operator_agent.core.backend_caps import Cap
     # ⚠️ 这里曾经写过 `backend.device_record()` —— **提供方上没有这个方法** (它住在
     # `benchmarks/drivers/harness_pass_rate.py`, 是量具自己的函数), 而外面套了 `except Exception`
     # ⇒ 属性错误被吞成一个空字典, 表头打出「实际器件=None 卡号=None」, 看起来像「这台机

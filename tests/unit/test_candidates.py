@@ -14,14 +14,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.candidates import (
+from operator_agent.core.candidates import (
     ParamSpace, SourceCandidate, TemplateCandidate, as_lineage, dedup_key,
     is_template, param_space_of, prune_by_smem, require_supported_space,
     smem_ok, source_candidate, space_origin, template_resource_binding, tile_smem_bytes,
 )
-from operator_agent.backend_caps import Backend
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.resource_check import SMEM_SLACK, SharedMemoryEvidence, smem_limit_bytes
+from operator_agent.core.backend_caps import Backend
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.decide.resource_check import SMEM_SLACK, SharedMemoryEvidence, smem_limit_bytes
 
 
 @dataclass
@@ -226,7 +226,7 @@ class TestProxyPrune(unittest.TestCase):
         (边界的**逐字节**行为由 `test_resource_precheck` 那条钉着 —— 它曾在我重构
         上界取整时当场变红, 这里只钉「同一个系数」与「留有余量」这两件事。)
         """
-        import operator_agent.resource_check as rc
+        import operator_agent.decide.resource_check as rc
         self.assertIs(SMEM_SLACK, rc.SMEM_SLACK, "两个 1.2 会漂成两套阈值")
         est = 32768  # Explicit physical bytes, not a source tile proxy.
         self.assertTrue(smem_ok(est, _Caps(30)), "留出余量 ⇒ 放行 (交给远端判定)")

@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.report import build_report
-from operator_agent.run_contract import audit_value, json_value
-from operator_agent.schemas import KernelArtifact, MemoryPlan, PipelineStage, UnifiedSketch
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.core.report import build_report
+from operator_agent.core.run_contract import audit_value, json_value
+from operator_agent.core.schemas import KernelArtifact, MemoryPlan, PipelineStage, UnifiedSketch
 from tests.unit.test_search_objective import execute
 
 

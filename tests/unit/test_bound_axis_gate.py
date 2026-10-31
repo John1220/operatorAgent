@@ -21,8 +21,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from operator_agent.hardware_caps import unknown_caps  # noqa: E402
-from operator_agent.optimization_planner import (  # noqa: E402
+from operator_agent.core.hardware_caps import unknown_caps  # noqa: E402
+from operator_agent.generate.optimization_planner import (  # noqa: E402
     AXIS_VALUES, OptimizationPlan, OptimizationPlanner, Recipe, _axis_field,
     axis_evidence,
 )
@@ -113,7 +113,7 @@ class TestAxisEvidence(unittest.TestCase):
     def test_axis_values_match_what_verifier_emits(self):
         """轴向词表不能自己漂移: 从 verifier 的 `_roofline_analysis` 里现取它写入
         `bound_type` 的字面量, 逐个确认要么在 `AXIS_VALUES` 里要么被明确当作非证据。"""
-        path = os.path.join(REPO_ROOT, "operator_agent", "verifier.py")
+        path = os.path.join(REPO_ROOT, "operator_agent", "decide", "verifier.py")
         with io.open(path, encoding="utf-8") as fh:
             tree = ast.parse(fh.read())
         fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
@@ -318,14 +318,14 @@ class TestBoundReadersAreRegistered(unittest.TestCase):
 
     REGISTERED = {
         # 产出端: 写 bound_type / roofline_bound / name_bound 三兄弟的地方。
-        "verifier.py": "产出端 (_roofline_analysis 综合算子名与脊点)",
+        "decide/verifier.py": "产出端 (_roofline_analysis 综合算子名与脊点)",
         # 消费端 4 处, 每一处的用途都不同, 所以必须分别确认它认不认识 "unknown":
-        "optimization_planner.py": "配方筛选 + prompt (本次的门, 只有它经 axis_evidence)",
-        "agents.py": "search_optimize prompt 与 _rule_optimize 的 tiling 选择 (缺省 unknown)",
-        "triton_opt_rules.py": "normalize_bound_type + 按轴推荐 tiling (unknown 落 mixed)",
-        "conductor.py": "血缘与 result.json 的落盘搬运",
+        "generate/optimization_planner.py": "配方筛选 + prompt (本次的门, 只有它经 axis_evidence)",
+        "generate/agents.py": "search_optimize prompt 与 _rule_optimize 的 tiling 选择 (缺省 unknown)",
+        "generate/triton_opt_rules.py": "normalize_bound_type + 按轴推荐 tiling (unknown 落 mixed)",
+        "app/conductor.py": "血缘与 result.json 的落盘搬运",
         # #87 第 3 片新增的第 5 个消费端: 「这一轮的尺说的是哪条轴」这件事实。
-        "measurement.py": "只当**尺的身份**比较, 不据此选轴; 认得 unknown —— "
+        "decide/measurement.py": "只当**尺的身份**比较, 不据此选轴; 认得 unknown —— "
                           "`l3_ruler_reading` 明确把 `unknown` 剔出读数 (两轮都 unknown "
                           "不许被读成「同一把尺」, 见那里的 docstring)",
     }
@@ -333,12 +333,16 @@ class TestBoundReadersAreRegistered(unittest.TestCase):
     def test_reader_set_matches_the_registry(self):
         pat = re.compile(r"\b(bound_type|roofline_bound|name_bound)\b")
         found = {}
-        for name in sorted(os.listdir(os.path.join(REPO_ROOT, "operator_agent"))):
-            if not name.endswith(".py"):
-                continue
-            n = len(pat.findall(_code_text(os.path.join(REPO_ROOT, "operator_agent", name))))
-            if n:
-                found[name] = n
+        # 2026-10-31: operator_agent/ 分五层，平铺 listdir 扫不到模块 ⇒ 递归
+        pkg = os.path.join(REPO_ROOT, "operator_agent")
+        for dirpath, _dirs, names in os.walk(pkg):
+            for name in sorted(names):
+                if not name.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, name)
+                n = len(pat.findall(_code_text(path)))
+                if n:
+                    found[os.path.relpath(path, pkg).replace(os.sep, "/")] = n
         self.assertEqual(set(self.REGISTERED), set(found),
                          f"读者清单与代码不一致。新增读者: {set(found) - set(self.REGISTERED)}; "
                          f"已消失: {set(self.REGISTERED) - set(found)}。"
@@ -370,7 +374,7 @@ class TestBoundReadersAreRegistered(unittest.TestCase):
         """§八 第 17 条那个非对称默认今天**只存在于 planner 一处**, 这条断言就是那句结论
         的证据: planner 之外的每个消费者, 读这三个键时的缺省都不许是 "memory"/"compute"。
 
-        agents.py 与 triton_opt_rules.py 都以 "unknown" 为缺省, 所以那两处不需要本次的
+        generate/agents.py 与 generate/triton_opt_rules.py 都以 "unknown" 为缺省, 所以那两处不需要本次的
         门; 有人把一个缺省改成真轴时, 这条会红, 而那时「还有谁拿 bound 做决定」这句
         话就得重写 —— 这正是登记表存在的原因。
         """
@@ -379,7 +383,7 @@ class TestBoundReadersAreRegistered(unittest.TestCase):
             r"""["']([^"']*)["']""")
         offenders = []
         for name in self.REGISTERED:
-            if name == "optimization_planner.py":
+            if name == "generate/optimization_planner.py":
                 continue      # 门在这里, 它自己就要求值 ∈ AXIS_VALUES
             for _, default in read_any.findall(_code_text(
                     os.path.join(REPO_ROOT, "operator_agent", name))):
@@ -391,7 +395,7 @@ class TestBoundReadersAreRegistered(unittest.TestCase):
 
     def test_the_planner_gate_is_the_only_bound_consumer_that_gates(self):
         planner_src = _code_text(os.path.join(REPO_ROOT, "operator_agent",
-                                             "optimization_planner.py"))
+                                             "generate/optimization_planner.py"))
         self.assertIn("AXIS_VALUES", planner_src,
                       "planner 的 bound 判断不再经过词表常量 —— 门可能被绕过")
         self.assertIn("axis_evidence(roofline)", planner_src,

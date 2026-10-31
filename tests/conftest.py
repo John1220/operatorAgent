@@ -24,7 +24,7 @@ import tempfile
 
 import pytest
 
-from operator_agent._harness_controls import enable_for_harness
+from operator_agent.app._harness_controls import enable_for_harness
 
 # Side-effect suppression and oversized heartbeat values are harness-only controls;
 # they are enabled by this process-local hook, never by an environment variable.

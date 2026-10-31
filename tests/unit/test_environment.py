@@ -18,12 +18,12 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.environment import (
+from operator_agent.core.environment import (
     DependencyAnalyzer, EnvironmentChecker, EnvironmentReport, CheckItem,
 )
-from operator_agent.backend_caps import OPTIONAL_CAP_METHODS, CapabilityMissing, Cap
-from operator_agent.remote_executor import RemoteExecutor
-from operator_agent.schemas import (
+from operator_agent.core.backend_caps import OPTIONAL_CAP_METHODS, CapabilityMissing, Cap
+from operator_agent.execute.remote_executor import RemoteExecutor
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision, VerificationLevel,
 )
@@ -174,9 +174,9 @@ class TestEnvironmentChecker(unittest.TestCase):
 class TestDeployHashSync(unittest.TestCase):
     """deploy() 按 hash 决定是否 scp (替代'存在即跳过')"""
 
-    @patch("operator_agent.remote_executor.subprocess")
+    @patch("operator_agent.execute.remote_executor.subprocess")
     def test_remote_outdated_triggers_scp(self, mock_subproc):
-        from operator_agent.remote_executor import SSHExecutor
+        from operator_agent.execute.remote_executor import SSHExecutor
         # 远程 hash 与本地不同 -> 触发 scp
         mock_subproc.run.return_value = MagicMock(returncode=0)
         mock_subproc.run.return_value.stdout = "remote_hash_old"
@@ -199,9 +199,9 @@ class TestDeployHashSync(unittest.TestCase):
         # scp 应被调用 (本地 vs 远程 hash 不匹配)
         self.assertGreater(mock_subproc.run.call_count, 0)
 
-    @patch("operator_agent.remote_executor.subprocess")
+    @patch("operator_agent.execute.remote_executor.subprocess")
     def test_remote_uptodate_skips_scp(self, mock_subproc):
-        from operator_agent.remote_executor import SSHExecutor
+        from operator_agent.execute.remote_executor import SSHExecutor
         import hashlib
 
         ex = SSHExecutor(host="h", user="u")
@@ -229,7 +229,7 @@ class TestDeployHashSync(unittest.TestCase):
         # hash 匹配, scp 不应被调用
         mock_subproc.run.assert_not_called()
 
-    @patch("operator_agent.remote_executor.subprocess")
+    @patch("operator_agent.execute.remote_executor.subprocess")
     def test_dependencies_pushed_before_runner(self, mock_subproc):
         """runner 的同级依赖必须先于 runner 推送
 
@@ -237,7 +237,7 @@ class TestDeployHashSync(unittest.TestCase):
         「新 runner + 缺依赖」(import 就炸)。远端 hash 查询失败/文件缺失都会
         触发全量推送, 所以这里让远端报空。
         """
-        from operator_agent.remote_executor import SSHExecutor
+        from operator_agent.execute.remote_executor import SSHExecutor
 
         ex = SSHExecutor(host="h", user="u")
         ex._uv_path = "uv"
@@ -258,8 +258,8 @@ class TestConductorEnvCheck(unittest.TestCase):
 
     def test_env_fail_returns_early_without_generation(self):
         """环境自检失败 -> 跳过 Coder/Verifier, 返回带清单的失败 artifact"""
-        from operator_agent.conductor import Conductor
-        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.app.conductor import Conductor
+        from operator_agent.execute.mock_gpu import MockGPU
 
         # MockGPU 不声明 ENV_PROVISION, 不会触发; 用声明了该能力且自检失败的后端。
         # 能力必须**声明**: conductor 读的是 `Cap.ENV_PROVISION in backend.capabilities`,

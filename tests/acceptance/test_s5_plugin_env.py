@@ -10,7 +10,7 @@ import pytest
 from benchmarks.experiments.s5 import s5_plugin_env as env, s5_plugin_probe as probe
 from benchmarks.experiments.s5 import s5_seatbelt
 from benchmarks.experiments.s5.s5_development_service import encoded
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 READY=sys.platform=='darwin'and Path(s5_seatbelt.SANDBOX).is_file()
 
@@ -165,7 +165,7 @@ def test_readiness_rejects_rehashed_boundary_claim_and_legacy_proof(actual_proof
 
 def test_readiness_rejects_unbound_implementation_and_report_link(actual_proof,tmp_path):
     root,report=actual_proof
-    altered=copy.deepcopy(report);altered['isolation_implementation']['operator_agent/mcp_server.py']='0'*64
+    altered=copy.deepcopy(report);altered['isolation_implementation']['operator_agent/app/mcp_server.py']='0'*64
     altered.pop('hash');altered['hash']=digest(altered)
     path=tmp_path/'fake.json';path.write_text(json.dumps(altered))
     with pytest.raises(ValueError,match='incomplete or drifted'):probe.load_readiness(path)

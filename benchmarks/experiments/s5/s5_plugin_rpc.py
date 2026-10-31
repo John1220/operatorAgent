@@ -370,7 +370,7 @@ class MCPRelay:
                    PYTHONDONTWRITEBYTECODE='1', OPERATOR_AGENT_S5_DEV_CONFIG=str(config))
         self.stderr = (self.output/'mcp-stderr.log').open('xb')
         try:
-            self.proc = subprocess.Popen([sys.executable, '-m', 'operator_agent.mcp_server'],
+            self.proc = subprocess.Popen([sys.executable, '-m', 'operator_agent.app.mcp_server'],
                 cwd=str(ROOT), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=self.stderr, start_new_session=True, bufsize=0)
             self.cleanup = 'running'

@@ -8,11 +8,11 @@ import json
 import numpy as np
 import pytest
 
-from operator_agent.agent_runtime import ActionEnvelope, ENVELOPE_ABSENT
-from operator_agent.fixer import FixOutcome, FixerAgent
-from operator_agent.generation_spec import GENERATION_SPEC
-from operator_agent.run_contract import code_hash, digest
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+from operator_agent.generate.agent_runtime import ActionEnvelope, ENVELOPE_ABSENT
+from operator_agent.generate.fixer import FixOutcome, FixerAgent
+from operator_agent.generate.generation_spec import GENERATION_SPEC
+from operator_agent.core.run_contract import code_hash, digest
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                    TargetSpec, TaskSchema, VerificationLevel,
                                    VerificationResult)
 

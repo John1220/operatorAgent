@@ -7,10 +7,10 @@ import numpy as np
 import pytest
 
 from benchmarks.drivers import correctness_profiles_h20 as d
-from operator_agent.anticheat import static_audit
-from operator_agent.correctness import as_suite
-from operator_agent.correctness_profiles import default_policy
-from operator_agent.schemas import KernelArtifact, VerificationResult, VerificationLevel as Level
+from operator_agent.decide.anticheat import static_audit
+from operator_agent.decide.correctness import as_suite
+from operator_agent.decide.correctness_profiles import default_policy
+from operator_agent.core.schemas import KernelArtifact, VerificationResult, VerificationLevel as Level
 
 
 def evidence():

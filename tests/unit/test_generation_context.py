@@ -6,18 +6,18 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from operator_agent.agents import CoderAgent
-from operator_agent.generation_context import (
+from operator_agent.generate.agents import CoderAgent
+from operator_agent.generate.generation_context import (
     build_generation_context, candidate_summary, generation_request,
     input_metadata, make_candidate_record, validate_candidate_record,
     wrapper_calling_convention, without_candidate_source,
 )
-from operator_agent.interface_contract import broadcast_calling_convention
-from operator_agent.prompt_manager import PromptManager
-from operator_agent.quality_suite import task_for
-from operator_agent.run_contract import code_hash
-from operator_agent.schemas import UnifiedSketch
-from operator_agent import single_candidate_coder as bounded
+from operator_agent.core.interface_contract import broadcast_calling_convention
+from operator_agent.generate.prompt_manager import PromptManager
+from operator_agent.decide.quality_suite import task_for
+from operator_agent.core.run_contract import code_hash
+from operator_agent.core.schemas import UnifiedSketch
+from operator_agent.generate import single_candidate_coder as bounded
 
 
 CODE = 'def kernel(X):\n    return X\n'
@@ -89,7 +89,7 @@ def test_controller_receipt_omits_source_without_inventing_an_absent_candidate()
     absent = make_candidate_record(context(), None, status='model_failed')
     assert without_candidate_source(absent) == absent
     retained['source_hash'] = 'invalid'
-    from operator_agent.run_contract import digest
+    from operator_agent.core.run_contract import digest
     retained['record_hash'] = digest({k: v for k, v in retained.items() if k != 'record_hash'})
     with pytest.raises(ValueError):
         validate_candidate_record(retained)

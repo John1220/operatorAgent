@@ -9,12 +9,12 @@ import pytest
 
 from benchmarks.drivers import durable_profile_h20 as driver
 from benchmarks.drivers.durable_profile_h20 import WORKLOADS, parser, receipt_errors, selected_workloads, transfer_errors
-from operator_agent.confirm import ConfirmRecord
-from operator_agent.kernel_db import KernelDatabase, KernelRecord
-from operator_agent.reference_contract import check_observed, registered_reference
-from operator_agent.remote_input_fidelity import json_input_parts
-from operator_agent.run_contract import code_hash, digest
-from operator_agent.session_inputs import PROTOCOL
+from operator_agent.core.confirm import ConfirmRecord
+from operator_agent.core.kernel_db import KernelDatabase, KernelRecord
+from operator_agent.decide.reference_contract import check_observed, registered_reference
+from operator_agent.decide.remote_input_fidelity import json_input_parts
+from operator_agent.core.run_contract import code_hash, digest
+from operator_agent.decide.session_inputs import PROTOCOL
 
 
 def test_original_default_and_resume_only_workloads_are_unchanged():

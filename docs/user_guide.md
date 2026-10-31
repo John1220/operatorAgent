@@ -245,7 +245,7 @@ print(f"产物目录: {artifact.kernel_id}")
         serverName: operator
         transport: stdio
         command: /absolute/path/to/python3
-        args: ['-m', 'operator_agent.mcp_server']
+        args: ['-m', 'operator_agent.app.mcp_server']
         cwd: /absolute/path/to/operatorAgent
         toolCallTimeoutMs: 600000
         failOnStartupError: false
@@ -294,7 +294,7 @@ print(f"产物目录: {artifact.kernel_id}")
 也可以自己先看一遍协议对话（不依赖宿主）：
 
 ```bash
-python -m operator_agent.mcp_server --selftest
+python -m operator_agent.app.mcp_server --selftest
 ```
 
 #### 方式三：一次一回合的 CLI（HITL / 外层宿主）
@@ -397,7 +397,7 @@ print(artifact.code)
 > ⚠️ **`config.yaml` 目前不被任何模块读取**（全仓无 `import yaml`）。改它不会有任何效果。
 > 真正生效的配置面是**三处**，换机器时请同步这三处：
 >
-> 1. `operator_agent/remote_executor.py` 的 `SSHExecutor.__init__` 默认值
+> 1. `operator_agent/execute/remote_executor.py` 的 `SSHExecutor.__init__` 默认值
 > 2. `test_nvidia_*.py` / `test_kunlunxin_matmul.py` 的 `build_llm()` 与 `ssh_config()`
 > 3. **环境变量**（见 §4.2）—— 唯一受支持的运行时开关面
 >
@@ -452,7 +452,7 @@ hardware_presets:
     vector_width: 128
 ```
 
-**LLM 客户端**（`operator_agent/llm_client.py`，排查 LLM 侧问题时先读这三条）：
+**LLM 客户端**（`operator_agent/execute/llm_client.py`，排查 LLM 侧问题时先读这三条）：
 
 - **零依赖**：只用标准库 `urllib` 的 OpenAI 兼容客户端，不装 `openai` 包；
 - **思考模式默认关闭**：默认发送 `chat_template_kwargs={"enable_thinking": False}`；
@@ -549,7 +549,7 @@ LLMClient(
 
 ### 4.5 日志自动清理配置
 
-日志自动清理在 [agent_logger.py](../operator_agent/agent_logger.py#L188) 中配置：
+日志自动清理在 [agent_logger.py](../operator_agent/generate/agent_logger.py#L188) 中配置：
 
 ```python
 def cleanup_old_logs(log_dir=None, keep_count=10):
@@ -625,7 +625,7 @@ except Exception as e:
 ### 5.4 功能验证失败（L2 FAIL）
 
 **先理解门的形式**：L2 不是纯绝对容差，而是**绝对 + 相对两项 AND**，按精度分档取阈值
-（[`tolerance.py`](../operator_agent/tolerance.py)）：
+（[`tolerance.py`](../operator_agent/core/tolerance.py)）：
 
 | precision | atol | rtol |
 |-----------|------|------|
@@ -765,7 +765,7 @@ output/matmul/nvidia_gpu/20260726_203150_af206fdd/
 违反它的代价是一整轮 Fixer（真实案例：attention 连烧 3 轮在
 `TypeError: kernel() got an unexpected keyword argument 'causal'`）。
 
-现在它在 [`interface_contract.py`](../operator_agent/interface_contract.py) 里被静态检查，
+现在它在 [`interface_contract.py`](../operator_agent/core/interface_contract.py) 里被静态检查，
 调用点是 `verifier._verify_compile`（即 L1，不占 GPU）。
 
 **生成之前也说一遍**（2026-09-29）：同一个模块的 `broadcast_calling_convention()` 会把「本次实际
@@ -864,7 +864,7 @@ AMBIGUOUS   没有可比值，或档位是 uninformative（带宽比信号本身
 
 ### 6.5 入库门：通过 ≠ 被记住
 
-`persist_decision()`（[`measurement.py:112`](../operator_agent/measurement.py)）决定这次运行的核
+`persist_decision()`（[`measurement.py:112`](../operator_agent/decide/measurement.py)）决定这次运行的核
 值不值得写进跨运行经验库。四条拒收，任一命中就不入库、并打印理由：
 
 | 拒收条件 | 理由 |
@@ -978,10 +978,10 @@ AMBIGUOUS   没有可比值，或档位是 uninformative（带宽比信号本身
 
 | Agent | 职责 | 文件 |
 |-------|------|------|
-| DesignerAgent | 生成设计草图（算法选择、tiling策略） | [agents.py](../operator_agent/agents.py) |
-| CoderAgent | 根据 Sketch 生成代码 | [agents.py](../operator_agent/agents.py) |
-| SearchAgent | 分析性能瓶颈并优化 | [agents.py](../operator_agent/agents.py) |
-| FixerAgent | 修复代码错误 | [fixer.py](../operator_agent/fixer.py) |
+| DesignerAgent | 生成设计草图（算法选择、tiling策略） | [agents.py](../operator_agent/generate/agents.py) |
+| CoderAgent | 根据 Sketch 生成代码 | [agents.py](../operator_agent/generate/agents.py) |
+| SearchAgent | 分析性能瓶颈并优化 | [agents.py](../operator_agent/generate/agents.py) |
+| FixerAgent | 修复代码错误 | [fixer.py](../operator_agent/generate/fixer.py) |
 
 ### A.2 验证等级
 

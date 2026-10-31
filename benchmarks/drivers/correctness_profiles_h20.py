@@ -21,14 +21,14 @@ sys.path.insert(0, str(ROOT))
 import numpy as np  # noqa: E402
 from benchmarks.drivers.input_fidelity_h20 import AcceptanceSSH, dumps, gpu_evidence  # noqa: E402
 from operator_agent import Conductor, IntentParser, KernelDatabase  # noqa: E402
-from operator_agent.artifact_store import ArtifactStore  # noqa: E402
-from operator_agent.backend_caps import Cap  # noqa: E402
-from operator_agent.correctness import as_suite  # noqa: E402
-from operator_agent.contract import freeze_from_task  # noqa: E402
-from operator_agent.input_fidelity import describe_inputs  # noqa: E402
-from operator_agent.kernel_db import FailureDatabase  # noqa: E402
-from operator_agent.run_layout import (new_run_root, run_layout, ROLE_HARNESS, ROLE_ORACLE, ROLE_REPORT_WRITER)  # noqa: E402
-from operator_agent.schemas import UnifiedSketch, VerificationLevel as Level  # noqa: E402
+from operator_agent.core.artifact_store import ArtifactStore  # noqa: E402
+from operator_agent.core.backend_caps import Cap  # noqa: E402
+from operator_agent.decide.correctness import as_suite  # noqa: E402
+from operator_agent.core.contract import freeze_from_task  # noqa: E402
+from operator_agent.decide.input_fidelity import describe_inputs  # noqa: E402
+from operator_agent.core.kernel_db import FailureDatabase  # noqa: E402
+from operator_agent.core.run_layout import (new_run_root, run_layout, ROLE_HARNESS, ROLE_ORACLE, ROLE_REPORT_WRITER)  # noqa: E402
+from operator_agent.core.schemas import UnifiedSketch, VerificationLevel as Level  # noqa: E402
 
 RELU = '''import torch
 import triton
@@ -133,7 +133,7 @@ class ProfileSSH(AcceptanceSSH):
             self.forbidden_actions.append(payload.get("action"))
             raise RuntimeError("profile acceptance forbids this action")
         row = {"request": payload}; self.trace.append(row)
-        from operator_agent.remote_executor import SSHExecutor
+        from operator_agent.execute.remote_executor import SSHExecutor
         try:
             row["response"] = SSHExecutor._ssh_exec_json(self, payload)
             return row["response"]

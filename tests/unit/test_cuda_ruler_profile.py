@@ -5,12 +5,12 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent import cuda_calibration as cc, cuda_ruler_profile as rp
-from operator_agent.backend_caps import Cap
-from operator_agent.conductor import Conductor
-from operator_agent.verifier import Verifier
-from operator_agent.measurement import assess, Validity
-from operator_agent.run_contract import atomic_json, protocol_identity
+from operator_agent.decide import cuda_calibration as cc, cuda_ruler_profile as rp
+from operator_agent.core.backend_caps import Cap
+from operator_agent.app.conductor import Conductor
+from operator_agent.decide.verifier import Verifier
+from operator_agent.decide.measurement import assess, Validity
+from operator_agent.core.run_contract import atomic_json, protocol_identity
 from tests.unit.test_cuda_calibration import receipt, NativeBackend, change
 from tests.unit.test_oracle import _eval
 from benchmarks.drivers import durable_profile_h20 as driver
@@ -193,7 +193,7 @@ def test_conductor_requires_every_window_heartbeat_and_freezes_ruler_choice(tmp_
     assert c._heartbeat_for_next_measurement() == (hb, True)
     assert c.cuda_calibration_identity_hash == p["identity_hash"]
     assert c.verifier._cuda_ruler_profile == p
-    assert "operator_agent/cuda_ruler_profile.py" in protocol_identity()
+    assert "operator_agent/decide/cuda_ruler_profile.py" in protocol_identity()
 
 
 def test_invalid_profile_is_rejected_before_h20_deployment_or_allocation(tmp_path, monkeypatch):

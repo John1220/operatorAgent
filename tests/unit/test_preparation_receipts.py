@@ -7,9 +7,9 @@ import pytest
 
 from benchmarks import _preparation as p
 from benchmarks.drivers import workload_codegen_h20 as d
-from operator_agent.remote_executor import SSHExecutor
-from operator_agent import llm_client as lc
-from operator_agent.run_contract import atomic_json, code_hash
+from operator_agent.execute.remote_executor import SSHExecutor
+from operator_agent.execute import llm_client as lc
+from operator_agent.core.run_contract import atomic_json, code_hash
 from tests.unit.test_workload_codegen_driver import prepared_execution
 
 SECRET = 'NEVER_PERSIST_REMOTE_TEXT'

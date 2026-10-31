@@ -24,9 +24,9 @@ from benchmarks.experiments.s5.s5_plugin_rpc import MCPRelay
 from benchmarks.experiments.s5.s5_plugin_flow import progress as workflow_progress
 from benchmarks.experiments.s5.s5_vertical_tool_provider import _sse
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE, BAD_FIXTURE
-from operator_agent import s5_shared_budget as shared
-from operator_agent.hitl_tools import prepare
-from operator_agent.run_contract import digest
+from operator_agent.execute import s5_shared_budget as shared
+from operator_agent.app.hitl_tools import prepare
+from operator_agent.core.run_contract import digest
 
 DECLARATION=dict(request='layernorm fp32',shapes=[[7,33]],hardware='mock_gpu',
                  dsl='python',precision='fp32')
@@ -197,7 +197,7 @@ def implementation():
     paths=('benchmarks/experiments/s5/s5_plugin_probe.py','benchmarks/experiments/s5/s5_plugin_env.py',
         'benchmarks/experiments/s5/s5_arm_env.py','benchmarks/experiments/s5/s5_seatbelt.py','benchmarks/experiments/s5/s5_plugin_rpc.py',
         'benchmarks/experiments/s5/s5_plugin_proxy.py','benchmarks/experiments/s5/s5_development_service.py',
-        'benchmarks/experiments/s5/s5_verify_remote.py','operator_agent/s5_verify_client.py','operator_agent/mcp_server.py')
+        'benchmarks/experiments/s5/s5_verify_remote.py','operator_agent/execute/s5_verify_client.py','operator_agent/app/mcp_server.py')
     return {p:s5_seatbelt.checksum(surface.ROOT/p)for p in paths}
 
 

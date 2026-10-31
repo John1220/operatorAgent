@@ -12,8 +12,8 @@
 
 import unittest
 
-from operator_agent.repair_loop import repair
-from operator_agent.schemas import (VerificationLevel, VerificationResult)
+from operator_agent.generate.repair_loop import repair
+from operator_agent.core.schemas import (VerificationLevel, VerificationResult)
 
 
 class FakeVerifier:

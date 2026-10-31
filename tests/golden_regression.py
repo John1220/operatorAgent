@@ -47,7 +47,7 @@ sys.path.insert(0, REPO_ROOT)
 
 # Golden 是独立运行的 harness；显式打开仅限 harness 的隔离开关，避免
 # `jsonl_path="off"` 在生产默认值收紧后落到仓库持久化路径。
-from operator_agent._harness_controls import enable_for_harness
+from operator_agent.app._harness_controls import enable_for_harness
 enable_for_harness()
 
 from operator_agent import (
@@ -55,7 +55,7 @@ from operator_agent import (
     TaskType, TaskComplexity, Precision, DSLEnum,
     Conductor, MockGPU, KernelDatabase,
 )
-from operator_agent.kernel_db import FailureDatabase
+from operator_agent.core.kernel_db import FailureDatabase
 
 
 REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "golden_registry.json")
@@ -407,7 +407,7 @@ class GoldenRegressionHarness:
         latency_ms = None
         speedup = 0.0
         for r in artifact.verification_results:
-            from operator_agent.schemas import VerificationLevel as VL
+            from operator_agent.core.schemas import VerificationLevel as VL
             if r.level == VL.L1_COMPILE:
                 l1_passed = r.passed
             elif r.level == VL.L2_FUNCTION:

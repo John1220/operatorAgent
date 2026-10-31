@@ -18,13 +18,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from backend_fakes import DeclaredFakeBackend
-from operator_agent import hardware_caps as hc
-from operator_agent.backend_caps import Cap
-from operator_agent.peak_probe import (
+from operator_agent.core import hardware_caps as hc
+from operator_agent.core.backend_caps import Cap
+from operator_agent.decide.peak_probe import (
     PEAK_PRECISIONS, PeakSample, precision_key_of, probe_peak,
     sample_from_l3_metrics,
 )
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 from tests.unit.test_search_belief_gate import _inputs, _task
 
 H20_INFO = {"name": "NVIDIA H20", "device": "cuda", "compute_capability": "9.0"}

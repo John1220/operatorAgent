@@ -2,7 +2,7 @@
 
 设计原文（`docs/design/autonomous-operator-agent-design.md:1552-1564`）列了九项隔离，理由
 是「候选代码在评测进程里运行时，它与 harness 共享地址空间、文件系统与网络」。
-`operator_agent/exec_guard.py` 落地的是**本地这一半里能实测站得住的那几项**，其余
+`operator_agent/execute/exec_guard.py` 落地的是**本地这一半里能实测站得住的那几项**，其余
 （网络默认关闭、独立 uid / 容器、文件系统白名单、GPU watchdog、设备租约回收）逐条登记为未落。
 
 这一组用例钉六件事：
@@ -41,8 +41,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np  # noqa: E402
 
-from operator_agent import exec_guard as eg  # noqa: E402
-from operator_agent.exec_guard import (  # noqa: E402
+from operator_agent.execute import exec_guard as eg  # noqa: E402
+from operator_agent.execute.exec_guard import (  # noqa: E402
     COMPILE_LIMITS, ENFORCED, EXECUTOR_AUTO, EXECUTOR_FORK, EXECUTOR_SUBPROCESS,
     ITEMS, KIND_ARTIFACT, KIND_CPU, KIND_FILE_SIZE, KIND_MEMORY, KIND_PROCESSES,
     KIND_WALL, MODE_COMPILE, MODE_RUN, NOT_ENFORCED, STATUS_CRASHED,
@@ -94,7 +94,7 @@ class TestTheNormalPathIsUnchanged(unittest.TestCase):
 
     def test_mock_gpu_returns_the_same_shape_as_before(self):
         """接线点回归：`MockGPU.execute` 的产物形状与搬走之前一致"""
-        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.execute.mock_gpu import MockGPU
         res = MockGPU().execute(NORMAL, {"A": A, "B": B})
         self.assertTrue(res.success, res.error)
         np.testing.assert_allclose(res.output, PRODUCT)
@@ -141,7 +141,7 @@ class TestTheNormalPathIsUnchanged(unittest.TestCase):
     @unittest.skipUnless(HAS_TORCH, "torch 未安装")
     def test_a_dynamic_cheat_is_still_caught_by_the_shield_in_the_child(self):
         """盾现在装在**子进程**里 ⇒ 命中的证据必须跨进程带回来（否则规则 4 又会恒 False）"""
-        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.execute.mock_gpu import MockGPU
         res = MockGPU().execute("""import torch
 
 def kernel(A, B):
@@ -498,7 +498,7 @@ class TestTheSingleDoorRatchet(unittest.TestCase):
         root = Path(__file__).resolve().parents[2] / "operator_agent"
         hits = {}
         for path in sorted(root.glob("*.py")):
-            if path.name == "exec_guard.py":
+            if path.name == "execute/exec_guard.py":
                 continue
             text = path.read_text("utf-8")
             for needle in ("resource.setrlimit", "os.fork(", "os.killpg",
@@ -517,7 +517,7 @@ class TestTheSingleDoorRatchet(unittest.TestCase):
         `exec_guard`」，不是那一行怎么写。
         """
         import ast
-        path = Path(__file__).resolve().parents[2] / "operator_agent" / "mock_gpu.py"
+        path = Path(__file__).resolve().parents[2] / "operator_agent" / "execute" / "mock_gpu.py"
         tree = ast.parse(path.read_text("utf-8"))
         imported = {alias.name: node.module
                     for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
@@ -526,12 +526,12 @@ class TestTheSingleDoorRatchet(unittest.TestCase):
             self.assertIn(name, imported,
                           f"受控执行入口 {name} 不再来自 exec_guard "
                           f"—— 复核「本地执行只有这一扇门」")
-            self.assertEqual("exec_guard", imported[name])
+            self.assertTrue(str(imported[name]).endswith("exec_guard"), imported[name])
 
     def test_the_guard_is_reachable_from_mock_gpu_only_through_exec_guard(self):
         """接线点的结构：`_execute_python` 里不许再出现进程内 `exec`"""
         import ast
-        path = Path(__file__).resolve().parents[2] / "operator_agent" / "mock_gpu.py"
+        path = Path(__file__).resolve().parents[2] / "operator_agent" / "execute" / "mock_gpu.py"
         tree = ast.parse(path.read_text("utf-8"))
         func = next(n for n in ast.walk(tree)
                     if isinstance(n, ast.FunctionDef) and n.name == "_execute_python")
@@ -593,7 +593,7 @@ class TestCompileMode(unittest.TestCase):
         self.assertEqual("顶层就炸", str(rebuilt))
 
         # 拿不到的类型名 ⇒ 退化成 RuntimeError，但**保留原名**（不许让读者以为是候选抛的）
-        from operator_agent.exec_guard import GuardResult
+        from operator_agent.execute.exec_guard import GuardResult
         odd = GuardResult(status=STATUS_CRASHED, exc_type="MyPrivateError", error="x")
         fallback = candidate_error(odd)
         self.assertIsInstance(fallback, RuntimeError)
@@ -653,20 +653,21 @@ class TestTheInProcessExecInventory(unittest.TestCase):
     #: 改大必须说清它为什么不能走 `exec_guard`。
     EXPECTED = {
         # 候选代码，**仍是 §22.2 的洞**（登记在状态文档 §22 行）
-        "mock_gpu.py": ["_benchmark_python", "_benchmark_triton_cuda",
+        "execute/mock_gpu.py": ["_benchmark_python", "_benchmark_triton_cuda",
                         "_execute_triton_cuda"],
-        "reference.py": ["load_reference_source"],
-        "remote_executor.py": ["benchmark", "execute"],
+        "decide/reference.py": ["load_reference_source"],
+        "execute/remote_executor.py": ["benchmark", "execute"],
         # 不是候选代码：harness 自己造的参照核 / 子进程程序入口
-        "calibration.py": ["_from_source"],
-        "exec_guard.py": ["_fork_child"],
+        "decide/calibration.py": ["_from_source"],
+        "execute/exec_guard.py": ["_fork_child"],
     }
 
     def test_the_inventory_is_exactly_this(self):
         import ast
         root = Path(__file__).resolve().parents[2] / "operator_agent"
         found = {}
-        for path in sorted(root.glob("*.py")):
+        # 2026-10-31: 包分五层 ⇒ 递归扫，键用包内相对路径
+        for path in sorted(root.rglob("*.py")):
             tree = ast.parse(path.read_text("utf-8"))
             funcs = [n for n in ast.walk(tree)
                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
@@ -677,7 +678,7 @@ class TestTheInProcessExecInventory(unittest.TestCase):
                 owners = [f.name for f in funcs
                           if f.lineno <= node.lineno <= (f.end_lineno or f.lineno)]
                 owner = max(owners, key=len) if owners else "<module>"
-                found.setdefault(path.name, []).append(owner)
+                found.setdefault(path.relative_to(root).as_posix(), []).append(owner)
         found = {k: sorted(v) for k, v in found.items()}
         self.assertEqual(self.EXPECTED, found,
                          "进程内 exec 的账本变了：少了一处 ⇒ 更新这份清单；"
@@ -686,11 +687,11 @@ class TestTheInProcessExecInventory(unittest.TestCase):
     def test_the_two_compile_paths_have_no_in_process_exec(self):
         import ast
         root = Path(__file__).resolve().parents[2] / "operator_agent"
-        targets = (("mock_gpu.py", "MockGPU", ("compile", "_compile_in_guard")),
-                   ("remote_executor.py", "LocalExecutor", ("compile",)))
+        targets = (("execute/mock_gpu.py", "MockGPU", ("compile", "_compile_in_guard")),
+                   ("execute/remote_executor.py", "LocalExecutor", ("compile",)))
         for filename, class_name, funcs in targets:
             tree = ast.parse((root / filename).read_text("utf-8"))
-            # 按**类**定位: `remote_executor.py` 里有两个 `compile`（SSH 那个把源码发远端,
+            # 按**类**定位: `execute/remote_executor.py` 里有两个 `compile`（SSH 那个把源码发远端,
             # 本地 `exec` 的只有 `LocalExecutor` 这一个）—— 按函数名找会找错那一个。
             cls = next(n for n in ast.walk(tree)
                        if isinstance(n, ast.ClassDef) and n.name == class_name)

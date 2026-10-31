@@ -193,7 +193,7 @@ class TestPolicy(unittest.TestCase):
         self.assertIn("不许做成产品开关", src, "这条理由本身要留在文件里")
 
     def test_the_band_is_taken_from_the_repo_not_invented(self):
-        from operator_agent.measurement import NOISE_BAND, Validity
+        from operator_agent.decide.measurement import NOISE_BAND, Validity
         self.assertEqual(float(NOISE_BAND[Validity.UNINFORMATIVE]), ABL.BAND)
 
 

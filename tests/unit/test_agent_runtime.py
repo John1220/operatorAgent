@@ -25,8 +25,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent import agent_runtime as ar
-from operator_agent.backend_caps import Cap
+from operator_agent.generate import agent_runtime as ar
+from operator_agent.core.backend_caps import Cap
 
 PARENT = "def kernel(A, B):\n    return A + B\n"
 CHILD = "def kernel(A, B):\n    return A - B\n"

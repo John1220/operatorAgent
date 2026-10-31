@@ -34,8 +34,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent import agent_runtime as ar  # noqa: E402
-from operator_agent import run_layout as rl  # noqa: E402
+from operator_agent.generate import agent_runtime as ar  # noqa: E402
+from operator_agent.core import run_layout as rl  # noqa: E402
 
 
 def _line(title: str) -> None:

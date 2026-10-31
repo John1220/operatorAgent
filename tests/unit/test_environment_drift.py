@@ -33,14 +33,14 @@ sys.path.insert(0, str(REPO))
 
 import numpy as np
 
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.backend_caps import Cap
-from operator_agent.environment import (FINGERPRINT_BACKEND_KEY, FINGERPRINT_KEYS,
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.core.backend_caps import Cap
+from operator_agent.core.environment import (FINGERPRINT_BACKEND_KEY, FINGERPRINT_KEYS,
                                         EnvironmentDrift, compare_fingerprints,
                                         fingerprint_of)
-from operator_agent.measurement import Validity, assess
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (ConstraintSpec, KernelArtifact, Precision, SourceSpec,
+from operator_agent.decide.measurement import Validity, assess
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (ConstraintSpec, KernelArtifact, Precision, SourceSpec,
                                     TargetSpec, TaskComplexity, TaskSchema, TaskType)
 
 PYTHON_MATMUL = """import numpy as np
@@ -122,8 +122,8 @@ def _inputs(n=32):
 
 def _run_conductor(backend, task, out_dir, rounds=1, resume_from=None):
     """在独占的产物目录里跑一次 Conductor, 返回 (artifact, stdout)"""
-    from operator_agent.conductor import Conductor
-    from operator_agent.kernel_db import KernelDatabase
+    from operator_agent.app.conductor import Conductor
+    from operator_agent.core.kernel_db import KernelDatabase
     from unittest import mock
     with mock.patch.dict(os.environ, {"OPERATOR_AGENT_OUTPUT_DIR": out_dir}):
         conductor = Conductor(backend=backend, kernel_db=KernelDatabase(),

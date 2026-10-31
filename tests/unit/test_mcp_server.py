@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-from operator_agent import mcp_server as srv  # noqa: E402
+from operator_agent.app import mcp_server as srv  # noqa: E402
 
 
 def conversation(requests, *, log=None):
@@ -240,7 +240,7 @@ class TestStdoutIsProtocolOnly(unittest.TestCase):
              "params": {"name": "operator_capabilities", "arguments": {}}},
         ]) + "\n"
         proc = subprocess.run(
-            [sys.executable, "-m", "operator_agent.mcp_server"],
+            [sys.executable, "-m", "operator_agent.app.mcp_server"],
             input=requests, capture_output=True, text=True, cwd=str(ROOT), timeout=180)
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
         lines = [l for l in proc.stdout.splitlines() if l.strip()]
@@ -251,7 +251,7 @@ class TestStdoutIsProtocolOnly(unittest.TestCase):
 
     def test_the_selftest_runs(self):
         proc = subprocess.run(
-            [sys.executable, "-m", "operator_agent.mcp_server", "--selftest"],
+            [sys.executable, "-m", "operator_agent.app.mcp_server", "--selftest"],
             capture_output=True, text=True, cwd=str(ROOT), timeout=180)
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
         self.assertIn("tools=['operator_prepare'", proc.stdout)

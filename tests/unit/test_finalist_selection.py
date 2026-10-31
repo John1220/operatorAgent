@@ -21,12 +21,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.conductor import Conductor
-from operator_agent.coder_pipeline import CoderPipeline
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.prompt_manager import PromptManager
-from operator_agent.schemas import (
+from operator_agent.app.conductor import Conductor
+from operator_agent.generate.coder_pipeline import CoderPipeline
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.generate.prompt_manager import PromptManager
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, UnifiedSketch,
     TaskType, TaskComplexity, Precision,
 )

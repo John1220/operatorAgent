@@ -3,7 +3,7 @@
 doc 53 §7.1 从 DSH 借的是**形状**而不是 hook 系统：`agent/turn-stopping` 是
 「自然停止边界上一个被 await 的串行通知」(`agent-lifecycle.md:59-60`、
 `architecture.md:84`、`interception-extension-points.md:21`)，要继续得显式 `agent.steer()`。
-本仓今天的对应物是 `conductor.py` 优化循环里的 15 处终止出口 (`return _ROUND_STOP`,
+本仓今天的对应物是 `app/conductor.py` 优化循环里的 15 处终止出口 (`return _ROUND_STOP`,
 散在 _run_round 与它拆出来的 _round_enter_or_stop / _round_close_out 里) + 1 处走满轮次，
 其中 5 处的「为什么」只活在 stdout 的一行 print 上 —— 产物里
 「没练够」「练到顶了」「修坏了」「压根没验过」全部同形 (`all_passed=False` + 一个轮次数)。
@@ -46,11 +46,11 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.artifact_store import ArtifactStore  # noqa: E402
-from operator_agent.conductor import Conductor  # noqa: E402
-from operator_agent.kernel_db import KernelDatabase  # noqa: E402
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,  # noqa: E402
+from operator_agent.core.artifact_store import ArtifactStore  # noqa: E402
+from operator_agent.app.conductor import Conductor  # noqa: E402
+from operator_agent.core.kernel_db import KernelDatabase  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,  # noqa: E402
                                     TaskComplexity, TaskSchema, TaskType)
 
 # 与 MockGPU 的 matmul 参考实现真对上的核 (试过 `A @ B` 出 9 vs 参考 8 的那种「样例核」
@@ -141,7 +141,7 @@ class TestStopReasonIsRecorded(unittest.TestCase):
         写者用了词汇外的词会抛 (`test_an_unknown_reason_raises_instead_of_being_stored`)，
         词汇表里多一个没写者的词由这条抓。
         """
-        src = io.open(ROOT / "operator_agent" / "conductor.py", encoding="utf-8").read()
+        src = io.open(ROOT / "operator_agent" / "app" / "conductor.py", encoding="utf-8").read()
         written = set()
         for node in ast.walk(ast.parse(src)):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -183,7 +183,7 @@ class TestStopReasonIsRecorded(unittest.TestCase):
         它的 reason 记在被委派的那个方法里, 所以判据把这种出口单独数, 并要求它委派到的
         方法里**确实**有一个带 reason 的实质出口 —— 否则委派就成了藏出口的通道。
         """
-        tree = ast.parse(io.open(ROOT / "operator_agent" / "conductor.py",
+        tree = ast.parse(io.open(ROOT / "operator_agent" / "app" / "conductor.py",
                                  encoding="utf-8").read())
         conductor = next(n for n in ast.walk(tree)
                          if isinstance(n, ast.ClassDef) and n.name == "Conductor")

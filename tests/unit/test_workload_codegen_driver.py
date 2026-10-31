@@ -10,12 +10,12 @@ from unittest.mock import Mock
 import pytest
 
 from benchmarks.drivers import workload_codegen_h20 as d
-from operator_agent import llm_client as lc
-from operator_agent import run_contract as rc
-from operator_agent.artifact_store import ArtifactStore
-from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
-from operator_agent.single_candidate_coder import SingleCandidateCoder
+from operator_agent.execute import llm_client as lc
+from operator_agent.core import run_contract as rc
+from operator_agent.core.artifact_store import ArtifactStore
+from operator_agent.execute.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.generate.single_candidate_coder import SingleCandidateCoder
 from tests.unit.test_single_candidate_coder import CODE, response, conductor
 from tests.unit.test_workload_evidence import task, inputs, backend
 
@@ -100,7 +100,7 @@ def test_frozen_plan_and_exact_sources_drift_refused(tmp_path, monkeypatch, what
     if what=='task': t.constraints.min_speedup=1.
     elif what=='source': monkeypatch.setattr(d,'sources',lambda:{'different':'source'})
     elif what=='snapshot':
-        p=root/'frozen-sources'/'operator_agent'/'conductor.py';p.chmod(0o600);p.write_text('different')
+        p=root/'frozen-sources'/'operator_agent'/'app/conductor.py';p.chmod(0o600);p.write_text('different')
     elif what=='symlink':
         p=root/'plan.json';p.unlink();p.symlink_to(tmp_path/'missing')
     else:
@@ -361,7 +361,7 @@ def raw_fixture(tmp_path):
     or machine qualification. The regular production integration is above.
     """
     from tests.unit.test_workload_decision_driver import _metrics
-    from operator_agent.reference_contract import check_observed
+    from operator_agent.decide.reference_contract import check_observed
     t,plan=d.declaration(d.parser().parse_args(['--gpu','2']))
     spec=d.registered_reference();receipt=check_observed(spec,spec.execution.content_dict())
     contract=d.load_dict(plan['contract']);suite=d.wd.as_suite(contract.correctness_suite)
@@ -438,8 +438,8 @@ def test_raw_audit_refuses_torn_forged_or_extra_evidence_without_remeasure(tmp_p
 
 
 def test_raw_degraded_is_auditable_but_never_counts_as_valid_acceptance(tmp_path):
-    from operator_agent.eligibility import DEGRADED
-    from operator_agent.workload import apply_qualification
+    from operator_agent.decide.eligibility import DEGRADED
+    from operator_agent.core.workload import apply_qualification
     t,plan,art,rounds,trace,corpus=raw_fixture(tmp_path)
     m=rounds[0][1][2].metrics;row=m['cases'][plan['supplied_cases'][1]]
     row.update(measurement_validity='degraded',eligibility=DEGRADED.as_dict())
@@ -462,8 +462,8 @@ def test_correctness_failure_keeps_evidence_without_benchmark_acceptance(tmp_pat
 @pytest.mark.parametrize('bad_confirmation',[False,True])
 def test_unexpected_target_pass_still_needs_independent_full_workload_confirmation(tmp_path,bad_confirmation):
     from dataclasses import asdict
-    from operator_agent.confirm import ConfirmRecord
-    from operator_agent.workload import confirmation_evidence
+    from operator_agent.core.confirm import ConfirmRecord
+    from operator_agent.core.workload import confirmation_evidence
     from tests.unit.test_workload_decision_driver import _metrics
     t,plan,art,rounds,trace,corpus=raw_fixture(tmp_path)
     binding=dict(candidate_hash=rc.code_hash(CODE),contract_hash=plan['contract']['hash'],
@@ -516,7 +516,7 @@ def test_cleanup_failure_retains_evidence_and_restores_environment(tmp_path,monk
 
 def test_actual_input_drift_after_prepare_cleans_without_model_or_candidate_dispatch(tmp_path,monkeypatch):
     import numpy as np
-    from operator_agent.reference_contract import check_observed
+    from operator_agent.decide.reference_contract import check_observed
     prepared,a=prepared_execution(tmp_path,monkeypatch);events=[]
     spec=d.registered_reference()
     class B:

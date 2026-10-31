@@ -20,15 +20,15 @@ import numpy as np
 from benchmarks.experiments.misc import layernorm_numerics as numerics
 from benchmarks.drivers.correctness_profiles_h20 import candidate
 from benchmarks.drivers.input_fidelity_h20 import AcceptanceSSH, dumps
-from operator_agent.correctness import as_suite
-from operator_agent.correctness_boundaries import lint_coverage
-from operator_agent.correctness_profiles import PROFILE_VERSION, default_policy, with_default_correctness
-from operator_agent.input_fidelity import describe_inputs, check_readback
-from operator_agent.remote_input_fidelity import encode_json_inputs
-from operator_agent.remote_executor import SSHExecutor
-from operator_agent.run_layout import new_run_root, run_layout, ROLE_HARNESS, ROLE_ORACLE, ROLE_REPORT_WRITER
-from operator_agent.schemas import TaskSchema, SourceSpec, ConstraintSpec, Precision
-from operator_agent.verifier import Verifier
+from operator_agent.decide.correctness import as_suite
+from operator_agent.decide.correctness_boundaries import lint_coverage
+from operator_agent.decide.correctness_profiles import PROFILE_VERSION, default_policy, with_default_correctness
+from operator_agent.decide.input_fidelity import describe_inputs, check_readback
+from operator_agent.decide.remote_input_fidelity import encode_json_inputs
+from operator_agent.execute.remote_executor import SSHExecutor
+from operator_agent.core.run_layout import new_run_root, run_layout, ROLE_HARNESS, ROLE_ORACLE, ROLE_REPORT_WRITER
+from operator_agent.core.schemas import TaskSchema, SourceSpec, ConstraintSpec, Precision
+from operator_agent.decide.verifier import Verifier
 
 CANDIDATE_VARIANTS = ("centered-fp32", "unfused-fp32")
 CONTROLS = (("dense", "auto-cols32-rows8-fp16-random-strided"),
@@ -81,7 +81,7 @@ def assess_measurement(result, inputs, device):
     expected_sources = {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in (
         ("layernorm_numerics.py", ROOT / "benchmarks/experiments/misc/layernorm_numerics.py"),
         *((n, ROOT / "operator_agent" / n) for n in
-          ("tolerance.py", "remote_input_fidelity.py", "input_fidelity.py")))}
+          ("core/tolerance.py", "decide/remote_input_fidelity.py", "decide/input_fidelity.py")))}
     if (identity.get("semantics") != numerics.SEMANTICS or identity.get("device") != device
             or not identity.get("torch") or len(identity.get("provenance", {}).get("source_sha256", "")) != 64
             or result.get("reference_identity_hash") != numerics.digest(identity)):
@@ -229,10 +229,10 @@ def run(args):
                 layout.write_for(ROLE_HARNESS, "harness/environment.json", dumps(environment))
                 layout.write_for(ROLE_HARNESS, "harness/runner_server.py", server.read_text())
             else:
-                from operator_agent.mock_gpu import MockGPU
+                from operator_agent.execute.mock_gpu import MockGPU
                 verifier = Verifier(MockGPU())
                 provenance = dict(factory="Verifier._build_reference_fn", source_sha256=
-                    hashlib.sha256((ROOT / "operator_agent/verifier.py").read_bytes()).hexdigest())
+                    hashlib.sha256((ROOT / "operator_agent/decide/verifier.py").read_bytes()).hexdigest())
 
             for name, origin, inputs in expected:
                 if backend:

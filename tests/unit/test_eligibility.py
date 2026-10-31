@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.eligibility import (
+from operator_agent.decide.eligibility import (
     ALL_FALSE, ALL_TRUE, DEGRADED, PEAK_SLACK, Eligibility,
     derive_eligibility, exceeds_measured_peak,
 )
@@ -218,7 +218,7 @@ class TestPeakHelper(unittest.TestCase):
     def test_the_threshold_has_exactly_one_source(self):
         """同一阈值两个真源会漂 (P2-9 的附带发现): oracle 里那句手写 `* 1.05` 不许回来"""
         src = (Path(__file__).resolve().parents[2] / "operator_agent"
-               / "oracle.py").read_text(encoding="utf-8")
+               / "decide/oracle.py").read_text(encoding="utf-8")
         # 只看**代码**, 不看注释: 注释里当然可以写设计的那个乘数 (解释用),
         # 会漂的是能被执行的阈值。这个粒度是刻意的 —— 一把连注释都砍的刀,
         # 下一次有人想解释这条设计时会先来改这个守卫。

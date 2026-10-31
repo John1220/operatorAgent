@@ -21,9 +21,9 @@ M5/M8 是两条**反向对照**: 掩码扩得太宽 (把被修对象打码) 与 
 from benchmarks.calibration.mutation_calibrate import Row
 
 FILES = {
-    "ms": "operator_agent/measurement.py",
-    "rx": "operator_agent/remote_executor.py",
-    "env": "operator_agent/environment.py",
+    "ms": "operator_agent/decide/measurement.py",
+    "rx": "operator_agent/execute/remote_executor.py",
+    "env": "operator_agent/core/environment.py",
 }
 
 TARGETS = [

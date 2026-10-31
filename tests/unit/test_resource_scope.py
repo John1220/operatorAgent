@@ -6,7 +6,7 @@ these tests require no Triton import, model, SSH connection or GPU.
 import json
 import unittest
 
-from operator_agent.resource_check import (
+from operator_agent.decide.resource_check import (
     MemCaps,
     SharedBuffer,
     SharedMemoryEvidence,

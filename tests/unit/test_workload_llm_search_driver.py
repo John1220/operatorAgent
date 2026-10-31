@@ -9,7 +9,7 @@ import pytest
 
 from benchmarks import _bounded_proposals as transport
 from benchmarks.drivers import workload_llm_search_h20 as driver
-from operator_agent import run_contract as rc
+from operator_agent.core import run_contract as rc
 
 
 def response(warps=4, **changes):
@@ -251,7 +251,7 @@ def test_audit_refuses_torn_or_forged_model_source_lineage(tmp_path,monkeypatch,
 
 def test_feedback_uses_full_workload_not_primary_or_gflops(tmp_path,monkeypatch):
     from tests.unit.test_workload_search_driver import durable_fixture
-    from operator_agent.contract import freeze_from_task
+    from operator_agent.core.contract import freeze_from_task
     art,c,t,rounds,plan=durable_fixture(tmp_path,monkeypatch)
     data=driver.feedback(rounds[:1],freeze_from_task(t))
     assert data['objective']==2. and len(data['cases'])==2
@@ -265,7 +265,7 @@ def test_feedback_uses_full_workload_not_primary_or_gflops(tmp_path,monkeypatch)
 
 def test_failed_first_observation_cannot_drive_second_model_call(tmp_path,monkeypatch):
     from tests.unit.test_workload_search_driver import durable_fixture
-    from operator_agent.contract import freeze_from_task
+    from operator_agent.core.contract import freeze_from_task
     art,c,t,rounds,plan=durable_fixture(tmp_path,monkeypatch)
     rounds[0][1][0].passed=False
     with pytest.raises(ValueError,match='no correct'):driver.feedback(rounds[:1],freeze_from_task(t))
@@ -273,7 +273,7 @@ def test_failed_first_observation_cannot_drive_second_model_call(tmp_path,monkey
 
 def test_degraded_feedback_cannot_buy_model_tuning(tmp_path,monkeypatch):
     from tests.unit.test_workload_search_driver import durable_fixture
-    from operator_agent.contract import freeze_from_task
+    from operator_agent.core.contract import freeze_from_task
     art,c,t,rounds,plan=durable_fixture(tmp_path,monkeypatch)
     rounds[0][1][-1].metrics['measurement_validity']='degraded'
     with pytest.raises(ValueError,match='unqualified'):driver.feedback(rounds[:1],freeze_from_task(t))
@@ -320,10 +320,10 @@ def test_production_conductor_consumes_real_response_hooks_and_saves_own_winner(
     import contextlib
     import io
     from operator_agent import Conductor, KernelDatabase
-    from operator_agent.budget import BudgetPlan
-    from operator_agent.contract import freeze_from_task
-    from operator_agent.kernel_db import FailureDatabase
-    from operator_agent.artifact_store import ArtifactStore
+    from operator_agent.execute.budget import BudgetPlan
+    from operator_agent.core.contract import freeze_from_task
+    from operator_agent.core.kernel_db import FailureDatabase
+    from operator_agent.core.artifact_store import ArtifactStore
     from tests.unit.test_workload_evidence import task,inputs,backend,CODE
     m=model(tmp_path);t=task(min_speedup=10.)
     _,plan=driver.declaration(driver.parser().parse_args([]),m.identity)

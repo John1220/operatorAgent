@@ -20,8 +20,8 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "eg": "operator_agent/exec_guard.py",
-    "mg": "operator_agent/mock_gpu.py",
+    "eg": "operator_agent/execute/exec_guard.py",
+    "mg": "operator_agent/execute/mock_gpu.py",
 }
 
 TARGETS = ["tests/unit/test_exec_guard.py", "tests/unit/test_demo_exec_guard.py",

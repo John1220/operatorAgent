@@ -6,7 +6,7 @@ import unittest
 
 from types import SimpleNamespace
 
-from operator_agent.failure_route import (ROUTE_DEBUG_FIX, ROUTE_FIX, ROUTE_HOLD,
+from operator_agent.decide.failure_route import (ROUTE_DEBUG_FIX, ROUTE_FIX, ROUTE_HOLD,
                                           ROUTE_RETRY, ROUTE_SEARCH, classify)
 
 

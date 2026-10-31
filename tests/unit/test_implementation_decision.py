@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.eligibility import (  # noqa: E402
+from operator_agent.decide.eligibility import (  # noqa: E402
     ALL_FALSE, ALL_TRUE, CLAIM_LEVELS, CLAIM_OBSERVED, CLAIM_PERSISTED,
     CLAIM_PROMOTABLE, CLAIM_PROVISIONAL, CLAIM_UNOBSERVED, CLAIM_VALIDATED,
     DEGRADED, DECISION_INCONCLUSIVE, DECISION_USE_CUSTOM, DECISION_USE_LIBRARY,
@@ -239,14 +239,14 @@ class TestTheReportPrintsIt(unittest.TestCase):
     """裁决必须有人读: 进 best-known-good（交付物第 1 件）"""
 
     def _artifact(self, **metrics):
-        from operator_agent.schemas import KernelArtifact
+        from operator_agent.core.schemas import KernelArtifact
         m = {"measurement_validity": "valid", "gflops": 1.0}
         m.update(metrics)
         return KernelArtifact(kernel_id="kw", task_id="t", code="# x",
                               language="triton", benchmark_data=m)
 
     def test_the_decision_and_its_reasons_are_printed(self):
-        from operator_agent.report import build_report
+        from operator_agent.core.report import build_report
         text = build_report(artifact=self._artifact(
             implementation_decision=_decide().as_dict()))
         self.assertIn("实现裁决 (§17.1)", text)
@@ -256,7 +256,7 @@ class TestTheReportPrintsIt(unittest.TestCase):
         self.assertLess(text.index("实现裁决"), text.index("## 2."))
 
     def test_a_use_custom_decision_is_printed_too(self):
-        from operator_agent.report import build_report
+        from operator_agent.core.report import build_report
         text = build_report(artifact=self._artifact(
             implementation_decision=_decide(required_cases_ok=True,
                                             regression_over_limit=False).as_dict()))
@@ -265,11 +265,11 @@ class TestTheReportPrintsIt(unittest.TestCase):
 
     def test_a_missing_key_means_no_line(self):
         """缺键不许印一个默认裁决（那会让「没算」读成「算出来是它」）"""
-        from operator_agent.report import build_report
+        from operator_agent.core.report import build_report
         self.assertNotIn("实现裁决", build_report(artifact=self._artifact()))
 
     def test_a_malformed_record_prints_nothing(self):
-        from operator_agent.report import build_report
+        from operator_agent.core.report import build_report
         text = build_report(artifact=self._artifact(
             implementation_decision={"reasons": ["x"]}))
         self.assertNotIn("实现裁决", text)
@@ -283,15 +283,15 @@ class TestTheOnlyProducer(unittest.TestCase):
                 / name).read_text(encoding="utf-8")
 
     def test_the_derivation_lives_in_exactly_one_module(self):
-        self.assertEqual(1, self._src("eligibility.py").count(
+        self.assertEqual(1, self._src("decide/eligibility.py").count(
             "def implementation_decision("))
-        self.assertEqual(1, self._src("conductor.py").count(
+        self.assertEqual(1, self._src("app/conductor.py").count(
             "implementation_decision("))
-        self.assertEqual(0, self._src("report.py").count(
+        self.assertEqual(0, self._src("core/report.py").count(
             "implementation_decision("), "报告只许读, 不许自己再判一次")
 
     def test_the_conductor_writes_it_after_the_final_claim_level(self):
-        src = self._src("conductor.py")
+        src = self._src("app/conductor.py")
         self.assertLess(src.index('metrics["claim_level"] = final'),
                         src.index('metrics["implementation_decision"] ='),
                         "裁决记的必须是**入库之后**那个等级（终态）")
@@ -305,7 +305,7 @@ class TestTheOnlyProducer(unittest.TestCase):
         「不许出现**字面量**、且必须调用那两个推导」：一个 `required_cases_ok=True` 会让
         没有量具的字段自己长出结论来（正是这一片要防的那件事）。
         """
-        src = self._src("conductor.py")
+        src = self._src("app/conductor.py")
         for literal in ("required_cases_ok=True", "required_cases_ok=False",
                         "regression_over_limit=True", "regression_over_limit=False"):
             self.assertNotIn(literal, src, literal)
@@ -314,7 +314,7 @@ class TestTheOnlyProducer(unittest.TestCase):
 
     def test_the_case_key_is_published_where_both_the_reading_and_the_inputs_exist(self):
         """「本次评了哪条 case」与 L3 读数写在**同一处**（判据侧没有输入可查）"""
-        src = self._src("conductor.py")
+        src = self._src("app/conductor.py")
         # Stage1: 收尾阶段改从运行状态对象读 (RunState) —— 两处都带上了 state. 前缀。
         # 相邻性这条断言本身没变, 只是跟着结构改形状 (结构变了就该红一次, 由人确认)。
         key_at = src.index('state.artifact.benchmark_data["case_key"] = case_key(state.test_inputs)')

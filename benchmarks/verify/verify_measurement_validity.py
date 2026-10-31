@@ -21,11 +21,11 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from operator_agent.remote_executor import RemoteExecutor
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.execute.remote_executor import RemoteExecutor
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
-from operator_agent.verifier import Verifier
-from operator_agent.measurement import (
+from operator_agent.decide.verifier import Verifier
+from operator_agent.decide.measurement import (
     DISPERSION_DEGRADED, DISPERSION_UNINFORMATIVE, INTRUDER_MAX_OVER_MEDIAN,
     NOISE_BAND, REFERENCE_CEILING_PCT, Validity, binding_attainment,
     reference_ceiling_reached, verdict,

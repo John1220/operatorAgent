@@ -77,18 +77,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.drivers.harness_pass_rate import (aggregate, format_report,  # noqa: E402
                                           record_rounds)
-from operator_agent import remote_executor as rx  # noqa: E402
-from operator_agent.conductor import Conductor, _round_transport  # noqa: E402
-from operator_agent.kernel_db import KernelDatabase  # noqa: E402
-from operator_agent.measurement import (  # noqa: E402
+from operator_agent.execute import remote_executor as rx  # noqa: E402
+from operator_agent.app.conductor import Conductor, _round_transport  # noqa: E402
+from operator_agent.core.kernel_db import KernelDatabase  # noqa: E402
+from operator_agent.decide.measurement import (  # noqa: E402
     SSH_TRANSPORT_EXIT_CODE, TRANSPORT_ANSWERED, TRANSPORT_KEY, TRANSPORT_STATES,
     TRANSPORT_UNKNOWN, transport_outcome, transport_outcome_of_result)
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
-from operator_agent.remote_executor import RemoteExecutionResult, SSHExecutor  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutionResult, SSHExecutor  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType, VerificationLevel, VerificationResult)
-from operator_agent.verifier import Verifier  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
 from tests.backend_fakes import DeclaredFakeBackend  # noqa: E402
 
 

@@ -13,7 +13,7 @@ import io
 import threading
 
 from benchmarks.experiments.s5 import s5_l2_evaluator, s5_task_manifest
-from operator_agent.run_contract import code_hash
+from operator_agent.core.run_contract import code_hash
 
 CASE_ID = 'layernorm-tail'
 MAX_SOURCE_BYTES = 65536

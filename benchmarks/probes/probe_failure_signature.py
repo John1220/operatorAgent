@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from operator_agent._harness_controls import enable_for_harness
+from operator_agent.app._harness_controls import enable_for_harness
 enable_for_harness()
 
 os.environ.setdefault("OPERATOR_AGENT_LOG_DIR", "off")
@@ -29,9 +29,9 @@ os.environ.setdefault("OPERATOR_AGENT_FAILURE_DB", "off")
 
 import numpy as np  # noqa: E402
 
-from operator_agent.kernel_db import failure_signature  # noqa: E402
-from operator_agent.remote_executor import SSHExecutor  # noqa: E402
-from operator_agent.verifier import failure_pair  # noqa: E402
+from operator_agent.core.kernel_db import failure_signature  # noqa: E402
+from operator_agent.execute.remote_executor import SSHExecutor  # noqa: E402
+from operator_agent.decide.verifier import failure_pair  # noqa: E402
 
 # 三条, 各自对应一条真实存在过的失败路径
 CASES = [

@@ -11,12 +11,12 @@
      same faulty pattern."
 
 我方的先决事实 —— **这一段被自己纠正过两次, 两次都错在「只核机制、没核入口」**。
-① 原本写「`conductor.py:780` 交进来的是 `[r for r in verify_results if not r.passed]`,
+① 原本写「`app/conductor.py:780` 交进来的是 `[r for r in verify_results if not r.passed]`,
    所以 L2 数值失败会**顺带**和 L3『还不够快』同框」。读回 `verifier.verify()`
-   (`operator_agent/verifier.py:233-249`) 是: 每一级失败就 `return results` ——
+   (`operator_agent/decide/verifier.py:233-249`) 是: 每一级失败就 `return results` ——
    **fail-fast**, 一份 `verify_results` 里最多只有一个未通过的级别 ⇒ 同轮 L2+L3 不可达。
-② 我改口成「跨轮经 `history_cases` 并存, 因为 L3 会被 `conductor.py:948-951` 记进库」。
-   这句也错: Fixer 那条支路被 `conductor.py:763` 的 `l1_l2_failed` 门挡着, 循环外那处
+② 我改口成「跨轮经 `history_cases` 并存, 因为 L3 会被 `app/conductor.py:948-951` 记进库」。
+   这句也错: Fixer 那条支路被 `app/conductor.py:763` 的 `l1_l2_failed` 门挡着, 循环外那处
    兜底入库 `:952-955` 明写 `if any(level in (L1, L2))` ⇒ **今天的代码不产 L3 记录**。
 
 结论: `_L2_RETREAT` 末句那句「若错误信息里同时出现性能未达标」今天是**明标的保险**,
@@ -73,10 +73,10 @@
 
 ⚠️ 这张表**第一版不是 10/10**: M9a 当时全绿。原因不在本文件, 而在
 `FailureDatabase.search_by_error` 末尾的兜底 —— 零词元重叠/取不出词元时它
-`return candidates[:limit]`, 把不相关的历史记录带进 prompt, 而 `fixer.py:423` 按
+`return candidates[:limit]`, 把不相关的历史记录带进 prompt, 而 `generate/fixer.py:423` 按
 「在不在这份返回列表里」给它们打上 `[错误相似度命中]`。也就是说: 一条声称「按 Jaccard>0
 匹配」的检索, 在没匹配到时**照样返回**, 于是 M9a 滤掉上下文通道后记录从「假命中」那条路
-回来了。修掉兜底 (kernel_db.py, 用例在 `tests/unit/test_failure_memory.py`) 之后 M9a 才归位。
+回来了。修掉兜底 (core/kernel_db.py, 用例在 `tests/unit/test_failure_memory.py`) 之后 M9a 才归位。
 **这条「逃逸」不是用例写松了, 是被测代码里一只真的「把没找到说成找到了」** —— doc 49 §八
 第 26/27 条、CHECKLOG I16/I17。
 
@@ -114,8 +114,8 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_FIXER_SRC = os.path.join(_ROOT, "operator_agent", "fixer.py")
-with open(os.path.join(_ROOT, "operator_agent", "verifier.py"), encoding="utf-8") as _fh:
+_FIXER_SRC = os.path.join(_ROOT, "operator_agent", "generate", "fixer.py")
+with open(os.path.join(_ROOT, "operator_agent", "decide", "verifier.py"), encoding="utf-8") as _fh:
     _VERIFIER_SRC = _fh.read()
 
 
@@ -138,14 +138,14 @@ def _early_returns(src: str) -> list:
             and n.test.operand.attr == "passed"
             and any(isinstance(s, ast.Return) for s in n.body)]
 
-from operator_agent.fixer import (  # noqa: E402
+from operator_agent.generate.fixer import (  # noqa: E402
     FixerAgent, stage_directive, failure_class,
     _L1_INPLACE, _L1_INTERFACE, _L2_RETREAT, _REFERENCE_HOLD,
 )
-from operator_agent.kernel_db import (  # noqa: E402
+from operator_agent.core.kernel_db import (  # noqa: E402
     FAILURE_CLASS_INTERFACE, failure_class_of, failure_signature,
 )
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision,
     VerificationResult, VerificationLevel,
@@ -199,7 +199,7 @@ _GATE_INPUTS = ["X", "Y", "bias"]   # 与 `input_key_sets` 给门的那份同形
 
 
 def _interface_gate_text() -> str:
-    from operator_agent.interface_contract import check_kernel_interface
+    from operator_agent.core.interface_contract import check_kernel_interface
 
     verdict = check_kernel_interface(_GATE_SRC, _GATE_INPUTS)
     text = verdict.problem
@@ -211,7 +211,7 @@ def _interface_gate_text() -> str:
 
 
 def _gate_result():
-    """**逐字照 `verifier.py:285-292` 的形状**造一条接口契约失败 (message 只有一行,
+    """**逐字照 `decide/verifier.py:285-292` 的形状**造一条接口契约失败 (message 只有一行,
     完整文本在 error_log; 取向读的是 error_log, 与库里归类同一个口径)。
     """
     text = _interface_gate_text()
@@ -310,13 +310,18 @@ class TestThirdRouteInterfaceRepair(unittest.TestCase):
         措辞 ⇒ 不相干的失败被领进这条路。全仓扫一遍把这两件事都变成红。
         """
         holders = []
-        for name in sorted(os.listdir(os.path.join(_ROOT, "operator_agent"))):
-            if not name.endswith(".py"):
-                continue
-            with open(os.path.join(_ROOT, "operator_agent", name), encoding="utf-8") as fh:
-                if "签名与之对不上" in fh.read():
-                    holders.append(name)
-        self.assertEqual(["interface_contract.py", "kernel_db.py"], holders,
+        # 2026-10-31: operator_agent/ 分五层，平铺 listdir 会扫不到任何模块 ⇒ 必须递归。
+        pkg = os.path.join(_ROOT, "operator_agent")
+        for dirpath, _dirs, files in os.walk(pkg):
+            for name in sorted(files):
+                if not name.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8") as fh:
+                    if "签名与之对不上" in fh.read():
+                        holders.append(os.path.relpath(path, pkg).replace(os.sep, "/"))
+        holders.sort()
+        self.assertEqual(["core/interface_contract.py", "core/kernel_db.py"], holders,
                          "产这条错误原文的只有 interface_contract, 认它的只有归类词表")
 
     def test_the_directives_do_not_share_their_scope_sentences(self):
@@ -380,8 +385,9 @@ class TestThirdRouteInterfaceRepair(unittest.TestCase):
                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
         self.assertIn("failure_class_of", called,
                       "failure_class 没走库里那一个分类器 ⇒ 取向与归类是两套口径")
+        # 2026-10-31: 包分层后这里看到的是 `..core.kernel_db`，按后缀认而不是按老的裸名。
         imported = {a.name for n in tree.body if isinstance(n, ast.ImportFrom)
-                    and n.module == "kernel_db" for a in n.names}
+                    and (n.module or "").endswith("kernel_db") for a in n.names}
         self.assertIn("FAILURE_CLASS_INTERFACE", imported,
                       "分流键常量不是从 kernel_db import 的那一个 ⇒ 它另有一份出处")
 
@@ -464,11 +470,11 @@ class TestThePerformanceTextIsDeadProseForNow(unittest.TestCase):
     """`_L2_RETREAT` 末句「若错误信息里同时出现性能未达标」**今天没有活对象** —— 两条通道都堵着
 
     这一处我连着纠正错两次, 两次的错都是同一个形状 (只核了机制、没核入口):
-      ① 原话「`conductor.py:780` 把所有未通过结果交给 Fixer ⇒ 同轮并存」—— 读回
+      ① 原话「`app/conductor.py:780` 把所有未通过结果交给 Fixer ⇒ 同轮并存」—— 读回
          `verifier.verify():233-249` 是**每级失败就 return** (fail-fast), 同轮最多一个
          未通过级别。
-      ② 我改成「跨轮经 `history_cases` 并存」并说「L3 失败会被 `conductor.py:948-951`
-         记进库」—— 这句也是错的: Fixer 那条支路被 `conductor.py:763` 的 `l1_l2_failed`
+      ② 我改成「跨轮经 `history_cases` 并存」并说「L3 失败会被 `app/conductor.py:948-951`
+         记进库」—— 这句也是错的: Fixer 那条支路被 `app/conductor.py:763` 的 `l1_l2_failed`
          门挡着, 循环外那处兜底入库 `:952-955` 明写 `if any(level in (L1, L2))` ⇒
          **今天的代码一条 L3 记录都不产**。(仓库现存 `output/failure_db.jsonl` 里那 2 条
          L3 没有生产写者, 全仓 grep 不到任何代码写出那句 error_summary。)
@@ -480,7 +486,7 @@ class TestThePerformanceTextIsDeadProseForNow(unittest.TestCase):
     """
 
     def _fixer_with_history(self):
-        from operator_agent.kernel_db import FailureDatabase, FailureRecord
+        from operator_agent.core.kernel_db import FailureDatabase, FailureRecord
 
         # `jsonl_path="off"` 不是随手写的: 默认构造会重放 `<repo>/output/failure_db.jsonl`,
         # 于是这条用例会读到**仓库自己的真语料** —— M9 第一次标定就是这么被污染成绿的
@@ -508,7 +514,7 @@ class TestThePerformanceTextIsDeadProseForNow(unittest.TestCase):
 
     def test_conductor_gates_both_the_fixer_and_the_recorder_on_l1_l2(self):
         """第二条通道的门: Fixer 支路与循环外兜底入库都只认 L1/L2 ⇒ 没有 L3 记录被产出来"""
-        src = open(os.path.join(_ROOT, "operator_agent", "conductor.py"),
+        src = open(os.path.join(_ROOT, "operator_agent", "app", "conductor.py"),
                    encoding="utf-8").read()
         tree = ast.parse(src)
         gate = next((n for n in ast.walk(tree) if isinstance(n, ast.Assign)

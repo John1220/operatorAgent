@@ -104,7 +104,7 @@ def test_actual_headless_resources_keep_jsonl_and_capture_diagnostics(tmp_path):
         pytest.skip('macOS runtime required')
     from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
     from benchmarks.experiments.s5.s5_vertical_tool_provider import _sse
-    from operator_agent import s5_shared_budget as budget
+    from operator_agent.execute import s5_shared_budget as budget
     from benchmarks.experiments.s5.s5_formal_run import _final_text
     ledger=tmp_path/'budget.sqlite'
     budget.create(ledger, task_id='resource-fixture', max_calls=3, max_output_tokens=1024,

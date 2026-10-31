@@ -3,7 +3,7 @@
 那一节点名的三处「算了没人读」里, 这里是后两处:
 
 * **`"mode": "simulated"`** —— `MockGPU` 无 CUDA 时按硬件规格**估**出来的那份基准。
-  搬运链路一直把它带进 metrics (`verifier.py` 的 extra_key 白名单), 而全仓读者数为 0。
+  搬运链路一直把它带进 metrics (`decide/verifier.py` 的 extra_key 白名单), 而全仓读者数为 0。
   后果: 一份纯模拟的基准与一份真机实测的基准**在产物里权威性等价**。
 * **`device == "cpu"`** —— 四个提供方会打这个标, 唯一的消费者是「选基线的显示名」
   (`cuBLAS(FP32)` vs `PyTorch Eager(CUDA)`)。没有任何地方拒绝记录一份在 CPU 上测出来
@@ -37,14 +37,14 @@ sys.path.insert(0, str(REPO))
 
 import numpy as np
 
-from operator_agent.backend_caps import Cap
-from operator_agent.measurement import (Validity, assess, persist_decision,
+from operator_agent.core.backend_caps import Cap
+from operator_agent.decide.measurement import (Validity, assess, persist_decision,
                                         provenance_conflicts)
-from operator_agent.mock_gpu import MockGPU, _has_cuda
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.execute.mock_gpu import MockGPU, _has_cuda
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType,
                                     VerificationLevel)
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 from tests.backend_fakes import DeclaredFakeBackend
 
 PYTHON_MATMUL = """import numpy as np
@@ -450,7 +450,7 @@ class TestVerifierRefusesSimulatedL3(unittest.TestCase):
 
 
 def _exec_result():
-    from operator_agent.mock_gpu import ExecutionResult
+    from operator_agent.execute.mock_gpu import ExecutionResult
     return ExecutionResult(output=np.zeros((64, 64), dtype=np.float32),
                            execution_time_ms=CANDIDATE_MS, gflops=500.0,
                            memory_bandwidth_gbs=100.0, device="cpu")
@@ -563,8 +563,8 @@ class TestConductorStopsTreatingItAsEvidence(unittest.TestCase):
     maxDiff = 600
 
     def _run(self, required, rounds=3, min_speedup=5.0):
-        from operator_agent.conductor import Conductor
-        from operator_agent.kernel_db import KernelDatabase
+        from operator_agent.app.conductor import Conductor
+        from operator_agent.core.kernel_db import KernelDatabase
         backend = DeclaredFakeBackend(
             caps=set(NOT_REAL),
             verify_function=lambda *a, **kw: {"success": True, "max_error": 0.0,
@@ -677,8 +677,9 @@ def _l3_gate_report(trees):
     return report
 
 
-_PRODUCTION = [(p.name, _strip_docstrings(ast.parse(p.read_text(encoding="utf-8"))))
-               for p in sorted((REPO / "operator_agent").glob("*.py"))]
+_PRODUCTION = [(p.relative_to(REPO / "operator_agent").as_posix(),
+                _strip_docstrings(ast.parse(p.read_text(encoding="utf-8"))))
+               for p in sorted((REPO / "operator_agent").rglob("*.py"))]
 
 
 class TestEveryL3ReturnPathIsGated(unittest.TestCase):
@@ -777,24 +778,24 @@ class TestReadersAreNotJustMentions(unittest.TestCase):
     def test_mode_has_a_reader_outside_the_transport_whitelist(self):
         sites = self._read_sites("mode")
         self.assertTrue(sites, "`mode` 又变成零读者了 (doc 49 §3.5 第 2 处)")
-        self.assertTrue(any(s.startswith("verifier.py") for s in sites), sites)
+        self.assertTrue(any(s.startswith("decide/verifier.py") for s in sites), sites)
 
     def test_device_has_more_readers_than_just_the_display_name(self):
         """改前 `device` 在 verifier 里只被读来选显示名 (两处 startswith), 现在 >= 3"""
-        sites = [s for s in self._read_sites("device") if s.startswith("verifier.py")]
+        sites = [s for s in self._read_sites("device") if s.startswith("decide/verifier.py")]
         self.assertGreaterEqual(len(sites), 3,
                                 f"`device` 的读者又只剩显示名了: {sites}")
 
     def test_the_refusal_flag_has_a_production_reader(self):
         """写进 metrics 却没人读 = 又造一个 §3.5。Conductor 的汇总必须读它"""
         sites = [s for s in self._read_sites("measurement_l3_pass_refused")
-                 if s.startswith("conductor.py")]
+                 if s.startswith("app/conductor.py")]
         self.assertTrue(sites,
                         "`measurement_l3_pass_refused` 又变成零读者了 (doc 49 §3.5)")
 
     def test_the_fingerprint_helpers_are_called_by_the_conductor(self):
         for name in ("fingerprint_of", "compare_fingerprints", "previous_environment"):
-            sites = [s for s in self._call_sites(name) if s.startswith("conductor.py")]
+            sites = [s for s in self._call_sites(name) if s.startswith("app/conductor.py")]
             self.assertTrue(sites, f"{name} 没有调用方 —— 又一处「算了没人读」")
 
     def test_the_reader_detector_is_not_vacuous(self):
@@ -816,7 +817,7 @@ class TestReadersAreNotJustMentions(unittest.TestCase):
 class TestContractHashIsRecordCarried(unittest.TestCase):
     """拆掉恒真: 载荷带来的旧契约哈希才比对, 没带就明说「没得校」
 
-    原先 `verifier.py` 写的是 `metrics.setdefault("contract_hash", stamp)` 再把
+    原先 `decide/verifier.py` 写的是 `metrics.setdefault("contract_hash", stamp)` 再把
     同一个值当 `record_hash` 回喂 —— 比较的两侧都由那一行自己造, `assert_hash`
     恒真, 「唯一收口点」名存实亡。现在两侧来源分开:
       * 载荷带的旧哈希 → 真比对 (不匹配 → 拒评);
@@ -861,7 +862,7 @@ class TestContractHashIsRecordCarried(unittest.TestCase):
 
     def test_a_carried_hash_matching_the_contract_is_verified(self):
         """带的旧哈希与当前契约一致 → 这才是真的校验过 (方向对照)"""
-        from operator_agent.contract import freeze_from_task
+        from operator_agent.core.contract import freeze_from_task
         payload = _bench(mode="cuda", device="cuda:2")
         task = _task(required=(Cap.REAL_DEVICE,))
         payload["contract_hash"] = freeze_from_task(task).hash
@@ -876,7 +877,7 @@ class TestContractHashIsRecordCarried(unittest.TestCase):
         这样一条端到端断言才拦得住 —— 而这个键此前根本没有生产者, 于是报告里那条
         「契约被改写, 本次评测作废」永远不会出现。
         """
-        from operator_agent.confirm import UnableToEstablish
+        from operator_agent.core.confirm import UnableToEstablish
         r, _ = _l3(_verifier(REAL, self._stale()),
                    _task(required=(Cap.REAL_DEVICE,)))
         u = UnableToEstablish()
@@ -890,7 +891,7 @@ class TestContractHashIsRecordCarried(unittest.TestCase):
         两者混作一个键, 产物里就读不出「这数在哪个尺子下取得」与「它自称是哪个
         尺子下取得的」的区别 —— 而这条不符正是要报出来的东西。
         """
-        from operator_agent.contract import freeze_from_task
+        from operator_agent.core.contract import freeze_from_task
         task = _task(required=(Cap.REAL_DEVICE,))
         live = freeze_from_task(task).hash
         r, _ = _l3(_verifier(REAL, self._stale()), task)
@@ -902,7 +903,7 @@ class TestContractHashIsRecordCarried(unittest.TestCase):
 # ─── 尺子: 心跳的结论必须落到报告读的那两个键上 (spine-review P1-5) ──
 
 def _hb(ok, window="hb-1", slow=3.0, reasons=()):
-    from operator_agent.calibration import HeartbeatResult
+    from operator_agent.decide.calibration import HeartbeatResult
     return HeartbeatResult(ok=ok, epoch=1, reasons=tuple(reasons),
                            known_good_ratio=1.0, known_slow_ratio=slow,
                            window_id=window)
@@ -918,7 +919,7 @@ class TestRulerVerdictReachesTheReport(unittest.TestCase):
                    task or _task(required=(Cap.REAL_DEVICE,)), **kw)[0]
 
     def test_a_broken_ruler_invalidates_the_reading_and_reaches_the_report(self):
-        from operator_agent.confirm import UnableToEstablish
+        from operator_agent.core.confirm import UnableToEstablish
         r = self._reading(heartbeat=_hb(False, slow=1.0,
                                         reasons=["RULER_BROKEN: 分离度不足"]),
                           heartbeat_expected=True)

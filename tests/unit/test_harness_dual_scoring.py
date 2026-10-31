@@ -41,10 +41,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.drivers.harness_pass_rate import (aggregate, format_report,  # noqa: E402
                                           last_round_correctness_passed)
-from operator_agent.conductor import correctness_verified  # noqa: E402
-from operator_agent.measurement import (CORRECTNESS_LEVELS,  # noqa: E402
+from operator_agent.app.conductor import correctness_verified  # noqa: E402
+from operator_agent.decide.measurement import (CORRECTNESS_LEVELS,  # noqa: E402
                                         correctness_verified_levels)
-from operator_agent.schemas import VerificationLevel, VerificationResult  # noqa: E402
+from operator_agent.core.schemas import VerificationLevel, VerificationResult  # noqa: E402
 
 
 def _run(case, levels_last, final_passed, ok=True, extra_rounds=None):

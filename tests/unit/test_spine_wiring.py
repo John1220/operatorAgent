@@ -19,11 +19,11 @@ from unittest import mock
 
 import numpy as np
 
-from operator_agent.confirm import ConfirmRecord
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (ConstraintSpec, KernelArtifact, Precision,
+from operator_agent.core.confirm import ConfirmRecord
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (ConstraintSpec, KernelArtifact, Precision,
                                     SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
                                     TaskType)
 from tests.backend_fakes import fake_backend
@@ -141,7 +141,7 @@ class TestTheGateHasExactlyOneImplementation(unittest.TestCase):
     def test_a_refusing_gate_actually_blocks_persistence(self):
         """判据说拒, 生产路径就必须不入库 —— 不许它自己另判一遍"""
         seen = []
-        with mock.patch("operator_agent.oracle.admit_to_corpus",
+        with mock.patch("operator_agent.decide.oracle.admit_to_corpus",
                         side_effect=self._spy((False, "哨兵: 判据拒了"), seen)):
             ok = self.cond._save_to_db(_artifact(_good_metrics()), _task())
         self.assertEqual(1, len(seen), "入库门没有走 oracle.admit_to_corpus")
@@ -150,7 +150,7 @@ class TestTheGateHasExactlyOneImplementation(unittest.TestCase):
     def test_an_allowing_gate_actually_allows_persistence(self):
         """反方向也要: 判据说行, 生产路径不许自己加门"""
         seen = []
-        with mock.patch("operator_agent.oracle.admit_to_corpus",
+        with mock.patch("operator_agent.decide.oracle.admit_to_corpus",
                         side_effect=self._spy((True, "哨兵: 判据放行"), seen)):
             ok = self.cond._save_to_db(_artifact(_good_metrics()), _task())
         self.assertEqual(1, len(seen))
@@ -159,7 +159,7 @@ class TestTheGateHasExactlyOneImplementation(unittest.TestCase):
     def test_the_double_confirmation_is_passed_as_an_invariant(self):
         """接线处写死 `True` —— 判据的那道门在**每一次**入库尝试上都要求着"""
         seen = []
-        with mock.patch("operator_agent.oracle.admit_to_corpus",
+        with mock.patch("operator_agent.decide.oracle.admit_to_corpus",
                         side_effect=self._spy((True, "哨兵"), seen)):
             self.cond._save_to_db(_artifact(_good_metrics()), _task())
             self.cond._save_to_db(_artifact(_good_metrics()), _task())
@@ -173,7 +173,7 @@ class TestTheGateHasExactlyOneImplementation(unittest.TestCase):
         """判据的输入就是产物携带的那份读数 (不是重新拼一份)"""
         seen = []
         m = _good_metrics()
-        with mock.patch("operator_agent.oracle.admit_to_corpus",
+        with mock.patch("operator_agent.decide.oracle.admit_to_corpus",
                         side_effect=self._spy((True, "哨兵"), seen)):
             self.cond._save_to_db(_artifact(m), _task())
         self.assertIs(seen[0]["metrics"], m, "判据拿到的不是产物里那份 metrics")
@@ -471,7 +471,7 @@ class TestCorrectnessCredentialWiring(unittest.TestCase):
 
     def setUp(self):
         root = Path(__file__).resolve().parents[2]
-        self.src = (root / "operator_agent" / "conductor.py").read_text(encoding="utf-8")
+        self.src = (root / "operator_agent" / "app" / "conductor.py").read_text(encoding="utf-8")
 
     @staticmethod
     def _call_body(src, open_paren):
@@ -534,7 +534,7 @@ class TestTheDoubleConfirmationIsAnInvariant(unittest.TestCase):
 
     def setUp(self):
         root = Path(__file__).resolve().parents[2]
-        self.src = (root / "operator_agent" / "conductor.py").read_text(encoding="utf-8")
+        self.src = (root / "operator_agent" / "app" / "conductor.py").read_text(encoding="utf-8")
 
     def _task(self, min_speedup=0.001):
         return TaskSchema(
@@ -647,10 +647,10 @@ class TestTheDoubleConfirmationIsAnInvariant(unittest.TestCase):
             return True, "哨兵: 判据放行"
 
         normal = self._run(self._cond())
-        with mock.patch("operator_agent.oracle.admit_to_corpus", side_effect=spy):
+        with mock.patch("operator_agent.decide.oracle.admit_to_corpus", side_effect=spy):
             normal = self._run(self._cond())
         with mock.patch.object(Conductor, "_produce_remeasure", lambda *a, **k: None), \
-                mock.patch("operator_agent.oracle.admit_to_corpus", side_effect=spy):
+                mock.patch("operator_agent.decide.oracle.admit_to_corpus", side_effect=spy):
             ablated = self._run(self._cond())
 
         self.assertIsNotNone(normal.remeasure, "前提: 正常臂里有那条重测记录")

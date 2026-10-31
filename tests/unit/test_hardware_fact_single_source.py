@@ -25,11 +25,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from operator_agent import hardware_caps as hc
-from operator_agent import verifier as v
-from operator_agent.hardware_caps import _KNOWN_HARDWARE, HardwareCaps
+from operator_agent.core import hardware_caps as hc
+from operator_agent.decide import verifier as v
+from operator_agent.core.hardware_caps import _KNOWN_HARDWARE, HardwareCaps
 
-VERIFIER_SRC = REPO / "operator_agent" / "verifier.py"
+VERIFIER_SRC = REPO / "operator_agent" / "decide" / "verifier.py"
 
 #: name 行里必须由 spec_row 派生的型号（两张表都有的卡）
 NAME_DERIVED = ("a100", "h100", "h20", "v100", "3090")

@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 
 from benchmarks.experiments.s5 import s5_l2_evaluator
-from operator_agent.run_contract import code_hash, digest
+from operator_agent.core.run_contract import code_hash, digest
 
 SCHEMA = 's5-preflight-verification-v1'
 MAX_SOURCE_BYTES = 65536

@@ -14,18 +14,18 @@
 """
 import json, os, sys, time
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]))
-from operator_agent._harness_controls import enable_for_harness
+from operator_agent.app._harness_controls import enable_for_harness
 enable_for_harness()
 os.environ.setdefault("OPERATOR_AGENT_KERNEL_DB", "off")
 os.environ.setdefault("OPERATOR_AGENT_FAILURE_DB", "off")
 
 
 import numpy as np, torch
-from operator_agent.kernel_db import _TRITON_MATMUL_CODE as _SEED
+from operator_agent.core.kernel_db import _TRITON_MATMUL_CODE as _SEED
 CODE = _SEED.replace('tl.dot(a, b, acc)', 'tl.dot(a, b, acc, input_precision="ieee")')
-from operator_agent.remote_executor import RemoteExecutor
-from operator_agent.verifier import Verifier
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.execute.remote_executor import RemoteExecutor
+from operator_agent.decide.verifier import Verifier
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskSchema, TaskType)
 
 task = TaskSchema(task_id="real-smoke", task_type=TaskType.CODE_TRANSLATION,

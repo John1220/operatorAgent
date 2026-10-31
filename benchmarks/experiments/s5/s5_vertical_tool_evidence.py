@@ -13,7 +13,7 @@ import math
 import re
 
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
-from operator_agent.run_contract import code_hash
+from operator_agent.core.run_contract import code_hash
 
 HASH = re.compile(r'[a-f0-9]{64}\Z')
 

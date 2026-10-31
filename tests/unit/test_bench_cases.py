@@ -40,12 +40,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.bench_cases import (BenchCaseError, BenchmarkCase, TensorSpec, case_key,
+from operator_agent.decide.bench_cases import (BenchCaseError, BenchmarkCase, TensorSpec, case_key,
                                         case_from_inputs, cases_from_shapes, known_layouts)
-from operator_agent.contract import (ContractError, DTypeSemantics, BaselineDef, ShapeDist,
+from operator_agent.core.contract import (ContractError, DTypeSemantics, BaselineDef, ShapeDist,
                                      freeze, freeze_from_task, load_dict)
-from operator_agent.report import REPORT_NAME
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.core.report import REPORT_NAME
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
 
 CODE = "import numpy as np\n\ndef kernel(A, B):\n    return A @ B\n"
@@ -417,18 +417,18 @@ class TestOneProducerPerFact(unittest.TestCase):
         return (Path(__file__).resolve().parents[2] / rel).read_text(encoding="utf-8")
 
     def test_the_identity_has_one_definition(self):
-        total = (self._src("operator_agent/bench_cases.py").count("def case_key(")
-                 + self._src("operator_agent/contract.py").count("def case_key("))
+        total = (self._src("operator_agent/decide/bench_cases.py").count("def case_key(")
+                 + self._src("operator_agent/core/contract.py").count("def case_key("))
         self.assertEqual(1, total)
 
     def test_the_layout_table_has_one_home(self):
-        self.assertEqual(1, self._src("operator_agent/bench_cases.py").count("_CASE_LAYOUTS ="));
-        for rel in ("operator_agent/verifier.py", "operator_agent/conductor.py",
-                    "operator_agent/contract.py", "benchmarks/drivers/harness_pass_rate.py"):
+        self.assertEqual(1, self._src("operator_agent/decide/bench_cases.py").count("_CASE_LAYOUTS ="));
+        for rel in ("operator_agent/decide/verifier.py", "operator_agent/app/conductor.py",
+                    "operator_agent/core/contract.py", "benchmarks/drivers/harness_pass_rate.py"):
             self.assertNotIn("_CASE_LAYOUTS", self._src(rel), rel)
 
     def test_the_conductor_resolves_inputs_in_one_place(self):
-        cu = self._src("operator_agent/conductor.py")
+        cu = self._src("operator_agent/app/conductor.py")
         self.assertEqual(1, cu.count("def _resolve_input_sets("))
         self.assertEqual(1, cu.count("self._resolve_input_sets("))
         self.assertNotIn("input_sets = list(test_inputs) if isinstance(test_inputs, list)", cu,
@@ -436,11 +436,11 @@ class TestOneProducerPerFact(unittest.TestCase):
 
     def test_the_input_source_is_read_from_the_published_key(self):
         """报告只许**读**那一格（`case_source`），不许拿着别的格自己推来源"""
-        rp = self._src("operator_agent/report.py")
+        rp = self._src("operator_agent/core/report.py")
         self.assertEqual(1, rp.count('_get(m, "case_source"'))
 
     def test_the_reporter_derives_nothing(self):
-        rp = self._src("operator_agent/report.py")
+        rp = self._src("operator_agent/core/report.py")
         for forbidden in ("case_key(", "case_from_inputs(", ".materialize(", "cases_from_shapes("):
             self.assertNotIn(forbidden, rp, forbidden)
 

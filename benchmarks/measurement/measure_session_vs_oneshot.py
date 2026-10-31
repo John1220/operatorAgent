@@ -33,9 +33,9 @@ import numpy as np  # noqa: E402
 
 # triton 那一对复用 61 号那次真机预演用的源码 —— 不抄第二份 (抄的那一刻是准的)
 from measure_heartbeat_real import TRITON_GOOD_SRC  # noqa: E402
-from operator_agent.calibration import (KNOWN_GOOD_SOURCE,  # noqa: E402
+from operator_agent.decide.calibration import (KNOWN_GOOD_SOURCE,  # noqa: E402
                                         backend_bench_fn, default_inputs, heartbeat)
-from operator_agent.remote_executor import RemoteExecutor, SSHExecutor  # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutor, SSHExecutor  # noqa: E402
 
 
 def stats(xs):

@@ -34,12 +34,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent.backend_caps import Cap
-from operator_agent.eligibility import (PERF_BASIS_OBJECTIVE, PERF_BASIS_PRIMARY_CASE,
+from operator_agent.core.backend_caps import Cap
+from operator_agent.decide.eligibility import (PERF_BASIS_OBJECTIVE, PERF_BASIS_PRIMARY_CASE,
                                         performance_verdict)
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 from tests.backend_fakes import DeclaredFakeBackend
 
 CASE_A = "A=16x16|B=16x16"
@@ -275,13 +275,13 @@ class TestTheAccountIsThreeState(unittest.TestCase):
     """账本收集（I95 搬到判据层）: 「量过但没得出」不许被当成 0"""
 
     def test_a_ledger_entry_without_a_number_stays_none(self):
-        from operator_agent.eligibility import case_speedups
+        from operator_agent.decide.eligibility import case_speedups
         out = case_speedups({"cases": {CASE_A: {"speedup_vs_baseline": None}}})
         self.assertIn(CASE_A, out)
         self.assertIsNone(out[CASE_A], "量过但没得出 ≠ 0")
 
     def test_the_hint_is_only_used_when_there_is_no_ledger(self):
-        from operator_agent.eligibility import case_speedups
+        from operator_agent.decide.eligibility import case_speedups
         self.assertEqual({CASE_A: 2.0}, case_speedups(
             {"cases": {CASE_A: {"speedup_vs_baseline": 2.0}}},
             case_key_hint=CASE_B, speedup_hint=9.0))
@@ -294,7 +294,7 @@ class TestTheReportSaysWhichStandardWasUsed(unittest.TestCase):
     """报告那一行（只读 `performance_verdict`，不重算）—— 三态"""
 
     def _lines(self, **m):
-        from operator_agent.report import _performance_verdict_lines
+        from operator_agent.core.report import _performance_verdict_lines
         return "\n".join(_performance_verdict_lines(m))
 
     def test_the_objective_basis_is_printed(self):
@@ -328,20 +328,20 @@ class TestOneProducerPerFact(unittest.TestCase):
         return (Path(__file__).resolve().parents[2] / rel).read_text(encoding="utf-8")
 
     def test_the_verdict_has_one_definition(self):
-        for rel in ("operator_agent/verifier.py", "operator_agent/conductor.py",
-                    "operator_agent/report.py"):
+        for rel in ("operator_agent/decide/verifier.py", "operator_agent/app/conductor.py",
+                    "operator_agent/core/report.py"):
             self.assertNotIn("def performance_verdict(", self._src(rel), rel)
-        self.assertEqual(1, self._src("operator_agent/eligibility.py")
+        self.assertEqual(1, self._src("operator_agent/decide/eligibility.py")
                          .count("def performance_verdict("))
 
     def test_the_gate_applies_the_verdict_in_one_method(self):
-        ve = self._src("operator_agent/verifier.py")
+        ve = self._src("operator_agent/decide/verifier.py")
         self.assertEqual(1, ve.count("def _apply_performance_verdict("))
         self.assertEqual(3, ve.count("self._apply_performance_verdict("),
                          "远端、本机、有声明目标却缺基线的拒绝出口")
 
     def test_the_primary_speedup_is_no_longer_the_success_criterion(self):
-        ve = self._src("operator_agent/verifier.py")
+        ve = self._src("operator_agent/decide/verifier.py")
         self.assertNotIn("passed = speedup >= min_required", ve,
                          "§16 的反模式就是这一行")
         self.assertEqual(2, ve.count("passed = True\n                if _win_scope")
@@ -349,20 +349,20 @@ class TestOneProducerPerFact(unittest.TestCase):
                          "两条路都只立前置条件（判决在返回前那一处算）")
 
     def test_the_report_only_reads_the_published_verdict(self):
-        rp = self._src("operator_agent/report.py")
+        rp = self._src("operator_agent/core/report.py")
         self.assertIn('_get', rp)
         for forbidden in ("aggregate_speedup(", "performance_verdict(", "case_speedups("):
             self.assertNotIn(forbidden, rp, forbidden)
         self.assertIn('m.get("performance_verdict")', rp)
 
     def test_the_verdict_publishes_the_registered_fields(self):
-        ve = self._src("operator_agent/verifier.py")
+        ve = self._src("operator_agent/decide/verifier.py")
         for field in ("\"basis\"", "\"passed\"", "\"value\"", "\"why\"",
                       "\"min_speedup\"", "\"regression_over_limit\"", "\"contract_frozen\""):
             self.assertIn(field, ve, field)
 
     def test_the_regression_judgement_stays_in_one_place(self):
-        ve = self._src("operator_agent/verifier.py")
+        ve = self._src("operator_agent/decide/verifier.py")
         self.assertIn("regression_over_limit(limits, speedups)", ve)
         self.assertNotIn("1 - speedup >", ve, "越限的算术只许在判据层写一遍")
 

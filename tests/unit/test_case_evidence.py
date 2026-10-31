@@ -41,12 +41,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import numpy as np
 
 from operator_agent import Conductor, KernelDatabase, MockGPU
-from operator_agent.contract import (BaselineDef, ContractError, DTypeSemantics,
+from operator_agent.core.contract import (BaselineDef, ContractError, DTypeSemantics,
                                      ShapeDist, case_key, freeze,
                                      freeze_from_task, load_dict)
-from operator_agent.eligibility import regression_over_limit, required_cases_ok
-from operator_agent.report import REPORT_NAME
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+from operator_agent.decide.eligibility import regression_over_limit, required_cases_ok
+from operator_agent.core.report import REPORT_NAME
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                     TargetSpec, TaskComplexity, TaskSchema,
                                     TaskType)
 
@@ -411,13 +411,13 @@ class TestOneProducerPerFact(unittest.TestCase):
         `contract.case_key` 是**再导出**（老调用点一字不动）；定义只许有一处 —— 数组路径与
         声明路径要是各写一份，「契约声明的 case」与「本次评的 case」迟早对不上。
         """
-        total = (self._src("operator_agent/bench_cases.py").count("def case_key(")
-                 + self._src("operator_agent/contract.py").count("def case_key("))
+        total = (self._src("operator_agent/decide/bench_cases.py").count("def case_key(")
+                 + self._src("operator_agent/core/contract.py").count("def case_key("))
         self.assertEqual(1, total)
-        self.assertIn("from .bench_cases import", self._src("operator_agent/contract.py"))
+        self.assertIn("from ..decide.bench_cases import", self._src("operator_agent/core/contract.py"))
 
     def test_the_two_faces_have_one_derivation_each(self):
-        el = self._src("operator_agent/eligibility.py")
+        el = self._src("operator_agent/decide/eligibility.py")
         self.assertEqual(1, el.count("def required_cases_ok("))
         self.assertEqual(1, el.count("def regression_over_limit("))
 
@@ -425,14 +425,14 @@ class TestOneProducerPerFact(unittest.TestCase):
         # Stage1: 收尾阶段改从运行状态对象读 (RunState), 参数因此变成 state.test_inputs。
         # 断言跟着改成新形状 —— 而不是抹掉前缀: 这条守卫要的就是「读的是本次运行的输入」
         # 这个结构事实, 结构变了它就该红一次, 由人确认。
-        cu = self._src("operator_agent/conductor.py")
+        cu = self._src("operator_agent/app/conductor.py")
         self.assertEqual(1, cu.count("case_key(state.test_inputs)"))
         self.assertEqual(1, cu.count("required_cases_ok(contract.required_cases"))
         self.assertEqual(1, cu.count("regression_over_limit(contract.max_regression"))
         self.assertIn("artifact.benchmark_data[\"case_key\"]", cu)
 
     def test_the_reporter_does_not_derive_the_evidence(self):
-        rp = self._src("operator_agent/report.py")
+        rp = self._src("operator_agent/core/report.py")
         for forbidden in ("required_cases_ok(", "regression_over_limit(", "case_key("):
             self.assertNotIn(forbidden, rp, forbidden)
 
@@ -443,7 +443,7 @@ class TestOneProducerPerFact(unittest.TestCase):
         区分不出「调用点自己写 True」与「读 L2 判定」，所以按结构钉 —— 调用点必须走
         `_l2_verdict`，而它只有一处定义、两个读者（两处各挑一次就会漂）。
         """
-        cu = self._src("operator_agent/conductor.py")
+        cu = self._src("operator_agent/app/conductor.py")
         self.assertEqual(1, cu.count("def _l2_verdict("))
         self.assertEqual(2, cu.count("self._l2_verdict(artifact)"),
                          "两个读者: correctness_verified 与条款 2 的 case 正确性")

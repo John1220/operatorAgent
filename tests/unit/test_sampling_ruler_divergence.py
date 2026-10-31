@@ -68,13 +68,13 @@ _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
 
 from operator_agent import Verifier  # noqa: E402
-from operator_agent.measurement import (  # noqa: E402
+from operator_agent.decide.measurement import (  # noqa: E402
     LINEAGE_RULER_KEY, RULER_REPORTED, RULER_UNREPORTED, cross_round_ruler, l2_ruler_reading,
 )
-from operator_agent.backend_caps import Cap  # noqa: E402
-from operator_agent.mock_gpu import ExecutionResult  # noqa: E402
-from operator_agent.remote_executor import RemoteExecutionResult  # noqa: E402
-from operator_agent.schemas import (  # noqa: E402
+from operator_agent.core.backend_caps import Cap  # noqa: E402
+from operator_agent.execute.mock_gpu import ExecutionResult  # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutionResult  # noqa: E402
+from operator_agent.core.schemas import (  # noqa: E402
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType,
 )
@@ -210,7 +210,7 @@ class TestTheSecondReadingUsesTheSharedRule(unittest.TestCase):
 
     def test_the_and_form_thresholds_are_not_a_second_copy_of_the_rule(self):
         """第二个读数必须**问**那个模块, 不许在 verifier 里再写一遍比较式"""
-        src = (_ROOT / "operator_agent" / "verifier.py").read_text(encoding="utf-8")
+        src = (_ROOT / "operator_agent" / "decide" / "verifier.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                   and n.name == "_verify_single_set")

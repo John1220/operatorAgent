@@ -37,10 +37,10 @@ sys.path.insert(0, str(REPO))
 
 import numpy as np
 
-from operator_agent.conductor import Conductor
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.app.conductor import Conductor
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType)
 
 SNAP = "execution_snapshot.json"
@@ -109,7 +109,7 @@ class TestTornCheckpointIsNeverInvisible(unittest.TestCase):
             art, _, _ = _run(d, _task("atomic1"), rounds=1)
             snap_path = Path(art.saved_dir) / SNAP
             before = json.loads(snap_path.read_text(encoding="utf-8"))
-            with mock.patch("operator_agent.conductor.json.dump",
+            with mock.patch("operator_agent.app.conductor.json.dump",
                             side_effect=TypeError("模拟写到一半崩了")):
                 _run(d, _task("atomic1"), rounds=2, resume_from=art.saved_dir)
             self.assertTrue(snap_path.exists(), "写失败把原快照删掉了")
@@ -259,8 +259,8 @@ class TestSnapshotLookupFollowsTheConfiguration(unittest.TestCase):
     def test_staging_snapshot_lands_under_the_configured_root(self):
         """第 1 轮还没 save 时的 staging 目录也不许绕开配置 (同一条 env 的两个分支)"""
         with tempfile.TemporaryDirectory() as d:
-            from operator_agent.schemas import KernelArtifact, VerificationResult
-            from operator_agent.schemas import VerificationLevel
+            from operator_agent.core.schemas import KernelArtifact, VerificationResult
+            from operator_agent.core.schemas import VerificationLevel
             c = _conductor(d)
             got = c._flush_snapshot(task=_task("stage1"), artifact_dir=None, round_done=1,
                                     current_sketch=None, current_code=PYTHON_MATMUL,

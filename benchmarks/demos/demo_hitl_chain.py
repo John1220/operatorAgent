@@ -63,13 +63,13 @@ for _key, _value in (("OPERATOR_AGENT_OUTPUT_DIR", str(RUN_ROOT / "output")),
                      ("OPERATOR_AGENT_FAILURE_DB", "off")):
     os.environ.setdefault(_key, _value)
 
-from operator_agent.contract import freeze_from_task  # noqa: E402
-from operator_agent.failure_route import classify  # noqa: E402
-from operator_agent.intent_parser import IntentParser  # noqa: E402
-from operator_agent.mock_gpu import MockGPU  # noqa: E402
-from operator_agent.report import write_report  # noqa: E402
-from operator_agent.schemas import KernelArtifact, VerificationLevel  # noqa: E402
-from operator_agent.verifier import Verifier  # noqa: E402
+from operator_agent.core.contract import freeze_from_task  # noqa: E402
+from operator_agent.decide.failure_route import classify  # noqa: E402
+from operator_agent.app.intent_parser import IntentParser  # noqa: E402
+from operator_agent.execute.mock_gpu import MockGPU  # noqa: E402
+from operator_agent.core.report import write_report  # noqa: E402
+from operator_agent.core.schemas import KernelArtifact, VerificationLevel  # noqa: E402
+from operator_agent.decide.verifier import Verifier  # noqa: E402
 
 
 NL_REQUEST = "把 64x64x64 的 fp32 矩阵乘法写成算子"

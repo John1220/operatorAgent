@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.demos import demo_run_layout as demo  # noqa: E402
-from operator_agent import run_layout as rl  # noqa: E402
+from operator_agent.core import run_layout as rl  # noqa: E402
 
 
 class TestTheRunLayoutDemo(unittest.TestCase):

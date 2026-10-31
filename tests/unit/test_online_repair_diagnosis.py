@@ -8,17 +8,17 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent.bench_cases import BenchmarkCase, TensorSpec
-from operator_agent.contract import freeze_from_task
-from operator_agent.fixer import FixerAgent
-from operator_agent.intent_parser import IntentParser
-from operator_agent.repair_diagnoser import (diagnose_candidate,
+from operator_agent.decide.bench_cases import BenchmarkCase, TensorSpec
+from operator_agent.core.contract import freeze_from_task
+from operator_agent.generate.fixer import FixerAgent
+from operator_agent.app.intent_parser import IntentParser
+from operator_agent.generate.repair_diagnoser import (diagnose_candidate,
                                               validate_candidate_diagnosis)
-from operator_agent.repair_loop import repair
-from operator_agent.run_contract import code_hash, digest
-from operator_agent.quality_suite import task_for
-from operator_agent.tolerance import effective_atol
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.generate.repair_loop import repair
+from operator_agent.core.run_contract import code_hash, digest
+from operator_agent.decide.quality_suite import task_for
+from operator_agent.core.tolerance import effective_atol
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
 
 
 SOURCE = (Path(__file__).resolve().parents[1] / 'fixtures/single_candidate_unmasked_variance.txt').read_text()

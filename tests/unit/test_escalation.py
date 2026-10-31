@@ -1,6 +1,6 @@
 """§10.3 的三条件升级门: 「什么时候才许让 LLM 做结构性改动」
 
-判据本体 (`operator_agent/escalation.py`) 只证算得对; 这里同时证**它接在生产链路上**:
+判据本体 (`operator_agent/decide/escalation.py`) 只证算得对; 这里同时证**它接在生产链路上**:
 门关 ⇒ 不问 LLM 要结构改动 (只做参数搜索), 门开 ⇒ 问, 且升级买到 K 轮。
 
 最要紧的一条边界: 门开需要**三条件同时成立**, 而条件 2 今天有**两把**量具 (`smem-bound`
@@ -25,13 +25,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from operator_agent import escalation
-from operator_agent.conductor import MAX_STAGNANT_ROUNDS, Conductor
-from operator_agent.escalation import (
+from operator_agent.decide import escalation
+from operator_agent.app.conductor import MAX_STAGNANT_ROUNDS, Conductor
+from operator_agent.decide.escalation import (
     COND_DIRECTION, COND_HARD_LIMIT, COND_PLATEAU, EscalationInputs, decide,
     plateaued, smem_bound_evidence, untried_directions,
 )
-from operator_agent.kernel_db import KernelDatabase
+from operator_agent.core.kernel_db import KernelDatabase
 from tests.unit.test_measurement_validity import (
     LaunchDominatedGPU, NET_MS_LAYERNORM_SMALL, NET_MS_MATMUL_4096,
 )
@@ -205,14 +205,14 @@ class TestTheGateInTheProductionLoop(unittest.TestCase):
 
     def test_with_hard_limit_evidence_and_a_plateau_the_llm_is_asked(self):
         """三条件成立 ⇒ 问 LLM, 且升级买到 K 轮 (停滞计数清零 ⇒ 跑得比上限更久)"""
-        from operator_agent.resource_check import (SharedMemoryEvidence, assess_shared_memory,
+        from operator_agent.decide.resource_check import (SharedMemoryEvidence, assess_shared_memory,
                                                    source_resource_binding)
         def native_report(code, caps, kind):
             binding = source_resource_binding(code)
             return assess_shared_memory(SharedMemoryEvidence(binding=binding,
                 kind='native_compiler', producer='controlled-test-compiler',
                 native_bytes=240*1024), caps, binding=binding)
-        with unittest.mock.patch('operator_agent.conductor.check_resource_feasibility', native_report):
+        with unittest.mock.patch('operator_agent.app.conductor.check_resource_feasibility', native_report):
             art, out, tags = self._run(_TightTileLlm())
         self.assertIn("Search", tags, f"三条件都成立却没问 LLM: {tags}")
         self.assertIn("结构升级门通过", out)

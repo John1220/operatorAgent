@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from benchmarks.demos import demo_agent_runtime as demo  # noqa: E402
-from operator_agent import agent_runtime as ar  # noqa: E402
+from operator_agent.generate import agent_runtime as ar  # noqa: E402
 
 
 class TestTheAgentRuntimeDemo(unittest.TestCase):

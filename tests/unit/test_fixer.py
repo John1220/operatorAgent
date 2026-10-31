@@ -20,13 +20,13 @@ import pathlib
 
 import numpy as np
 
-import operator_agent.conductor as conductor
+import operator_agent.app.conductor as conductor
 
-from operator_agent.fixer import FixerAgent
-from operator_agent.conductor import Conductor
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.schemas import (
+from operator_agent.generate.fixer import FixerAgent
+from operator_agent.app.conductor import Conductor
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,
     TaskType, TaskComplexity, Precision,
     VerificationResult, VerificationLevel,

@@ -24,9 +24,9 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "ar": "operator_agent/agent_runtime.py",
-    "fx": "operator_agent/fixer.py",
-    "cu": "operator_agent/conductor.py",
+    "ar": "operator_agent/generate/agent_runtime.py",
+    "fx": "operator_agent/generate/fixer.py",
+    "cu": "operator_agent/app/conductor.py",
     "pm": "operator_agent/prompts/fixer_repair.md",
 }
 

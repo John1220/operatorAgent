@@ -15,12 +15,12 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 
-from operator_agent import session_inputs as si
-from operator_agent.input_fidelity import describe_inputs
-from operator_agent.remote_input_fidelity import decode_json_inputs, JSON_PROTOCOL
-from operator_agent.remote_executor import _RemoteSession, SSHExecutor, SessionError
-from operator_agent.measurement import TRANSPORT_UNKNOWN
-from operator_agent.run_contract import protocol_identity
+from operator_agent.decide import session_inputs as si
+from operator_agent.decide.input_fidelity import describe_inputs
+from operator_agent.decide.remote_input_fidelity import decode_json_inputs, JSON_PROTOCOL
+from operator_agent.execute.remote_executor import _RemoteSession, SSHExecutor, SessionError
+from operator_agent.decide.measurement import TRANSPORT_UNKNOWN
+from operator_agent.core.run_contract import protocol_identity
 
 
 def prepared(inputs):
@@ -321,7 +321,7 @@ def test_client_receipt_guard_stops_unknown_inputs_without_candidate_retry(monke
 
 def test_upload_commit_and_final_rpc_do_not_get_independent_deadlines():
     peer = '''import sys,json,time
-from operator_agent.session_inputs import SessionInputs
+from operator_agent.decide.session_inputs import SessionInputs
 c=SessionInputs()
 for line in sys.stdin:
  r=json.loads(line); a=r['action']
@@ -353,8 +353,8 @@ for line in sys.stdin:
 
 def test_cache_failures_are_unknown_to_production_verifier_not_candidate_failures(monkeypatch):
     from operator_agent import IntentParser, Verifier
-    from operator_agent.failure_route import classify, ROUTE_HOLD
-    from operator_agent.schemas import VerificationLevel
+    from operator_agent.decide.failure_route import classify, ROUTE_HOLD
+    from operator_agent.core.schemas import VerificationLevel
     backend = SSHExecutor(host="offline", persistent=True)
     backend._deployed = True
     backend.compile = Mock(return_value={"success": True})
@@ -369,5 +369,5 @@ def test_cache_failures_are_unknown_to_production_verifier_not_candidate_failure
 
 def test_new_session_sources_are_deployed_and_frozen_protocol_bound():
     files = [Path(remote).name for _, remote in SSHExecutor(host="offline")._remote_files()]
-    assert files.index("session_inputs.py") < files.index("runner_server.py")
-    assert "operator_agent/session_inputs.py" in protocol_identity()
+    assert files.index("session_inputs.py") < files.index("runner_server.py")   # 远端部署名是裸名
+    assert "operator_agent/decide/session_inputs.py" in protocol_identity()

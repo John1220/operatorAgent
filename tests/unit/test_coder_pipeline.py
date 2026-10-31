@@ -23,13 +23,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import numpy as np
 
-from operator_agent.coder_pipeline import CoderPipeline, RepairState
-from operator_agent.planner import PlannerAgent
-from operator_agent.resource_check import MemCaps
-from operator_agent.rule_templates import RuleTemplateCoder
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.prompt_manager import PromptManager
-from operator_agent.schemas import (
+from operator_agent.generate.coder_pipeline import CoderPipeline, RepairState
+from operator_agent.generate.planner import PlannerAgent
+from operator_agent.decide.resource_check import MemCaps
+from operator_agent.core.rule_templates import RuleTemplateCoder
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.generate.prompt_manager import PromptManager
+from operator_agent.core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec, UnifiedSketch,
     TilingStrategy,
     TaskType, TaskComplexity, Precision,
@@ -255,7 +255,7 @@ class TestRuleTemplateFallback(unittest.TestCase):
 class TestCoderAgentWithPipeline(unittest.TestCase):
 
     def test_agent_uses_pipeline_when_injected(self):
-        from operator_agent.agents import CoderAgent
+        from operator_agent.generate.agents import CoderAgent
         llm = MockLLM(chat_handler=lambda p, t: FENCED_MATMUL)
         pipe = CoderPipeline(llm, KernelDatabase())
         coder = CoderAgent(KernelDatabase(), llm=llm, pipeline=pipe)
@@ -264,7 +264,7 @@ class TestCoderAgentWithPipeline(unittest.TestCase):
 
     def test_agent_legacy_without_pipeline(self):
         """未注入 pipeline 时走 legacy 单线程生成 (兼容)"""
-        from operator_agent.agents import CoderAgent
+        from operator_agent.generate.agents import CoderAgent
         llm = MockLLM(chat_handler=lambda p, t: PYTHON_MATMUL)
         coder = CoderAgent(KernelDatabase(), llm=llm)
         code = coder.run(_sketch(), _task())
@@ -311,7 +311,7 @@ class TestResourceGate(unittest.TestCase):
             [TRITON_BIG_TILE], "triton", "matmul"))
 
     def _proven_oversized(self):
-        from operator_agent.resource_check import (SharedMemoryEvidence, assess_shared_memory,
+        from operator_agent.decide.resource_check import (SharedMemoryEvidence, assess_shared_memory,
                                                    source_resource_binding)
         binding = source_resource_binding(TRITON_BIG_TILE)
         return assess_shared_memory(SharedMemoryEvidence(binding=binding, kind='native_compiler',
@@ -319,7 +319,7 @@ class TestResourceGate(unittest.TestCase):
 
     def test_an_explicit_shared_resource_refusal_still_reaches_the_gate(self):
         from unittest.mock import patch
-        with patch('operator_agent.coder_pipeline.check_resource_feasibility',
+        with patch('operator_agent.generate.coder_pipeline.check_resource_feasibility',
                    return_value=self._proven_oversized()):
             self.assertEqual([], self._pipe(MemCaps(228))._prune_to_finalists(
                 [TRITON_BIG_TILE], 'triton', 'matmul'))
@@ -340,7 +340,7 @@ class TestResourceGate(unittest.TestCase):
         """修复基线的 issues 带着上界约束 —— 修代码的提示从此有硬数字 (G3 的流程半边)"""
         pipe = self._pipe(MemCaps(228))
         from unittest.mock import patch
-        with patch('operator_agent.coder_pipeline.check_resource_feasibility',
+        with patch('operator_agent.generate.coder_pipeline.check_resource_feasibility',
                    return_value=self._proven_oversized()):
             best = pipe._best_failure([TRITON_BIG_TILE], "triton", "matmul")
         self.assertIsNotNone(best)
@@ -351,8 +351,8 @@ class TestResourceGate(unittest.TestCase):
         """接线证人: hw_info → detect_hardware_caps → pipeline.caps (execute 内注入)"""
         import contextlib
         import io
-        from operator_agent.conductor import Conductor
-        from operator_agent.mock_gpu import MockGPU
+        from operator_agent.app.conductor import Conductor
+        from operator_agent.execute.mock_gpu import MockGPU
         from tests.unit.test_template_queue import _KernelLLM, _task, _inputs
 
         c = Conductor(backend=MockGPU(), llm=_KernelLLM(),

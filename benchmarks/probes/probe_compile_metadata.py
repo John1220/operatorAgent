@@ -9,17 +9,17 @@
 import os, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from operator_agent._harness_controls import enable_for_harness
+from operator_agent.app._harness_controls import enable_for_harness
 enable_for_harness()
 os.environ.setdefault("OPERATOR_AGENT_KERNEL_DB", "off")
 os.environ.setdefault("OPERATOR_AGENT_FAILURE_DB", "off")
 
 import numpy as np
-from operator_agent.remote_executor import RemoteExecutor
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TaskSchema,
+from operator_agent.execute.remote_executor import RemoteExecutor
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TaskSchema,
                                     TaskType, TargetSpec)
-from operator_agent.triton_matmul_template import instantiate
-from operator_agent.verifier import Verifier
+from operator_agent.generate.triton_matmul_template import instantiate
+from operator_agent.decide.verifier import Verifier
 
 task = TaskSchema(task_id="probe-meta", task_type=TaskType.CODE_TRANSLATION,
                   source=SourceSpec(kernel_type="matmul"),

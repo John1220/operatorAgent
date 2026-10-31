@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from benchmarks.experiments.s5.s5_vertical_validation import VerticalValidator, GOOD_FIXTURE, BAD_FIXTURE
-from operator_agent.run_contract import code_hash
+from operator_agent.core.run_contract import code_hash
 
 
 def test_good_fixture_keeps_source_contract_and_three_input_checks():

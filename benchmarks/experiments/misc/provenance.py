@@ -63,7 +63,7 @@ def _has_torch() -> bool:
 
 
 def _module_to_rel(mod: str) -> Optional[str]:
-    """`operator_agent.conductor` -> `operator_agent/conductor.py`; 包 -> `<pkg>/__init__.py`"""
+    """`operator_agent.conductor` -> `operator_agent/app/conductor.py`; 包 -> `<pkg>/__init__.py`"""
     parts = mod.split(".")
     if parts[0] not in LOCAL_PACKAGES:
         return None
@@ -93,7 +93,7 @@ def _is_package(mod: str, root: str) -> bool:
 def local_imports(path: Path, root: str = ".") -> List[str]:
     """这个文件 import 了哪些本仓模块 —— 含**相对 import** (`from .verifier import …`)
 
-    ⚠️ 第一版只认绝对名, 于是 `operator_agent/conductor.py` 里那一串 `from .xxx import` 一条也没
+    ⚠️ 第一版只认绝对名, 于是 `operator_agent/app/conductor.py` 里那一串 `from .xxx import` 一条也没
     认出来, 闭包停在 8 个文件上、verifier/measurement 全都不在名单里 —— 而这份名单的用途恰恰是
     「谁变了这份读数就不该归给 HEAD」。少一层等于这条守卫在最重要的那条边上从没跑过。
     只看可执行语句: 注释与 docstring 里提到的模块名不算 (doc 49 §八 那条「被 docstring 喂出假阳性」)。
@@ -149,7 +149,7 @@ def closure(entry: str, root: str = ".", extra_entries: Sequence[str] = ()) -> L
         real = os.path.realpath(str(path))
         key = os.path.relpath(real, str(rp)) if real.startswith(str(rp) + os.sep) else rel
         found.setdefault(key, rel)
-        # 包的 `__init__.py` 也是「跑过的代码」: `import operator_agent.conductor` 会先执行
+        # 包的 `__init__.py` 也是「跑过的代码」: `import operator_agent.app.conductor` 会先执行
         # `operator_agent/__init__.py`, 而那个文件自己又 import 了一批模块
         parts = rel.split("/")[:-1]
         for i in range(1, len(parts) + 1):

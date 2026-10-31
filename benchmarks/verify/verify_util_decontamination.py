@@ -43,9 +43,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.measurement import CONTAMINATION_UTIL_PCT      # noqa: E402
-from operator_agent.remote_executor import RemoteExecutor          # noqa: E402
-from operator_agent.verifier import Verifier                       # noqa: E402
+from operator_agent.decide.measurement import CONTAMINATION_UTIL_PCT      # noqa: E402
+from operator_agent.execute.remote_executor import RemoteExecutor          # noqa: E402
+from operator_agent.decide.verifier import Verifier                       # noqa: E402
 
 TRITON_LN = '''
 import torch, triton, triton.language as tl
@@ -119,7 +119,7 @@ def mm_inputs(n):
 
 
 def make_task(kernel_type):
-    from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+    from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                         TargetSpec, TaskComplexity, TaskSchema,
                                         TaskType)
     return TaskSchema(

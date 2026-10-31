@@ -11,7 +11,7 @@ import sys
 import time
 
 from benchmarks.experiments.s5 import s5_formal_run, s5_perf_evaluator, s5_plugin_probe, s5_plugin_workflow, s5_runtime, s5_shared_gpu, s5_verify_remote
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = 's5-kernel-performance-trial-v1'
@@ -68,8 +68,8 @@ def _identity():
              'benchmarks/experiments/s5/s5_verify_remote.py', 'benchmarks/experiments/s5/s5_shared_gpu.py',
              'benchmarks/experiments/s5/s5_gateway_http.py', 'benchmarks/experiments/s5/s5_gateway_supervisor.py',
              'benchmarks/experiments/s5/s5_gateway_transport.py', 'benchmarks/experiments/s5/s5_development_service.py',
-             'benchmarks/experiments/s5/s5_candidate_extraction.py', 'operator_agent/mcp_server.py',
-             'operator_agent/cli.py', 'integrations/dsh-operator/index.mjs')
+             'benchmarks/experiments/s5/s5_candidate_extraction.py', 'operator_agent/app/mcp_server.py',
+             'operator_agent/app/cli.py', 'integrations/dsh-operator/index.mjs')
     return {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in paths}
 
 

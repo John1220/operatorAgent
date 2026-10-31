@@ -20,10 +20,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from benchmarks.drivers.input_fidelity_h20 import AcceptanceSSH, GOOD
-from operator_agent.input_fidelity import describe_inputs, check_readback
-from operator_agent.remote_input_fidelity import encode_json_inputs
-from operator_agent.remote_executor import SessionError
-from operator_agent.run_layout import new_run_root, run_layout, ROLE_HARNESS, ROLE_ORACLE, ROLE_REPORT_WRITER
+from operator_agent.decide.input_fidelity import describe_inputs, check_readback
+from operator_agent.decide.remote_input_fidelity import encode_json_inputs
+from operator_agent.execute.remote_executor import SessionError
+from operator_agent.core.run_layout import new_run_root, run_layout, ROLE_HARNESS, ROLE_ORACLE, ROLE_REPORT_WRITER
 
 PEER = '''import os,sys,json,time
 from session_control import runner_identity

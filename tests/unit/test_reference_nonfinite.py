@@ -67,8 +67,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from operator_agent import MockGPU, Verifier
-from operator_agent.remote_executor import RemoteExecutionResult
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.execute.remote_executor import RemoteExecutionResult
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType,
                                     VerificationLevel, VerificationResult)
 from tests.backend_fakes import DeclaredFakeBackend

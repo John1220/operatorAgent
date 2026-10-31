@@ -4,8 +4,8 @@ import json
 import pytest
 
 from benchmarks.experiments.misc import operator_quality as cli
-from operator_agent.quality_evaluation import make_plan
-from operator_agent.quality_pairing import make_paired_plan
+from operator_agent.decide.quality_evaluation import make_plan
+from operator_agent.decide.quality_pairing import make_paired_plan
 
 
 def test_paired_plan_only_is_pure_and_published_exclusively(tmp_path, capsys, monkeypatch):

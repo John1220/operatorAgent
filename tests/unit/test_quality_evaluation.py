@@ -6,11 +6,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent import quality_evaluation as q
-from operator_agent import quality_suite
-from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
-from operator_agent.schemas import VerificationLevel as Level, VerificationResult
-from operator_agent.run_contract import digest
+from operator_agent.decide import quality_evaluation as q
+from operator_agent.decide import quality_suite
+from operator_agent.execute.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
+from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.core.run_contract import digest
 
 
 CASE = 'layernorm-tail'

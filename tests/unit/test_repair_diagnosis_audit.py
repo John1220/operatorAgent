@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.experiments.misc import repair_diagnosis as d
-from operator_agent.run_contract import code_hash, digest
+from operator_agent.core.run_contract import code_hash, digest
 from tests.unit.test_repair_diagnoser import CASE, FIXTURES, RAW
 
 
@@ -183,7 +183,7 @@ def test_producer_snapshot_is_data_never_executed_or_attested(tmp_path):
 def test_audit_cli_is_read_only_and_does_not_touch_network_arrays_or_credit(tmp_path,monkeypatch,capsys):
     from benchmarks import _numerical_repair as nr
     from benchmarks.drivers import workload_codegen_h20 as driver
-    from operator_agent import llm_client as lc
+    from operator_agent.execute import llm_client as lc
     root=build(tmp_path);capsys.readouterr();before=snapshot(root)
     forbidden=lambda *a,**k:pytest.fail('audit performed side effects')
     monkeypatch.setattr(d,'atomic_json',forbidden);monkeypatch.setattr(d.tempfile,'mkdtemp',forbidden)

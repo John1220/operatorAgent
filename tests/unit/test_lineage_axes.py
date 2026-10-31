@@ -32,13 +32,13 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from operator_agent.conductor import Conductor, _round_axes
-from operator_agent.kernel_db import KernelDatabase
-from operator_agent.mock_gpu import MockGPU
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.app.conductor import Conductor, _round_axes
+from operator_agent.core.kernel_db import KernelDatabase
+from operator_agent.execute.mock_gpu import MockGPU
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskComplexity, TaskSchema, TaskType,
                                     VerificationLevel, VerificationResult)
-from operator_agent.verifier import Verifier
+from operator_agent.decide.verifier import Verifier
 
 AI_OF = Verifier._compute_arithmetic_intensity
 
@@ -135,7 +135,7 @@ class AxesCrossThePersistenceBoundary(unittest.TestCase):
         c = Conductor(backend=MockGPU(), kernel_db=KernelDatabase(jsonl_path=None),
                       llm=AxesCrossThePersistenceBoundary._Llm(self),
                       max_optimize_rounds=1)
-        from operator_agent.conductor import Conductor as C
+        from operator_agent.app.conductor import Conductor as C
         c.store.output_dir = Path(self.tmp.name)
         return c
 

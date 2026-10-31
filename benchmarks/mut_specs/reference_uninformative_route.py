@@ -26,10 +26,10 @@ if _ROOT not in sys.path:
 from benchmarks.calibration.mutation_calibrate import Row  # noqa: E402
 
 FILES = {
-    "kdb": "operator_agent/kernel_db.py",
-    "fix": "operator_agent/fixer.py",
-    "cond": "operator_agent/conductor.py",
-    "ver": "operator_agent/verifier.py",
+    "kdb": "operator_agent/core/kernel_db.py",
+    "fix": "operator_agent/generate/fixer.py",
+    "cond": "operator_agent/app/conductor.py",
+    "ver": "operator_agent/decide/verifier.py",
 }
 
 TARGETS = [

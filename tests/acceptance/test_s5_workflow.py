@@ -20,8 +20,9 @@ from benchmarks.experiments.s5.s5_gateway_http import GatewayServer
 from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
 from benchmarks.experiments.s5.s5_vertical_tool_provider import _sse
 from benchmarks.experiments.s5.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
-from operator_agent import hitl_tools, s5_verify_client as client, s5_shared_budget as shared
-from operator_agent.run_contract import code_hash
+from operator_agent.app import hitl_tools
+from operator_agent.execute import s5_verify_client as client, s5_shared_budget as shared
+from operator_agent.core.run_contract import code_hash
 
 DECLARATION = dict(request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',
                    dsl='python', precision='fp32')
@@ -134,7 +135,7 @@ def test_core_opt_in_never_falls_back_to_a_local_backend(tmp_path, monkeypatch):
         with pytest.raises(hitl_tools.ToolError) as exc:
             function(*args)
         assert exc.value.code == 's5_development_only'
-    from operator_agent.mcp_server import _tool_definitions
+    from operator_agent.app.mcp_server import _tool_definitions
     with pytest.raises(ValueError, match='incomplete'):
         _tool_definitions()
 

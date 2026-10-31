@@ -17,7 +17,7 @@ from pathlib import Path
 import time
 
 from benchmarks.experiments.s5 import s5_preflight_plan, s5_runtime, s5_task_manifest, s5_three_group_run, s5_verify_remote
-from operator_agent.run_contract import digest
+from operator_agent.core.run_contract import digest
 
 SCHEMA = 's5-three-group-service-run-v1'
 

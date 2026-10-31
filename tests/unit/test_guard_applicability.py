@@ -24,11 +24,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from operator_agent.anticheat import static_audit  # noqa: E402
-from operator_agent.eligibility import derive_eligibility  # noqa: E402
-from operator_agent.interface_contract import check_kernel_interface  # noqa: E402
-from operator_agent.remote_executor import SSHExecutor  # noqa: E402
-from operator_agent.source_lang import (AST_FAMILY, COVERAGE_AST, COVERAGE_NONE,  # noqa: E402
+from operator_agent.decide.anticheat import static_audit  # noqa: E402
+from operator_agent.decide.eligibility import derive_eligibility  # noqa: E402
+from operator_agent.core.interface_contract import check_kernel_interface  # noqa: E402
+from operator_agent.execute.remote_executor import SSHExecutor  # noqa: E402
+from operator_agent.core.source_lang import (AST_FAMILY, COVERAGE_AST, COVERAGE_NONE,  # noqa: E402
                                         COVERAGE_REGEX, DOES_NOT_APPLY, UNKNOWN,
                                         classify, flag_from_metrics)
 
@@ -176,9 +176,9 @@ class TestTheReceiptPointReadsIt(unittest.TestCase):
     """收口点 (oracle) 真的读了它, 并且三态在 provenance 里分得开"""
 
     def _oracle(self, **raw_extra):
-        from operator_agent.contract import freeze_from_task
-        from operator_agent.oracle import evaluate
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+        from operator_agent.core.contract import freeze_from_task
+        from operator_agent.decide.oracle import evaluate
+        from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                             TargetSpec, TaskSchema, TaskType)
         task = TaskSchema(task_id="guard-app", task_type=TaskType.CODE_TRANSLATION,
                           source=SourceSpec(kernel_type="matmul"),
@@ -219,10 +219,10 @@ class TestTheVerifierPublishesItAndTheLoopPassesItOn(unittest.TestCase):
     """生产路径: L1 → (Conductor) → L3 的资格判定, 以及部署链"""
 
     def test_the_verifier_publishes_the_judgement(self):
-        from operator_agent.mock_gpu import MockGPU
-        from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec,
+        from operator_agent.execute.mock_gpu import MockGPU
+        from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec,
                                             TargetSpec, TaskSchema, TaskType)
-        from operator_agent.verifier import Verifier
+        from operator_agent.decide.verifier import Verifier
         task = TaskSchema(task_id="pub", task_type=TaskType.CODE_TRANSLATION,
                           source=SourceSpec(kernel_type="matmul"),
                           target=TargetSpec(hardware="mock", dsl="python"),

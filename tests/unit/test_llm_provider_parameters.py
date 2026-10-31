@@ -6,9 +6,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from operator_agent import llm_client as lc
-from operator_agent.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
-from operator_agent.llm_client import LLMClient
+from operator_agent.execute import llm_client as lc
+from operator_agent.execute.llm_budget import LLMCallBudget, LLMCallLimits, LLMCallRefused
+from operator_agent.execute.llm_client import LLMClient
 
 
 BASE_URL = "https://provider.invalid/v1"

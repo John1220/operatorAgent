@@ -19,10 +19,10 @@ import unittest
 
 import numpy as np
 
-from operator_agent.bench_cases import BenchmarkCase, TensorSpec, case_spec, cases_from_shapes
-from operator_agent.remote_input_fidelity import (SEED_PROTOCOL, materialize_seed_inputs,
+from operator_agent.decide.bench_cases import BenchmarkCase, TensorSpec, case_spec, cases_from_shapes
+from operator_agent.decide.remote_input_fidelity import (SEED_PROTOCOL, materialize_seed_inputs,
                                                   seed_input_digest)
-from operator_agent.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
+from operator_agent.core.schemas import (ConstraintSpec, Precision, SourceSpec, TargetSpec,
                                     TaskSchema, TaskType)
 
 
@@ -74,8 +74,8 @@ class TestBothSidesMaterializeTheSameBytes(unittest.TestCase):
 class TestControlSideOnlyReplacesBytesWhenIdentical(unittest.TestCase):
 
     def _verifier(self):
-        from operator_agent.mock_gpu import MockGPU
-        from operator_agent.verifier import Verifier
+        from operator_agent.execute.mock_gpu import MockGPU
+        from operator_agent.decide.verifier import Verifier
         return Verifier(MockGPU())
 
     def test_matching_inputs_get_a_spec(self):
@@ -141,7 +141,7 @@ class TestTheTransportFallsBackToBytes(unittest.TestCase):
     """真机过一次 90 MB 太贵；这里用替身把两条分支都跑到。"""
 
     def _executor(self, responses):
-        from operator_agent.remote_executor import SSHExecutor
+        from operator_agent.execute.remote_executor import SSHExecutor
         ex = SSHExecutor.__new__(SSHExecutor)
         ex.platform = "nvidia"
         ex._persistent = False
@@ -228,7 +228,7 @@ class TestProtocolIdentitySurvivesAPackagedLayout(unittest.TestCase):
     def test_it_hashes_package_relative_files_from_any_cwd(self):
         import os
         import tempfile
-        from operator_agent import run_contract
+        from operator_agent.core import run_contract
 
         here = run_contract.protocol_identity()
         cwd = os.getcwd()
@@ -239,29 +239,30 @@ class TestProtocolIdentitySurvivesAPackagedLayout(unittest.TestCase):
             os.chdir(cwd)
         self.assertEqual(here, elsewhere, "换 cwd 之后身份变了 —— 说明路径不是包相对的")
         self.assertIn("remote_scripts/run_kernel.py", here)
-        self.assertIn("operator_agent/verifier.py", here)
+        self.assertIn("operator_agent/decide/verifier.py", here)
 
     def test_every_hashed_file_lives_under_the_package_parent(self):
         from pathlib import Path
-        from operator_agent import run_contract
+        from operator_agent.core import run_contract
 
-        root = Path(run_contract.__file__).resolve().parent.parent
+        # 2026-10-31: run_contract 在 operator_agent/core/ 下 ⇒ 仓库根在再上一层
+        root = Path(run_contract.__file__).resolve().parents[2]
         self.assertTrue((root / "operator_agent").is_dir())
         self.assertTrue((root / "remote_scripts").is_dir())
         identity = run_contract.protocol_identity()
         self.assertEqual(len(identity), 73)
-        self.assertIn('operator_agent/s5_verify_client.py', identity)
-        self.assertTrue({"operator_agent/generation_spec.py", "operator_agent/prompt_manager.py",
-                         "operator_agent/fixer.py", "operator_agent/repair_loop.py",
-                         "operator_agent/repair_stride_diagnoser.py", "operator_agent/repair_scalar_diagnoser.py",
-                         "operator_agent/compile_evidence.py", "operator_agent/generation_context.py",
-                         "operator_agent/task_budget.py", "operator_agent/autonomous.py",
-                         "operator_agent/tool_evidence.py", "operator_agent/hitl_tools.py",
-                         "operator_agent/report.py", "operator_agent/run_layout.py",
-                         "operator_agent/task_cancellation.py", "operator_agent/tool_calls.py",
-                         "operator_agent/task_clock.py", "operator_agent/candidates.py",
-                         "operator_agent/coder_pipeline.py", "operator_agent/triton_matmul_template.py",
-                         "operator_agent/agents.py", "operator_agent/execution_audit.py",
-                         "operator_agent/backend_ownership.py", "operator_agent/s5_shared_budget.py",
-                         "operator_agent/s5_inner_budget.py"} <= set(identity))
+        self.assertIn('operator_agent/execute/s5_verify_client.py', identity)
+        self.assertTrue({"operator_agent/generate/generation_spec.py", "operator_agent/generate/prompt_manager.py",
+                         "operator_agent/generate/fixer.py", "operator_agent/generate/repair_loop.py",
+                         "operator_agent/generate/repair_stride_diagnoser.py", "operator_agent/generate/repair_scalar_diagnoser.py",
+                         "operator_agent/decide/compile_evidence.py", "operator_agent/generate/generation_context.py",
+                         "operator_agent/execute/task_budget.py", "operator_agent/app/autonomous.py",
+                         "operator_agent/decide/tool_evidence.py", "operator_agent/app/hitl_tools.py",
+                         "operator_agent/core/report.py", "operator_agent/core/run_layout.py",
+                         "operator_agent/execute/task_cancellation.py", "operator_agent/app/tool_calls.py",
+                         "operator_agent/execute/task_clock.py", "operator_agent/core/candidates.py",
+                         "operator_agent/generate/coder_pipeline.py", "operator_agent/generate/triton_matmul_template.py",
+                         "operator_agent/generate/agents.py", "operator_agent/core/execution_audit.py",
+                         "operator_agent/execute/backend_ownership.py", "operator_agent/execute/s5_shared_budget.py",
+                         "operator_agent/execute/s5_inner_budget.py"} <= set(identity))
         self.assertTrue(all((root / name).is_file() for name in identity))
