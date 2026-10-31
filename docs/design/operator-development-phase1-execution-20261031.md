@@ -50,11 +50,11 @@ v0.1 的 T1.1（提交在盘改动）已被重构顺带完成，但换来的是 
 
 - [x] **T1.1 写一份身份重绑记录（本期第一个产出）。** 已落 [交付身份重绑](../status/delivery-identity-rebind-20261031.md)：两侧聚合摘要 `78993c98…` → `e8c7f2c6…`、14 纯搬运 / 59 内容变、入口与布局差异、三处硬失败机制、五份冻结记录的失效清单。复算命令按文档原样跑过（`/usr/bin/python3` 3.9.6，`HEAD = 24f4fc2`）。未改任何判据、未重跑 GPU、未覆盖任何哈希。
 - [x] **T1.2 版本号强制递增。** Python `0.6.1` → `0.6.2`，插件壳 `0.1.10` → `0.1.11`。改了 8 处活副本：[pyproject.toml:7](../../pyproject.toml#L7)、[operator_agent/__init__.py:20](../../operator_agent/__init__.py#L20) 与同文件首行 docstring、[README.md:7](../../README.md#L7)、[package.json:3](../../integrations/dsh-operator/package.json#L3)、[CHANGELOG.md](../../integrations/dsh-operator/CHANGELOG.md) 新增 `## 0.1.11` 段、插件 README 的安装命令与发布形态段落。带日期的状态文档按「历史快照不改写」保留 `0.6.1` 原文。读数：`tests/hygiene` **59 passed**、`npm test` **58/58**、`capabilities()` 返回 `version=0.6.2`、`tool_version=9`（工具契约未变）。
-- [ ] **T1.3 仓外干净检出重建。** 构建目录落在**仓外**（F5：[布局守卫](../../tests/hygiene/test_repo_layout.py) 禁构建产物入库），`rsync` 导出排除 `output/`、`logs/`、`triton/`、`.git/`。新 wheel 三条断言：模块集合是五层、`entry_points.txt` 指向 `operator_agent.app.*`、许可与 11 prompts / 2 skills 齐备。`tests/hygiene/test_packaging.py` 与布局守卫同时绿才算过。
-- [ ] **T1.4 反向对照。** 在 `6cb1fca`（本次实算：该提交 `backend_ownership.py` 内 `owned_worker_scope` 出现 0 次）跑 [tests/unit/test_owned_cleanup_defaults.py](../../tests/unit/test_owned_cleanup_defaults.py)，必须以缺失/失败告终。这一条不过，T1.3 的绿灯不算数——说明这组测试锁不住行为，只证"这条分支没人走"。**用临时 clone 或独立 worktree，不在共享工作树上做历史提交检出。**
+- [x] **T1.3 仓外干净检出重建。** 已建：`git clone` 到临时目录 → `uv build --wheel`，产出 `operator_agent-0.6.2-py3-none-any.whl`（968,687 bytes，`11683240…`）与 `dsh-operator-agent-0.1.11.tgz`（31,751 bytes，`0ce665a7…`）。三条断言逐条查看过：包内是五层 + `ops` + `prompts`(11)/`skills`(2)、`dist-info/licenses/` 两份齐备、`entry_points.txt` 指向 `operator_agent.app.*`。**关键一条：解包后 `digest(protocol_identity())` 等于 HEAD 的 `e8c7f2c6…`，即干净检出确实复现同一身份。** 读数条件：本机 `/usr/bin/python3` 3.9.6（pip 21.2.4、setuptools 58 都低于 `pyproject` 要求，故走 `uv build` 自带的隔离构建）。工件与哈希落 `output/plugin_completion/20261031-phase1-identity-v1/`，详见[重绑记录 §5](../status/delivery-identity-rebind-20261031.md)。附带抓到一次真约束：构建残留 `build/`、`operator_agent.egg-info` 会让布局守卫变红——所以「构建落在仓外」不是洁癖。
+- [x] **T1.4 反向对照（双向都做了）。** 在临时克隆里跑，不在共享工作树切提交。同一份 [tests/unit/test_owned_cleanup_defaults.py](../../tests/unit/test_owned_cleanup_defaults.py)：在 `ef6acea`（修复所在提交）**11 passed**；在 `6cb1fca`（该提交 `backend_ownership.py` 内 `owned_worker_scope` 出现 0 次）**11 failed**，失败消息是行为缺失（`owned local worker did not reach the expected state`），不是导入报错。⇒ 这组测试确实锁住了行为，T1.3 的绿灯有效。
 - [ ] **T1.5 沙箱外全量 pytest 一次留档。** 缺口见[发布形态 §3](../status/dsh-operator-release-readiness-20261030.md#L57-L59)：`ps`／`sandbox-exec`／真 DSH 的 19 项集成用例仍只有历史轮次读数。本次要顺带把 F4 的四个口径钉到提交号与解释器上。日志经 `output/` 符号链接落仓外证据树，逐文件哈希入清单。**已知顺序相关偶发**（[分包记录 §未处理项](repo-slimming-20261031.md#L140-L142) 的 `test_hitl_tools::…gets_two_consequences`）按偶发单列，不并进"全绿"。
 - ~~**T1.6 CI 首跑**~~ **本期不纳入**（用户 2026-10-31 决定：一期做到「本地可发布」为止，不 push）。工作流仍未在远端真实执行过；解除条件是先过凭据/脱敏扫描并单独确认，因为 origin 是公开库、`design/autonomous-spine` 至今零 push。
-- [ ] **T1.7 安装说明与身份绑定。** [插件 README](../../integrations/dsh-operator/README.md) 的安装段落已随 T1.2 换成 `0.6.2`/`0.1.11` 并指向重绑记录；仍需补的是**实际构建产物的 SHA256**（要等 T1.3 真建出来再写，不预先填）。
+- [x] **T1.7 安装说明与身份绑定。** [插件 README](../../integrations/dsh-operator/README.md) 的安装段落已随 T1.2 换成 `0.6.2`/`0.1.11`，并在发布形态段落指向重绑记录。**工件哈希不写进被打包的 README 本身**（写进去就自指，改了文字哈希必变），改记在[重绑记录 §5](../status/delivery-identity-rebind-20261031.md) 与证据树的 `artifacts-SHA256.txt`。
 - [ ] **T1.8 入口 docstring 与包布局矛盾。** [operator_agent/__init__.py:4-15](../../operator_agent/__init__.py#L4-L15) 的「模块结构」还在列平铺名（`schemas.py`、`kernel_db.py`、`mock_gpu.py`…），分层后这些都已带层前缀。与版本 bump 分开放，避免一次改动混两类事实。
 
 本期**不做** `npm publish` / `twine upload`：会产生不可撤回的公开版本号，属发布决定，不在一期范围。
@@ -84,15 +84,15 @@ v0.1 的 T1.1（提交在盘改动）已被重构顺带完成，但换来的是 
 
 ## 5. 本期出口判据
 
-| 判据 | 通过条件 |
-|---|---|
-| 交付身份 | T1.1 重绑记录入库，且 T1.3 与 T1.4 同时成立——仓外干净检出可复现工件，去掉修复时覆盖确实变红 |
-| 版本一致 | T1.2 完成后，`版本号 → 内容` 重新一一对应；旧工件哈希未被覆盖（这正是发布形态 §1 第 3 项修过、又被重构冲掉的缺陷） |
-| 验证留档 | T1.5 与 T1.6 各有一份日志与哈希，红/绿与偶发原样记录 |
-| 阶段 A | T2.4 选出 1 个场景、T2.5 预登记完成，能回答"谁在哪一步花时间" |
-| B 就绪 | T3.5 runbook 可在无卡条件下被第三方逐步复核，且 T3.6 的身份绑定已写明 |
+| 判据 | 通过条件 | 现状（2026-10-31） |
+|---|---|---|
+| 交付身份 | T1.1 重绑记录入库，且 T1.3 与 T1.4 同时成立——仓外干净检出可复现工件，去掉修复时覆盖确实变红 | **已达**：记录入库、新 wheel 解包后摘要等于 HEAD、对照双向 11 红/11 绿 |
+| 版本一致 | T1.2 完成后，`版本号 → 内容` 重新一一对应；旧工件哈希未被覆盖（这正是发布形态 §1 第 3 项修过、又被重构冲掉的缺陷） | **已达**：`0.6.2`/`0.1.11` 与 `e8c7f2c6…` 绑定，旧 `0.6.1`/`0.1.10` 原样保留 |
+| 验证留档 | T1.5 与 T1.6 各有一份日志与哈希，红/绿与偶发原样记录 | **未达**：沙箱外全量未留档；CI 按用户决定划出一期 |
+| 阶段 A | T2.4 选出 1 个场景、T2.5 预登记完成，能回答"谁在哪一步花时间" | **未开始** |
+| B 就绪 | T3.5 runbook 可在无卡条件下被第三方逐步复核，且 T3.6 的身份绑定已写明 | **未开始** |
 
-五条缺一不进入阶段 B。
+五条缺一不进入阶段 B。**W1 的交付身份与版本一致两条已达；剩下三条里只有「验证留档」是本期欠账。**
 
 ## 6. 本期明确不做，以及各自的解除条件
 
@@ -122,3 +122,4 @@ v0.1 的 T1.1（提交在盘改动）已被重构顺带完成，但换来的是 
 | 2026-10-31 | 创建 v0.1：把路线阶段 A 改写为可勾选一期清单，含 W1 交付身份收口、W3 冻结 B 计划 | 本次实算的工件与 `HEAD`/工作区哈希、发布形态与中断恢复记录、可迁移性评估 |
 | 2026-10-31 | v0.2：适配四层重构（`HEAD = f3c9c03`）。§1 读数整段替换为 F1–F5；W1 第一动作由"提交在盘改动"改为"身份重绑"，版本号递增从条件项变硬条件，构建改到仓外，反向对照基线钉到 `6cb1fca`；W3 新增 T3.6 evaluator 身份重绑；出口判据四条扩为五条；§6 加"不回退布局"，§7 加旧身份不可复现与历史文档不改写 | 本次实算：wheel 与 HEAD 的 `entry_points`/模块集合/路径键差异（73 条清单里 70 条变）、`git log -S` 定位 `ef6acea`、`6cb1fca` 上符号 0 次、四个全量读数、布局守卫与符号链接 |
 | 2026-10-31 | v0.3：T1.1、T1.2 完成并打勾，F3 换成具体数值（聚合摘要 `78993c98…`→`e8c7f2c6…`、14 纯搬运 / 59 内容变、`remote_scripts` 三件全变、corpus drift 门这一机制后果）；按用户决定把 T1.6 CI 首跑划出一期范围（本地做完，不 push）；T1.7 拆出「等 T1.3 再填哈希」；新增 T1.8 记入口 docstring 与包布局矛盾 | [交付身份重绑](../status/delivery-identity-rebind-20261031.md)；两侧 `protocol_identity()`/`digest()` 复算；`tests/hygiene` 59 passed、`npm test` 58/58、`capabilities()` 报 `0.6.2` / 契约 9 |
+| 2026-10-31 | v0.4：T1.3、T1.4、T1.7 完成。新工件 `0.6.2`（`11683240…`）解包后身份摘要等于 HEAD，插件包 `0.1.11`（`0ce665a7…`）；反向对照做成双向（`ef6acea` 11 绿 / `6cb1fca` 11 红，且失败原因是行为缺失）；§5 出口判据加「现状」列——交付身份与版本一致两条已达，验证留档是本期唯一欠账 | 仓外 `uv build --wheel` 与 `npm pack` 实跑；解包目录逐项查看布局/入口/prompts-skills；双向对照各跑一次；构建残留触发布局守卫变红一次（记为约束证据） |

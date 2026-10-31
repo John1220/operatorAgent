@@ -5,7 +5,7 @@
 | 文档性质 | 身份断链的事实记录与失效清单；不是验收报告，不新增能力 |
 | 依据 | [第一期清单 T1.1](../design/operator-development-phase1-execution-20261031.md)、[仓库瘦身与分包](../design/repo-slimming-20261031.md) |
 | 读数条件 | 本机 `/usr/bin/python3` 3.9.6（numpy 2.0.2）；`HEAD = 24f4fc2`（分支 `feat/phase1-delivery-identity`）；旧身份从在盘 wheel 解包到**独立目录**后 import 计算，新身份从仓库根计算 |
-| 本期动作 | 只重绑与记录：不重算旧哈希、不迁移历史证据、不回退布局、不跑 GPU、不叫模型 |
+| 本期动作 | 重绑与记录：不重算旧哈希、不迁移历史证据、不回退布局、不跑 GPU、不叫模型；另在**仓外**重建 `0.6.2`/`0.1.11` 工件并核对身份（§5） |
 
 ## 1. 断链的两端
 
@@ -58,7 +58,23 @@
 - **版本号必须换**。`0.6.1` 现在同时指平铺 wheel 与分层 HEAD，正是[发布形态 §1 第 3 项](dsh-operator-release-readiness-20261030.md)刚修掉又被打回来的缺陷；随 T1.2 升 `0.6.2` / `0.1.11`，本记录即新身份的起算点。
 - **报数不得跨身份混表**。引用历史读数时按旧摘要 `78993c98…` 注明不可与新批次同列。
 
-## 5. 怎么复算
+## 5. 重绑后的新工件（T1.3）
+
+| 工件 | 大小 | SHA256 | 身份核对 |
+|---|---:|---|---|
+| `operator_agent-0.6.2-py3-none-any.whl` | 968,687 | `11683240a7e78db2cf941c9425a710b1be6c115eb64a71e070d3d2cbf5894941` | 解包到独立目录后 `digest(protocol_identity())` = `e8c7f2c6…`，**与 HEAD 相同** |
+| `dsh-operator-agent-0.1.11.tgz` | 31,751 | `0ce665a72b28f603b23c72b77d0e02fb565acd995de7ee047aac3e16c6817b8b` | 包内 10 文件，含 `LICENSE`/`NOTICE` |
+
+布局与入口断言（在 wheel 解包目录内实际查看）：包内是 `core/decide/execute/generate/app` 五层 + `ops` + `prompts`/`skills`，`prompts` 11 份、`skills` 2 份、`dist-info/licenses/` 两份齐备；`entry_points.txt` 指向 `operator_agent.app.cli:main` 与 `operator_agent.app.mcp_server:main`。
+
+构建与留档条件：
+
+- 从**仓外克隆**构建（`git clone` 到临时目录 → `uv build --wheel`；`npm pack` 用临时 cache 与目标目录），避免与共享工作树互相污染。
+- 一条附带读数：克隆根目录里留下的 `build/` 与 `operator_agent.egg-info` 会让 [布局守卫](../../tests/hygiene/test_repo_layout.py) 的 `test_the_root_only_holds_known_entries` 变红。这正是"构建必须落在仓外"的可复现证据，不是守卫缺陷；同一时刻真实仓内 `tests/hygiene` 保持 **59 passed**。
+- 证据落 `output/plugin_completion/20261031-phase1-identity-v1/`（经符号链接解析到仓外证据树），含 `artifacts/` 与 `artifacts-SHA256.txt`。
+- 旧 `0.6.1`/`0.1.10` 两个工件与其哈希原样保留，不覆盖、不复用其验收。
+
+## 6. 怎么复算
 
 ```bash
 # 新身份（仓库根，本机 python3 需带 numpy）
@@ -79,3 +95,4 @@ tmp=$(mktemp -d) && unzip -q output/plugin_completion/20261030-release-v1/artifa
 | 日期 | 变更 | 依据 |
 |---|---|---|
 | 2026-10-31 | 创建：记录平铺 → 五层造成的协议身份断链、入口与布局差异、三处硬失败机制、五份冻结记录失效清单 | 本日实算的两侧 `protocol_identity()` 与 `digest()`、wheel `entry_points.txt`、73 条目逐项比对、`tests/hygiene` 59 通过基线 |
+| 2026-10-31 | 新增 §5：`0.6.2` wheel 与 `0.1.11` 插件包在仓外重建完成，解包后身份摘要等于 HEAD 的 `e8c7f2c6…`，工件与哈希落证据树；旧工件未被覆盖 | `uv build --wheel` 与 `npm pack` 实跑；解包目录内的布局/入口/prompts-skills 逐项查看；构建残留触发布局守卫变红一次（已记为约束证据而非缺陷） |
