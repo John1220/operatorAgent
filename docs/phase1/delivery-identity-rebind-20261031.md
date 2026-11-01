@@ -103,6 +103,21 @@ T1.8 改的 `operator_agent/__init__.py` 模块清单也在 wheel 里，所以�
 `.../20261101-phase1-docindex-v1/`。**协议摘要一路不变**——版本号与文档路径都不在那 73 个文件里，
 这本身就是「身份清单只覆盖评测面」的一次现场印证。
 
+### 5.3 CLI 与迁移门入口落进 wheel 之后（2026-11-01，同日第三次）
+
+| 工件 | SHA256 |
+|---|---|
+| `operator_agent-0.6.5-py3-none-any.whl` | `460c56a0f37a92fa8938fb3029f8df7063f106dcc4ba01bdfb3ee0c240cf8cc9` |
+| `dsh-operator-agent-0.1.14.tgz` | `0da759ee4c43b418d9744def077169d57848ed256b255ac40c340168e71cbc64` |
+
+克隆自 `2e41cf9` 重建（`app/cli.py` 加了 `ledger-new|fill|report` 三条子命令，`core/human_ledger.py`
+边界说明同步）；解包内 `digest(protocol_identity())` **仍是 `e8c7f2c6…`**，解包后 CLI 三个子命令在位。
+
+至此四代 Python 工件（`0.6.2`/`0.6.3`/`0.6.4`/`0.6.5`）与四代插件包并存、逐件哈希、互不覆盖，
+**协议摘要一路没动**。这不是巧合而是定义使然：身份清单只覆盖评测面那 73 个文件，
+版本号、文档路径、CLI 入口都不在其中。**所以「协议身份相同」不等于「工件相同」，
+「工件不同」也不等于「身份变了」**——两者要分开引用，这也是 §5 那张四代表格的用处。
+
 ## 6. 怎么复算
 
 ```bash
@@ -126,3 +141,5 @@ tmp=$(mktemp -d) && unzip -q output/plugin_completion/20261030-release-v1/artifa
 | 2026-10-31 | 创建：记录平铺 → 五层造成的协议身份断链、入口与布局差异、三处硬失败机制、五份冻结记录失效清单 | 本日实算的两侧 `protocol_identity()` 与 `digest()`、wheel `entry_points.txt`、73 条目逐项比对、`tests/hygiene` 59 通过基线 |
 | 2026-10-31 | 新增 §5：`0.6.2` wheel 与 `0.1.11` 插件包在仓外重建完成，解包后身份摘要等于 HEAD 的 `e8c7f2c6…`，工件与哈希落证据树；旧工件未被覆盖 | `uv build --wheel` 与 `npm pack` 实跑；解包目录内的布局/入口/prompts-skills 逐项查看；构建残留触发布局守卫变红一次（已记为约束证据而非缺陷） |
 | 2026-11-01 | 本文件与一期清单、台账一起迁入 `docs/phase1/`；新增 §5.1 记录文档搬动导致的再建（`0.6.3` / `0.1.12`），并核对「升号与文档路径改动不触及那 73 个协议身份文件」。一处哈希前缀笔误（写成 `0ce65a…`）在写入后立即与证据树的 `artifacts-SHA256.txt` 对回并更正——记错的哈希前缀会伪装成「证据被篡改」，所以不复算就不写 | `git clone` 自 `6f1d583` 重建 + `npm pack`；解包内 `digest(protocol_identity())` 复算；`shasum -a 256` 逐件实算 |
+| 2026-11-01 | 加 §5.3：CLI 人时子命令与迁移门入口进 wheel ⇒ 第三次升号 `0.6.5`/`0.1.14`，解包复算协议摘要仍 `e8c7f2c6…`；写明「身份相同 ≠ 工件相同」这条区分 | `git clone` 自 `2e41cf9` + `uv build` + `npm pack`；`shasum -a 256` 逐件实算；解包内 `digest(protocol_identity())` 与 CLI 子命令逐项核对 |
+
