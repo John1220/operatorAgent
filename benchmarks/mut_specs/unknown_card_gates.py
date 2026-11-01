@@ -21,11 +21,13 @@ from benchmarks.calibration.mutation_calibrate import Row
 FILES = {
     "gates": "benchmarks/probes/unknown_card_gates.py",
     "cli": "operator_agent/app/cli.py",
+    "col": "benchmarks/probes/collect_unknown_card_probe.py",
 }
 
 TARGETS = [
     "tests/unit/test_unknown_card_gates.py",
     "tests/unit/test_cli_ledger.py",
+    "tests/unit/test_unknown_card_probe.py",
 ]
 
 ROWS = [
@@ -64,4 +66,18 @@ ROWS = [
         "        if False:",
         "先 new、填一格 analyze=yes、再 new 一次：原实现拒绝且已答格子原样还在；关掉后表被重置成"
         "全 unknown，「问过并答了」在报表里退化成「没问过」，分母看着干净其实是空的", True),
+
+    Row("M8 采集器不再拒绝缺失共享形态（给个默认值）", "col",
+        "    if sharing not in SHARING_VALUES:",
+        "    if False:",
+        "存在具体输入可观察：`assemble(props, uuid, None, 0)` —— 原实现直接拒并回显三个合法值；"
+        "关掉后 payload 带着空 `sharing_pattern` 出门，G4 于是可以在**没问过机器形态**的情况下"
+        "被当成已标定。消费卡接显示器就是靠这一步溜过去的", True),
+
+    Row("M9 共享内存读不到时编一个 128 KiB 兜底", "col",
+        '    if props.get("per_block_optin_bytes") is None or props.get("per_sm_kb") is None:',
+        "    if False:",
+        "存在具体输入可观察：`per_block_optin_bytes=None` 的 props —— 原实现拒绝（这正是 G2 门"
+        "在 4090 评估里点名的兜底病灶），关掉后 None 被写进表、门判 unknown 而不是「采集失败」，"
+        "**没人知道自己其实没测过**", True),
 ]
