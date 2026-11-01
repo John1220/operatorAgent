@@ -57,3 +57,10 @@ config.yaml
 # `from operator_agent import Conductor` 直接 ImportError; 同一规则还会吞掉
 # benchmarks/_remote_bench.py, 而三个已跟踪的 benchmarks/test_*.py 都 import 它。
 /_*.py
+
+# ─── 本地工具的记忆/工作目录 (公开仓绝不能进) ───
+# 2026-10-31 23:22 根目录冒出 `.workbuddy/memory/2026-10-31.md`: 桌面工具的本地记忆文件,
+# 内容是"这台机器这段时间聊过什么", 与代码无关, 且 origin 是公开仓库。
+# 光写这里不够 —— 布局守卫扫的是 os.listdir(根目录), 所以必须同时进
+# tests/hygiene/test_repo_layout.py 的 ALLOWED_ROOT「被 .gitignore 覆盖的运行期目录」那一组。
+/.workbuddy/

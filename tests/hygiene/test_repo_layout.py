@@ -32,7 +32,7 @@ ALLOWED_ROOT = {
     # 被 .gitignore 覆盖的运行期/本地目录：允许存在，但不许入库
     "output", "logs", "debug", "triton", "config.yaml", "__pycache__",
     ".pytest_cache", ".uploads", ".trae-html-share-packages", ".DS_Store",
-    ".venv",
+    ".venv", ".workbuddy",
 }
 
 #: **单层**条目预算：一个目录里直接放多少个 tracked 文件就到头了。
