@@ -51,7 +51,7 @@ from ..decide.escalation import (
     EscalationInputs, decide, occupancy_bound_evidence, smem_bound_evidence,
     untried_directions,
 )
-from ..core.hardware_caps import detect_hardware_caps
+from ..core.hardware_caps import detect_hardware_caps, require_triton_support
 from ..decide.resource_check import caps_from_metrics, check_resource_feasibility
 from ..core.candidates import (param_space_of, point_label, require_supported_space,
                         select_template_candidate, template_arm, template_points)
@@ -1476,6 +1476,15 @@ class Conductor:
         # 运行据此比较)、打进日志、以及作为 L3 测量有效性的一个输入 (漂移 ⇒ 降到
         # DEGRADED, 不禁用配方也不计停滞, 但**不**据此判核失败)。
         hw_info = self.backend.get_hardware_info()
+        # CC 下限预检：**一次 LLM 调用都不发**就停。低于 Triton 下限的卡（P4 / P100 /
+        # TITAN X 那类）每个候选都会死在编译期，而 `_INFRA_MARKERS` 只认 oom 那一族 ⇒
+        # 架构不支持会被记成「候选失败」，跑完得到的是一张假的候选能力表。
+        cc_verdict, cc_text = require_triton_support(hw_info, self.backend.label)
+        if cc_verdict == "sunset":
+            # 7.x：Triton 语言口径仍支持，但工具链在往外移（Volta sm_70），且没有
+            # cp.async（`has_software_pipelining` 要 major >= 8）。只是提示，不改判。
+            print(f"  ⚠️ CC {cc_text} 属 7.x 收口区：无 cp.async，bf16/tf32 视代次可能缺失；"
+                  f"开跑前先编一个必成功的最小核当栈正例（docs/research/80 §5）")
         # §10.3 的 ε 抽签种子: 一次运行一个。抽签值是它的纯函数, 而它自己落进产物 ⇒
         # 「第 3 轮为什么走了探索那一支」跑完可以逐位复算 (不必记下每个随机数)。
         _selection_seed = f"{task.task_id}|{self.backend.label}"

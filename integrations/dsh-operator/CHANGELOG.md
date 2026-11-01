@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.16
+
+升号原因在 wheel 内，而且改的是**被读得最多的两个文件**：`core/hardware_caps.py`（新增
+`TRITON_MIN_CC_MAJOR` / `triton_cc_verdict()` / `require_triton_support()` / `TritonUnsupported`）
+与 `app/conductor.py`（紧跟硬件探测之后做一次 CC 下限预检）。
+
+**行为变更**：目标设备申报出 `compute_capability < 7.0`（TITAN X 5.2 / P4、P40、P100 6.x）时，
+运行在**第一次 LLM 调用之前**抛 `TritonUnsupported` 并停住，理由里带读到的 cc、设备名、下限与后果。
+以前这类卡会一路跑到编译期，而失败路由的 `_INFRA_MARKERS` 只认 oom 那一族 ⇒
+架构不支持被记成**候选失败**，跑完交出的是一张假的能力表（钱也照烧）。
+
+- 7.x（Volta / Turing）只打一行 ⚠️ 提示：无 cp.async、bf16/tf32 视代次缺失、工具链正在移出 sm_70。
+- **不拦「问不到 cc」的那些**：MockGPU、CPU 回退、`gfx90a` 一律判 unknown 后放行——那是探测诚实性
+  的活（`smem_budget()` 与迁移门采集器管），混进来会把无 GPU 的开发路径整条打死。
+- Python 侧同步 `0.6.7`；工具契约仍为 **9**，MCP 工具面一条命令都没动。
+- **协议摘要本期第二次换号**：`b937fd8e…` → `5b9b0c8f…`（明细见 `docs/phase1/delivery-identity-rebind-20261031.md` §5.5）。
+- 已知未覆盖：`verify` / `repair` **不经 Conductor**，那条路上架构不支持仍会被记成候选失败。
+  不动 `_INFRA_MARKERS` 是有意的——加个 marker 会把它变成**无限重试**（这类卡永远不会成功），
+  正确的形状是一个「环境不可用」终态，那需要单独设计，不在本次顺手改。
+
 ## 0.1.15
 
 升号原因在 wheel 内，且**这次连随包 runner 一起改了**（`remote_scripts/run_kernel.py` 在

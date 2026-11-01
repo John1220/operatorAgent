@@ -34,6 +34,16 @@ class UnknownHardware(KeyError):
             f"认不出的目标硬件 {target!r}; 已知键名: {self.known_keys}")
 
 
+class TritonUnsupported(RuntimeError):
+    """设备**问到了**, 但它的算力低于 Triton 的下限 —— 与 `HardwareProbeFailed` 是两回事。
+
+    那个回答「连上了, 但问不到它是谁」; 这个回答「问到了, 而这台编不出码」。
+    合用一个类会让日志里「P4 上每张候选都失败」和「runner 坏了」看不出区别 ——
+    而失败路由 (`operator_agent/failure_route.py` 的 `_INFRA_MARKERS`) 只认 oom 那一族,
+    于是架构不支持会被记成**候选失败**, 一整轮跑完产出的是一张假的候选能力表。
+    """
+
+
 @dataclass
 class HardwareCaps:
     """硬件能力描述符 — 所有字段均有保守默认值"""
@@ -323,6 +333,51 @@ def _nvidia_cc_major(cc: str) -> int:
     """
     head = (cc or "").split(".")[0]
     return int(head) if head.isdigit() else 0
+
+
+#: Triton 的 CUDA 后端下限。低于它的卡 (Maxwell 5.x / Pascal 6.x) 一个核都编不出来,
+#: 而那在产物里长得和「候选写错了」一模一样 —— 见 `TritonUnsupported`。
+#: 7.0 (Volta) 按**语言口径**仍算supported, 但 CUDA 13 / vLLM 0.20 已在移出 sm_70 的
+#: 编译目标 (docs/research/80 §1, 二手资料), 所以下限取 7.0、把 7.0 单独标成「收口区」。
+TRITON_MIN_CC_MAJOR = 7
+TRITON_VOLTA_SUNSET_MAJOR = 7
+
+
+def triton_cc_verdict(hardware_info: dict) -> tuple:
+    """按申报的 compute_capability 判 (verdict, cc 原文)。
+
+    verdict ∈ {"ok", "sunset", "below", "unknown"}。**解析不出来就是 unknown, 不当 0 处理**:
+    CPU 回退与模拟器不给 cc, 把它们判成「低于下限」会让这道门变成新的静默降级。
+    """
+    text = str(hardware_info.get("compute_capability") or "").strip()
+    head = text.split(".")[0]
+    if not head.isdigit():
+        return "unknown", text
+    major = int(head)
+    if major < TRITON_MIN_CC_MAJOR:
+        return "below", text
+    if major <= TRITON_VOLTA_SUNSET_MAJOR:
+        return "sunset", text
+    return "ok", text
+
+
+def require_triton_support(hardware_info: dict, context: str = "") -> tuple:
+    """低于 Triton 下限 ⇒ 抛 `TritonUnsupported`。其余一律放行并回传判词。
+
+    这道门只做一件事: 让「一台编不出码的卡」在**第一次 LLM 调用之前**停下来,
+    而不是跑完一轮后交出一张把环境缺陷写成候选缺陷的表。
+    """
+    verdict, cc = triton_cc_verdict(hardware_info)
+    if verdict == "below":
+        where = f"后端 {context}: " if context else ""
+        raise TritonUnsupported(
+            f"{where}目标设备 {hardware_info.get('name') or '?'} 的 compute_capability={cc!r} "
+            f"低于 Triton 下限 {TRITON_MIN_CC_MAJOR}.0 —— Triton 不给这类卡 (Maxwell/Pascal) "
+            f"生成代码, 每个候选都会死在编译期, 而失败路由把编译失败记成「候选失败」"
+            f"(不是基础设施失败: 不算迭代、不学习、重试也不救)。换一张 CC ≥ "
+            f"{TRITON_MIN_CC_MAJOR}.0 的卡再开跑; 判据与逐档机型见 "
+            f"docs/research/80-算力市场机型可用性与连接方式核查.md")
+    return verdict, cc
 
 
 def _match_known_key(*texts: str) -> Optional[str]:
