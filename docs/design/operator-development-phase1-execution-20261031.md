@@ -5,7 +5,7 @@
 | 文档性质 | 一期可勾选执行清单；不含已完成事项，不代替验收报告 |
 | 版本 | v0.2 |
 | 创建 / 最近更新 | 2026-10-31 / 2026-10-31（`HEAD = f3c9c03`，分包重构之后） |
-| 上游 | [产品路线 §5 阶段 A](operator-development-product-roadmap.md#L157-L163)、[§6 评价问题与口径](operator-development-product-roadmap.md#L186-L215) |
+| 上游 | [产品路线 §5 阶段 A](operator-development-product-roadmap.md#L159-L166)、[§6 评价问题与口径](operator-development-product-roadmap.md#L230-L277) |
 | 事实来源 | [发布形态](../status/dsh-operator-release-readiness-20261030.md)、[GPU 中断恢复](../status/gpu-interrupt-recovery-20261030.md)、[S5 结项](../status/dsh-operator-s5-closeout-20261030.md)、[仓库瘦身与分包](repo-slimming-20261031.md)、[可迁移性](dsh-operator-portability-4090.md) |
 | 本期资源前提 | 零 GPU 机时、零模型调用；H20 与 P800 已下线，读数不可再生 |
 
@@ -117,11 +117,11 @@ v0.1 的 T1.1（提交在盘改动）已被重构顺带完成，但换来的是 
 
 ### 5.1 阶段 A → B 的门槛：已按**甲**改写（2026-10-31 定案）
 
-路线原句把「能明确指出谁在什么环节花费时间，以及怎样证明改善」当成推进到 B 的条件（[§5 表 A 行](operator-development-product-roadmap.md#L159)）。当事人答复没记录过，本轮又查证外部没有同类读数，于是三个选项里只有一个可执行，**已采纳甲**：
+路线原句把「能明确指出谁在什么环节花费时间，以及怎样证明改善」当成推进到 B 的条件（[§5 表 A 行](operator-development-product-roadmap.md#L161)）。当事人答复没记录过，本轮又查证外部没有同类读数，于是三个选项里只有一个可执行，**已采纳甲**：
 
 | 方案 | 内容 | 处置 |
 |---|---|---|
-| **甲** | 门槛拆两半：①哪些环节会失败、单次代价多少（机器侧）；②人在哪些环节出现、为什么（贡献矩阵，当场记录）。历史人时明确记为不可追 | **已采纳**：路线 [§5 A 行](operator-development-product-roadmap.md#L159) 已改，[§2.4](operator-development-product-roadmap.md#L70-L76) 与 [§6.3「人工实际投入」](operator-development-product-roadmap.md#L211) 同步写明可行形式；路线自己的修订记录加了 v0.2 一行 |
+| **甲** | 门槛拆两半：①哪些环节会失败、单次代价多少（机器侧）；②人在哪些环节出现、为什么（贡献矩阵，当场记录）。历史人时明确记为不可追 | **已采纳**：路线 [§5 A 行](operator-development-product-roadmap.md#L161) 已改，[§2.4](operator-development-product-roadmap.md#L70-L78) 与 [§6.3「人工实际投入」](operator-development-product-roadmap.md#L255) 同步写明可行形式；路线自己的修订记录加了 v0.2 一行 |
 | 乙 | 维持原句，阶段 B 无限期停在门槛外 | 未采纳：这条门槛从未被任何公开工作满足过 |
 | 丙 | 用外部定性表述（「数天到数周」「profile 解读最贵」）冒充我方基线 | **判为不可接受**：读数条件错位，等于把别人的工具当成我们的证据 |
 
@@ -129,7 +129,7 @@ v0.1 的 T1.1（提交在盘改动）已被重构顺带完成，但换来的是 
 
 ## 6. 本期明确不做，以及各自的解除条件
 
-| 不做 | 解除条件（来自[路线 §5.2](operator-development-product-roadmap.md#L175-L184)） |
+| 不做 | 解除条件（来自[路线 §5.2](operator-development-product-roadmap.md#L182-L191)） |
 |---|---|
 | 性能剖析工具（`profiler` 当前为 `None`，见 [generate/agent_runtime.py:154](../../operator_agent/generate/agent_runtime.py#L154)） | 阶段 A 显示瓶颈分析是主要耗时环节，且有可用卡验证增量 |
 | 形状扫描 `shape_sweep`（同上 `None`；L3 只测 `test_inputs[0]`） | 真实任务出现"单形状达标但输入分布回退"的实际案例 |
