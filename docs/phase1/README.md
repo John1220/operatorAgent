@@ -6,7 +6,7 @@
 | 文档 | 类型 | 内容 |
 |---|---|---|
 | [operator-development-phase1-execution-20261031.md](operator-development-phase1-execution-20261031.md) | 一期计划 | 可勾选执行清单（W1 交付身份 / W2 阶段 A / W3 B 计划冻结）、出口判据与现状、本期不做项 |
-| [delivery-identity-rebind-20261031.md](delivery-identity-rebind-20261031.md) | 事实记录 | 平铺 → 五层造成的协议身份断链（`78993c98…` → `e8c7f2c6…`）、失效清单、五代工件（`0.6.2`→`0.6.6`）逐件哈希与身份核对；§5.4 记本期**唯一一次摘要换号** `e8c7f2c6…` → `b937fd8e…` |
+| [delivery-identity-rebind-20261031.md](delivery-identity-rebind-20261031.md) | 事实记录 | 平铺 → 五层造成的协议身份断链（`78993c98…` → `e8c7f2c6…`）、失效清单、六代工件（`0.6.2`→`0.6.7`）逐件哈希与身份核对；本期**两次摘要换号**：`e8c7f2c6…` → `b937fd8e…`（§5.4，runner 自描述）→ `5b9b0c8f…`（§5.5，CC 下限预检） |
 | [stage-a-ledger-20261031.md](stage-a-ledger-20261031.md) | 研究记录 | 八条真实任务台账、「人时全仓从未记录」的缺口证明、外部一线流程核查、环节排序与场景选择 |
 | [stage-b-runbook-20261101.md](stage-b-runbook-20261101.md) | 执行前冻结计划 | W3 产出：T2.5 预算与达标定义、T3.3 控制变量、T3.4 绕过与额外成本字段、T3.5 七步 runbook、T3.6 四代协议身份与 evaluator 摘要 |
 
@@ -22,18 +22,27 @@
 
 ```sh
 ls output/plugin_completion/20261031-phase1-identity-v1/
-#   artifacts/            0.6.2 wheel + 0.1.11 插件包（后续几代另放两个目录）
+#   artifacts/            0.6.2 wheel + 0.1.11 插件包（后续几代另放三个目录）
 #   artifacts-SHA256.txt  逐文件哈希
 #   full-regression.log / full-regression-with-ledger.log   两次全量留档
 #   manifest.json         命令、解释器、对照、守卫、量具缺口
 ls output/plugin_completion/20261101-phase1-docindex-v1/artifacts/     # 0.6.3→0.6.5 三代
 ls output/plugin_completion/20261101-phase1-smem-selfdescribe-v1/      # 0.6.6 / 0.1.15
-#   scoped-regression.log 本轮**只跑受影响子集**（196 passed / 4.54s），不是全量
+ls output/plugin_completion/20261101-phase1-cc-floor-preflight-v1/     # 0.6.7 / 0.1.16
+#   scoped-regression.log 各代留档的是**当时那一棵树的读数**，条件写在同目录 manifest.json 里
 ```
 
-**本轮没有第五次全量读数**：当事人 2026-11-01 指示「精简，不用跑这么多」，所以留档的是受影响子集
-（迁移门 / 采集器 / Designer 与 runner 接面 / 硬件诚实性 / 运行时接线 / hygiene）。上一条全量留档
-仍是 `0.6.5` 树的 6226 passed / 1 skipped。
+## 读数分档（当事人 2026-11-01 指示「精简，不用跑这么多」之后定下）
+
+| 改动落在哪儿 | 跑什么 | 实测耗时 |
+|---|---|---|
+| `benchmarks/probes` / `mut_specs` / `tests` / `docs` | 只跑受影响文件 | 秒级 |
+| `operator_agent/**` 的叶子模块（例：`agents.py` 提出 `smem_budget()`） | 受影响子集 + `tests/hygiene` | ~3 s |
+| **被广泛读的文件**（`conductor` / `hardware_caps` / `run_contract` / 后端） | `tests/unit` + `tests/hygiene` | 4:26（5633 passed / 1 skipped / 0 failed） |
+| 发版 / 身份重绑那一次 | 才跑 `tests/`（含 acceptance） | 上一条留档是 `0.6.5` 树 6226 passed |
+
+所以本期最后两代（`0.6.6`/`0.6.7`）**没有** `tests/` 全量读数：`0.6.6` 只留了受影响子集（196 passed），
+`0.6.7` 留了 unit+hygiene 全量 5633 + 最终子集 163。缺口写明，不留空框。
 
 证据位置与「单副本、H20/P800 已下线不可再生」的警告写在
 [docs/research/evidence-location.json](../research/evidence-location.json)。

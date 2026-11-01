@@ -138,6 +138,22 @@ T1.8 改的 `operator_agent/__init__.py` 模块清单也在 wheel 里，所以�
 里加了「只报 opt-in 时也够用」那一档，所以这棵树、这件工件、这条值三者互不相等。按当事人既定的处置
 （历史不动），以本节与 [`docs/phase1/README.md`](README.md) 的勘误行为准。
 
+### 5.5 CC 下限预检之后（2026-11-01，同日第五次；本期第二次摘要换号）
+
+| 工件 | SHA256 |
+|---|---|
+| `operator_agent-0.6.7-py3-none-any.whl` | `0f2c24ceea426bff404426b859180a367d04c555f8351c357f4f10a6ff91229c` |
+| `dsh-operator-agent-0.1.16.tgz` | `f87d94ac3b06c7bfdbe612c0a5b030fd8be1832c0acacab8656be1dee0c27810` |
+
+克隆自 `1174fd8` 仓外重建。摘要 **`b937fd8e…` → `5b9b0c8f…`**，动的两个条目都在 73 文件清单内：
+`core/hardware_caps.py`（`b874fee7…`，新增 `require_triton_support()` 与 `TritonUnsupported`）、
+`app/conductor.py`（`dec06885…`，探测后立刻预检）。三侧对齐才算数：本树 HEAD、解包后的 `0.6.7`
+wheel 都是 `5b9b0c8f…`；同批复算 `0.6.6` wheel 仍是 `b937fd8e…` 作反向对照。
+**这次的摘要只在最终树上算过一次**——上一代把中途值 `19ab44fc…` 写进了提交说明（勘误二），这条就是那次的产物。
+
+解包目录里还实跑了一次行为：`0.6.7` 的 wheel 对 `6.1` 抛、对 `7.5` 判 sunset 不抛、对 `8.6` 判 ok、
+对没有 cc 的申报返回 unknown。**装出来的和跑起来的是同一个东西**，这一句才有工件表的意义。
+
 ## 6. 怎么复算
 
 ```bash
@@ -163,4 +179,5 @@ tmp=$(mktemp -d) && unzip -q output/plugin_completion/20261030-release-v1/artifa
 | 2026-11-01 | 本文件与一期清单、台账一起迁入 `docs/phase1/`；新增 §5.1 记录文档搬动导致的再建（`0.6.3` / `0.1.12`），并核对「升号与文档路径改动不触及那 73 个协议身份文件」。一处哈希前缀笔误（写成 `0ce65a…`）在写入后立即与证据树的 `artifacts-SHA256.txt` 对回并更正——记错的哈希前缀会伪装成「证据被篡改」，所以不复算就不写 | `git clone` 自 `6f1d583` 重建 + `npm pack`；解包内 `digest(protocol_identity())` 复算；`shasum -a 256` 逐件实算 |
 | 2026-11-01 | 加 §5.3：CLI 人时子命令与迁移门入口进 wheel ⇒ 第三次升号 `0.6.5`/`0.1.14`，解包复算协议摘要仍 `e8c7f2c6…`；写明「身份相同 ≠ 工件相同」这条区分 | `git clone` 自 `2e41cf9` + `uv build` + `npm pack`；`shasum -a 256` 逐件实算；解包内 `digest(protocol_identity())` 与 CLI 子命令逐项核对 |
 | 2026-11-01 | 加 §5.4：runner 自描述与 `smem_budget()` 落在 73 个文件内 ⇒ **本期第一次协议摘要换号** `e8c7f2c6…` → `b937fd8e…`，`0.6.6`/`0.1.15` 工件与哈希入证据树；并记一条勘误——`4008621` 提交说明里的 `19ab44fc…` 是中途树的值，工件与本树都不是它 | 克隆自 `4008621` 仓外重建（`uv build --wheel` + `npm pack`）；解包内与 HEAD 两侧 `digest()` 各实算一次；`0.6.5` wheel 同批复算作反向对照；`shasum -a 256` 逐件实算并写入 `artifacts-SHA256.txt` 与 `manifest.json` |
+| 2026-11-01 | 加 §5.5：CC 下限预检（`hardware_caps.py` + `conductor.py`，都在身份清单内）⇒ **本期第二次换号** `b937fd8e…` → `5b9b0c8f…`，`0.6.7`/`0.1.16` 入证据树；摘要只在最终树上算一次，并把「解包后的 wheel 里实跑预检」记成第 4 个核对面 | 克隆自 `1174fd8` + `uv build` + `npm pack`；HEAD / `0.6.7` 解包 / `0.6.6` 解包 三侧 `digest()` 各实算；在解包目录里对 cc `6.1 / 7.5 / 8.6 / None` 四种申报跑 `require_triton_support()`；`shasum -a 256` 逐件实算 |
 

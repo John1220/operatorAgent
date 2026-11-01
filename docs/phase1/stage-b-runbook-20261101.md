@@ -101,6 +101,8 @@ scp <ssh别名>:~/card-probe.json ./
 #         G4 的散布/污染阈值与 G5 的形状清单这里仍然没有：门会判 unknown，就停在这里。
 python3 -B -m benchmarks.probes.unknown_card_gates --from-json ./card-probe.json
 #    退出码非 0（有 fail 或 unknown）⇒ 停在这里，不开跑；不静默降级
+#    —— 控制面还有一道硬门：`operator-agent run` 探测到 cc<7.0 直接抛 `TritonUnsupported`，
+#       一次 LLM 调用都不发。`verify`/`repair` 不经这道门（§6），所以别拿它们试不认识的卡。
 operator-agent capabilities --json-out ./cap.json
 
 # 1. 冻契约（每格一个新 run-dir，调用方拥有布局）
@@ -170,6 +172,14 @@ GPU 型号、UUID、free memory 一律运行时探测入档；共享卡快照不
 ## 6. 本文没有做的事
 
 - 没有跑任何真机或模型；没有新增能力（剖析、形状扫描、多候选裁决工具仍为零，见一期清单 §6 不做项）。
+- **CC 下限预检只覆盖 `run` 这一条路**：门在 `Conductor._execute_inner` 的硬件探测之后
+  （`core/hardware_caps.py` 的 `require_triton_support()`），低于 7.0 就抛 `TritonUnsupported`
+  且一次 LLM 调用都不发。而 `verify` / `repair` **不经 Conductor**（见 `hitl_tools.py` 的头注），
+  那条路上「这台编不出码」仍然会被失败路由记成**候选失败**。没有顺手往 `_INFRA_MARKERS`
+  加 marker 是有意的：那会让它变成**无限重试**（这类卡永远不会成功），正确的形状是一个
+  「环境不可用」终态，需要单独设计——本文把它记成缺口，不记成已修。
+- **7.x 的 `sunset` 分支只是一行 print**，改坏它今天没有任何用例会红。按「报缺陷前先证明有活入口」
+  的纪律，这条不假装覆盖（变异表 `triton_cc_floor.py` 头部同步记了），它只是提示，判据不依赖它。
 - 没有替 T3.1 选卡。**T3.2 只落了探针形状**（`benchmarks/probes/unknown_card_gates.py`，21 行变异表 21/21 拦住、门与接面共 59 条用例全绿），**五道门一条读数都没有**——那些必须来自真实卡上的探测输出，本文不猜；探针的全部作用就是让继承值与缺读数不许变成绿。
 - 预算与门槛的数值取自当事人 2026-11-01 的指示；改动它们需要新计划与新身份，不在本文授权内。
 
@@ -200,3 +210,4 @@ CC 8.9（Ada，AD104）落在仓内硬件表的 **8.9 行**，Triton 可用、�
 | 2026-11-01 | 门的输入侧补齐：新增采集器 `collect_unknown_card_probe.py`（读 torch 设备属性与 nvidia-smi UUID，**拒绝给共享形态与 smem 兜底值**），runbook 第 0 步接上它；新增 §7 记录目标卡 RTX 4070 的四个已知后果（8.9 行按 L40S 偏大 ⇒ 判停不出口、`agents.py` 缺 8.9 分支、独占消掉污染杀手、8192 MiB 预检阈值要重设） | 采集器契约 8 条用例（与门的字段对齐、没测的段不许出现在产物里）；变异表扩到 9 行后重跑 **9/9 KILLED**，跑后 `git status` 只剩本次新增文件；`_PEAK_BY_CC` 与 `agents.py` 分支为本次实读 |
 | 2026-11-01（同日第二次） | §7 第 2 条**闭合**：`gpu_info` 自描述 `hardware_report`，Designer 侧新增 `smem_budget()`（实测 > cc 表 > legacy 申报 > 抛），`128` 兜底与 legacy 分支的 `else 128` 一起删掉 ⇒ **老 runner 在 cc 8.9 上现在会抛**，4070 必须部署本轮 `remote_scripts/run_kernel.py`。§7 第 4 条**更正**：先前只写 8192 是半句话，实际独占默认 `min_free_mib=4096`、8192 属 `shared-known-processes` 且被 `validate_policy` 钉死为常数，三条都只在 S5 驱动层生效。第 0 步补上两份实测（地板 / 峰值带宽）与 `--from-probe` 的接线，并写明 G4/G5 仍无读数。过程中查出并修掉一处会让 4070 **开不了跑**的口径：`shared_memory_per_multiprocessor` 不是每个 torch build 都暴露，于是门与采集器改成**两个上限有一个就够**（全没有才拒），Designer 只有 opt-in 时按 opt-in 取（Ada 99 ≤ 100，保守方向） | `smem_budget()` 与 19 条新用例（含 `LocalExecutor`「N/A」申报被拒、MockGPU 申报可读的反向对照、opt-in 单独可读）；用例总数 34→59；变异表 21 行重跑 **21/21 KILLED**（行为 18 / 结构 3），跑后 `git status` 无残留、五处改动文件 grep 不到 `if False:`；`s5_workflow_preflight.py:22`、`s5_shared_gpu.py:31`、`_preparation.py:21` 三处阈值本次实读；H20 归档 `raw/hw/nvml_attrs.json` 用来核对 torch 属性名拼法 |
 | 2026-11-01（同日第三次） | **§7 第 1 条的归因更正**：先前写「`peak_trusted` 不为 True ⇒ 判停出口不开」是错的——cc 行的出处串不带 ⚠️，`peak_trusted` 实际为 **True**；出口认的是**「分母实测过」没有**（`未实测⇒天花板出口关闭`），§13.5 刻意把「口径核过」与「探测过」分开。后果与处置不变（新卡必须实测）。另在 §7 顶部记下**卡源同日有变**并指到 [`docs/research/80`](../research/80-算力市场机型可用性与连接方式核查.md)：市场机型逐档判定 + 首选 3070 8 GB / 同代选 3090 24 GB | [verifier.py:2524](../../operator_agent/decide/verifier.py#L2524) 与 [verifier.py:1875](../../operator_agent/decide/verifier.py#L1875) 两行本次实读；`_PEAK_CC_SOURCE` 无 ⚠️ 前缀为实测所得；市场价目表与连接方式取自其公开文档三页 |
+| 2026-11-01（同日第四次） | 第 0 步补一句**控制面硬门**（`operator-agent run` 探测到 cc<7.0 直接抛 `TritonUnsupported`，一次 LLM 都不发）；§6 加两条「本文没有做的事」：① 这道门只在 `run` 上——`verify`/`repair` 不经 Conductor，那条路上架构不支持仍被记成候选失败，而**不往 `_INFRA_MARKERS` 加 marker 是有意的**（会变无限重试：这类卡永远不会成功），需要的是「环境不可用」终态；② 7.x 的 `sunset` 分支只是 print、没有活入口，改坏它今天不会红 | `hitl_tools.py` 头注「不经过 Conductor」实读；`decide/failure_route.py` 的 `_INFRA_MARKERS` 实读（只含 oom 那一族）；变异表 `benchmarks/mut_specs/triton_cc_floor.py` 4/4 KILLED；`operator_agent: 6.1 抛 / 7.5 sunset / 8.6 ok / 无 cc unknown` 是在**解包后的 0.6.7 wheel 里**跑的 |
