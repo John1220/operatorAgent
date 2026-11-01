@@ -89,6 +89,20 @@
 一条测量教训也记在 manifest 里：**基线断链数不能在临时工作树里扫**——那里没有 `output/`
 符号链接，`../../output/...` 会被整批判成断链（实测一份 closeout 记录就虚报 19 条）。
 
+### 5.2 入口 docstring 修完之后（2026-11-01，同日再升一次）
+
+T1.8 改的 `operator_agent/__init__.py` 模块清单也在 wheel 里，所以按同一条规矩再升号：
+
+| 工件 | SHA256 | 身份核对 |
+|---|---|---|
+| `operator_agent-0.6.4-py3-none-any.whl` | `2b3742a61e52fb40b12a3eec77ec172115d0b69949b52b0aae3876e0135cab30` | 克隆自 `ba29424` 重建；解包内 `digest(protocol_identity())` 仍是 `e8c7f2c6…` |
+| `dsh-operator-agent-0.1.13.tgz` | `b10b19af893b5df7c420e5afb4c18d4a8948c95599cefe32c3512273beb9ecac` | 包内 10 文件，含许可两份 |
+
+三代 Python 工件（`0.6.2` / `0.6.3` / `0.6.4`）与三代插件包（`0.1.11` / `0.1.12` / `0.1.13`）的哈希逐件实算、
+互不覆盖，分别留在 `output/plugin_completion/20261031-phase1-identity-v1/` 与
+`.../20261101-phase1-docindex-v1/`。**协议摘要一路不变**——版本号与文档路径都不在那 73 个文件里，
+这本身就是「身份清单只覆盖评测面」的一次现场印证。
+
 ## 6. 怎么复算
 
 ```bash
