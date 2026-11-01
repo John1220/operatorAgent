@@ -57,6 +57,7 @@ DIRECTORY_BUDGETS = {
     "docs/design": 62,
     "docs/research": 75,
     "docs/status": 46,
+    "docs/phase1": 8,               # 一期文档：清单 + 两份记录 + 目录索引
 }
 
 #: 绝不该出现在 `git ls-files` 里的形态：缓存、构建产物、被搬走的证据目录。

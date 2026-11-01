@@ -3,7 +3,7 @@
 设计出处:
   * `docs/design/operator-development-product-roadmap.md` §5.1 把一条完整工作流写成六个环节，
     §6.3 要求「人工实际投入」记**活跃工作时间与干预原因**，且**不能用模型墙钟代替**
-  * 台账 `docs/research/80-阶段A真实任务台账与基线.md` §2/§3.1：本仓从未记录过人时，
+  * 台账 `docs/phase1/stage-a-ledger-20261031.md` §2/§3.1：本仓从未记录过人时，
     而外部公开材料里也**没有任何一处给出按环节的人工时间百分比** —— 所以历史不可追，
     只能从现在起当场产生
   * 形态借 `arXiv 2607.17979` 附录 Table 5「Human and Agent Contribution Matrix」：

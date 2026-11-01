@@ -3,14 +3,14 @@
 | 项目 | 说明 |
 |---|---|
 | 文档性质 | 阶段 A 的证据整理与预登记骨架；零 GPU 机时、零模型调用 |
-| 对应任务 | [一期清单 T2.1–T2.7](../design/operator-development-phase1-execution-20261031.md) |
+| 对应任务 | [一期清单 T2.1–T2.7](operator-development-phase1-execution-20261031.md) |
 | 上游判据 | [产品路线 §2.4](../design/operator-development-product-roadmap.md#L70-L78)、[§5 阶段 A](../design/operator-development-product-roadmap.md#L159-L166)、[§6](../design/operator-development-product-roadmap.md#L230-L277) |
 | 还原方式 | 按路线要求优先用**现有任务、代码与实验记录**还原流程；本文不含任何访谈或用户自述 |
 | 读数复核 | 表格内每个数字都由本次实读得出（非二手转述）；引用处给 file:line |
 
 ## 0. 四条结论
 
-1. **阶段 A 的出口判据不能只靠存量证据达成。** 「谁在哪个环节花时间」需要人工活跃时间，而本仓**从未记录过人时**（§2）。**处置（2026-10-31 定案）**：路线 §5 的条件已按「甲」拆成两半——机器侧的「哪些环节会失败、单次代价多少」留在门槛内（本档 §4 已答），历史人时移出门槛，未来人时由 [T3.7 量具](../design/operator-development-phase1-execution-20261031.md)当场记录（`core/human_ledger.py`：六环节、unknown 缺省、分母恒全、人档与机器秒不折叠）。存量证据只能回答「哪些环节会失败、失败一次花多少机器时间」。
+1. **阶段 A 的出口判据不能只靠存量证据达成。** 「谁在哪个环节花时间」需要人工活跃时间，而本仓**从未记录过人时**（§2）。**处置（2026-10-31 定案）**：路线 §5 的条件已按「甲」拆成两半——机器侧的「哪些环节会失败、单次代价多少」留在门槛内（本档 §4 已答），历史人时移出门槛，未来人时由 [T3.7 量具](operator-development-phase1-execution-20261031.md)当场记录（`core/human_ledger.py`：六环节、unknown 缺省、分母恒全、人档与机器秒不折叠）。存量证据只能回答「哪些环节会失败、失败一次花多少机器时间」。
 2. **机器侧基线已经能建起来，且失败高度集中在两处**：L3 性能判定（两批独立复现：L2 通过率 100%，而 L3 分别 5/10 与 3/12=25%，加速比中位 0.99x）与 L1/契约形状一致性（matmul 三臂 0/3，全是 `expected 3, got 2` 这类维度不一致）。第 2 处还有**外部同向**证据（§3.1）。
 3. **外部一线流程最耗时的前两段，本仓仪器数量为零。** KernelAgent 把循环定为 Profile→Diagnose→Prescribe→Orchestrate→Explore→Measure，并明说人工这套循环「要数天到数周」；而我们的 `TOOL_PROFILER` 与 `TOOL_SHAPE_SWEEP` 都是 `None`（[generate/agent_runtime.py:153](../../operator_agent/generate/agent_runtime.py#L153-L154)，本次实读）。
 4. **拿别人的数替这个格子也不行——因为没有人有这个数。** 本轮专门去找「按环节的人工时间百分比」，公开材料里**一条都没有**（§3.1）：只有定性表述、「12 天 / 283 小时」这类**总耗时（含排队，不是人时）**、以及端到端可改份额。所以缺口不在「谁忘了记」，而在**这个口径从没被定义过**；可执行的动作是定义口径并当场测，而不是等回忆。
@@ -24,7 +24,7 @@
 | L1 | 30 次三臂对照（3 matmul / 4 layernorm / 3 softmax × A 裸 DSH、B +CLI、C +插件） | 完整 L1+L2 + 套件 + 输入保真 | A 6/10、B 5/10、C 7/10；**matmul 0/3 三臂全灭**（8 失败 + 1 unknown） | 调用 23/33/34；token ≈11.7k/15.4k/15.8k；通过运行 111–123 s（其中约 100 s 是 GPU 验证，**不能当性能指标**） | 任务提示与评测器维度不一致：`expected 3, got 2`；[s5-formal-results:21-46](../status/dsh-operator-s5-formal-results-20261028.md#L21-L46) |
 | L2 | 24 格协作研究（6 任务 × A/C × 2 重复） | 同上，最多 72 次验证 | 12 passed / 0 failed / **12 unknown**（1 次设施中断 + 11 格未执行） | A 76 调用 / 2571.281 s；C 46 / 2016.817 s；13 格耗时 4896.627 s | DSH `pi-ai stream idle timeout after 300000ms` 停在 13/24；C 用 `check.py` 7 次、`operator_verify` 0 次；[s5-cooperative-study:31-50](../status/dsh-operator-s5-cooperative-study-20261029.md#L31-L50) |
 | L3 | 性能 A/C：LayerNorm 16384×6144、Matmul 4096³ | ≥1.05× 且两次 L3 确认 | LayerNorm C−A 只有 **1.34% / 0.24%**，且 C 终稿 SHA 等于种子 SHA；Matmul C **0.9867×**（更慢）、A `call_budget_exhausted` 无终稿候选 | 18/20/19/24 调用；138 次调用合计；L3 配对样本 195/191/47/193 | [s5-kernel-performance-results:11-14,47-49](../status/dsh-operator-s5-kernel-performance-results-20261030.md#L11-L14) |
-| L4 | 端到端成功率量具（matmul 4096³ + layernorm）。**两个批次、两个 `git_head`**：`20260928_174223`（6 运行 / 12 轮，856 s）与 `20260929_142830`（6 运行 / **16 轮**，1096.7 s、208,233 token、`git_head 4e80b13`） | L1→L2→L3 逐级 | 批次一 **L1 10/12=83.3%、L2 10/10=100%、L3 5/10=50%**，加速比中位 **0.99x**（min 0.9697 / max 1.3196），任务成功 5/6。批次二 **L1 12/16=75%、L2 12/12=100%、L3 3/12=25%**，任务成功 3/6 | 856 s 墙钟；真实 token 总量 166,345（批次一，修正后）；派生成本 `cost_usd` 逐运行留存（如 0.01845 / 0.009436 / 0.017044） | 失败全在 L3 的 ±3% 刀刃上；**33% 首轮 L1 失败，每次代价一整轮 ≈20 s + 22k token**；[research/48:138-172](48-端到端成功率量具.md#L138-L172)、[:193-196](48-端到端成功率量具.md#L193-L196)、[:302](48-端到端成功率量具.md#L302)；两批 aggregate 本次直读自 `output/harness/*/pass_rate.json`。**L2 全通过与「L3 才是瓶颈」在两批上同时复现** |
+| L4 | 端到端成功率量具（matmul 4096³ + layernorm）。**两个批次、两个 `git_head`**：`20260928_174223`（6 运行 / 12 轮，856 s）与 `20260929_142830`（6 运行 / **16 轮**，1096.7 s、208,233 token、`git_head 4e80b13`） | L1→L2→L3 逐级 | 批次一 **L1 10/12=83.3%、L2 10/10=100%、L3 5/10=50%**，加速比中位 **0.99x**（min 0.9697 / max 1.3196），任务成功 5/6。批次二 **L1 12/16=75%、L2 12/12=100%、L3 3/12=25%**，任务成功 3/6 | 856 s 墙钟；真实 token 总量 166,345（批次一，修正后）；派生成本 `cost_usd` 逐运行留存（如 0.01845 / 0.009436 / 0.017044） | 失败全在 L3 的 ±3% 刀刃上；**33% 首轮 L1 失败，每次代价一整轮 ≈20 s + 22k token**；[research/48:138-172](../research/48-端到端成功率量具.md#L138-L172)、[:193-196](../research/48-端到端成功率量具.md#L193-L196)、[:302](../research/48-端到端成功率量具.md#L302)；两批 aggregate 本次直读自 `output/harness/*/pass_rate.json`。**L2 全通过与「L3 才是瓶颈」在两批上同时复现** |
 | L5 | 插件修复验收：LayerNorm 注入方差缺陷 | 经插件走 判→修→再判 | 首判 `accepted=false`（max err 2.42546，缺 `/n_cols`）→ 追加 L2 **12/12**，max err 2.38e-7 | 9 调用 / 170.009 s；恢复轮 106.086 s、**0 新调用** | [s5-plugin-repair-acceptance:27-46](../status/dsh-operator-s5-plugin-repair-acceptance-20261029.md#L27-L46) |
 | L6 | 一次真实会话：手搓 vs 插件（matmul 4096³ fp16，同一契约 `ee6734fa…`） | 同一契约的 L1/L2/L3 | 手搓 **1.0568x**（独立复核确认）vs 插件 `operator_run` **1.0036x** | 79 次工具调用：`bash` 45、`write/edit/read` 24、`operator_verify` 3、**`operator_run`/`repair`/`status` 0** | 用户绕开委托执行、自己扫 tile；插件模板空间缺 `stages=4` ⇒ 该轴**结构性不可搜**；[hitl-bench-sweep:6-20](../design/hitl-bench-sweep.md#L6-L20)、[:129](../design/hitl-bench-sweep.md#L129) |
 | L7 | LeetCUDA pilot 20 题（MockGPU 对拍） | NumPy 参考一致 | **15/20 = 75%**；失败种类 crash 3 / interface 1 / numeric 1 | 族：activation 4/7、norm **1/3**、gemm/softmax/reduce/transpose/elementwise/embedding 满分；难度 easy 72.7% / medium 71.4% / hard 100% | 本次读自 `output/leetcuda_bench/agent_full20/results.json` 的 `aggregate`；同批 `llm_calls` 字段为 0，**该批量投入不可核**（见 §9） |
@@ -34,7 +34,7 @@
 
 | 字段 | 现状 | 证据 |
 |---|---|---|
-| **人工活跃时间 / 人时** | **无任何读数**。全 `docs/` 里像「人时」的字面只有 `无人时 peers=0`，指的是同卡并发对手进程，不是人 | [CHECKLOG:1682](CHECKLOG.md#L1682)（唯一的近似）；路线把该字段列为**待收集**而非数据：[§2.4](../design/operator-development-product-roadmap.md#L70-L78) |
+| **人工活跃时间 / 人时** | **无任何读数**。全 `docs/` 里像「人时」的字面只有 `无人时 peers=0`，指的是同卡并发对手进程，不是人 | [CHECKLOG:1682](../research/CHECKLOG.md#L1682)（唯一的近似）；路线把该字段列为**待收集**而非数据：[§2.4](../design/operator-development-product-roadmap.md#L70-L78) |
 | 人工时间的唯一近似 | 一次会话的**工具调用分布**（79 次、45 次 bash、「≈2–4 分钟」）——是散文估算、不可复现，且计的是调用次数，不含阅读/决策/等待 | [hitl-bench-sweep:8-16,137](../design/hitl-bench-sweep.md#L8-L16) |
 | 环节位置 ≠ 环节时长 | 每条记录带 `first_candidate_write_step` / `first_verification_step`，但字段自述 `model_step_basis = ordinal ... not provider API calls` | 例如 `output/plugin_completion/20261029-s5-cooperative-study-v1/execution/records/*.json` |
 | 账单金额 | **分两类，都还不能当账单**：① S5 各批 provider usage 全部缺失 → 成本一律未知（[s5-kernel-performance-results:34](../status/dsh-operator-s5-kernel-performance-results-20261030.md#L34)）；② harness 批次**有** `cost_usd`（逐运行，如 0.01845），但它取自 `LLMUsageTracker.summary()['total_cost_usd']`，即**价格表 × token 的派生值、不是发票**；且 [harness_pass_rate.py:283-290](../../benchmarks/drivers/harness_pass_rate.py#L283-L290) 自己记着「第一版读错了键，于是整场测成 0」 |
@@ -92,7 +92,7 @@
 | 2 | **L1 接口 / 形状契约一致性** | L1 行 matmul 三臂 0/3；L4 批次一 33% 首轮失败、批次二 L1 通过率 12/16=75%（即 4/16 轮卡在 L1） | ≈20 s + 22k token（一整轮 Fixer） | **强：我方两批 + 外部同向**（AgentKernelArena：主导失败是入口/接线契约，不是数值） |
 | 3 | **委托执行被绕过** | L6 一次会话里 `operator_run`/`repair` 使用 **0** 次 | 整条产品主张失效的风险 | 弱：n=1，但方向明确 |
 | 4 | **传输 / 宿主中断** | L2 停在 13/24（300 s idle timeout）、L1 行 C 组 12 次后断流、`TRANSPORT` 未知 | 整批未执行，只记 unknown | 中：多次但异质 |
-| 5 | **测量有效性与共享机污染** | 工具开销 99.8%（8.6 s 墙钟对 18.8 ms 读数）、`launch floor` 实为空闲等待、配对排名 6/10 反转 | 判据方向错，代价不可计 | 中：[32](32-吸纳Triton-do_bench计时口径.md)/[34](34-util快照去污染复核.md)/[56](56-共享机测量保真与记录的可核性.md)/61/62 |
+| 5 | **测量有效性与共享机污染** | 工具开销 99.8%（8.6 s 墙钟对 18.8 ms 读数）、`launch floor` 实为空闲等待、配对排名 6/10 反转 | 判据方向错，代价不可计 | 中：[32](../research/32-吸纳Triton-do_bench计时口径.md)/[34](../research/34-util快照去污染复核.md)/[56](../research/56-共享机测量保真与记录的可核性.md)/61/62 |
 | — | **接入 / 端到端业务结果** | 无阶段、无读数 | **未知** | 无：不可建基线 |
 
 ## 5. 场景选择（T2.4）
@@ -118,8 +118,8 @@
 | 项 | 本期建议 | 依据 |
 |---|---|---|
 | 主评价问题 | **固定开发预算**（预算结束时达标任务数、最终性能） | 固定验收目标依赖同条件 A/C 对照，而 H20/P800 已下线、那条主张永久不可补 |
-| 收益门槛 | **待用户确认**。两个约束必须先摆出来：门槛设在 1.00x 时量到的是门槛位置（L4 实测中位 0.99x、±3% 刀刃）；预注册 1.05× 在 A/C 上实测只有 1.34%/0.24% | [48:163-172](48-端到端成功率量具.md#L163-L172)、[s5-kernel-performance-results:47-49](../status/dsh-operator-s5-kernel-performance-results-20261030.md#L47-L49) |
-| 重复方式 | 同任务同预算至少 2 次独立运行；跨身份禁止同表混报（[重绑记录](../status/delivery-identity-rebind-20261031.md)） | 路线 §6.2 |
+| 收益门槛 | **待用户确认**。两个约束必须先摆出来：门槛设在 1.00x 时量到的是门槛位置（L4 实测中位 0.99x、±3% 刀刃）；预注册 1.05× 在 A/C 上实测只有 1.34%/0.24% | [48:163-172](../research/48-端到端成功率量具.md#L163-L172)、[s5-kernel-performance-results:47-49](../status/dsh-operator-s5-kernel-performance-results-20261030.md#L47-L49) |
+| 重复方式 | 同任务同预算至少 2 次独立运行；跨身份禁止同表混报（[重绑记录](delivery-identity-rebind-20261031.md)） | 路线 §6.2 |
 | 停止规则 | 预算耗尽、设施中断、或连续轮次无有意义改善即停；不中途改门槛（KernelAgent 用的正是最后这条） | 路线 §5.1 |
 | 分母 | 全部已派发任务保留，成功 / 失败 / 未知分列；预登记未执行单列 | 路线 §6.2 |
 
@@ -131,7 +131,7 @@
 | 首次正确时间 | s | `first_complete_correct.elapsed_seconds` | `workflow_progress` 只有 ordinal，**不是时长** |
 | 验收总时间 | s | `execution-started.json` → 终评 | 含启动与清理；文档已两次警告「不是 GPU 核耗时」 |
 | 人工实际投入 | 分钟（自述） | §6 提纲 | **禁止用模型墙钟代替**；本期无读数 |
-| 开发资源投入 | 调用数 / token / case 数 / GPU s / 账单 | 账本与 provider usage | 曾因 `CostTracker` 跨运行累加把 token **高估 3.25 倍**（540114 vs 166345）；provider usage 缺失就记未知，[48:216](48-端到端成功率量具.md#L216)、[:411-413](48-端到端成功率量具.md#L411-L413)「不要引用省 61%」 |
+| 开发资源投入 | 调用数 / token / case 数 / GPU s / 账单 | 账本与 provider usage | 曾因 `CostTracker` 跨运行累加把 token **高估 3.25 倍**（540114 vs 166345）；provider usage 缺失就记未知，[48:216](../research/48-端到端成功率量具.md#L216)、[:411-413](../research/48-端到端成功率量具.md#L411-L413)「不要引用省 61%」 |
 | 最终运行性能 | ×基线 + 档位 | ruler / L3 | `utilization.memory` 是时间占比；launch floor 含空闲等待；同核可因 L2 冲刷从 0.895x 翻到 1.346x；配对排名会反转 |
 | 业务收益 | 端到端 | 无阶段 | **未知**，不得由 kernel 读数外推 |
 | 持续使用 | 人次 | 无记录 | **未知**，属 §6 复盘项 |
@@ -140,7 +140,7 @@
 
 - `output/leetcuda_bench/agent_full20/results.json` 里 `llm_calls` 为 0：需查这批是否走了模板/`--from-json` 评分路径；若是，其「成功率」不能当 LLM 生成的投入产出读数。
 - 48 号已修 token 跨运行累加缺陷，但 540114 这个错值是否还被别处引用需要扫一遍（同条 :411 已禁止引用「省 61%」）。
-- 语料不可作分母：2942 产物 / 8017 轮 / **带轴的为 0**（[51](51-可达上界与分母的口径.md)）。
+- 语料不可作分母：2942 产物 / 8017 轮 / **带轴的为 0**（[51](../research/51-可达上界与分母的口径.md)）。
 - 44 的峰值显存阈值 4 点未交、47 的重复基数因 n=2 被拒答、76「有希望的区域已穷尽」与 79 的真机复跑结论都欠一次外部资料复核。
 - 61/62 两轮显示**工具与传输本身吃掉绝大部分墙钟**（心跳 8.6 s 对 18.8 ms 读数、单臂 1.87 s 里约 1.47 s 是量具自己的策略）：任何阶段 B 的「省时」读数都必须把这一段单独列出，否则会把它算成收益。
 
@@ -150,4 +150,4 @@
 |---|---|---|
 | 2026-10-31 | 创建：八条真实任务台账、人工投入从未记录的缺口证明、KernelAgent 外部流程核查、环节排序、场景选择与可反驳理由、复盘提纲、T2.5 预登记骨架、T2.6 口径表、T2.7 待办 | 本次实读的 S5 各批与 research 48/51/32/34/56、`hitl-bench-sweep`、`leetcuda_bench/agent_full20/results.json` 的 aggregate、PyTorch 博客全文抓取 |
 | 2026-10-31 | v0.2：用户答「没记录过」，于是把「能否用外部读数代替」查到底。新增 §3.1（八条来源、逐条标注是否人时；**结论是按环节的人工时间百分比在公开材料里一条都没有**）；L4 行补入第二批 `20260929_142830`（16 轮、L1 12/16、L2 12/12、L3 3/12=25%、任务 3/6、1096.7 s、208,233 token、`git_head 4e80b13`）→ 排序第 1 位升级为两批复现；第 2 位补外部同向（AgentKernelArena 的入口契约失败）；§2 账单一行改为区分「S5 无 usage」与「harness 有 `cost_usd` 但属价格表派生、且曾读错键测成 0」；结论从三条增为四条 | 直读 `output/harness/*/pass_rate.json` 两批 aggregate 与逐轮结构；[harness_pass_rate.py:283-290](../../benchmarks/drivers/harness_pass_rate.py#L283-L290)；§3.1 所列八个 URL 于本日实际取回并逐条引原文 |
-| 2026-10-31 | v0.3：用户选定「甲」，路线 §5 的阶段 A 出口条件已改写（机器侧代价 + 人的出现，历史人时移出门槛），本档结论 1、§2、§6 同步到新形式；T3.7 量具落地（`core/human_ledger.py`、15 条用例、变异表行为分母 8/8 全拦），历史四格改为「事后追认才补」 | [一期清单 §5.1](../design/operator-development-phase1-execution-20261031.md) 的定案记录；`pytest tests/unit/test_human_ledger.py` 15 passed；`benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/human_ledger.py` |
+| 2026-10-31 | v0.3：用户选定「甲」，路线 §5 的阶段 A 出口条件已改写（机器侧代价 + 人的出现，历史人时移出门槛），本档结论 1、§2、§6 同步到新形式；T3.7 量具落地（`core/human_ledger.py`、15 条用例、变异表行为分母 8/8 全拦），历史四格改为「事后追认才补」 | [一期清单 §5.1](operator-development-phase1-execution-20261031.md) 的定案记录；`pytest tests/unit/test_human_ledger.py` 15 passed；`benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/human_ledger.py` |

@@ -4,7 +4,7 @@
 attention 等），由 LLM agent 设计、生成、修复 Triton / CUDA 核，经三级验证
 （L1 编译 → L2 功能 → L3 性能 + Roofline）后产出**可审计**的结论。
 
-- 版本：`0.6.2`（见 [operator_agent/__init__.py](operator_agent/__init__.py)）
+- 版本：`0.6.3`（见 [operator_agent/__init__.py](operator_agent/__init__.py)）
 - 运行模式：**无人值守** —— 无人在环内裁决歧义或发现失效
 - DSL：Triton / CUDA 为主；后端接口预留模板型后端
 

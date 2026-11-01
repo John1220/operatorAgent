@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.12
+
+换号原因只有一件：一期文档搬进 `docs/phase1/` 后，随包的 `README.md` 与本 `CHANGELOG.md` 里引用的
+文档路径变了，Python 侧 `human_ledger.py` 的模块说明也变了 —— 这些字节都在发布物里，按 `0.1.10`
+立下的「版本号 ↔ 内容一一对应」规矩必须换号，不能沿用 `0.1.11` 的哈希。
+
+- Python 侧同步升到 `0.6.3`；`0.6.2`/`0.1.11` 两个工件与其 SHA256 原样保留，不覆盖、不复用其验收。
+- 工具行为、schema、宿主契约均未变（工具契约仍为 **9**，`npm test` 仍 58 条）。
+- 文档位置：一期清单与两份记录现在在 `docs/phase1/`，索引见 `docs/phase1/README.md`。
+
 ## 0.1.11
 
 换号只因 Python 侧身份变了：`operator_agent/` 从包根平铺分为五层，`protocol_identity()` 的 73 条清单里 70 条路径键
@@ -9,7 +19,7 @@
 - 与 `0.6.1` 的关系必须说清：在盘的 `0.6.1` wheel 是平铺布局，仓库 HEAD 的 `0.6.1` 源码是分层布局，
   同号两物正是 `0.1.10` 修掉过的缺陷，因此 Python 侧升 `0.6.2`、壳侧同步升 `0.1.11`。
 - 分层前的冻结记录（S5/S6、GPU 中断恢复、发布形态）从此只读、不可当新身份引用，见
-  `docs/status/delivery-identity-rebind-20261031.md`。
+  `docs/phase1/delivery-identity-rebind-20261031.md`。
 
 ## 0.1.10
 

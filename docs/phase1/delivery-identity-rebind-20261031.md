@@ -3,7 +3,7 @@
 | 项目 | 说明 |
 |---|---|
 | 文档性质 | 身份断链的事实记录与失效清单；不是验收报告，不新增能力 |
-| 依据 | [第一期清单 T1.1](../design/operator-development-phase1-execution-20261031.md)、[仓库瘦身与分包](../design/repo-slimming-20261031.md) |
+| 依据 | [第一期清单 T1.1](operator-development-phase1-execution-20261031.md)、[仓库瘦身与分包](../design/repo-slimming-20261031.md) |
 | 读数条件 | 本机 `/usr/bin/python3` 3.9.6（numpy 2.0.2）；`HEAD = 24f4fc2`（分支 `feat/phase1-delivery-identity`）；旧身份从在盘 wheel 解包到**独立目录**后 import 计算，新身份从仓库根计算 |
 | 本期动作 | 重绑与记录：不重算旧哈希、不迁移历史证据、不回退布局、不跑 GPU、不叫模型；另在**仓外**重建 `0.6.2`/`0.1.11` 工件并核对身份（§5） |
 
@@ -38,11 +38,11 @@
 
 | 记录 | 它引用的旧身份 | 现在 |
 |---|---|---|
-| [S5 安装工件验收](dsh-operator-s5-installed-gpu-acceptance-20261030.md) | wheel `0.6.0`（`8cd75a38…`）、协议身份 73 文件（平铺键） | 只读。不得写成分层后身份的验收 |
-| [S6 交付验收](dsh-operator-s6-acceptance-20261030.md) | wheel `0.6.0` + 插件 `0.1.9` | 只读 |
-| [S6 准备](dsh-operator-s6-preparation-20261027.md) | 「已安装包的协议身份含 70 文件」 | 只读。70 与 73 是不同时期的清单，别再互相换算 |
-| [GPU 中断恢复](gpu-interrupt-recovery-20261030.md) | 本轮源码（平铺布局，109 个冻结文件） | 只读。四项真机验收结论本身不变，但绑定的是旧布局身份 |
-| [发布形态](dsh-operator-release-readiness-20261030.md) | wheel `0.6.1`（`097918d3…`）、插件 `0.1.10`（`8245f168…`） | 只读。这两个工件保留原样，不覆盖、不复用其验收 |
+| [S5 安装工件验收](../status/dsh-operator-s5-installed-gpu-acceptance-20261030.md) | wheel `0.6.0`（`8cd75a38…`）、协议身份 73 文件（平铺键） | 只读。不得写成分层后身份的验收 |
+| [S6 交付验收](../status/dsh-operator-s6-acceptance-20261030.md) | wheel `0.6.0` + 插件 `0.1.9` | 只读 |
+| [S6 准备](../status/dsh-operator-s6-preparation-20261027.md) | 「已安装包的协议身份含 70 文件」 | 只读。70 与 73 是不同时期的清单，别再互相换算 |
+| [GPU 中断恢复](../status/gpu-interrupt-recovery-20261030.md) | 本轮源码（平铺布局，109 个冻结文件） | 只读。四项真机验收结论本身不变，但绑定的是旧布局身份 |
+| [发布形态](../status/dsh-operator-release-readiness-20261030.md) | wheel `0.6.1`（`097918d3…`）、插件 `0.1.10`（`8245f168…`） | 只读。这两个工件保留原样，不覆盖、不复用其验收 |
 
 在盘两个工件的 SHA256（本日实算，与发布形态记录一致）：
 
@@ -55,7 +55,7 @@
 
 - **接受断链**。分层与[层依赖棘轮守卫](../../tests/hygiene/test_repo_layout.py)是本轮定下的方向；旧身份不可复现，要复原只能回滚布局，本期不回滚。
 - **不迁移、不重算**。给历史证据目录改写 `measurement_protocol` 字段等于把旧批次伪装成新身份，属于伪造同源，本期禁止。
-- **版本号必须换**。`0.6.1` 现在同时指平铺 wheel 与分层 HEAD，正是[发布形态 §1 第 3 项](dsh-operator-release-readiness-20261030.md)刚修掉又被打回来的缺陷；随 T1.2 升 `0.6.2` / `0.1.11`，本记录即新身份的起算点。
+- **版本号必须换**。`0.6.1` 现在同时指平铺 wheel 与分层 HEAD，正是[发布形态 §1 第 3 项](../status/dsh-operator-release-readiness-20261030.md)刚修掉又被打回来的缺陷；随 T1.2 升 `0.6.2` / `0.1.11`，本记录即新身份的起算点。
 - **报数不得跨身份混表**。引用历史读数时按旧摘要 `78993c98…` 注明不可与新批次同列。
 
 ## 5. 重绑后的新工件（T1.3）
