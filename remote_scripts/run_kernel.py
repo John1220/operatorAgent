@@ -1726,6 +1726,29 @@ def get_gpu_info(reference_contract=None) -> dict:
                 "gpu_selection_log": _GPU_SELECTION_LOG,
                 "torch_version": torch.__version__,
             }
+            # 硬件自描述：Designer 的 tiling 约束只有一个读者，而它过去在真机路径上
+            # 拿不到共享内存与 L2 —— 于是 `agents.py` 对 8.0/9.0 之外的卡一律落到
+            # "128KB" 兜底（Ada 实为 100KB/SM，预算偏大 28%，代价是多烧 L1 轮次）。
+            # 规矩与本文件其它探测一致：**读不到就把键整个省掉**，不给"看起来像样"的值。
+            report = {}
+            for key, attr, scale in (
+                    ("shared_memory_per_sm_kb", "shared_memory_per_multiprocessor", 1024.0),
+                    ("shared_memory_per_block_optin_bytes", "shared_memory_per_block_optin", 1),
+                    ("l2_cache_size_bytes", "L2_cache_size", 1),
+                    ("max_threads_per_sm", "max_threads_per_multi_processor", 1),
+                    ("regs_per_sm", "regs_per_multiprocessor", 1),
+                    ("warp_size", "warp_size", 1)):
+                raw = getattr(props, attr, None)
+                if raw:
+                    value = raw / scale
+                    report[key] = int(value) if float(value).is_integer() else round(value, 1)
+            if report:
+                report["probed_by"] = "torch.cuda.get_device_properties"
+                info["hardware_report"] = report
+            else:
+                info["hardware_report_missing"] = (
+                    "该 torch build 未暴露设备属性字段；控制端不许改用兜底常量，"
+                    "要么显式跑一次峰值标定补上，要么让任务停在探测失败")
             # 多卡显存快照
             gpus = _query_gpu_memory()
             if gpus:

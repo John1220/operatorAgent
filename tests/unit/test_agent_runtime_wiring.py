@@ -255,7 +255,12 @@ class TestTheGateIsOnTheRealLoop(unittest.TestCase):
         """
         calls = []
         backend = DeclaredFakeBackend(
-            caps=[], analyze_dependencies=lambda code: (calls.append(code), [])[1])
+            caps=[], analyze_dependencies=lambda code: (calls.append(code), [])[1],
+            # 这条用例要观察的是依赖探针，不是 tile 预算。假件未覆盖的方法落到
+            # `LocalExecutor`，而它的 `memory.local.size` 是 "N/A" —— Designer 从此拒绝
+            # 按 128KB 猜（见 smem_budget），所以在这里显式给一个**申报了预算**的后端，
+            # 数值取自 `MockGPU` 自己的声明，不在测试里另抄一份规格。
+            get_hardware_info=lambda: MockGPU().get_hardware_info())
         _, art, _, _ = self._run(backend=backend, rounds=3,
                                  llm=_ScriptedLlm(generate=BROKEN_COMPILE,
                                                   fix=FIXER_ADDS_DEP),

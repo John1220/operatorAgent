@@ -36,7 +36,10 @@ def copy_kernel(src, dst, n, BLOCK: tl.constexpr):
     tl.store(dst + offs, tl.load(src + offs, mask=m), mask=m)
 
 
-def bench(fn, warmup=25, rep=200):
+REP = 200   # 采集尾巴里的 samples 用它，别两处各写一个数
+
+
+def bench(fn, warmup=25, rep=REP):
     """CUDA event 计时, 取 median (抗离群)"""
     import statistics
     for _ in range(warmup):
@@ -102,3 +105,22 @@ if crossover:
     print(f"    copy 核在 >= {mib} MiB/张 (访存 {traffic_c/1e6:.2f} MB) 时 launch 占比才降到 {oh:.1f}%")
     print(f"    => memory-bound 基准的单张张量访存量应达到 ~{traffic_c/1e6:.0f} MB 量级, 测量才有意义")
     print(f"    => layernorm 1024x768 只有 {traffic/1e6:.2f} MB, 差 {traffic_c/traffic:.0f}x")
+
+# 机器可读尾巴：G1 门要「本卡实测的地板 + 样本数 + 来源」。uuid 取不到就省键，
+# 采集器会因此拒绝盖来源戳，门继续报 unknown —— 而不是把这条脚本的结论当成标过。
+import json as _json, subprocess as _sp
+_u = None
+try:
+    _r = _sp.run(["nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader"],
+                 capture_output=True, text=True, timeout=10)
+    if _r.returncode == 0 and _r.stdout.strip():
+        _u = _r.stdout.strip().splitlines()[0].strip()
+except Exception:
+    _u = None
+_p = torch.cuda.get_device_properties(0)
+print("PROBE_JSON " + _json.dumps({
+    "uuid": _u, "name": _p.name, "cc": "%d.%d" % (_p.major, _p.minor),
+    "launch_floor": {"median_us": round(med, 3), "min_us": round(mn, 3), "samples": REP},
+    "crossover_mib_per_tensor": (crossover[0] if crossover else None),
+    "measured_by": "benchmarks/measurement/measure_launch_floor.py",
+}, ensure_ascii=False, sort_keys=True))

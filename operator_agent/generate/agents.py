@@ -42,6 +42,55 @@ def _hint_log(sketch: UnifiedSketch, new_hints: list) -> list:
     return out
 
 
+#: cc → (每 SM 共享内存 KB, 每 SM 线程数)。这是**回退表**，不是事实来源：
+#: runner 一旦自描述硬件 (`hardware_report`)，就先按实测取，这张表只兜住老 runner。
+_CC_SMEM_FALLBACK = (("9.0", 228, 2048, ("h100", "h200")),
+                     ("8.0", 164, 2048, ("a100",)))
+
+
+def smem_budget(hardware_info: dict):
+    """从硬件信息里定出 (shared_mem_kb, max_threads_per_sm, max_blocks_per_sm)。
+
+    顺序是刻意的：**实测 > 按 cc 的常量表 > 被显式上报的 legacy 字段 > 拒绝**。
+    最后一级过去是 `128` 兜底——它正好让「没探测过硬件」在产物里长得像探测过，
+    而且对 Ada (100KB/SM) 偏大 28%：tile 预算按不存在的池子排，代价全烧在 L1 轮次上。
+    """
+    from ..execute.remote_executor import HardwareProbeFailed
+    cc = str(hardware_info.get("compute_capability", ""))
+    hw_name = str(hardware_info.get("name", "")).lower()
+    report = hardware_info.get("hardware_report") or {}
+    legacy_local = (hardware_info.get("memory") or {}).get("local") or {}
+    # 两个上限不是一回事：per-SM 是这台计算单元的池子，opt-in 是**一个块**能要到的量。
+    # Hopper 上是 228 / 227、Ada 上是 100 / 99 —— 取先出现的那个，方向偏保守（偏小不会
+    # 炸共享内存，偏大会让候选在编译期 OOR，白烧一轮）。torch 老 build 只暴露一半。
+    if report.get("shared_memory_per_sm_kb"):
+        smem_kb = int(report["shared_memory_per_sm_kb"])
+    elif report.get("shared_memory_per_block_optin_bytes"):
+        smem_kb = int(report["shared_memory_per_block_optin_bytes"]) // 1024
+    else:
+        smem_kb = 0
+    if smem_kb:
+        return smem_kb, int(report.get("max_threads_per_sm") or 2048), 32
+    for prefix, kb, threads, name_tokens in _CC_SMEM_FALLBACK:
+        if cc.startswith(prefix) or any(t in hw_name for t in name_tokens):
+            return kb, threads, 32
+    if legacy_local.get("size"):
+        # 这个分支只服务老载荷的 "164KB/SM" 这类字符串；解析不出整数就拒。
+        # 旧写法在这里 `else 128`——兜底病灶换了个分支继续存在。
+        raw = str(legacy_local["size"]).replace("KB", "").replace("/SM", "").strip()
+        if not raw.isdigit():
+            raise HardwareProbeFailed(
+                "designer.tile_budget",
+                "legacy 上报的共享内存 %r 解析不出整数 KB：拒绝按 128KB 猜" % (legacy_local["size"],))
+        threads = int(hardware_info.get("compute_units", 128)) * 2  # rough estimate
+        return int(raw), threads, 32
+    raise HardwareProbeFailed(
+        "designer.tile_budget",
+        "共享内存上限既没探测到（hardware_report.shared_memory_per_sm_kb 缺失）、"
+        "也不在已知 cc 常量表里（cc=%r）：拒绝按 128KB 猜" % (cc or "unknown",),
+        endpoint_hint="要么升级远端 runner 让它自描述硬件，要么在契约里显式声明硬件事实")
+
+
 class DesignerAgent:
     """
     Designer Agent
@@ -102,23 +151,8 @@ class DesignerAgent:
         rag_context = self._build_rag_context(similar)
 
         # ---- 提取硬件约束用于 tile 选择 ----
-        cc = str(hardware_info.get("compute_capability", ""))
-        hw_name = str(hardware_info.get("name", "")).lower()
-        # 根据 compute_capability 推断共享内存和 SM 参数
-        # A100: 164KB/SM (可配置到 48KB 默认), 2048 threads/SM, 32 blocks/SM
-        # H100: 228KB/SM, 2048 threads/SM, 32 blocks/SM
-        is_a100 = cc.startswith("8.0") or "a100" in hw_name
-        is_h100 = cc.startswith("9.0") or "h100" in hw_name or "h200" in hw_name
-        if is_h100:
-            shared_mem_kb, max_threads, max_blocks = 228, 2048, 32
-        elif is_a100:
-            shared_mem_kb, max_threads, max_blocks = 164, 2048, 32
-        else:
-            shared_mem_kb = hardware_info.get("memory", {}).get("local", {}).get("size", "128KB")
-            if isinstance(shared_mem_kb, str):
-                shared_mem_kb = int(shared_mem_kb.replace("KB", "").replace("/SM", "").strip()) if "KB" in shared_mem_kb else 128
-            max_threads = hardware_info.get("compute_units", 128) * 2  # rough estimate
-            max_blocks = 32
+        # 判定顺序与「拒绝编兜底值」的规矩都在 smem_budget() 里，理由写在那儿。
+        shared_mem_kb, max_threads, max_blocks = smem_budget(hardware_info)
 
         # 可用共享内存 (扣除系统预留 ~10%)
         usable_shared_mem_kb = int(shared_mem_kb * 0.9)

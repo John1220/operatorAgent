@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.15
+
+升号原因在 wheel 内，且**这次连随包 runner 一起改了**（`remote_scripts/run_kernel.py` 在
+交付身份的 73 个文件里，改它必然换身份）：
+
+- runner 的 `gpu_info` 现在自描述硬件：每 SM 共享内存、块可 opt-in 的字节数、L2 大小、
+  每 SM 线程数、寄存器数、warp 宽度，并带 `probed_by`。**读不到就省键**，另给一条
+  `hardware_report_missing` 说明——不许改用兜底常量。
+- Designer 的 tile 预算（`generate/agents.py` 的 `smem_budget()`）改成
+  **实测 > 按 cc 的常量表 > 被显式申报的 legacy 字段 > 抛**。原来最后一级是 `128` KB，
+  它对 Ada（100 KB/SM）偏大 28%，而且让「没探测过硬件」在产物里长得像探测过。
+
+**使用者可见的行为变更**：降级梯子的终点（CPU 回退 `LocalExecutor`，它的
+`memory.local.size` 是 `"N/A"`）从此**不是一台可生成的 GPU**——Designer 在烧掉 LLM 调用之前
+抛 `HardwareProbeFailed`，而不是借给它一个不存在的共享内存池子。
+
+- Python 侧同步 `0.6.6`；工具契约仍为 **9**，MCP 工具面一条命令都没动。
+- 两个共享内存上限（每 SM 与每块 opt-in）**只要有一个就够排 tile 预算**：`shared_memory_per_multiprocessor`
+  不是每个 torch build 都暴露，要求两个都有等于按 torch 版本判卡。只有 opt-in 时按它取值
+  （Hopper 227/228、Ada 99/100，取到的是偏小的那个，方向保守）。
+- 同批（都不随包发布）：迁移门采集器 `benchmarks/probes/collect_unknown_card_probe.py` 接上
+  `--from-probe`，`measure_launch_floor.py` 与 `calibrate_achievable_peak.py` 尾巴各打一行
+  `PROBE_JSON {...}`（带本卡 uuid，取不到就省键）；门与采集器、runner 与 Designer 之间的字段契约
+  共 59 条用例（`test_unknown_card_gates` 21 / `test_unknown_card_probe` 19 / `test_smem_budget` 19），
+  变异表 `benchmarks/mut_specs/unknown_card_gates.py` 扩到 21 行（行为 18 / 结构 3，全 KILLED）。
+
 ## 0.1.14
 
 一行没改插件壳本身，升号原因还是 wheel 内的 Python 代码：`app/cli.py` 新增三条子命令

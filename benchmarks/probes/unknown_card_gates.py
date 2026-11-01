@@ -87,7 +87,9 @@ def assess(info):
     # --- G2 共享内存 ----------------------------------------------------------
     g2 = info.get("shared_memory") or {}
     per_block, per_sm, src = g2.get("per_block_optin_bytes"), g2.get("per_sm_kb"), g2.get("source_uuid")
-    if per_block is None or per_sm is None:
+    # 两个上限只要**有一个是本卡读回的**就够排 tile 预算（torch 老 build 只暴露一半）。
+    # 要求两个都有会把门变成「按 torch 版本判卡」——那是采集口径，不是硬件事实。
+    if per_block is None and per_sm is None:
         out["G2_shared_memory"] = _missing("共享内存未从设备属性读回：缺它时 tile 预算会落到默认量级，Ada 类卡直接偏高")
     elif src != uuid:
         out["G2_shared_memory"] = _fail(per_block,

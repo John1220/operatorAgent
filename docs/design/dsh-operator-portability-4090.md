@@ -189,11 +189,19 @@ attention 的参考实现走 `F.scaled_dot_product_attention`
 
 按顺序做，每步都能独立验收；任何一步没做完就不进入下一步的性能结论。
 
-1. **让 runner 自描述硬件。** 在 `gpu_info` 里补报共享内存/SM 与 L2 大小
-   （现在只给 cc、总显存、SM 数，见 [run_kernel.py:1720](../../remote_scripts/run_kernel.py)），
-   硬件表退化为回退值。验收：未知卡不再落进 G2 的 128 KiB 兜底。
-2. **修 G2 的解析分支**，Ada 走独立分支或直接读 caps；验收：未知卡上 Designer 拿到的
-   smem 是"未知"而不是一个偏大的数。
+1. **让 runner 自描述硬件。** ✅ 已做（2026-11-01，`0.6.6`/`0.1.15`）：`gpu_info` 现在从
+   `torch.cuda.get_device_properties` 逐字段探测每 SM 共享内存、块可 opt-in 的字节数、L2 大小、
+   每 SM 线程数、寄存器数与 warp 宽度，带 `probed_by`（[run_kernel.py:1734](../../remote_scripts/run_kernel.py#L1734)）；
+   **读不到就省键**，另给一条 `hardware_report_missing` 说明「不许改用兜底常量」。
+   验收（未知卡不再落进 G2 的 128 KiB 兜底）由 `tests/unit/test_smem_budget.py` 的
+   runner↔Designer 键名守卫与变异表 M17 钉住。
+2. **修 G2 的解析分支。** ✅ 已做（同一批）：Designer 侧提出
+   [`smem_budget()`](../../operator_agent/generate/agents.py#L51)，顺序为
+   **实测 > 按 cc 的常量表 > 被显式申报的 legacy 字段 > 抛 `HardwareProbeFailed`**；
+   两处 `128` 兜底（else 分支与 legacy 字符串解析失败的 `else 128`）一起删掉。
+   验收：未知卡上 Designer 拿到的是**拒绝**而不是一个偏大的数——`{}`、cc 8.9 无实测、
+   以及 CPU 回退那句 `"N/A"` 三条输入各自都红过（变异表 M10–M12）。
+   副作用要写在脸上：**老 runner 在 cc 8.9 上现在会抛**，换卡必须连 runner 一起部署。
 3. **加目标卡的硬件条目并实测峰值。** 用 `peak_probe` 实测替代 ⚠️ 行；验收：
    `peak_trusted=True` 且出处字符串不再以 ⚠️ 开头。
 4. **标定 floor / L2 冲刷 / dispersion / `NOISE_BAND`**，把 floor 落进硬件条目。

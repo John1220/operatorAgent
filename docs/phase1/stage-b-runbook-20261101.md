@@ -78,15 +78,27 @@
 前置未满足就**停在第 0 步并报告**，不许静默降级继续跑（[可迁移性 G1–G5](../design/dsh-operator-portability-4090.md#L85-L126)）：
 
 ```sh
-# 0. 迁移门（T3.2 只落了探针形状；五道门任一不过即停）
+# 0. 迁移门（五道门任一不过即停）
 python3 -B -m benchmarks.probes.unknown_card_gates --selftest
-#      门的输入由采集器组装（在目标机上跑，读 torch 设备属性 + nvidia-smi UUID）：
-#        scp benchmarks/probes/collect_unknown_card_probe.py <ssh别名>:~/ && \
-#          ssh <ssh别名> "python3 collect_unknown_card_probe.py --sharing exclusive --out ~/card-probe.json"
-#      —— 本机已确认为**独占**，所以 --sharing exclusive；接显示器要改 desktop，不许留空
 #    ↑ 零机时自检：证明「无读数 ⇒ 五门全 unknown」「继承值 ⇒ 不得 pass」两条反例是活的
-#      真跑前先在卡上产出一份探测 JSON（device / launch_floor / shared_memory / peak /
-#      noise / shapes，每块都要带 source_uuid），再喂给门：
+
+#    门的输入由采集器在目标机组装（读 torch 设备属性 + nvidia-smi UUID）。
+#    三个脚本都是**单文件 scp** 过去跑（它们没法 import 门里的 schema，所以键名靠
+#    tests/unit/test_smem_budget.py 的静态守卫钉住）：
+for f in benchmarks/measurement/measure_launch_floor.py \
+         benchmarks/calibration/calibrate_achievable_peak.py \
+         benchmarks/probes/collect_unknown_card_probe.py; do
+  scp "$f" <ssh别名>:~/
+done
+ssh <ssh别名> "python3 ~/measure_launch_floor.py        > ~/floor.txt"   # G1：本卡 launch 地板
+ssh <ssh别名> "python3 ~/calibrate_achievable_peak.py   > ~/peak.txt"    # G3：本卡峰值与 D2D 带宽
+ssh <ssh别名> "python3 ~/collect_unknown_card_probe.py --sharing exclusive \
+      --from-probe ~/floor.txt --from-probe ~/peak.txt --out ~/card-probe.json"
+scp <ssh别名>:~/card-probe.json ./
+#      —— 本机已确认为**独占**，所以 --sharing exclusive；接显示器要改 desktop，不许留空。
+#         两份实测尾巴各打一行 `PROBE_JSON {...}`，里面带**本卡 uuid**；uuid 与本卡不符
+#         或缺 uuid ⇒ 采集器直接拒（别的卡的地板与峰值不许混用）。
+#         G4 的散布/污染阈值与 G5 的形状清单这里仍然没有：门会判 unknown，就停在这里。
 python3 -B -m benchmarks.probes.unknown_card_gates --from-json ./card-probe.json
 #    退出码非 0（有 fail 或 unknown）⇒ 停在这里，不开跑；不静默降级
 operator-agent capabilities --json-out ./cap.json
@@ -158,20 +170,20 @@ GPU 型号、UUID、free memory 一律运行时探测入档；共享卡快照不
 ## 6. 本文没有做的事
 
 - 没有跑任何真机或模型；没有新增能力（剖析、形状扫描、多候选裁决工具仍为零，见一期清单 §6 不做项）。
-- 没有替 T3.1 选卡。**T3.2 只落了探针形状**（`benchmarks/probes/unknown_card_gates.py`，七行变异表 7/7 拦住、26 条用例全绿），**五道门一条读数都没有**——那些必须来自真实卡上的探测输出，本文不猜；探针的全部作用就是让继承值与缺读数不许变成绿。
+- 没有替 T3.1 选卡。**T3.2 只落了探针形状**（`benchmarks/probes/unknown_card_gates.py`，21 行变异表 21/21 拦住、门与接面共 59 条用例全绿），**五道门一条读数都没有**——那些必须来自真实卡上的探测输出，本文不猜；探针的全部作用就是让继承值与缺读数不许变成绿。
 - 预算与门槛的数值取自当事人 2026-11-01 的指示；改动它们需要新计划与新身份，不在本文授权内。
 
 ## 7. 目标卡：RTX 4070（当事人 2026-11-01 确认：独占、ssh 可达）
 
 CC 8.9（Ada，AD104）落在仓内硬件表的 **8.9 行**，Triton 可用、有 Tensor Core 与 bf16、12 GB 显存。
-四个已知后果，都不需要卡就能定下来，必须按顺序处理：
+四条已知后果都不需要卡就能定下来（第 2 条已在 2026-11-01 闭合，其余三条要卡上的读数）：
 
 | # | 事实（仓内实读） | 后果与处置 |
 |---|---|---|
 | 1 | [verifier.py 的 8.9 行](../../operator_agent/decide/verifier.py#L206) 按 **L40S** 填（362 TFLOPS fp16 / 864 GB/s），而 `_PEAK_BY_NAME` 没有 4070 条目 ⇒ 走 CC 兜底 | 分母偏大是仓里**有意的不对称策略**（偏大只是不出口，偏小会提前停）。后果：`peak_trusted` 不为 True，**roofline 判停出口在这张卡上基本永不打开**。要判停质量必须 `peak_probe` 实测并落本卡条目（G3 验收） |
-| 2 | `generate/agents.py` 的 smem 分支只有 `8.0`/`9.0`，8.9 落 else | G2 门的典型病灶。采集器已从设备属性读 `shared_memory_per_block_optin`，但**生成侧那两处分支也要补 8.9**，否则 Designer 拿到的 tile 预算仍是兜底量级 |
+| 2 | ~~`generate/agents.py` 的 smem 分支只有 `8.0`/`9.0`，8.9 落 else~~ **本次已修**：runner 的 `gpu_info` 自描述 `hardware_report`（每 SM 共享内存 / 块 opt-in 字节 / L2 / 每 SM 线程数 / 寄存器 / warp，**读不到就省键**），Designer 侧改成 [`smem_budget()`](../../operator_agent/generate/agents.py#L51) 按 **实测 > cc 表 > legacy 申报 > 抛** 取值，`128` 兜底删掉；两个上限**有一个就够**（`shared_memory_per_multiprocessor` 不是每个 torch build 都暴露，只有 opt-in 时按它取 ⇒ Ada 上 99 ≤ 100，保守方向） | 后果变了，而且是两条：**老 runner（没有 `hardware_report`）在 cc 8.9 上现在直接抛 `HardwareProbeFailed`**，所以 4070 上必须部署本轮的 `remote_scripts/run_kernel.py`；CPU 回退（`memory.local.size = "N/A"`）不再是可生成目标——`128 KB` 借给它的这条路断了。`⚠️ cc 8.9 表内常量`不存在，实测值才是唯一来源 |
 | 3 | 独占机器 | G4 的 `--sharing exclusive` 如实可填；这条消掉了消费卡最常见的杀手（桌面占用使 util 长期 >5%、每轮 degraded）。**但阈值本身仍是 H20 八卡共享机那组**，必须重测，否则是反向错（太松） |
-| 4 | S5 驱动层预检阈值 8192 MiB | 12 GB 卡上≈要求整卡全空，会常态预检不过 ⇒ 开跑前重设（4096 MiB 档尚可，通用默认 1024 MiB 无问题） |
+| 4 | 预检阈值有两档，前一版本文只说了一个数（8192）——那是**共享模式**那档 | 独占默认档是 `min_free_mib=4096`（[s5_workflow_preflight.py:22](../../benchmarks/experiments/s5/s5_workflow_preflight.py#L22)），12 GB 卡上可过；`shared-known-processes` 那档的 8192 被 [s5_shared_gpu.py:31](../../benchmarks/experiments/s5/s5_shared_gpu.py#L31) 的 `validate_policy` **钉死为常数**（不是可配项），12 GB 卡上等于要求整卡 2/3 全空——按独占口径就不必碰它。通用默认 `min_free_mb=1024`（[_preparation.py:21](../../benchmarks/_preparation.py#L21)）无问题。三条都只在 **S5 驱动层**生效，阶段 B 走 `operator-agent run` 不吃这套策略 |
 
 再加两条口径约束：4070 的带宽约为 H20 的 1/7，**别期待复现 1.41× 那类读数**；且这张卡上的全部结论都是**新身份新基线**，不得与 H20 的冻结记录同表（§5 规则）。形状上限仍由传输预算 256/512 MiB 决定，与显存无关。
 
@@ -181,3 +193,4 @@ CC 8.9（Ada，AD104）落在仓内硬件表的 **8.9 行**，Triton 可用、�
 |---|---|---|
 | 2026-11-01 | 创建：T2.5 预登记（固定预算问题 + 每任务 ≤30 调用 / ≤2400 s 墙钟 + 4×2 设计 + +1 最小可检出单位）、T3.3 控制变量表、T3.4 绕过与额外成本字段（含「bypass 非空不算收益」硬规矩）、T3.5 七步 runbook（命令与 CLI 默认值实测核对）、T3.6 四代协议身份与四条新 evaluator 摘要 | `operator_agent/app/cli.py:39-145` 参数实读；`digest()` 实算四条 evaluator 身份与三代协议摘要；证据树 `grep` 全树查 `evaluator_sources`（0 命中）与 `measurement_protocol`（7 命中） |
 | 2026-11-01 | 门的输入侧补齐：新增采集器 `collect_unknown_card_probe.py`（读 torch 设备属性与 nvidia-smi UUID，**拒绝给共享形态与 smem 兜底值**），runbook 第 0 步接上它；新增 §7 记录目标卡 RTX 4070 的四个已知后果（8.9 行按 L40S 偏大 ⇒ 判停不出口、`agents.py` 缺 8.9 分支、独占消掉污染杀手、8192 MiB 预检阈值要重设） | 采集器契约 8 条用例（与门的字段对齐、没测的段不许出现在产物里）；变异表扩到 9 行后重跑 **9/9 KILLED**，跑后 `git status` 只剩本次新增文件；`_PEAK_BY_CC` 与 `agents.py` 分支为本次实读 |
+| 2026-11-01（同日第二次） | §7 第 2 条**闭合**：`gpu_info` 自描述 `hardware_report`，Designer 侧新增 `smem_budget()`（实测 > cc 表 > legacy 申报 > 抛），`128` 兜底与 legacy 分支的 `else 128` 一起删掉 ⇒ **老 runner 在 cc 8.9 上现在会抛**，4070 必须部署本轮 `remote_scripts/run_kernel.py`。§7 第 4 条**更正**：先前只写 8192 是半句话，实际独占默认 `min_free_mib=4096`、8192 属 `shared-known-processes` 且被 `validate_policy` 钉死为常数，三条都只在 S5 驱动层生效。第 0 步补上两份实测（地板 / 峰值带宽）与 `--from-probe` 的接线，并写明 G4/G5 仍无读数。过程中查出并修掉一处会让 4070 **开不了跑**的口径：`shared_memory_per_multiprocessor` 不是每个 torch build 都暴露，于是门与采集器改成**两个上限有一个就够**（全没有才拒），Designer 只有 opt-in 时按 opt-in 取（Ada 99 ≤ 100，保守方向） | `smem_budget()` 与 19 条新用例（含 `LocalExecutor`「N/A」申报被拒、MockGPU 申报可读的反向对照、opt-in 单独可读）；用例总数 34→59；变异表 21 行重跑 **21/21 KILLED**（行为 18 / 结构 3），跑后 `git status` 无残留、五处改动文件 grep 不到 `if False:`；`s5_workflow_preflight.py:22`、`s5_shared_gpu.py:31`、`_preparation.py:21` 三处阈值本次实读；H20 归档 `raw/hw/nvml_attrs.json` 用来核对 torch 属性名拼法 |

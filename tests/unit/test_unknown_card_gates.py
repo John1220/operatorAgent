@@ -74,6 +74,13 @@ class TestInheritedValuesAreRefused(unittest.TestCase):
         self.assertEqual(gate["verdict"], "fail")
         self.assertIn("判停", gate["why"])
 
+    def test_peak_from_another_card_is_fail_not_pass(self):
+        """`trusted` 对得上但**不是本卡测的**：CC 8.9 那行兜底值按 L40S 填，偏大就永不判停。"""
+        result = self._refuse(lambda i: i["peak"].update(source_uuid="H20-archive"))
+        gate = result["gates"]["G3_peak_denominators"]
+        self.assertEqual(gate["verdict"], "fail")
+        self.assertFalse(result["all_green"])
+
     def test_noise_band_copied_from_the_tree_never_passes(self):
         """搬仓内 H20 的数又没给来源 ⇒ unknown 或 fail，唯独不许 pass。"""
         def mut(i):
@@ -86,6 +93,27 @@ class TestInheritedValuesAreRefused(unittest.TestCase):
     def test_shared_memory_from_another_card_is_fail(self):
         result = self._refuse(lambda i: i["shared_memory"].update(source_uuid="H20-archive"))
         self.assertEqual(result["gates"]["G2_shared_memory"]["verdict"], "fail")
+
+    def test_both_limits_absent_is_unknown_not_pass(self):
+        """段在、来源在，但两个上限都是 `None` —— 那是「没读到」，不是「读到了 0」。"""
+        result = self._refuse(lambda i: i["shared_memory"].update(
+            per_block_optin_bytes=None, per_sm_kb=None))
+        self.assertEqual(result["gates"]["G2_shared_memory"]["verdict"], "unknown")
+
+    def test_one_limit_is_enough_because_torch_builds_differ(self):
+        """反向对照：`shared_memory_per_multiprocessor` 不是每个 torch build都暴露。
+
+        要求两个都在就等于**按 torch 版本判卡**——4070 上会采集失败、门永远 unknown，
+        而这跟硬件没关系。每块 opt-in 单独出现时排 tile 预算够用，而且方向偏保守。
+        """
+        for key, keep in (("per_sm_kb", "per_block_optin_bytes"),
+                          ("per_block_optin_bytes", "per_sm_kb")):
+            info = good_info()
+            info["shared_memory"].pop(key)
+            result = assess(info)
+            gate = result["gates"]["G2_shared_memory"]
+            self.assertEqual(gate["verdict"], "pass", "%s 缺席时只剩 %s 也不该拦" % (key, keep))
+            self.assertEqual(gate["value"][keep], good_info()["shared_memory"][keep])
 
     def test_noise_thresholds_without_provenance_are_unknown(self):
         """光写一句「独占」不构成标定 —— 来源缺失时不得给 pass。"""

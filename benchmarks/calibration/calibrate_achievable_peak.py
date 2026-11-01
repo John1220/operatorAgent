@@ -123,8 +123,10 @@ def main():
                   f"{tflops / ref:>7.1%}")
 
     print("\n=== 有效带宽阶梯 (D2D copy, GB/s; 表里的 H20 带宽 = 3680) ===")
+    bw = []
     for mb in (8, 64, 256, 1024, 4096):
         gbs = copy_gbs(mb)
+        bw.append({"mb": mb, "gbs": round(gbs, 1)})
         print(f"  {mb:>5} MB → {gbs:>8.0f} GB/s   相对 3680 = {gbs / 3680:>6.1%}")
 
     print("\n=== 读法 ===")
@@ -140,6 +142,32 @@ def main():
     print("  若某个 dtype 的跨 shape 相差 > 一个测量档位 (measurement.NOISE_BAND 的 "
           "degraded 档 = 0.4%), 那么『一个 dtype 一个峰值标量』就是错的口径, "
           "达成率会随 shape 系统性地偏高或偏低。")
+
+    # 机器可读尾巴：门要的是「本卡实测的峰值 + 来源」，靠人抄一遍就等于没测。
+    # uuid 取不到就把键省掉 —— 采集器会因此拒绝盖来源戳，门继续报 unknown，
+    # 而不是拿一份来历不明的数当标定过。
+    import json as _json, subprocess as _sp
+    _u = None
+    try:
+        _r = _sp.run(["nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader"],
+                     capture_output=True, text=True, timeout=10)
+        if _r.returncode == 0 and _r.stdout.strip():
+            _u = _r.stdout.strip().splitlines()[0].strip()
+    except Exception:
+        _u = None
+    _peak = {}
+    for _n, _name, _tf in rows:
+        _peak[_name] = max(_peak.get(_name, 0.0), round(_tf, 2))
+    print("PROBE_JSON " + _json.dumps({
+        "uuid": _u, "name": p.name, "cc": "%d.%d" % (p.major, p.minor),
+        "l2_cache_size_bytes": int(getattr(p, "L2_cache_size", 0) or 0),
+        "peak_by_dtype": _peak,
+        "mem_bw_gbs": max((b["gbs"] for b in bw), default=None),
+        "mem_bw_by_mb": bw,
+        "measured_by": "benchmarks/calibration/calibrate_achievable_peak.py",
+        "torch_version": torch.__version__,
+    }, ensure_ascii=False, sort_keys=True))
+
 
 
 if __name__ == "__main__":
