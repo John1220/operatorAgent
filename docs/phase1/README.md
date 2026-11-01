@@ -6,7 +6,7 @@
 | 文档 | 类型 | 内容 |
 |---|---|---|
 | [operator-development-phase1-execution-20261031.md](operator-development-phase1-execution-20261031.md) | 一期计划 | 可勾选执行清单（W1 交付身份 / W2 阶段 A / W3 B 计划冻结）、出口判据与现状、本期不做项 |
-| [delivery-identity-rebind-20261031.md](delivery-identity-rebind-20261031.md) | 事实记录 | 平铺 → 五层造成的协议身份断链（`78993c98…` → `e8c7f2c6…`）、失效清单、重建后的 `0.6.3` 工件与身份核对 |
+| [delivery-identity-rebind-20261031.md](delivery-identity-rebind-20261031.md) | 事实记录 | 平铺 → 五层造成的协议身份断链（`78993c98…` → `e8c7f2c6…`）、失效清单、五代工件（`0.6.2`→`0.6.6`）逐件哈希与身份核对；§5.4 记本期**唯一一次摘要换号** `e8c7f2c6…` → `b937fd8e…` |
 | [stage-a-ledger-20261031.md](stage-a-ledger-20261031.md) | 研究记录 | 八条真实任务台账、「人时全仓从未记录」的缺口证明、外部一线流程核查、环节排序与场景选择 |
 | [stage-b-runbook-20261101.md](stage-b-runbook-20261101.md) | 执行前冻结计划 | W3 产出：T2.5 预算与达标定义、T3.3 控制变量、T3.4 绕过与额外成本字段、T3.5 七步 runbook、T3.6 四代协议身份与 evaluator 摘要 |
 
@@ -22,11 +22,18 @@
 
 ```sh
 ls output/plugin_completion/20261031-phase1-identity-v1/
-#   artifacts/            0.6.3 wheel + 0.1.12 插件包
+#   artifacts/            0.6.2 wheel + 0.1.11 插件包（后续几代另放两个目录）
 #   artifacts-SHA256.txt  逐文件哈希
 #   full-regression.log / full-regression-with-ledger.log   两次全量留档
 #   manifest.json         命令、解释器、对照、守卫、量具缺口
+ls output/plugin_completion/20261101-phase1-docindex-v1/artifacts/     # 0.6.3→0.6.5 三代
+ls output/plugin_completion/20261101-phase1-smem-selfdescribe-v1/      # 0.6.6 / 0.1.15
+#   scoped-regression.log 本轮**只跑受影响子集**（196 passed / 4.54s），不是全量
 ```
+
+**本轮没有第五次全量读数**：当事人 2026-11-01 指示「精简，不用跑这么多」，所以留档的是受影响子集
+（迁移门 / 采集器 / Designer 与 runner 接面 / 硬件诚实性 / 运行时接线 / hygiene）。上一条全量留档
+仍是 `0.6.5` 树的 6226 passed / 1 skipped。
 
 证据位置与「单副本、H20/P800 已下线不可再生」的警告写在
 [docs/research/evidence-location.json](../research/evidence-location.json)。
@@ -43,6 +50,15 @@ ls output/plugin_completion/20261031-phase1-identity-v1/
 | `6772930` | `f6df8ad`（第二次全量读数） | **第四次**全量读数：`0.6.5` 树 6226 passed / 1 skipped（= 上一轮 6200 + 新增 26 条），1 文件 +2 行 |
 
 写成这样是我的流程问题，不是仓库的：连续三次在提交时复用了上一条的标题字符串。今后 `git commit` 前先把标题与上一条对拍一遍，写错就当场说、当场请求处置，不等被问。
+
+## 勘误二：`4008621` 提交说明里的协议摘要是中途树的值（历史不动）
+
+那条提交写的是 `e8c7f2c6…` → `19ab44fc…`。**`19ab44fc…` 在任何一棵树、任何一件工件上都不存在**：
+它是我在「两处兜底删完之后、加 opt-in 那一档之前」那个中途状态算出来的，算完又改了 `smem_budget()`。
+真实值以证据树与 [`delivery-identity-rebind` §5.4](delivery-identity-rebind-20261031.md) 为准：
+**`b937fd8ec655604407a7674c091492d5b2532e9de643c3e4fe5d078b1b7b2c43`**（本树 HEAD 与解包后的 `0.6.6`
+wheel 两侧算出来一样，`0.6.5` wheel 复算仍是 `e8c7f2c6…` 作反向对照）。
+教训归到量具上：**摘要必须在最终树上重算一次再写**，中途值一旦进文档就伪装成「证据被篡改」。
 
 ## 新增文件时的两条规矩
 
