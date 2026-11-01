@@ -56,6 +56,8 @@ v0.1 写成之后，工作区被四个提交扫过（证据出仓 + 布局守卫
 
 **第三次全量（`0.6.4` 树，W3 文档与 T1.8 修正之后）**：**6200 passed / 1 skipped / 2 warnings**，455.76 s，0 failed / 0 error，退出码 0，日志 `output/plugin_completion/20261101-phase1-docindex-v1/full-regression.log`。与第二次**总数相同**，说明这轮的改动（版本号字符串、包根 docstring 分层清单、34 份变异表死路径、四份文档搬家）零行为影响；同一条 skip 仍是 `test_remote_input_fidelity.py:365`（requires real CUDA）。先前那条「`0.6.3`/`0.6.4` 这棵树没跑过全量」的缺口至此闭合。
 
+**第四次全量（`0.6.5` 树，CLI 与迁移门入口落地之后）**：**6226 passed / 1 skipped / 2 warnings**，459.31 s，0 failed / 0 error，退出码 0，日志 `full-regression-065.log`。6226 = 上一轮 6200 + 本次新增 26 条（迁移门 14 + CLI 与量具面 12），**逐项对得上，无别数变化**；同一条 skip 仍是那条 requires real CUDA。
+
 三条附带事实，都是本次实跑出来的：
 
 1. **第一次跑错解释器就撞在收集阶段**：`/usr/bin/python3` 3.9.6（有 numpy、无 torch）在 6.68 秒内以 2 个 `ModuleNotFoundError: No module named 'torch'` 中断收集（`tests/unit/test_pairing_window.py`、`tests/unit/test_remote_input_fidelity.py`）。[CI 定义的注释](../../.github/workflows/ci.yml)与 [completion-plan:243](../design/dsh-operator-completion-plan-20261026.md#L243) 早就写明这一点，是读数的解释器条件，不是仓库缺陷。该次失败日志被重跑覆盖，读数只保留在 `manifest.json` 里。
