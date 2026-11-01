@@ -78,9 +78,14 @@
 前置未满足就**停在第 0 步并报告**，不许静默降级继续跑（[可迁移性 G1–G5](../design/dsh-operator-portability-4090.md#L85-L126)）：
 
 ```sh
-# 0. 迁移门（T3.2，未完成即停）：未知卡的 launch 地板 / 共享内存 / roofline 分母 / 噪声带
+# 0. 迁移门（T3.2 只落了探针形状；五道门任一不过即停）
+python3 -B -m benchmarks.probes.unknown_card_gates --selftest
+#    ↑ 零机时自检：证明「无读数 ⇒ 五门全 unknown」「继承值 ⇒ 不得 pass」两条反例是活的
+#      真跑前先在卡上产出一份探测 JSON（device / launch_floor / shared_memory / peak /
+#      noise / shapes，每块都要带 source_uuid），再喂给门：
+python3 -B -m benchmarks.probes.unknown_card_gates --from-json ./card-probe.json
+#    退出码非 0（有 fail 或 unknown）⇒ 停在这里，不开跑；不静默降级
 operator-agent capabilities --json-out ./cap.json
-#    核对：backends、hardware_caps、smem、峰值口径是否齐备；缺任一项 → 记 unknown 并停止
 
 # 1. 冻契约（每格一个新 run-dir，调用方拥有布局）
 operator-agent prepare --declaration ./task-01.json --run-dir ./b/01 \
@@ -101,14 +106,18 @@ operator-agent cancel --run-dir ./b/01 --invocation-id <id> && operator-agent st
 operator-agent verify --run-dir ./b/01 --code-file <终稿> --stop-after L3 \
   --backend ssh --host <别名> --persistent --json-out ./b/01/final.json
 
-# 6. 填 T3.7 人时表（六环节四元组，未问的留 unknown），与机器秒分列存档
+# 6. 填人时表（T3.7 的 CLI 入口；没问过的格子留 unknown，量级档与秒分列）
+operator-agent ledger-new    --run-dir ./b/01
+operator-agent ledger-fill   --run-dir ./b/01 --stage analyze --involved yes \
+  --action-taken "读 L3 回执判是否值得再跑" --reason "门槛在 ±3% 刀刃上" --minutes-band 5-15
+operator-agent ledger-report --run-dir ./b/01 --machine-wall-json ./b/01/wall.json
 ```
 
 预期读数与停止条件：
 
 | 步 | 期望 | 不满足时 |
 |---|---|---|
-| 0 | `capabilities` 报出后端与硬件能力，无静默默认值 | 停止，记 `unknown`，不开跑 |
+| 0 | 探针 `--selftest` 退 0（两条反例活着）；`--from-json` 对真实探测输出应五门全 pass；`capabilities` 无静默默认值 | 任一门 fail 或 unknown ⇒ 停止并记录，不开跑。**这道门的存在理由**：`measurement.assess()` 缺地板时仍给 `VALID`，未标定的卡会把小形状读数当成可裁决读数，而禁用配方是永久决策 |
 | 1 | `prepare` 产出契约 + 输入冻结，`--hardware` 来自探测而非仓内常量 | 停止（这是 G1/G2 的坑位） |
 | 3 | 终态 `done/failed/cancelled`；`lost` 必须能说清是进程没了还是结果未知 | 该格记未知，不重跑覆盖 |
 | 3 后 | `cleanup.remote_execution ∈ {quiescent, not_started, unknown}`；本机回收与远端停止分开报 | 未证 quiescent 就写未证，不当成功 |
@@ -145,7 +154,7 @@ GPU 型号、UUID、free memory 一律运行时探测入档；共享卡快照不
 ## 6. 本文没有做的事
 
 - 没有跑任何真机或模型；没有新增能力（剖析、形状扫描、多候选裁决工具仍为零，见一期清单 §6 不做项）。
-- 没有替 T3.1 选卡、也没有实现 T3.2 的迁移门探针——runbook 的第 0 步就是用来在它们缺失时停住的。
+- 没有替 T3.1 选卡。**T3.2 只落了探针形状**（`benchmarks/probes/unknown_card_gates.py`，七行变异表 7/7 拦住、26 条用例全绿），**五道门一条读数都没有**——那些必须来自真实卡上的探测输出，本文不猜；探针的全部作用就是让继承值与缺读数不许变成绿。
 - 预算与门槛的数值取自当事人 2026-11-01 的指示；改动它们需要新计划与新身份，不在本文授权内。
 
 ## 修订记录

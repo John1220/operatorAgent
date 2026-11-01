@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.14
+
+一行没改插件壳本身，升号原因还是 wheel 内的 Python 代码：`app/cli.py` 新增三条子命令
+`operator-agent ledger-new | ledger-fill | ledger-report`（一期 T3.7 人时表的填写入口），
+`core/human_ledger.py` 的边界说明随之更新（**入口是 CLI，仍然不接 MCP 工具回包**，那会改工具契约）。
+
+- Python 侧同步 `0.6.5`；工具契约仍为 **9**，MCP 工具面一条命令都没动。
+- 同批新增未知卡迁移门探针 `benchmarks/probes/unknown_card_gates.py`（不随包发布），
+  阶段 B runbook 的第 0 步与第 6 步现在直接调这两个入口。
+
 ## 0.1.13
 
 换号原因仍然只是文档：一期清单、身份重绑记录与阶段 A 台账迁入 `docs/phase1/` 后，随包文字里的

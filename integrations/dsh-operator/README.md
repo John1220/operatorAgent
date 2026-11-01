@@ -34,8 +34,8 @@ pip install operator-agent
 本地交付的 wheel 与 DSH `.tgz` 尚未发布到包仓库。先将 wheel 安装到 DSH 启动时可访问的 Python 环境，再把 `.tgz` 加到目标 profile：
 
 ```bash
-python3 -m pip install numpy /path/to/operator_agent-0.6.4-py3-none-any.whl
-dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.1.13.tgz
+python3 -m pip install numpy /path/to/operator_agent-0.6.5-py3-none-any.whl
+dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.1.14.tgz
 ```
 
 确认安装命令可见：
@@ -320,7 +320,7 @@ python -m pip wheel . --no-deps -w dist/
   然后在 `/tmp/oa-src` 里构建。
 
 发布形态（2026-10-30 起）：`private` 已改为 `false`、`LICENSE`/`NOTICE` 已随包、可以发布。
-版本号现推进到 `0.1.13`（Python 侧 `0.6.4`）——`0.6.1` 曾同时指平铺 wheel 与分层源码，同号两物，
+版本号现推进到 `0.1.14`（Python 侧 `0.6.5`）——`0.6.1` 曾同时指平铺 wheel 与分层源码，同号两物，
 换号理由与身份断链的明细见 `docs/phase1/delivery-identity-rebind-20261031.md`。
 实际执行顺序是 Python 包（PyPI）→ npm 壳（`npm publish`）→ README 里补一行 `dsh plugin add dsh-operator-agent`。
 工具契约仍是 **9**，本次没有改工具行为。逐字节副本与发版形态由

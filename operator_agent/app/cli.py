@@ -16,6 +16,14 @@
     python -m operator_agent prepare --request "把 64x64x64 的 fp32 矩阵乘法写成算子" \\
         --shapes 64,64,64 --run-dir "$op_workspace/run"
     python -m operator_agent verify --run-dir "$op_workspace/run" --code-file cand.py --stop-after L2
+    # 六环节人时表（阶段 A「人在哪些环节出现」的当场读数，与机器秒分列）
+    python -m operator_agent ledger-new  --run-dir "$op_workspace/run"
+    python -m operator_agent ledger-fill --run-dir "$op_workspace/run" \\
+        --stage analyze --involved yes --action-taken "读 L3 回执并判是否值得再跑" \\
+        --reason "门槛在 ±3% 刀刃上" --minutes-band 5-15
+    python -m operator_agent ledger-report --run-dir "$op_workspace/run"
+
+子命令：capabilities / prepare / verify / run / repair / status / cancel / ledger-{new,fill,report}。
 
 与 `benchmarks/demos/demo_hitl_chain.py` 的关系：那个演示给人看；这个 CLI 给程序调。
 """
@@ -29,6 +37,8 @@ from pathlib import Path
 
 from ..app.hitl_tools import (CANDIDATE_ORIGINS, ToolError, autonomous_status, cancel_task, capabilities,
                          prepare, run_autonomous)
+from ..core import human_ledger
+from ..core.human_ledger import LedgerError
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -139,6 +149,27 @@ def _parser() -> argparse.ArgumentParser:
     cancel.add_argument('--run-dir', required=True)
     cancel.add_argument('--invocation-id', required=True)
     cancel.add_argument('--json-out')
+
+    led_new = sub.add_parser('ledger-new', help='在一个 run 目录里建一张六环节人时表（全部 unknown）')
+    led_new.add_argument('--run-dir', required=True)
+    led_new.add_argument('--json-out')
+    led_fill = sub.add_parser('ledger-fill', help='填一格：人是否介入 / 做了什么 / 为什么 / 量级档')
+    led_fill.add_argument('--run-dir', required=True)
+    led_fill.add_argument('--stage', required=True,
+                          help='| '.join(human_ledger.STAGES))
+    led_fill.add_argument('--involved', choices=list(human_ledger.INVOLVED_VALUES),
+                          help='不传表示「没问过」——保持 unknown，不等于 no')
+    led_fill.add_argument('--action-taken', dest='action_taken', help='人具体做了什么')
+    led_fill.add_argument('--reason', help='为什么必须人出手（干预原因单独记）')
+    led_fill.add_argument('--minutes-band', dest='minutes_band',
+                         choices=list(human_ledger.MINUTE_BANDS),
+                         help='自报量级档，只准填档不准填分钟')
+    led_fill.add_argument('--json-out')
+    led_rep = sub.add_parser('ledger-report', help='打印人自报档与机器秒两列（不合算，不折叠）')
+    led_rep.add_argument('--run-dir', required=True)
+    led_rep.add_argument('--machine-wall-json', dest='machine_wall_json',
+                         help='按环节给的机器秒数 JSON；缺则整列留空而不是补 0')
+    led_rep.add_argument('--json-out')
     return p
 
 
@@ -184,6 +215,35 @@ def _emit(payload: dict, json_out: str | None) -> None:
     print(text)
 
 
+def _ledger(args) -> dict:
+    """六环节人时表的新建 / 填格 / 打印。表在 run 目录里，路径知识只有一处。"""
+    path = Path(args.run_dir) / human_ledger.LEDGER_FILENAME
+    if args.action == "ledger-new":
+        if path.exists():
+            raise ToolError("ledger_exists",
+                            "%s 已有表：请编辑它而不是覆盖——已答的格子一旦被重写，"
+                            "「问过并答了」就退化成「没问过」" % path)
+        ledger = human_ledger.new_ledger(Path(args.run_dir).name)
+        human_ledger.write_ledger(path, ledger)
+        return dict(ok=True, ledger=str(path), **human_ledger.counts(ledger))
+    if args.action == "ledger-fill":
+        ledger = human_ledger.read_ledger(path)
+        human_ledger.record(ledger, args.stage, involved=args.involved,
+                            action=args.action_taken, reason=args.reason,
+                            minutes_band=args.minutes_band)
+        human_ledger.write_ledger(path, ledger)
+        return dict(ok=True, ledger=str(path), stage=args.stage,
+                    entry=ledger["entries"][args.stage], **human_ledger.counts(ledger))
+    ledger = human_ledger.read_ledger(path)
+    machine = None
+    if args.machine_wall_json:
+        machine = json.loads(Path(args.machine_wall_json).read_text(encoding="utf-8"))
+    return dict(ok=True, ledger=str(path), counts=human_ledger.counts(ledger),
+                rows=human_ledger.as_report_rows(ledger, machine),
+                columns=("human_minutes_band", "machine_wall_s"),
+                note="两列分开印：本命令不提供把量级档与秒合算的入口")
+
+
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -217,6 +277,8 @@ def main(argv=None) -> int:
             payload = autonomous_status(args.run_dir, args.invocation_id)
         elif args.action == 'cancel':
             payload = cancel_task(args.run_dir, args.invocation_id)
+        elif args.action in ("ledger-new", "ledger-fill", "ledger-report"):
+            payload = _ledger(args)
         else:
             from ..app.tool_calls import run_tool_call
             payload = run_tool_call('operator_verify', dict(run_dir=args.run_dir, code=_read_code(args),
@@ -228,6 +290,11 @@ def main(argv=None) -> int:
                              candidate_origin=args.candidate_origin))
     except ToolError as exc:
         _emit(exc.as_dict(), getattr(args, "json_out", None))
+        return 2
+    except LedgerError as exc:
+        # 人时表的拒绝要能自我纠正：消息里带合法取值，调用方不用猜
+        _emit({"ok": False, "error": "ledger_refused", "detail": str(exc)},
+              getattr(args, "json_out", None))
         return 2
     except (OSError, json.JSONDecodeError) as exc:
         _emit({"ok": False, "error": "io_error", "detail": repr(exc)},

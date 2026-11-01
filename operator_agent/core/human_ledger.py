@@ -12,7 +12,8 @@
 与既有机制的关系:
   * `run_contract` / `corpus_admission` 记的是**机器侧事实**（身份、判定、耗时）
   * **本模块**只记人的出现与原因，两栏永不合算成一个数
-  * 本模块**不**接入任何 MCP 工具的回包 —— 那会改工具契约，属另一件事，需单独设计与验收
+  * 填写入口是 CLI（`operator-agent ledger-new|ledger-fill|ledger-report`，见 `app/cli.py`）。
+    本模块**不**接入任何 MCP 工具的回包 —— 那会改工具契约，属另一件事，需单独设计与验收
 
 三条不变量（都有对应用例，见 `tests/unit/test_human_ledger.py`）:
   1. **没问 ≠ 没人做**：`involved` 缺省是 `unknown`，不是 `no`，也不是 `False`
@@ -28,6 +29,9 @@ from typing import Dict, List, Optional
 from .run_contract import atomic_json
 
 SCHEMA = "operator-human-ledger-v1"
+
+#: 表在 run 目录里的固定名字。路径知识只留这一处，CLI 与调用方都从这里取。
+LEDGER_FILENAME = "human-ledger.json"
 
 #: 六个环节，逐字取自路线 §5.1「过程：准备任务 → 检查与运行 → 分析反馈 →
 #: 修改或修复 → 比较候选 → 最终验收」。**不要**在这里加第七个环节来塞"接入"：
