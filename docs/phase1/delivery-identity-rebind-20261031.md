@@ -74,6 +74,21 @@
 - 证据落 `output/plugin_completion/20261031-phase1-identity-v1/`（经符号链接解析到仓外证据树），含 `artifacts/` 与 `artifacts-SHA256.txt`。
 - 旧 `0.6.1`/`0.1.10` 两个工件与其哈希原样保留，不覆盖、不复用其验收。
 
+### 5.1 一期文档迁入 `docs/phase1/` 之后的再建（2026-11-01）
+
+搬动改了**打进包里的文字**——插件 README、插件 CHANGELOG，以及 wheel 内 `human_ledger.py` 的文档路径引用。按 `0.1.10` 立下的「版本号 ↔ 内容一一对应」规矩，这必须换号：
+
+| 工件 | 大小 | SHA256 | 身份核对 |
+|---|---:|---|---|
+| `operator_agent-0.6.3-py3-none-any.whl` | 972,283 | `108fd527add299ddfd2e0d2ba5436c2ccfdb1cc8a732845b50878e5eb31749b3` | 克隆自 `6f1d583` 重建；解包后 `digest(protocol_identity())` 仍是 `e8c7f2c6…` ⇒ 升号与文档路径改动**不触及那 73 个协议身份文件** |
+| `dsh-operator-agent-0.1.12.tgz` | 32,010 | `2eb97dc42c4d1d3a88c1733915cf65aba1c326c825addfe8e97a323e81482809` | 包内 10 文件，含 `LICENSE`/`NOTICE` |
+
+`0.6.2`/`0.1.11` 的哈希（`11683240…` / `0ce665a7…`，全值见 §5）与工件留在
+`output/plugin_completion/20261031-phase1-identity-v1/`；本次新一组在
+`output/plugin_completion/20261101-phase1-docindex-v1/`（含 `manifest.json`）。
+一条测量教训也记在 manifest 里：**基线断链数不能在临时工作树里扫**——那里没有 `output/`
+符号链接，`../../output/...` 会被整批判成断链（实测一份 closeout 记录就虚报 19 条）。
+
 ## 6. 怎么复算
 
 ```bash
@@ -96,3 +111,4 @@ tmp=$(mktemp -d) && unzip -q output/plugin_completion/20261030-release-v1/artifa
 |---|---|---|
 | 2026-10-31 | 创建：记录平铺 → 五层造成的协议身份断链、入口与布局差异、三处硬失败机制、五份冻结记录失效清单 | 本日实算的两侧 `protocol_identity()` 与 `digest()`、wheel `entry_points.txt`、73 条目逐项比对、`tests/hygiene` 59 通过基线 |
 | 2026-10-31 | 新增 §5：`0.6.2` wheel 与 `0.1.11` 插件包在仓外重建完成，解包后身份摘要等于 HEAD 的 `e8c7f2c6…`，工件与哈希落证据树；旧工件未被覆盖 | `uv build --wheel` 与 `npm pack` 实跑；解包目录内的布局/入口/prompts-skills 逐项查看；构建残留触发布局守卫变红一次（已记为约束证据而非缺陷） |
+| 2026-11-01 | 本文件与一期清单、台账一起迁入 `docs/phase1/`；新增 §5.1 记录文档搬动导致的再建（`0.6.3` / `0.1.12`），并核对「升号与文档路径改动不触及那 73 个协议身份文件」。一处哈希前缀笔误（写成 `0ce65a…`）在写入后立即与证据树的 `artifacts-SHA256.txt` 对回并更正——记错的哈希前缀会伪装成「证据被篡改」，所以不复算就不写 | `git clone` 自 `6f1d583` 重建 + `npm pack`；解包内 `digest(protocol_identity())` 复算；`shasum -a 256` 逐件实算 |
