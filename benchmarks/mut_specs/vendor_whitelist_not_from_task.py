@@ -18,7 +18,7 @@ witness 一栏按 doc 57 §二 第 1 条分两类:
   · behavioral=True —— 有**具体输入或条件**让这次改动能被观察到;
   · behavioral=False —— 今天在行为层与原文不可区分, 拦住它的只可能是结构守卫。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/vendor_whitelist_not_from_task.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/vendor_whitelist_not_from_task.py
 """
 import sys
 from os.path import abspath, dirname

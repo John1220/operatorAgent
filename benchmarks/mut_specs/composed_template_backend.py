@@ -9,7 +9,7 @@ d66c430 提交说明自己明写「本片还没有变异矩阵 (下一轮补)」
     M3 转发 fail-open (缺方法返 None)      M7 template_backend 访问器指错那一半
     M4 转发整个断掉 (执行半不存在)         M8 组合时丢了 smem 上界
 
-跑: python3 -B -m benchmarks.mutation_calibrate \
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate \
       --spec benchmarks/mut_specs/composed_template_backend.py
 """
 import sys

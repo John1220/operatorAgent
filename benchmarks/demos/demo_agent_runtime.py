@@ -22,7 +22,7 @@
 `tests/unit/test_agent_runtime_wiring.py`(11 条) / `tests/unit/test_llm_action_producer.py`(24 条);
 变异表 27 行 (`agent_action_gate.py`) + 16 行 (`llm_action_producer.py`):
 
-    python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/agent_action_gate.py
+    python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/agent_action_gate.py
 
 ⚠️ 边界 (与状态文档同一句话): 这不是沙箱 —— 判的是**声明的**路径, 强制是 §22 的事;
 源码级「幻觉 API」判不了 (进 `uncovered_rules`); token 预算那一轴只能在**事后**裁决,

@@ -7,7 +7,7 @@
 （§22.1 的执行层），而这一片钉的是**接线**——「判据指着的那个路径」与「盘上真实存在的
 产物」是不是同一个文件、驱动是不是真的在建布局。两类失效方式不同, 各配一张表。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/run_root_wiring.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/run_root_wiring.py
 """
 import sys
 from os.path import abspath, dirname

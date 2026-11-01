@@ -4,7 +4,7 @@
 的读数会掉到 22/36，而收尾那句无条件写着「要改的是文档里那张表」——照做就把一次网络抖动
 「核」成了一份错的表。与 I21/I32 同族：**读数要连「它是在什么条件下取的」一起说**。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/recheck_advice_triage.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/recheck_advice_triage.py
 """
 import sys
 from os.path import abspath, dirname

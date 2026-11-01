@@ -8,6 +8,7 @@
 | [operator-development-phase1-execution-20261031.md](operator-development-phase1-execution-20261031.md) | 一期计划 | 可勾选执行清单（W1 交付身份 / W2 阶段 A / W3 B 计划冻结）、出口判据与现状、本期不做项 |
 | [delivery-identity-rebind-20261031.md](delivery-identity-rebind-20261031.md) | 事实记录 | 平铺 → 五层造成的协议身份断链（`78993c98…` → `e8c7f2c6…`）、失效清单、重建后的 `0.6.3` 工件与身份核对 |
 | [stage-a-ledger-20261031.md](stage-a-ledger-20261031.md) | 研究记录 | 八条真实任务台账、「人时全仓从未记录」的缺口证明、外部一线流程核查、环节排序与场景选择 |
+| [stage-b-runbook-20261101.md](stage-b-runbook-20261101.md) | 执行前冻结计划 | W3 产出：T2.5 预算与达标定义、T3.3 控制变量、T3.4 绕过与额外成本字段、T3.5 七步 runbook、T3.6 四代协议身份与 evaluator 摘要 |
 
 ## 命名说明
 

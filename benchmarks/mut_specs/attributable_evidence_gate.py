@@ -4,7 +4,7 @@
 执行**：metric-only（配对口径 Δ>0 就接受）与可归因门（要有正证据且零回归），再点名变坏的 case。
 判据在 `measurement.attributable_evidence`，配对与报表在 `benchmarks/drivers/harness_pass_rate.py`。
 
-跑: python3 -B -m benchmarks.mutation_calibrate \
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate \
       --spec benchmarks/mut_specs/attributable_evidence_gate.py
 """
 import sys

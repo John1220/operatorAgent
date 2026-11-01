@@ -17,7 +17,7 @@ patch 的父代, 而父代可能是**上一轮被拒**的那份候选 ⇒ 同一
 真的上了远端编译 (`benchmarks/drivers/agent_action_h20.py` 第一版实测: 第 3 轮 torch 候选
 `L1 PASSED`)。修法与守卫都在表里, 不许再退回去。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/structured_evidence.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/structured_evidence.py
 """
 import sys
 from os.path import abspath, dirname

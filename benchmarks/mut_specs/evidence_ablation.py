@@ -1,6 +1,6 @@
 """变异表: §21.3 对照实验的接线与结论边界 (靶子 = `tests/unit/test_evidence_ablation.py`)
 
-⚠️ 这张表由**主 agent 串行标定** (`python3 -B -m benchmarks.mutation_calibrate --spec ...`)。
+⚠️ 这张表由**主 agent 串行标定** (`python3 -B -m benchmarks.calibration.mutation_calibrate --spec ...`)。
 `--check-only` 只核锚点唯一性与 witness 字段, 不动盘。
 
 每一行都在问同一个问题: 「这个实验的接线**坏了**的时候, 有没有一条守卫会红?」

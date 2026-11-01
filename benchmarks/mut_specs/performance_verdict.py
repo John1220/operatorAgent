@@ -14,7 +14,7 @@
 （确定性载荷），所以它在**行为上不可区分**，只有结构守卫 `test_the_primary_speedup_is_no_longer_
 the_success_criterion` 杀得掉（§16 的那一行不许回来）。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/performance_verdict.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/performance_verdict.py
 """
 import sys
 from os.path import abspath, dirname

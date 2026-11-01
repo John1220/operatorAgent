@@ -10,7 +10,7 @@
     T4 四个出口里漏一个带格                 T9 报表把「这一轮没报」并进 answered
     T5 verifier 远程那路缺格也填默认         T10 报表删掉「另有 N 轮是空的」那一支
 
-跑: python3 -B -m benchmarks.mutation_calibrate \
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate \
       --spec benchmarks/mut_specs/transport_outcome_cell.py
 """
 import sys

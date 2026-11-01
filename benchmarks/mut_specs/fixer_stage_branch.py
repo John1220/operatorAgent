@@ -9,7 +9,7 @@ witness 一栏按 doc 57 §二 第 1 条 (arXiv:2609.22220v1 行 246-251) 分两
     这三行 (M11/M16/M21) 以前和新行为行混在同一个「21/21」里, 那句话把两种完全不同的覆盖
     说成了一种。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/fixer_stage_branch.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/fixer_stage_branch.py
 """
 import sys
 from os.path import abspath, dirname

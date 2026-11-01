@@ -8,7 +8,7 @@
 ② `--doc` 只载入一份表，`CITATIONS` 却是全局扁平清单 ⇒ 别的文档的引文全被判红
    （实跑 32/65）。只补「默认并读多份」修的是默认路径，没修 `--doc` 本身。
 
-跑: python3 -B -m benchmarks.mutation_calibrate \
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate \
       --spec benchmarks/mut_specs/anchor_fetch_is_a_response.py
 """
 import sys

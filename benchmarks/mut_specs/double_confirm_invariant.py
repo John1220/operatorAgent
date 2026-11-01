@@ -18,7 +18,7 @@ witness 一栏按 doc 57 §二 第 1 条分两类:
 明文"不许接到配置文件/环境变量/命令行/任务字段上"。所以 M2 打的是**生产调用点**, 不是
 判据的默认值 —— 默认值那一栏今天在生产路径上根本走不到 (恒传 True)。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/double_confirm_invariant.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/double_confirm_invariant.py
 """
 import sys
 from os.path import abspath, dirname

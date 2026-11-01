@@ -12,7 +12,7 @@
 * 拆「响应」——询问不响应、上界拿掉、答复不进 prompt、把「答不出来」说成「观测是空」；
 * 拆「单源」——投影断开、信封跨轮泄漏、判据措辞各写一份、模板不再教那个围栏。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/llm_action_producer.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/llm_action_producer.py
 """
 import sys
 from os.path import abspath, dirname

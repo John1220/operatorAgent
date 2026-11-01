@@ -1,23 +1,21 @@
-"""算子开发Agent v0.6.3
+"""算子开发Agent v0.6.4
 支持 Triton DSL: 矩阵乘法/Softmax/Attention 等 GPU 算子
-模块结构:
-  schemas.py            - 核心数据结构 (含 DSLEnum, TritonCompileConfig)
-  kernel_db.py          - 算子知识库 (RAG) - 含 Triton 种子数据
-  mock_gpu.py           - Mock GPU 后端 (支持 Triton 编译/模拟执行)
-  remote_executor.py    - 远程代码执行器 (SSH/HTTP/Local) - 支持 Triton
-  llm_client.py         - LLM 客户端
-  prompt_manager.py     - Prompt 模板管理器
-  agents.py             - Agent (Designer + Coder + Search) - 支持 Triton 代码生成
-  verifier.py           - 验证层 (L1/L2/L3) + Roofline 分析
-  optimization_planner.py - 优化配方选择器 (确定性规则引擎)
-  conductor.py          - Conductor 调度层 (集成 Planner)
-  intent_parser.py      - 用户接口层 - 支持 DSL 解析
-  artifact_store.py     - 产物持久化存储
-  skills/               - SKILL 规范 + 优化配方库
-  prompts/              - Prompt 模板目录 (含 Triton 模板)
-  output/               - 生成的算子产物 (自动创建)"""
+模块结构（2026-10-31 分五层，全量归属见 docs/design/repo-slimming-20261031.md §5）:
+  core/       词汇与产物  - schemas / contract / run_contract / candidates / kernel_db /
+                            artifact_store / run_layout / report / human_ledger
+  decide/     判定        - verifier (L1/L2/L3 + Roofline) / measurement / eligibility /
+                            correctness* / anticheat / reference* / failure_route / quality_*
+  execute/    执行与预算  - remote_executor / exec_guard / backend_* / mock_gpu /
+                            task_budget / task_cancellation / llm_*
+  generate/   生成与修复  - planner / coder_pipeline / single_candidate_coder / fixer /
+                            repair_* / prompt_manager / optimization_planner / triton_*
+  app/        入口与编排  - conductor / cli / mcp_server / hitl_tools / autonomous /
+                            intent_parser / tool_calls
+  ops/ prompts/ skills/   内嵌子包与资源目录（SKILL 规范 + Prompt 模板）
+外部用法保持不变: `from operator_agent import Conductor` 一类再导出仍走包根 __init__.py,
+`python -m operator_agent` 由包根 __main__.py 委托。"""
 
-__version__ = "0.6.3"
+__version__ = "0.6.4"
 
 from .core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,

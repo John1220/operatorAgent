@@ -6,7 +6,7 @@
 ρ=1.0 的表上与原文给同一个答案 (采样窗口里没有「部分坏点仍算过」那一档), 所以它只能被那条
 AST 守卫杀掉, 不进行为分母。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/sampling_ruler_divergence.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/sampling_ruler_divergence.py
 """
 import sys
 from os.path import abspath, dirname

@@ -9,7 +9,7 @@
 而是**接线断了**: 上限不再压级 / 门不再读上限 / 生产路径不再写入。
 前两类是判据本身错, 第三类是「判据与调用方脱钩」——两者失效方式不同。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/claim_level.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/claim_level.py
 """
 import sys
 from os.path import abspath, dirname

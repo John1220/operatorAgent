@@ -6,7 +6,7 @@
 这句话有两层（权限位 + 唯一入口的角色判据），变异表每行拆掉一层，看守卫是不是真的
 在守它 —— 只守一层的话，另一层就是「文档里写着、代码里没有」。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/run_layout_doors.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/run_layout_doors.py
 """
 import sys
 from os.path import abspath, dirname

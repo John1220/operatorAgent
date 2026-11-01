@@ -18,7 +18,7 @@
 可执行文档: `tests/unit/test_exec_guard.py`(32 条) 与 `tests/unit/test_demo_exec_guard.py`；
 变异表 7 行（只标定、不改源）:
 
-    python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/exec_guard.py
+    python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/exec_guard.py
 
 ⚠️ 边界 (与 CHECKLOG 素材、模块 docstring 同一句话): 这只证明**本地这一半**里能实测站住的
 那几项。这**不是**敌意候选的沙箱 —— 同一个 uid、网络**没关**、没有容器/cgroup、

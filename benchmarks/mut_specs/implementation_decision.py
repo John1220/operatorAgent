@@ -10,7 +10,7 @@
 自己长出结论来。M1/M2/M3/M7 就是这一类（fail-open 的四个入口）, M4 是读法反面
 （没判成就建议用库 —— 设计点名的失效模式）, M5 是门槛抬错, M6 是「算出来没人用」。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/implementation_decision.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/implementation_decision.py
 """
 import sys
 from os.path import abspath, dirname

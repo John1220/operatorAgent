@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.13
+
+换号原因仍然只是文档：一期清单、身份重绑记录与阶段 A 台账迁入 `docs/phase1/` 后，随包文字里的
+文档路径又变了一次（本 `CHANGELOG.md` 与 `README.md`），且 Python 包根的模块清单 docstring 改成
+了分层写法（`operator_agent/__init__.py`，在 wheel 内）。Python 侧同步 `0.6.4`。
+
+- 工具行为、schema、宿主契约未变（工具契约仍为 **9**）。
+- 一期文档索引现在在 `docs/phase1/README.md`；阶段 B 的执行前冻结计划在 `docs/phase1/stage-b-runbook-20261101.md`。
+
 ## 0.1.12
 
 换号原因只有一件：一期文档搬进 `docs/phase1/` 后，随包的 `README.md` 与本 `CHANGELOG.md` 里引用的

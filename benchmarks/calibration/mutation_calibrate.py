@@ -19,8 +19,8 @@
   3. 每条变异跑完立刻复原并断言逐字节相等, 否则红名单会串味道 (doc 55 §六 / I11)。
 
 用法:
-    python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/fixer_stage_branch.py
-    python3 -B -m benchmarks.mutation_calibrate --spec … --check-only   # 只核锚点与证人, 不改文件
+    python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/fixer_stage_branch.py
+    python3 -B -m benchmarks.calibration.mutation_calibrate --spec … --check-only   # 只核锚点与证人, 不改文件
 """
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ class Result:
 def load_spec(spec_path: str) -> Tuple[Dict[str, str], List[str], List[Row]]:
     """按路径执行 spec 模块并取 FILES/TARGETS/ROWS。
 
-    ⚠️ 这里**不用 `isinstance(r, Row)`**: 用 `python -m benchmarks.mutation_calibrate` 跑时本文件
+    ⚠️ 这里**不用 `isinstance(r, Row)`**: 用 `python -m benchmarks.calibration.mutation_calibrate` 跑时本文件
     的名字是 `__main__`, 而 spec 里 `from benchmarks.calibration.mutation_calibrate import Row` 会把它**再导
     一份** ⇒ 两个 Row 类对象, isinstance 对完全合法的规格报「不是 Row」。改成按字段结构核,
     与类身份无关。

@@ -2,7 +2,7 @@
 """#87 第 4 片 (改善判据那条带宽跨轮是不是同一把) 的变异表。
 
 跑法:
-    python3 -B -m benchmarks.mutation_calibrate \\
+    python3 -B -m benchmarks.calibration.mutation_calibrate \\
         --spec benchmarks/mut_specs/improvement_band_drift.py
 
 本表 12 行**全在行为分母**、结构分母 0 行 —— 这不是省事，是这片的每条变异今天都能被一个

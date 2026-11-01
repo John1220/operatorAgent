@@ -9,7 +9,7 @@
 口径没进 hash」（判据变成可改的常量）; M9 是声明渠道断了; M10 是主 case 不在账本里（它
 会被读成「没量到」）; M11 是绕过共用的那对调用（协议一漂就比出两种数，今天行为不可区分）。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/case_ledger.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/case_ledger.py
 """
 import sys
 from os.path import abspath, dirname

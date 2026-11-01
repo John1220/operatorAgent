@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """一期 T3.7 (人在环节上的出现记录) 的变异表。
 
-跑法（命令里的模块路径是 Phase 3 分目录之后的真实路径；旧写法 `-m benchmarks.mutation_calibrate`
+跑法（命令里的模块路径是 Phase 3 分目录之后的真实路径；旧写法 `-m benchmarks.calibration.mutation_calibrate`
 已不存在，别照抄别的 spec 头部那行）:
     python3 -B -m benchmarks.calibration.mutation_calibrate \\
         --spec benchmarks/mut_specs/human_ledger.py

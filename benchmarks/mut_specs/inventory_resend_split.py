@@ -2,7 +2,7 @@
 """#102 第 3 片 (存量产物里 intent 重发的清点) 的变异表。
 
 跑法:
-    python3 -B -m benchmarks.mutation_calibrate \\
+    python3 -B -m benchmarks.calibration.mutation_calibrate \\
         --spec benchmarks/mut_specs/inventory_resend_split.py
 
 十二行全在行为分母：这一片的判据都是「给一棵合成的产物树，看数出来的是哪几个数」，

@@ -14,7 +14,7 @@ witness 一栏按 doc 57 §二 第 1 条 (arXiv:2609.22220v1 行 246-251) 分两
 不在这一片。也正因为靶子在装配上, 有一条**必须**在表里: M20「门的裁决结果不看」
 —— 判据算得再对, 没人读就是本仓最贵的失效方式 (CHECKLOG I46/I47/I49/I50/I52 同一族)。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/agent_action_gate.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/agent_action_gate.py
 """
 import sys
 from os.path import abspath, dirname

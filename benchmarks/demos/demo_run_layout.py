@@ -17,7 +17,7 @@
 
 可执行文档: `tests/unit/test_run_layout.py`(32 条); 变异表 8 行:
 
-    python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/run_layout_doors.py
+    python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/run_layout_doors.py
 
 ⚠️ 边界 (与 CHECKLOG I82 / 状态文档同一句话): 这只证明 **harness 侧**那一半 ——
 候选与 harness 同一个 uid，属主可以自己 `chmod` 回去；远端 runner 侧的布局一个字都没说；

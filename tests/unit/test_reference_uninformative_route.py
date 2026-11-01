@@ -42,7 +42,7 @@
   · M6/M7 与 M12/M13 各自的红名单**逐条相同** —— 标定报的是用例名, 两条断言挤在同一个方法
     里时看不出是谁杀的。拆成两个方法之后 M6 变 2 条红、M7 仍是 1 条, 归属才分得开。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/reference_uninformative_route.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/reference_uninformative_route.py
 
 ⚠️ 两件不在这一片的事写在 doc 58 §4.2, 这里不假装做全了:
   · 控制流仍然照常调 Fixer —— 「省掉这一轮的 LLM 调用」要带 A/B 才能改, 另片;

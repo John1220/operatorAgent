@@ -2,7 +2,7 @@
 """#87 第 3 片 (性能那一半的尺) 的变异表。
 
 跑法:
-    python3 -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/perf_ruler_across_rounds.py
+    python3 -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/perf_ruler_across_rounds.py
 
 `behavioral=False` 的两行都写了「为什么今天行为层不可区分」—— 它们只有结构守卫杀得掉,
 按 #83 那条不进行为分母。

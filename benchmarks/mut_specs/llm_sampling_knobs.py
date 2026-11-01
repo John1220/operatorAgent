@@ -6,7 +6,7 @@
 出现在被测代码自己的解释文案里 (登记 I32)。那一行的 witness 写的是它第二次被拦住的位置。
 
 跑:
-    python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/llm_sampling_knobs.py
+    python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/llm_sampling_knobs.py
 """
 import sys
 from os.path import abspath, dirname

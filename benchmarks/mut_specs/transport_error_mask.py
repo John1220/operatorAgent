@@ -2,7 +2,7 @@
 """#102 第 2 片 (远端异常文本那道掩码) 的变异表。
 
 跑法:
-    python3 -B -m benchmarks.mutation_calibrate \\
+    python3 -B -m benchmarks.calibration.mutation_calibrate \\
         --spec benchmarks/mut_specs/transport_error_mask.py
 
 十一行全在行为分母：这一片的判据本身就是「给一份带秘密的输入, 看输出里还有没有」——

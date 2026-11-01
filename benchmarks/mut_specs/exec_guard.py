@@ -8,7 +8,7 @@
   ② 「设上了 rlimit」不等于「如实报没设上的项」。
 每行拆掉一层，看守卫是不是真的在守它。只守一层的话，另一层就是「文档里写着、代码里没有」。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/exec_guard.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/exec_guard.py
 """
 import sys
 from os.path import abspath, dirname

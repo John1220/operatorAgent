@@ -11,7 +11,7 @@ witness 一栏按 doc 57 §二 第 1 条 (arXiv:2609.22220v1 行 246-251) 分两
       (`cx-{task_id}:{signature}`), 「收成单点」只覆盖产它的那一半代码, 名字一旦被写进
       别的事实就不再是自由重构 (CHECKLOG I19/I20 那两次「只数产者、没数读者」)。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/reference_uninformative_route.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/reference_uninformative_route.py
 
 ⚠️ 这张表的靶子是**判决侧接上了没有**, 不是「坏参考被修好了」。后者是 #95 (任务准入要过
 参考解自证可达那道门), 不在这一片。

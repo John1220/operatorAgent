@@ -10,7 +10,7 @@
 读不到的形状被读成 0 —— M1/M2/M3/M4/M5 就是这五个入口; M6 是判据方向; M7/M8 是
 「声明没进 hash / 没进契约」（那会让判据变成可改的常量）; M9 是「算出来了但没发布」。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/case_evidence.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/case_evidence.py
 """
 import sys
 from os.path import abspath, dirname

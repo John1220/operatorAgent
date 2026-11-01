@@ -15,7 +15,7 @@ hash 就变，`test_the_audit_name_is_not_part_of_the_judgement` 会红）。F �
 钉住「一处生产」，但今天没有一条**行为不可区分**的故障可以拿它当唯一杀手 —— 硬凑一行假的
 结构行比缺一行更坏。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/bench_cases.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/bench_cases.py
 """
 import sys
 from os.path import abspath, dirname

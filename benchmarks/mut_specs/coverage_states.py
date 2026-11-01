@@ -10,7 +10,7 @@
 真实状态（有对象、没量具）又被记成「没有对象」。两类失效方式不同：前者是**集合并错**，
 后者是**状态写错**，第三类是**没人读**（数据算出来没有下游）。
 
-跑: python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/coverage_states.py
+跑: python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/coverage_states.py
 """
 import sys
 from os.path import abspath, dirname

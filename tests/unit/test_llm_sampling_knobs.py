@@ -16,7 +16,7 @@ Coder 0.1/40960、Fixer 0.1/1024、planner 0.2/2048。所以「把 `client.tempe
 
 变异标定 (每条只改一处，跑完立刻逐字节复原并断言 sha256 与改前一致。表的可执行形态在仓里:
 `benchmarks/mut_specs/llm_sampling_knobs.py`，跑法是
-`python3 -B -m benchmarks.mutation_calibrate --spec benchmarks/mut_specs/llm_sampling_knobs.py`。
+`python3 -B -m benchmarks.calibration.mutation_calibrate --spec benchmarks/mut_specs/llm_sampling_knobs.py`。
 2026-09-30 实跑，基线 17 passed，**行为分母 12/12 拦住、结构分母 0/0**；
 L 组打在 `execute/llm_client.py`，H 组打在 `harness_pass_rate.py`):
     L1 body 里的 temperature 不看逐调用覆盖            → 2 红 (红在 msg=「发出去」那一侧)
