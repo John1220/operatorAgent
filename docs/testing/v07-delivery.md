@@ -347,3 +347,29 @@ $ cd /tmp && .../v07-venv/bin/python -c "import operator_agent; print(operator_a
 Python 3.12 开发环境现已独立安装 NumPy、Torch 和测试依赖；不需要借用 §6 所述的旧 conda 测试环境。首轮大范围回归为 6006 passed / 1 skipped / 2 failed，保留原日志；失败项涉及候选版本号守卫及实验 DSH 启动/流转发。修复后相关范围 **124 passed**（46.31 秒），插件测试 **58 passed**；从交付包自带工具与源码快照重建也已通过。另修正遗留隔离测试误读“禁止访问 site-packages”为失败，以及把旧 CPython 3.9 NumPy 注入 3.12 的测试环境问题。命令和日志摘要记录在 `delivery.json`，未将局部复验写成一次新的全量通过。测试框架另有多线程 fork 的弃用提示，本轮未改执行模型。
 
 以上闭合的是无需租卡的安装与交付准备。真实 GPU/运行时支持、性能资格、正式模型采样对齐及同卡四任务八格继续待验收；公开发布未执行。
+
+## 9. rc2 干净安装与宿主入口验收（2026-11-04，本机）
+
+针对 `0.7.0rc2` / 插件 `0.2.0-rc.2`（提交 `d4b27b8`，工件哈希见交付目录 `manifest.json`）。
+
+环境与偏差：本机到 `pypi.org` 返回 `http=000`（不可达），因此 venv 用
+`--system-site-packages` 建（numpy 取自宿主 conda py12 的 2.5.1），wheel 用
+`pip install --no-deps` 装入。**「无网络下重新解析依赖」这一步仍然没有验证过**，其余步骤都是真跑。
+
+| 步骤 | 命令要点 | 读数 |
+|---|---|---|
+| 干净 venv 安装 | `python3.12 -m venv --system-site-packages` + `pip install --no-deps <wheel>` | 安装成功；`pip check` = **No broken requirements found** |
+| 能力发现 | `operator-agent capabilities`（在 `/tmp` 下跑，排除源码树遮蔽） | `version=0.7.0rc2`、`tool_version=10`、`torch_installed=false`、`triton_installed=false`（控制面零第三方依赖，符合设计） |
+| 随包示例 · CLI 成功 | `examples/v07/offline_smoke.py --entry cli --scenario success` | `ok=true / phase=done / test_only=true / gpu_acceptance=false` |
+| 随包示例 · MCP 修复 | `--entry mcp --scenario correctness-repair` | `ok=true / phase=done` |
+| 随包示例 · MCP 取消 | `--entry mcp --scenario cancel` | `ok=true / phase=cancelled` |
+| 导出物 | `export/` | `code.py` / `report.md` / `status.json` / `manifest.json` 四件齐备 |
+| 独立终评 | `prepare` + `verify --backend fake --code-file export/code.py`（零模型调用） | `L1✓ L2✓ L3✗`（fake 无性能资格），`execution_context.test_only=true`、`gpu_acceptance=false` |
+| 隔离 DSH profile | `DSH_HOME=<临时> dsh plugin add <tgz> --offline` → `--dump-config` → `remove` | 合成配置含 `mcp-operator` 与 `operator-tools` 两条入口；卸载成功 |
+
+⚠️ 隔离 profile 用的是 PATH 上的 `dsh@0.1.1-rc.2`，**不满足**插件 `engines: ^0.2.1-rc.2`，
+所以这一步证明的是**配置形态与打包正确**，不是「在满足版本要求的宿主上装好」。桌面端
+（内嵌 `0.2.1-rc.2`）上的安装与 `/op` 实跑属用户环境，未在本轮改动。
+
+**结论**：rc2 工件在干净 venv 里可安装、可运行、可导出、可独立复评，示例与配置形态正确；
+仍然缺的是「在符合 engines 的宿主上从插件入口跑一次完整真实任务」，以及无网络重建依赖。
