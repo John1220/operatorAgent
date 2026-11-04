@@ -299,3 +299,52 @@ def test_conductor_candidate_selection_and_saved_report_use_suite(broken, tmp_pa
     assert "CorrectnessSuite (§20)" in (saved / "report.md").read_text()
     payload = json.loads((saved / "result.json").read_text())
     assert payload["task"]["constraints"]["correctness_suite"] == suite.content_dict()
+
+
+def test_single_case_transport_unknown_is_resent_once(monkeypatch):
+    """一个 case 的传输未知要补发一次，而不是整份套件直接 unknown。
+
+    2026-11-04 真机 matmul-4096-B：15 个 case 里 1 个 `auto-k4-m32-n32-fp16-constant-
+    contiguous` 传输未知 ⇒ 套件 unknown ⇒ `ROUTE_HOLD` ⇒ 整格作废（957 s / 17 次调用）。
+    「不重试在飞请求」管的是**在飞**那个；结果是**已确认未知**之后补发，是一条新请求。
+    """
+    from operator_agent.decide.measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
+    calls = {"n": 0}
+    original = Verifier._verify_single_set
+
+    def flaky(self, kernel_code, inputs, expected, task_):
+        calls["n"] += 1
+        result = original(self, kernel_code, inputs, expected, task_)
+        # 第 1 次是 primary（L1/L2 主输入）；套件从第 2 次开始
+        if calls["n"] == 2:
+            result.metrics[TRANSPORT_KEY] = TRANSPORT_UNKNOWN
+            result.metrics.pop("input_fidelity", None)
+            result.passed = False
+        return result
+
+    monkeypatch.setattr(Verifier, "_verify_single_set", flaky)
+    results, verifier = verify(suite=CorrectnessSuite((case(),)))
+    # primary + 套件首发 + 补发 + 通过后的确定性重复
+    assert calls["n"] == 4, "未知之后必须恰好补发一次"
+    assert results[-1].passed, "补发通过后整套件应当通过"
+    assert _correctness_credential(results) is True
+
+
+def test_transport_unknown_is_bounded(monkeypatch):
+    """补发有上限：两次都未知仍然是 unknown，不能无限重试。"""
+    from operator_agent.decide.measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
+    calls = {"n": 0}
+    original = Verifier._verify_single_set
+
+    def always_unknown(self, kernel_code, inputs, expected, task_):
+        calls["n"] += 1
+        result = original(self, kernel_code, inputs, expected, task_)
+        if calls["n"] >= 2:                      # 只让套件里的 case 一直未知
+            result.metrics[TRANSPORT_KEY] = TRANSPORT_UNKNOWN
+            result.passed = False
+        return result
+
+    monkeypatch.setattr(Verifier, "_verify_single_set", always_unknown)
+    results, verifier = verify(suite=CorrectnessSuite((case(),)))
+    assert calls["n"] == 3, "上限必须生效（primary + 首发 + 一次补发）"
+    assert results[-1].metrics["correctness"]["verdict"] == "unknown"

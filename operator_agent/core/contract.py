@@ -573,8 +573,8 @@ def freeze_from_task(task, *, dtype: Optional[str] = None,
         # The legacy layout table predates that profile and includes affine
         # weight/bias. Keep legacy tasks unchanged, and let the checked profile
         # own its actual input names instead of making preflight impossible.
-        from ..decide.correctness_profiles import PROFILE_VERSION
-        if (getattr(cons, "correctness_profile", None) == PROFILE_VERSION
+        from ..decide.correctness_profiles import PROFILE_VERSION, PROFILE_V2
+        if (getattr(cons, "correctness_profile", None) in (PROFILE_VERSION, PROFILE_V2)
                 and kt in ("layernorm", "softmax", "relu")):
             if any(len(shape) != 2 for shape in declared_shapes):
                 raise ContractError("默认单输入 profile 要求二维 shape")

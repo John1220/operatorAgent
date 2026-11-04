@@ -64,10 +64,12 @@ def request_cancel(run_dir, invocation):
     status = read_json(run/'run-status.json') or {}
     if status.get('invocation_id') not in (None, invocation):
         raise ValueError('status invocation mismatch')
+    context = ({'execution_context': launch['execution_context']}
+               if isinstance(launch.get('execution_context'), dict) else {})
     if status.get('phase') in TERMINAL:
         return dict(ok=True, accepted=False, phase=status['phase'],
             invocation_id=invocation, run_dir=str(run), reason='already_terminal',
-            cleanup=status.get('cleanup'), stopped_reason=status.get('stopped_reason'))
+            cleanup=status.get('cleanup'), stopped_reason=status.get('stopped_reason'), **context)
     owner = status if status.get('pid') else (read_json(run/'supervisor.json') or {})
     if owner.get('pid'):
         from ..execute.exec_guard import process_identity
@@ -77,7 +79,7 @@ def request_cancel(run_dir, invocation):
                 and actual != owner['pid_identity'])):
             return dict(ok=True, accepted=False, phase='lost', invocation_id=invocation,
                 run_dir=str(run), reason='owner_unavailable', cleanup=dict(status='cleanup_unknown',
-                    remote_execution='unknown', provider_call='unknown'))
+                    remote_execution='unknown', provider_call='unknown'), **context)
     value = dict(schema='operator-task-cancel-v1', invocation_id=invocation,
         requested_at=time.time(), requested_monotonic=monotonic())
     try:
@@ -89,7 +91,8 @@ def request_cancel(run_dir, invocation):
         value = existing
     return dict(ok=True, accepted=True, phase=status.get('phase', 'running'),
         invocation_id=invocation, run_dir=str(run), cancellation='requested',
-        requested_at=value['requested_at'], hint='Query operator_status for terminal acknowledgement.')
+        requested_at=value['requested_at'], hint='Query operator_status for terminal acknowledgement.',
+        **context)
 
 
 def stop_event(run, invocation, deadline):

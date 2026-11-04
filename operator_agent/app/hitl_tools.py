@@ -57,6 +57,7 @@ from ..core.execution_audit import install_level_recorder
 from ..core.schemas import (ConstraintSpec, KernelArtifact, Precision, TaskSchema,
                       VerificationLevel, VerificationResult)
 from ..decide.verifier import Verifier
+from ..execute.fake_backend.config import tool_context
 
 #: 工具面的契约版本。**加/删工具或改回包形状就要 +1** —— 外层宿主会把这个数记进
 #: 自己的配置与报告，同一份 `tool_version` 必须指同一套语义。
@@ -69,7 +70,8 @@ from ..decide.verifier import Verifier
 #: 7: invocation 绑定的取消入口、取消终态与可中断的 MCP 长调用。
 #: 8: 资源预检按明确共享存储证据裁决，L1 保留未知/来源，不再从逻辑 tile 猜物理占用。
 #: 9: repair 有限任务预算、独立模型/验证账本和监督截止；新增阶段/usage 审计元数据。
-TOOL_VERSION = 9
+#: 10: 显式 fake 后端、run 场景/模型配置与 test_only 执行上下文。
+TOOL_VERSION = 10
 
 #: 允许进 `declaration` 的键（§6.3 的白名单）。**没列在这里的一律拒绝** ——
 #: 「先收下、以后再判断」是这一层最不能有的形状：它等于给未来开了一个没说出口的口子。
@@ -103,7 +105,7 @@ FORBIDDEN_KEYS = {
 #: 已接线的后端。`mock` = 控制机 numpy（最快、最诚实）；`local` = LocalExecutor（本机 CPU，
 #: **没有输入回读协议** ⇒ 带正确性套件的任务 L2 会如实判 unknown，不要读成「候选错了」）；
 #: `ssh` = 真机，需要 host（或 `~/.ssh/config` 别名）与网络。
-_BACKENDS = ("mock", "local", "ssh")
+_BACKENDS = ("mock", "local", "ssh", "fake")
 _STOP_AFTER = {"L1": VerificationLevel.L1_COMPILE,
                "L2": VerificationLevel.L2_FUNCTION,
                "L3": VerificationLevel.L3_PERFORMANCE}
@@ -140,6 +142,7 @@ _METRIC_KEYS = (
     "measurement_validity", "measurement_l3_pass_refused",
     "measurement_can_gate", "measurement_validity_reasons",
     "static_guards", "ruler_broken", "benchmark_contaminated",
+    "test_only", "evidence_kind", "gpu_acceptance", "performance_evidence",
 )
 
 
@@ -250,7 +253,13 @@ def build_task(declaration: dict) -> TaskSchema:
         parsed.source,
         framework=str(declaration.get("framework") or parsed.source.framework),
     )
-    return replace(parsed, source=source, target=target, constraints=constraints)
+    # The public declaration may override precision/framework after rule parsing.
+    # Recompute the parser's default suite against the final task, so FP16
+    # LayerNorm receives its calibrated v2 profile rather than stale FP32 v1.
+    from ..decide.correctness_profiles import with_default_correctness
+    constraints = replace(constraints, correctness_profile=None, correctness_suite=None,
+                          reference_contract=None)
+    return with_default_correctness(replace(parsed, source=source, target=target, constraints=constraints))
 
 
 def _case_summary(case) -> dict:
@@ -267,6 +276,9 @@ def _backend(name: str, *, host: Optional[str] = None, port: Optional[int] = Non
     if name not in _BACKENDS:
         raise ToolError("backend_not_wired",
                         f"backend={name!r} 未接线（已接线：{list(_BACKENDS)}）")
+    if name == "fake":
+        from ..execute.fake_backend import FakeBackend
+        return FakeBackend()
     if name == "mock":
         from ..execute.mock_gpu import MockGPU
         return MockGPU()
@@ -504,6 +516,7 @@ def verify(run_dir: str | Path, code: str, *, stop_after: Any = None,
             "ok": False, "error": "contract_drift",
             "detail": "run 目录里的契约与当前声明重新冻结出来的哈希不同 —— 判据在回合之间被改过",
             "recorded_hash": recorded, "current_hash": contract.hash,
+            **tool_context(backend),
         }
 
     from ..execute.s5_verify_client import enabled, delegated_verify
@@ -567,6 +580,7 @@ def verify(run_dir: str | Path, code: str, *, stop_after: Any = None,
 
         payload = {
             "ok": True,
+            **tool_context(backend),
             "run_id": run.name,
             "round": index,
             "contract_hash": contract.hash,
@@ -681,6 +695,7 @@ def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
             "ok": False, "error": "contract_drift",
             "detail": "run 目录里的契约与当前声明重新冻结出来的哈希不同 —— 判据在回合之间被改过",
             "recorded_hash": recorded, "current_hash": contract.hash,
+            **tool_context(backend),
         }
 
     with RoundEvidence(run, "bench", declaration, contract,
@@ -722,6 +737,7 @@ def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
                                  "verdicts": verification_data(results), "error": arm_error})
             arms.append({
                 "name": item["name"],
+                **tool_context(backend),
                 "error": arm_error,
                 "median_ms": metrics.get("median_time_ms"),
                 "baseline_ms": metrics.get("baseline_time_ms"),
@@ -748,6 +764,7 @@ def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
             "ok": True,
             "run_id": run.name,
             "batch": index,
+            **tool_context(backend),
             "contract_hash": contract.hash,
             "backend": backend,
             "backend_resolution": resolution,
@@ -789,6 +806,9 @@ def capabilities() -> dict:
         "version": __version__,
         "tool_version": TOOL_VERSION,
         "backends": {
+            "fake": {"wired": True, "requires": ["numpy"], "test_only": True,
+                     "notes": ["始终离线；CPU 执行 Python 候选；固定性能值不具备 GPU 验收资格",
+                               "run 默认使用 fake 模型；可用 fake.llm=live 检查真实模型接线"]},
             "mock": {"wired": True, "requires": [],
                      "notes": ["控制机 numpy；最快，也是唯一默认"]},
             "local": {"wired": True, "requires": [],
@@ -874,7 +894,8 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
     if contract.hash != recorded:
         return {"ok": False, "error": "contract_drift",
                 "detail": "判据在回合之间被改过 —— 拒绝在旧回合上继续",
-                "recorded_hash": recorded, "current_hash": contract.hash}
+                "recorded_hash": recorded, "current_hash": contract.hash,
+                **tool_context(backend, model_mode='live')}
 
     level = _level_of(stop_after)
     with RoundEvidence(run, "repair", declaration, contract, tool_version=TOOL_VERSION,
@@ -942,8 +963,9 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
                 l3 = next((r for r in results if r.level is VerificationLevel.L3_PERFORMANCE), None)
                 report = step.write_text("report.md", build_report(artifact=KernelArtifact(
                     code=current, verification_results=results,
+                    metadata=tool_context(backend, model_mode='live'),
                     benchmark_data=dict(l3.metrics or {}) if l3 else {}), task=task))
-                payload = dict(round=index, **retained,
+                payload = dict(round=index, **retained, **tool_context(backend, model_mode='live'),
                     levels={r.level.value: r.passed for r in results},
                     evidence=str(step.path / "result.json"), report=report,
                     log=str(step.path / "execution.log"))
@@ -1009,6 +1031,7 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
         l3 = next((r for r in final_results if r.level is VerificationLevel.L3_PERFORMANCE), None)
         report_path = evidence.write_text("report.md", build_report(artifact=KernelArtifact(
             code=final_code, verification_results=final_results,
+            metadata=tool_context(backend, model_mode='live'),
             benchmark_data=dict(l3.metrics or {}) if l3 else {}), task=task))
         # 派生而非声明：`action="fixed"` 的那一轮把 `current` 换成了 Fixer 的产出
         # （`repair_loop.repair` 的 anti-fake-fix 已经挡掉「原样返回/只改注释」）。
@@ -1017,6 +1040,7 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
                         else origin)
         payload = {
             "ok": runtime_error is None,
+            **tool_context(backend, model_mode='live'),
             "run_id": run.name,
             "attempt": index,
             "passed": result["passed"],
@@ -1108,20 +1132,44 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
                    key_path: Optional[str] = None, work_dir: Optional[str] = None,
                    timeout: int = 300, persistent: bool = False,
                    target_gflops: float = 0.0, wall_clock_s: float = 1800.0,
-                   max_llm_calls: int = 24, oracle_total: int = 20) -> dict:
+                   max_llm_calls: int = 24, oracle_total: int = 20,
+                   fake: Optional[dict] = None) -> dict:
     """起一次**无人值守**的整段运行（`Conductor` 自己设计/写核/修/搜索）。
 
     与 `verify` 的分工：`verify` 判**外层给的**候选；这里把整条循环交回本仓。
     进程分离（`start_new_session`）的理由见 `operator_agent/app/autonomous.py` 的 docstring。
     """
     _s5_development_only()
+    context = {}
+    if backend not in _BACKENDS:
+        raise ToolError('backend_not_wired', f'Unknown backend: {backend}')
+    if backend == 'fake':
+        from ..execute.fake_backend import FakeConfig, execution_context
+        from ..execute.fake_backend.model import FIXTURES
+        try:
+            fake_config = FakeConfig.from_dict(fake)
+        except (TypeError, ValueError) as exc:
+            raise ToolError('invalid_fake_config', str(exc)) from exc
+        if any(value is not None for value in (host, port, user, key_path, work_dir)) or persistent:
+            raise ToolError('invalid_fake_config', 'fake backend does not accept remote connection options')
+        task = build_task(declaration)
+        if task.target.dsl != 'python':
+            raise ToolError('fake_python_only', 'fake backend executes CPU Python candidates; use dsl=python')
+        if task.target.required_caps - _backend('fake').capabilities:
+            raise ToolError('fake_capability_missing', 'fake backend cannot satisfy real GPU requirements')
+        if fake_config.llm == 'fake' and task.source.kernel_type not in FIXTURES:
+            raise ToolError('fake_fixture_missing', 'fake LLM fixtures support relu and matmul')
+        fake = fake_config.as_dict()
+        context = dict(execution_context=execution_context(fake_config))
+    elif fake is not None:
+        raise ToolError('invalid_fake_config', 'fake options require backend=fake')
     from ..execute.task_budget import TaskBudgetConfig
     try:
         task_budget = TaskBudgetConfig(wall_clock_s=wall_clock_s,
             max_llm_calls=max_llm_calls, oracle_total=oracle_total).as_dict()
     except (TypeError, ValueError) as exc:
         raise ToolError('invalid_task_budget', str(exc)) from exc
-    problem = _llm_problem()
+    problem = None if backend == 'fake' and fake['llm'] == 'fake' else _llm_problem()
     if problem:
         raise ToolError("llm_not_configured", problem)
     from ..execute.task_cancellation import launch_identity
@@ -1133,14 +1181,14 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
     invocation_id = uuid.uuid4().hex
     try:
         launch_identity(run, invocation_id, kind='autonomous', backend=backend,
-                        task_budget=task_budget)
+                        task_budget=task_budget, **context)
     except FileExistsError as exc:
         raise ToolError('run_already_started', 'This run directory already has a launch identity.') from exc
     try:
         prepared = prepare(declaration, run)
     except Exception:
         _write_json(run / STATUS_FILE, dict(phase='failed', invocation_id=invocation_id,
-            stopped_reason='prepare_failed', pid=None, finished_at=time.time()))
+            stopped_reason='prepare_failed', pid=None, finished_at=time.time(), **context))
         raise
     config = {
         "backend": backend, "max_rounds": int(max_rounds),
@@ -1150,12 +1198,15 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
         "task_budget": task_budget,
         "invocation_id": invocation_id,
         "started_at": time.time(),
+        **context,
     }
+    if backend == 'fake':
+        config['fake'] = fake
     _write_json(run / CONFIG_FILE, config)
     log_path = run / "autonomous.log"
     from ..execute.exec_guard import start_background_worker
     _write_json(run / STATUS_FILE, dict(phase='running', stage='starting', pid=None,
-        invocation_id=invocation_id, started_at=config['started_at'], task_budget=task_budget))
+        invocation_id=invocation_id, started_at=config['started_at'], task_budget=task_budget, **context))
     try:
         proc = start_background_worker(
             [sys.executable, "-m", "operator_agent.app.autonomous", str(run)],
@@ -1163,7 +1214,7 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
         )
     except OSError:
         _write_json(run / STATUS_FILE, dict(phase='failed', invocation_id=invocation_id,
-            stopped_reason='supervisor_start_failed', pid=None, finished_at=time.time()))
+            stopped_reason='supervisor_start_failed', pid=None, finished_at=time.time(), **context))
         raise
     from ..execute.task_cancellation import publish_json
     from ..execute.exec_guard import process_identity
@@ -1177,6 +1228,7 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
         "invocation_id": invocation_id,
         "status": str(run / STATUS_FILE), "log": str(log_path),
         "hint": "用 operator_status 轮询；不要用 verify 的 run_dir 混用",
+        **context,
     }
 
 
@@ -1230,6 +1282,7 @@ def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) 
         "finished_at": status.get("finished_at"),
         "duration_s": status.get("duration_s"),
         "backend": status.get("backend"), "max_rounds": status.get("max_rounds"),
+        "execution_context": status.get('execution_context') or (summary or {}).get('execution_context'),
         "error": status.get("error"), "detail": status.get("detail"),
         "generation_evidence": (status.get('generation_evidence')
                                 or (summary or {}).get('generation_evidence')),

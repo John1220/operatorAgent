@@ -39,11 +39,13 @@ class Cap(str, Enum):
      本仓对应的失败模式叫「算了没人读」。)
     """
 
+    #: Offline workflow fixtures; no result can qualify as GPU/performance evidence.
+    TEST_ONLY = "test_only"
     #: 真加速卡上执行 —— 不是模拟、不是 CPU 回退
     REAL_DEVICE = "real_device"
     #: 提供方是模拟器 (SYCL 的 `aspect::emulated` 那个意思: 不为性能而生)
     EMULATED = "emulated"
-    #: 性能数字是按硬件规格**估**的, 不是测的 (`mock_gpu` 的 `"mode": "simulated"`)
+    #: 性能数字由规格估算或测试脚本提供, 不是实测 (`mode="simulated"`)
     SIMULATED_PERF = "simulated_perf"
     #: `verify_function`: 候选与参考在**同一台设备**上比对, 只回摘要
     REMOTE_VERIFY = "remote_verify"

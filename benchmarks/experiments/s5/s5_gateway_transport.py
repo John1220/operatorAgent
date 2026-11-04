@@ -293,6 +293,11 @@ class UpstreamExchange:
             holding=False
             phase='response_body'
             while True:
+                # read1 closes its buffered socket once Content-Length is
+                # consumed. Do not touch that detached socket on the next
+                # iteration; validation below still checks length and EOF.
+                if response.isclosed():
+                    break
                 remaining=deadline-time.monotonic()
                 if remaining <= 0: raise UpstreamError('upstream deadline exceeded',stage=phase,code='timeout')
                 if response_socket is not None: response_socket.settimeout(max(.001,remaining))

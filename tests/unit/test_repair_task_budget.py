@@ -210,7 +210,7 @@ def test_repair_schema_uses_run_finite_defaults_without_exposing_them_to_verify(
     verify = definitions['operator_verify']['inputSchema']['properties']
     assert {key: repair[key]['default'] for key in expected} == expected
     assert not set(expected).intersection(verify)
-    assert ht.TOOL_VERSION == 9
+    assert ht.TOOL_VERSION == 10
 
 
 @pytest.fixture

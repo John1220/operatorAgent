@@ -62,9 +62,14 @@ print(f"device: {torch.cuda.get_device_name(dev)}")
 
 # ── 1. 空核 launch 开销 ──
 x = torch.zeros(1024, device=dev)
-med, mn = bench(lambda: empty_kernel[(1,)](x))
-print(f"\n[1] 空核 launch: median={med:.2f}us min={mn:.2f}us")
-floor = mn
+# 地板用**独立变量名**接住：下面的 copy 扫描与 [4] 的 crossover 也写 med/mn，
+# 混用会让机器可读尾巴把某一行 copy 的中位数当成 launch 地板报出去
+# （2026-11-01 在 RTX 3080 上实测：报成 median 600.064us / min 1160.192us，
+#  真值是 47.10 / 38.91us，且 min>median 自相矛盾却没有任何守卫拦。
+#  表格与 crossover 判决只用 floor，故它们一直是对的。）
+floor_med, floor_min = bench(lambda: empty_kernel[(1,)](x))
+print(f"\n[1] 空核 launch: median={floor_med:.2f}us min={floor_min:.2f}us")
+floor = floor_min
 
 # ── 2. copy 核: 扫描字节量, 找 launch 开销占比 < 10% 的拐点 ──
 print(f"\n[2] copy 核扫描 (launch 地板 {floor:.2f}us)")
@@ -101,7 +106,7 @@ print(f"    launch 地板 {floor:.2f}us / 下界 {roof_us:.3f}us = {floor/roof_u
 
 print("\n[4] 结论")
 if crossover:
-    mib, traffic_c, med, oh = crossover
+    mib, traffic_c, cross_med, oh = crossover
     print(f"    copy 核在 >= {mib} MiB/张 (访存 {traffic_c/1e6:.2f} MB) 时 launch 占比才降到 {oh:.1f}%")
     print(f"    => memory-bound 基准的单张张量访存量应达到 ~{traffic_c/1e6:.0f} MB 量级, 测量才有意义")
     print(f"    => layernorm 1024x768 只有 {traffic/1e6:.2f} MB, 差 {traffic_c/traffic:.0f}x")
@@ -111,16 +116,18 @@ if crossover:
 import json as _json, subprocess as _sp
 _u = None
 try:
-    _r = _sp.run(["nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader"],
-                 capture_output=True, text=True, timeout=10)
-    if _r.returncode == 0 and _r.stdout.strip():
-        _u = _r.stdout.strip().splitlines()[0].strip()
+    # 钉卡后 torch 的**可见索引 0** 就是被测卡；而 `nvidia-smi` 的第一行不是。
+    # 2026-11-04 在 8 卡共享 H20 上，CUDA_VISIBLE_DEVICES=3 时按第一行取会把本卡地板
+    # 盖成物理 0 号卡 —— 不崩、不变红，只让来源门以为测的就是它。
+    _u = str(torch.cuda.get_device_properties(0).uuid)
+    _u = _u if _u.startswith("GPU-") else "GPU-" + _u
 except Exception:
     _u = None
 _p = torch.cuda.get_device_properties(0)
 print("PROBE_JSON " + _json.dumps({
     "uuid": _u, "name": _p.name, "cc": "%d.%d" % (_p.major, _p.minor),
-    "launch_floor": {"median_us": round(med, 3), "min_us": round(mn, 3), "samples": REP},
+    "launch_floor": {"median_us": round(floor_med, 3), "min_us": round(floor_min, 3),
+                     "samples": REP},
     "crossover_mib_per_tensor": (crossover[0] if crossover else None),
     "measured_by": "benchmarks/measurement/measure_launch_floor.py",
 }, ensure_ascii=False, sort_keys=True))

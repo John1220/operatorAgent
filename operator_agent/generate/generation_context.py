@@ -144,12 +144,15 @@ def generation_request(llm, messages, *, caller, temperature, max_tokens):
         summary = budget.summary()
         ledger = dict(reserved_calls_before=summary['reserved_calls'],
                       max_calls=budget.limits.max_calls)
-    return dict(caller=caller, configured_model=_text(getattr(llm, 'model', None)),
+    receipt = dict(caller=caller, configured_model=_text(getattr(llm, 'model', None)),
         messages_hash=digest(messages),
         prompt_hashes=[code_hash(message['content']) for message in messages
                        if type(message.get('content')) is str],
         temperature=temperature, requested_max_output_tokens=max_tokens, budget=ledger,
         identity_scope='configured_client_and_sent_messages_not_provider_response')
+    if getattr(llm, 'test_only', False) is True:
+        receipt['evidence_kind'] = 'test_only'
+    return receipt
 
 
 def make_candidate_record(context, source, *, request=None, attempt=1,
@@ -161,6 +164,8 @@ def make_candidate_record(context, source, *, request=None, attempt=1,
         raise ValueError('generation context drift')
     if type(attempt) is not int or attempt < 1:
         raise ValueError('positive generation attempt required')
+    if isinstance(request, dict) and request.get('evidence_kind') == 'test_only':
+        source_author = 'test_fixture'
     if source is not None and type(source) is not str:
         raise TypeError('candidate source must be text or absent')
     source = source if source else None

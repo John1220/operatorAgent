@@ -12,7 +12,7 @@
 ## 1. 前置
 
 - DSH `0.2.1-rc.2`（本包按这个版本声明 `engines.dsh`；升版前先看 `CHANGELOG.md`）
-- Python ≥ 3.9，且 `operator-agent` 可被宿主进程导入
+- 默认开发与本候选安装验收使用 Python 3.12；最低兼容版本仍为 3.9，且 `operator-agent` 可被宿主进程导入
 - 真机执法需要 `ssh` 与目标机器的 `~/.ssh/config` 别名（可选，先跑 mock 也行）
 
 ## 2. 安装
@@ -34,8 +34,9 @@ pip install operator-agent
 本地交付的 wheel 与 DSH `.tgz` 尚未发布到包仓库。先将 wheel 安装到 DSH 启动时可访问的 Python 环境，再把 `.tgz` 加到目标 profile：
 
 ```bash
-python3 -m pip install numpy /path/to/operator_agent-0.6.7-py3-none-any.whl
-dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.1.16.tgz
+python3.12 -m venv /absolute/path/operator-v07-env
+/absolute/path/operator-v07-env/bin/python -m pip install /path/to/operator_agent-0.7.0rc2-py3-none-any.whl
+dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.2.0-rc.2.tgz
 ```
 
 确认安装命令可见：
@@ -47,7 +48,7 @@ command -v operator-agent-mcp
 
 如果 DSH 从 GUI 启动，GUI 未继承安装 Python 环境的 `PATH`，应在 profile 的 `cordis.patch.yml` 中将 `mcp-operator` 与 `operator-tools` 的命令改成对应绝对路径。卸载 `.tgz` 与源码目录安装相同，见 §2.4。
 
-本次验收的工件哈希和平台边界见 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md)。本地验证保存的 NumPy wheel 仅适用于 macOS 14+ arm64 / CPython 3.9；其他平台应安装适配本机的 NumPy，不要复用该 wheel。
+当前为 v0.7 本地候选，尚未正式发布；本轮步骤、边界和回退见 [v0.7 交付准备](../../docs/testing/v07-delivery.md)，可运行离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md) 仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，当前 Python 3.12 应使用匹配的平台依赖。
 
 ### 2.3 DSH 侧
 

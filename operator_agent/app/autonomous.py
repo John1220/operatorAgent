@@ -45,6 +45,9 @@ def _atomic_json(path: Path, payload: dict) -> None:
 
 
 def _backend(name: str, cfg: dict):
+    if name == 'fake':
+        from ..execute.fake_backend import FakeBackend
+        return FakeBackend(cfg.get('fake'), event_path=Path(cfg['run_dir'])/'fake-events.jsonl')
     from ..app.hitl_tools import _backend as make
     return make(name,
                 host=cfg.get("host"), port=cfg.get("port"), user=cfg.get("user"),
@@ -57,6 +60,8 @@ def _worker_main(run, deadline, started_monotonic, invocation_id=None) -> int:
     from ..execute.task_budget import TaskBudgetConfig, snapshot, stopped_reason
     started = time.time()
     cfg = json.loads((run / CONFIG).read_text(encoding="utf-8"))
+    cfg['run_dir'] = str(run)
+    context = _execution_context(cfg)
     declaration = json.loads((run / "declaration.json").read_text(encoding="utf-8"))
     policy = TaskBudgetConfig.from_dict(cfg.get('task_budget'))
 
@@ -65,7 +70,7 @@ def _worker_main(run, deadline, started_monotonic, invocation_id=None) -> int:
               "run_dir": str(run),
               # 语料落点也收在 run 目录：这一版的语料是**运行内**的，不写入仓库那份。
               "corpus": {"kernel_db": "run-local", "failure_db": "run-local"}}
-    status.update(task_budget=policy.as_dict(), invocation_id=invocation_id)
+    status.update(task_budget=policy.as_dict(), invocation_id=invocation_id, **context)
     conductor = None
 
     # 落点收进 run 目录：无人值守的运行不该把产物撒到仓库或用户 home 的默认位置。
@@ -90,7 +95,11 @@ def _worker_main(run, deadline, started_monotonic, invocation_id=None) -> int:
         call_timeout = min(float(cfg.get('llm_timeout') or 120), policy.wall_clock_s)
         ledger = production_budget(policy.llm_limits(call_timeout), run/'model-journal',
                                    deadline=deadline)
-        llm = LLMClient(max_tokens=4096, timeout=call_timeout, call_budget=ledger)
+        if cfg.get('backend') == 'fake' and cfg.get('fake', {}).get('llm', 'fake') == 'fake':
+            from ..execute.fake_backend import FakeLLM
+            llm = FakeLLM(task.source.kernel_type, timeout=call_timeout, call_budget=ledger)
+        else:
+            llm = LLMClient(max_tokens=4096, timeout=call_timeout, call_budget=ledger)
         backend = _backend(str(cfg.get("backend") or "mock"), cfg)
 
         conductor = Conductor(
@@ -126,6 +135,7 @@ def _worker_main(run, deadline, started_monotonic, invocation_id=None) -> int:
                                     if (run / 'generation-records.json').is_file() else None),
             "finished_at": time.time(),
             "duration_s": round(time.time() - started, 1),
+            **context,
         }
         budget = snapshot(run, policy, started_monotonic)
         reason = stopped_reason(budget)
@@ -160,11 +170,18 @@ def _worker_main(run, deadline, started_monotonic, invocation_id=None) -> int:
             status.update(phase='done', error=None, detail=None)
             _atomic_json(run / SUMMARY, dict(phase='done', all_passed=False,
                 stopped_reason=reason, task_budget=policy.as_dict(), budget=budget,
-                finished_at=status['finished_at'], duration_s=status['duration_s']))
+                finished_at=status['finished_at'], duration_s=status['duration_s'], **context))
         status['finished_monotonic'] = failed_monotonic
         _atomic_json(run / WORKER_RESULT, status)
         print(f"[autonomous] failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 0 if reason else 1
+
+
+def _execution_context(cfg):
+    if cfg.get('backend') != 'fake':
+        return {}
+    from ..execute.fake_backend import execution_context
+    return dict(execution_context=execution_context(cfg.get('fake')))
 
 
 def _owned_groups(worker_pid):
@@ -225,6 +242,8 @@ def _main(argv=None) -> int:
         backend=cfg.get('backend'), max_rounds=cfg.get('max_rounds'), run_dir=str(run),
         task_budget=policy.as_dict(), invocation_id=invocation_id,
         corpus={'kernel_db':'run-local', 'failure_db':'run-local'})
+    context = _execution_context(cfg)
+    status.update(context)
     status['pid_identity'] = process_identity(os.getpid())
     status['budget'] = snapshot(run, policy, started_monotonic)
     _atomic_json(run / STATUS, status)
@@ -235,7 +254,7 @@ def _main(argv=None) -> int:
             cleanup=dict(status='no_worker_started', worker_reaped=True,
                          remote_execution='unknown', provider_call='unknown'))
         _atomic_json(run / SUMMARY, dict(phase='cancelled', all_passed=False,
-            stopped_reason=reason, task_budget=policy.as_dict(), budget=status['budget']))
+            stopped_reason=reason, task_budget=policy.as_dict(), budget=status['budget'], **context))
         _atomic_json(run / STATUS, status)
         return 1
     def interrupted(signum, frame):
@@ -294,7 +313,7 @@ def _main(argv=None) -> int:
             error=None, detail=None, budget=budget)
         _atomic_json(run / SUMMARY, dict(phase=phase, all_passed=False,
             stopped_reason=reason, task_budget=policy.as_dict(), budget=budget,
-            finished_at=time.time(), duration_s=round(time.time()-started, 3)))
+            finished_at=time.time(), duration_s=round(time.time()-started, 3), **context))
     elif valid_finish and result.get('phase') in ('done', 'failed'):
         status.update(result, pid=os.getpid(), started_at=started, budget=budget)
     else:

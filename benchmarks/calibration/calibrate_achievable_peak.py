@@ -125,6 +125,15 @@ def main():
     print("\n=== 有效带宽阶梯 (D2D copy, GB/s; 表里的 H20 带宽 = 3680) ===")
     bw = []
     for mb in (8, 64, 256, 1024, 4096):
+        need = 2 * mb * 2 ** 20                     # 源 + 目标
+        free = torch.cuda.mem_get_info()[0]
+        if need > free * 0.8:
+            # 共享卡上装不下的档位要**显式跳过**，不能抛 OOM 把前面已标定完的阶梯整段作废。
+            # 缺读数记 skipped（进产物），mem_bw 取已测档位的最大值，不拿别处的数补齐。
+            bw.append({"mb": mb, "gbs": None,
+                       "skipped": "free=%d MiB < need=%d MiB" % (free >> 20, need >> 20)})
+            print(f"  {mb:>5} MB → 跳过：空闲 {free >> 20} MiB，需要 {need >> 20} MiB")
+            continue
         gbs = copy_gbs(mb)
         bw.append({"mb": mb, "gbs": round(gbs, 1)})
         print(f"  {mb:>5} MB → {gbs:>8.0f} GB/s   相对 3680 = {gbs / 3680:>6.1%}")
@@ -149,10 +158,11 @@ def main():
     import json as _json, subprocess as _sp
     _u = None
     try:
-        _r = _sp.run(["nvidia-smi", "--query-gpu=gpu_uuid", "--format=csv,noheader"],
-                     capture_output=True, text=True, timeout=10)
-        if _r.returncode == 0 and _r.stdout.strip():
-            _u = _r.stdout.strip().splitlines()[0].strip()
+        # 钉卡后 torch 的**可见索引 0** 就是被测卡；`nvidia-smi` 的第一行不是
+        # （CUDA_VISIBLE_DEVICES 只对 CUDA 运行时生效，nvidia-smi 照旧按物理序号排）。
+        _u = str(p.uuid) if getattr(p, "uuid", None) else None
+        if _u:
+            _u = _u if _u.startswith("GPU-") else "GPU-" + _u
     except Exception:
         _u = None
     _peak = {}
@@ -162,7 +172,7 @@ def main():
         "uuid": _u, "name": p.name, "cc": "%d.%d" % (p.major, p.minor),
         "l2_cache_size_bytes": int(getattr(p, "L2_cache_size", 0) or 0),
         "peak_by_dtype": _peak,
-        "mem_bw_gbs": max((b["gbs"] for b in bw), default=None),
+        "mem_bw_gbs": max((b["gbs"] for b in bw if b.get("gbs")), default=None),
         "mem_bw_by_mb": bw,
         "measured_by": "benchmarks/calibration/calibrate_achievable_peak.py",
         "torch_version": torch.__version__,

@@ -476,11 +476,19 @@ class Conductor:
         # 就是这么把 7 条探针记录写进 `output/failure_db.jsonl` 的: 它给的是临时目录。
         self.backend = backend if backend is not None else MockGPU(
             exec_limits=execution_limits, compile_limits=compile_limits)
-        self.kernel_db = kernel_db if kernel_db is not None else KernelDatabase()
-        self.failure_db = failure_db if failure_db is not None else FailureDatabase()
+        test_only = Cap.TEST_ONLY in self.backend.capabilities
+        if test_only:
+            if not run_root or kernel_db is not None or failure_db is not None:
+                raise ValueError('test_only backend requires run_root and owns its isolated corpus')
+            fake_root = Path(run_root).resolve()
+            self.kernel_db = KernelDatabase(jsonl_path=str(fake_root/'fake-kernel_db.jsonl'))
+            self.failure_db = FailureDatabase(jsonl_path=str(fake_root/'fake-failure_db.jsonl'))
+        else:
+            self.kernel_db = kernel_db if kernel_db is not None else KernelDatabase()
+            self.failure_db = failure_db if failure_db is not None else FailureDatabase()
         self.llm = llm
         self.pm = prompt_manager or PromptManager()
-        self.store = ArtifactStore()
+        self.store = ArtifactStore(output_dir=str(fake_root/'output')) if test_only else ArtifactStore()
         self.router = Router()
         self.max_optimize_rounds = max_optimize_rounds
         #: §10.2 的预算计划 (不含账本 —— 账本每次运行新建, 见 `_execute_inner`)。
@@ -1284,6 +1292,8 @@ class Conductor:
             task_id=task.task_id,
             operator=operator_name,
             hardware=hardware_name,
+            **({'log_dir': str(Path(self.run_root)/'log')}
+               if Cap.TEST_ONLY in self.backend.capabilities else {}),
         ) as self._log_path:
             try:
                 return self._execute_inner(

@@ -9,8 +9,17 @@ import hashlib
 import os
 from pathlib import Path
 
-from ..execute.llm_budget import ProductionLLMCallBudget, LLMCallRefused, strict_object
+from ..execute.llm_budget import (ProductionLLMCallBudget, ProductionBudgetExhausted,
+                                 LLMCallRefused, strict_object)
 from ..execute import s5_shared_budget as shared
+
+
+_SHARED_LIMIT_REASONS = {
+    'call_budget_exhausted': 'llm_call_budget',
+    'wall_clock_exhausted': 'task_wall_clock',
+    'per_call_output_exhausted': 'llm_output_budget',
+    'output_budget_exhausted': 'llm_output_budget',
+}
 
 
 def _provider_counters(usage, source):
@@ -121,6 +130,18 @@ class SharedProductionBudget(ProductionLLMCallBudget):
                 item = shared.reserve(self.shared_path, participant='inner', caller=caller,
                                       max_output_tokens=token_cap, request_sha256=req_hash,
                                       expected_task_id=self.shared_task_id)
+            except shared.BudgetError as exc:
+                reason = _SHARED_LIMIT_REASONS.get(exc.reason)
+                if reason is None:
+                    self._poison('reservation')
+                try:
+                    self._exhausted(reason, 'shared budget refused: ' + exc.reason)
+                except ProductionBudgetExhausted:
+                    raise
+                except Exception:
+                    # A normal limit still needs a durable refusal receipt.
+                    # Failure to publish it stops all participants as before.
+                    self._poison('reservation_refusal')
             except Exception:
                 self._poison('reservation')
             # If the local reservation fails, the shared reservation remains

@@ -42,6 +42,7 @@ from typing import Any, BinaryIO, Optional, TextIO
 from .. import __version__
 from ..app.hitl_tools import (CANDIDATE_ORIGINS, ToolError, autonomous_status, cancel_task, bench,
                          capabilities, prepare, repair, run_autonomous, verify)
+from ..execute.fake_backend.config import PROFILES, SCENARIOS
 
 SERVER_NAME = "operator"
 SERVER_VERSION = __version__
@@ -105,6 +106,10 @@ required_caps）。`validity=degraded` 或 `uninformative` 的读数不驱动调
 真改了源码就是 `inner_fixer`，那一格不接受声明。
 """
 
+INSTRUCTIONS += ("\n离线检查组件可用 backend=fake（只支持 CPU Python）：operator_run 默认使用脚本模型，"
+                 "无需 API 凭据。fake={scenario, profile, llm} 选择故障与硬件规格，llm=live 才调用"
+                 "真实模型。结果标记 test_only，固定性能值不可用于 GPU 验收或生产语料。\n")
+
 _SHAPES = {"type": "array", "minItems": 1,
            "items": {"type": "array", "minItems": 1,
                      "items": {"type": "integer", "minimum": 0}},
@@ -163,7 +168,7 @@ def _tool_definitions() -> list[dict]:
                     "code_file": {"type": "string", "description": "候选源码文件路径（与 code 二选一）"},
                     "candidate_origin": _ORIGIN,
                     "stop_after": {"type": "string", "enum": ["L1", "L2", "L3"]},
-                    "backend": {"type": "string", "enum": ["mock", "local", "ssh"],
+                    "backend": {"type": "string", "enum": ["mock", "local", "ssh", "fake"],
                                 "default": "mock"},
                     "host": {"type": "string",
                              "description": "backend=ssh 必需：主机名或 ~/.ssh/config 别名"},
@@ -200,7 +205,7 @@ def _tool_definitions() -> list[dict]:
                             },
                         },
                     },
-                    "backend": {"type": "string", "enum": ["mock", "local", "ssh"], "default": "mock"},
+                    "backend": {"type": "string", "enum": ["mock", "local", "ssh", "fake"], "default": "mock"},
                     "host": {"type": "string"},
                     "port": {"type": "integer"},
                     "user": {"type": "string"},
@@ -235,13 +240,19 @@ def _tool_definitions() -> list[dict]:
                     "framework": {"type": "string"},
                     "notes": {"type": "string"},
                     "max_rounds": {"type": "integer", "default": 1},
+                    "fake": {"type": "object", "additionalProperties": False,
+                             "description": "仅 backend=fake 的离线测试配置",
+                             "properties": {
+                                 "scenario": {"type": "string", "enum": list(SCENARIOS)},
+                                 "profile": {"type": "string", "enum": list(PROFILES)},
+                                 "llm": {"type": "string", "enum": ["fake", "live"]}}},
                     "wall_clock_s": {"type": "number", "exclusiveMinimum": 0,
                                      "default": 1800.0, "description": "整个任务的墙钟时限（秒）"},
                     "max_llm_calls": {"type": "integer", "minimum": 1,
                                       "default": 24, "description": "整个任务允许派发的模型调用总数，失败不退款"},
                     "oracle_total": {"type": "integer", "minimum": 1,
                                      "default": 20, "description": "验证 case 派发额度，确认预留不可挪用；不表示原始 GPU launch 次数或 GPU 秒数"},
-                    "backend": {"type": "string", "enum": ["mock", "local", "ssh"], "default": "mock"},
+                    "backend": {"type": "string", "enum": ["mock", "local", "ssh", "fake"], "default": "mock"},
                     "host": {"type": "string"},
                     "port": {"type": "integer"},
                     "user": {"type": "string"},
@@ -298,7 +309,7 @@ def _tool_definitions() -> list[dict]:
                     "oracle_total": {"type": "integer", "minimum": 1, "default": 20,
                                      "description": "验证输入组派发额度，确认预留不可挪用"},
                     "stop_after": {"type": "string", "enum": ["L1", "L2", "L3"]},
-                    "backend": {"type": "string", "enum": ["mock", "local", "ssh"], "default": "mock"},
+                    "backend": {"type": "string", "enum": ["mock", "local", "ssh", "fake"], "default": "mock"},
                     "host": {"type": "string"},
                     "port": {"type": "integer"},
                     "user": {"type": "string"},
@@ -407,7 +418,7 @@ def _text_result(payload: dict, *, is_error: bool = False) -> dict:
 #: declaration 决定"判什么"，运行选项决定"怎么跑"，前者不许被后者污染。
 _RUN_OPTION_KEYS = ("max_rounds", "backend", "host", "port", "user", "key_path",
                     "work_dir", "timeout", "persistent", "target_gflops",
-                    "wall_clock_s", "max_llm_calls", "oracle_total")
+                    "wall_clock_s", "max_llm_calls", "oracle_total", "fake")
 
 
 def _call_tool(name: str, arguments: dict) -> dict:

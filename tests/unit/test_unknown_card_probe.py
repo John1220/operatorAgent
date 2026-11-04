@@ -12,7 +12,8 @@ import unittest
 from pathlib import Path
 
 from benchmarks.probes.collect_unknown_card_probe import (
-    MEASURED_BY_ELSEWHERE, PROBE_PREFIX, assemble, load_probes)
+    MEASURED_BY_ELSEWHERE, NOISE_THRESHOLD_KEYS, PROBE_PREFIX, assemble, load_probes,
+    resolve_device)
 from benchmarks.probes.unknown_card_gates import MIN_FLOOR_SAMPLES, assess
 
 # 没有实测输入时，采集器**只许**产出这三段 + 两个元数据键
@@ -159,6 +160,86 @@ class TestProbeLoading(unittest.TestCase):
             self.assertIn("PROBE_JSON", str(caught.exception))
 
 
+class TestNoiseAndShapeMerging(unittest.TestCase):
+    """G4 / G5 的输入段：2026-11-01 之前**没有任何产出方**，两门永远 unknown。
+
+    现在有了两个采集器，于是这里钉三件事：① 绿的路径真的能绿（否则补了也白补）；
+    ② 半截标定必须被拒（「段存在」不等于「已标定」）；③ 别卡的形状必须被拒在入口。
+
+    ⚠️ 键集**写字面量**，不 import 那个常量再迭代：否则把 `NOISE_THRESHOLD_KEYS` 削掉
+    一项时，两组用例会跟着一起缩，全部照绿 —— 实测变异 M5 就是这么逃掉的。
+    """
+
+    REQUIRED_NOISE_KEYS = ("band", "contamination_util_pct", "dispersion_degraded")
+
+    NOISE_PROBE = {"uuid": UUID, "measured_by": "calibrate_dispersion_thresholds.py",
+                   "noise": {"band": {"valid": 0.0006, "degraded": 0.0021,
+                                      "uninformative": 0.0075},
+                             "contamination_util_pct": 1.0,
+                             "dispersion_degraded": 0.021}}
+    SHAPE_PROBE = {"uuid": UUID, "measured_by": "collect_shape_inventory.py",
+                   "shapes": [{"label": "1024x768 fp16", "bytes": 3145728},
+                              {"label": "4096x4096 fp16", "bytes": 67108864}]}
+
+    def test_the_three_threshold_keys_are_pinned(self):
+        self.assertEqual(set(NOISE_THRESHOLD_KEYS), set(self.REQUIRED_NOISE_KEYS))
+
+    def test_a_measured_noise_probe_actually_opens_g4(self):
+        payload = assemble(PROPS_4070, UUID, "exclusive", 0, [self.NOISE_PROBE])
+        gate = assess(payload)["gates"]["G4_noise_bands"]
+        self.assertEqual(gate["verdict"], "pass", gate)
+        self.assertIn("exclusive", gate["reading_condition"])
+        self.assertNotIn("noise.band/dispersion", payload["still_missing"])
+
+    def test_a_half_calibrated_noise_section_is_refused(self):
+        """只给 band 不给 util/散布 ⇒ 拒。让截断的产物流过门，等于把标定变成装饰。"""
+        for missing in self.REQUIRED_NOISE_KEYS:
+            node = dict(self.NOISE_PROBE["noise"])
+            node.pop(missing)
+            with self.assertRaises(SystemExit) as caught:
+                assemble(PROPS_4070, UUID, "exclusive", 0,
+                         [dict(self.NOISE_PROBE, noise=node)])
+            self.assertIn(missing, str(caught.exception), missing)
+
+    def test_a_band_with_wrong_keys_is_refused_not_silently_inherited(self):
+        """拼错键集会让 `_same_as_inherited()` 判「不等」而放行继承值 —— 静默失败方向。"""
+        node = dict(self.NOISE_PROBE["noise"], band={"valid": 0.002, "degrad": 0.006,
+                                                     "uninformative": 0.03})
+        with self.assertRaises(SystemExit) as caught:
+            assemble(PROPS_4070, UUID, "exclusive", 0,
+                     [dict(self.NOISE_PROBE, noise=node)])
+        self.assertIn("键集", str(caught.exception))
+
+    def test_measured_shapes_open_g5_and_carry_this_card(self):
+        payload = assemble(PROPS_4070, UUID, "exclusive", 0, [self.SHAPE_PROBE])
+        gate = assess(payload)["gates"]["G5_shape_inheritance"]
+        self.assertEqual(gate["verdict"], "pass", gate)
+        self.assertEqual([s["validated_on_uuid"] for s in payload["shapes"]], [UUID, UUID])
+        self.assertNotIn("shapes", payload["still_missing"])
+
+    def test_shapes_validated_on_another_card_are_refused_at_the_door(self):
+        bad = {"uuid": UUID, "measured_by": "collect_shape_inventory.py",
+               "shapes": [{"label": "4096x4096 fp16", "bytes": 67108864,
+                           "validated_on_uuid": "GPU-h20"}]}
+        with self.assertRaises(SystemExit) as caught:
+            assemble(PROPS_4070, UUID, "exclusive", 0, [bad])
+        self.assertIn("不是本机", str(caught.exception))
+
+    def test_a_shape_without_measured_bytes_is_refused(self):
+        bad = {"uuid": UUID, "measured_by": "collect_shape_inventory.py",
+               "shapes": [{"label": "4096x4096 fp16"}]}
+        with self.assertRaises(SystemExit) as caught:
+            assemble(PROPS_4070, UUID, "exclusive", 0, [bad])
+        self.assertIn("字节数", str(caught.exception))
+
+    def test_all_four_probes_together_are_the_only_all_green_path(self):
+        payload = assemble(PROPS_4070, UUID, "exclusive", 0,
+                           [FLOOR_PROBE, PEAK_PROBE, self.NOISE_PROBE, self.SHAPE_PROBE])
+        result = assess(payload)
+        self.assertTrue(result["all_green"], result["gates"])
+        self.assertEqual(payload["still_missing"], [])
+
+
 class TestEmitterWireFormat(unittest.TestCase):
     """产出 `PROBE_JSON` 行的两个脚本，必须**单独跑在远端机器上**（scp 单文件过去），
     所以它们没法 import 这里的 schema。键名一旦改了就没人拦：门会一直 unknown，
@@ -190,6 +271,50 @@ class TestEmitterWireFormat(unittest.TestCase):
         match = re.search(r"^REP\s*=\s*(\d+)", text, re.MULTILINE)
         self.assertIsNotNone(match, "%s 里找不到 `REP = <整数>`：样本数没落成常数" % self.FLOOR.name)
         self.assertGreaterEqual(int(match.group(1)), MIN_FLOOR_SAMPLES)
+
+
+class TestWhichCardIsThis(unittest.TestCase):
+    """来源戳必须盖在**真的被测的那张卡**上。
+
+    2026-11-04 在 8 卡共享 H20 上实测踩到：`CUDA_VISIBLE_DEVICES=3` 之后 torch 的 index 0
+    是物理 3 号卡，而 `nvidia-smi -i 0` 仍指物理 0 号。按 index 0 取 uuid 会把本卡读数盖成
+    别人的卡 —— 不崩、不变红，只让来源门误以为测的就是它。下面是这条的逐分支反例。
+    """
+
+    ROWS = [(0, "GPU-aaaa"), (1, "GPU-bbbb"), (3, "GPU-634bbc76"), (7, "GPU-cccc")]
+
+    def test_unset_means_the_lowest_physical_index(self):
+        self.assertEqual(resolve_device(None, self.ROWS), (0, "GPU-aaaa"))
+        self.assertEqual(resolve_device("", self.ROWS), (0, "GPU-aaaa"),
+                         "未设置 CUDA_VISIBLE_DEVICES 时 CUDA 用序号最小的那张")
+
+    def test_numeric_pin_selects_the_physical_card_not_index_zero(self):
+        """这就是那个缺陷：钉 3 号卡时不许回 index 0 的 uuid。"""
+        self.assertEqual(resolve_device("3", self.ROWS), (3, "GPU-634bbc76"))
+        self.assertNotEqual(resolve_device("3", self.ROWS), self.ROWS[0])
+
+    def test_pin_with_several_entries_uses_the_first(self):
+        self.assertEqual(resolve_device("3,7", self.ROWS), (3, "GPU-634bbc76"))
+
+    def test_uuid_pin_is_matched_with_or_without_the_gpu_prefix(self):
+        self.assertEqual(resolve_device("GPU-634bbc76", self.ROWS), (3, "GPU-634bbc76"))
+        self.assertEqual(resolve_device("634bbc76", self.ROWS), (3, "GPU-634bbc76"),
+                         "torch 暴露的 uuid 没有 GPU- 前缀，两种写法都必须认")
+
+    def test_pin_pointing_at_a_missing_card_is_refused(self):
+        with self.assertRaises(SystemExit):
+            resolve_device("9", self.ROWS)
+        with self.assertRaises(SystemExit):
+            resolve_device("GPU-nope", self.ROWS)
+
+    def test_empty_visibility_list_is_refused(self):
+        """CUDA_VISIBLE_DEVICES=',' 是「一张都不可见」，不能退化成「用第 0 张」。"""
+        with self.assertRaises(SystemExit):
+            resolve_device(",", self.ROWS)
+
+    def test_no_nvidia_smi_rows_is_refused(self):
+        with self.assertRaises(SystemExit):
+            resolve_device("0", [])
 
 
 if __name__ == "__main__":

@@ -303,6 +303,11 @@ def _bad_mask_as_2d(mask):
     return a.reshape(-1, cols), int(a.size // cols), cols
 
 
+#: 一个 case 因「传输结果未知」被重发的次数上限。它只管**已确认未知**之后的补发，
+#: 不改变「在飞请求不重试」那条规矩；上限 1 是为了不让一次抖动变成无限退避循环。
+_TRANSPORT_RETRIES = 1
+
+
 class Verifier:
     """
     验证器 - 执行三级验证
@@ -330,12 +335,19 @@ class Verifier:
         self._reference_bindings = {}
         self.on_level_complete = None
 
+    def _tag_evidence(self, result):
+        if Cap.TEST_ONLY in self._caps:
+            result.metrics = dict(result.metrics or {}, test_only=True,
+                                  evidence_kind='test_only', gpu_acceptance=False,
+                                  performance_evidence=False, backend=self.backend.label)
+        return result
+
     def _timed_level(self, fn, source, audit_task, previous, *args, **kwargs):
         if self.on_level_complete is None:
-            return fn(*args, **kwargs)
+            return self._tag_evidence(fn(*args, **kwargs))
         from ..execute.task_clock import monotonic
         started_utc, started = time.time(), monotonic()
-        result = fn(*args, **kwargs)
+        result = self._tag_evidence(fn(*args, **kwargs))
         timing = dict(started_at=started_utc, completed_at=time.time(),
                       started_monotonic=started, completed_monotonic=monotonic())
         result.metrics = dict(result.metrics or {}, execution_timing=timing)
@@ -377,10 +389,10 @@ class Verifier:
 
         preflight = self.correctness_preflight(task, test_inputs)
         if preflight is not None:
-            return [preflight]  # Harness gap, not a compile/candidate failure.
+            return [self._tag_evidence(preflight)]  # Harness gap, not a candidate failure.
         preflight = self.reference_preflight(task)
         if preflight is not None:
-            return [preflight]
+            return [self._tag_evidence(preflight)]
 
         l1 = self._timed_level(self._verify_compile, kernel_code, task, results,
                               kernel_code, task.target.dsl, input_key_sets(test_inputs))
@@ -438,12 +450,13 @@ class Verifier:
         if task.constraints.correctness_profile is not None:
             preflight = self.correctness_preflight(task, test_inputs)
             if preflight is not None:
-                return [preflight]
+                return [self._tag_evidence(preflight)]
         preflight = self.reference_preflight(task)
         if preflight is not None:
-            return [preflight]
+            return [self._tag_evidence(preflight)]
         if task.constraints.reference_contract is not None and correctness_verified is not True:
-            return [self._reference_unknown("v2 L3 必须携带已通过的 L2 凭据", VerificationLevel.L3_PERFORMANCE)]
+            return [self._tag_evidence(self._reference_unknown(
+                "v2 L3 必须携带已通过的 L2 凭据", VerificationLevel.L3_PERFORMANCE))]
         l3 = self._timed_level(self._verify_performance, kernel_code, task, [],
                                       kernel_code, test_inputs, target_gflops, task,
                                       environment_drift=environment_drift,
@@ -710,6 +723,18 @@ class Verifier:
                 inputs = case.materialize()
                 r = self._verify_single_set(kernel_code, inputs, None, case_task)
                 state, reason = verdict_of(r)
+                retried = 0
+                while (state == "unknown"
+                       and r.metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN
+                       and retried < _TRANSPORT_RETRIES):
+                    # 「不重试在飞请求」仍然成立：结果是**已确认的未知**之后才走到这里，
+                    # 再发一次是**新请求**（新的预算预留、新的 request_id），不是重放在飞的那个。
+                    # 没有这一步，一个 case 的瞬时抖动就让整份套件 unknown ⇒ 整格 hold
+                    # （2026-11-04 matmul-4096-B：15 个 case 里 1 个 unknown，整格作废）。
+                    retried += 1
+                    r = self._verify_single_set(kernel_code, case.materialize(), None, case_task)
+                    state, reason = verdict_of(r)
+                    row["transport_retry"] = retried
                 row.update(verdict=state, reason=reason, metrics=dict(r.metrics))
                 if state == "passed" and suite.deterministic:
                     # Re-materialize: a candidate must not mutate its first input
@@ -1573,6 +1598,11 @@ class Verifier:
         if preflight is not None:
             held = dict(success=False, error=preflight.message, **preflight.metrics)
             return held, held
+        if Cap.TEST_ONLY in self._caps:
+            # The fixture owns both arms. Never invoke the local Torch baseline,
+            # which can probe/select CUDA independently of the fake backend.
+            fixture = self.backend.benchmark(kernel_code, inputs, warmup=2, repeat=5)
+            return fixture, fixture
         if Cap.SAME_DEVICE_BASELINE in self._caps:
             seed_spec = self._seed_spec_for(task, inputs)
             remote_bench = self.backend.benchmark_with_baselines(

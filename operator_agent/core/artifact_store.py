@@ -34,6 +34,11 @@ class ArtifactStore:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def save(self, artifact: KernelArtifact, task=None) -> Path:
+        if any((v.metrics or {}).get('test_only') is True for v in artifact.verification_results):
+            if artifact.metadata is None:
+                artifact.metadata = {}
+            artifact.metadata['execution_context'] = dict(mode='fake', test_only=True,
+                evidence_kind='test_only', gpu_acceptance=False, performance_evidence=False)
         kernel_type = task.source.kernel_type if task else "unknown"
         hardware = task.target.hardware if task else "unknown"
         language = task.target.dsl if task else "python"
@@ -125,7 +130,7 @@ class ArtifactStore:
         from ..core.run_contract import audit_value
         for name in ("search_objective", "candidate_selection", "last_probe_stop",
                      "llm_call_budget", "code_generation", "candidate_records",
-                     "selected_source_hash", "budget"):
+                     "selected_source_hash", "budget", "execution_context"):
             if (artifact.metadata or {}).get(name) is not None:
                 result_data[name] = audit_value(artifact.metadata[name])
         result_path = artifact_dir / "result.json"
@@ -267,7 +272,7 @@ class ArtifactStore:
             metadata={k:data[k] for k in ("corpus_admission", "claim_level", "stop",
                 "search_objective", "candidate_selection", "last_probe_stop", "llm_cost",
                 "llm_call_budget", "code_generation", "candidate_records",
-                "selected_source_hash", "budget") if k in data},
+                "selected_source_hash", "budget", "execution_context") if k in data},
             saved_dir=str(dir_path),
         )
 

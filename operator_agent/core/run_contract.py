@@ -94,6 +94,8 @@ def protocol_identity():
         "operator_agent/generate/agents.py",
         "operator_agent/execute/exec_guard.py", "operator_agent/execute/budget.py", "operator_agent/decide/calibration.py",
         "operator_agent/execute/task_budget.py", "operator_agent/app/autonomous.py",
+        "operator_agent/execute/fake_backend/backend.py",
+        "operator_agent/execute/fake_backend/config.py", "operator_agent/execute/fake_backend/model.py",
         "operator_agent/execute/llm_client.py", "operator_agent/execute/llm_budget.py",
         "operator_agent/execute/llm_transport.py", "operator_agent/generate/single_candidate_coder.py",
         "operator_agent/generate/bounded_repair.py",

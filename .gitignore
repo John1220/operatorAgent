@@ -10,7 +10,6 @@ dist/
 .venv/
 venv/
 env/
-.python-version
 
 # ─── IDE / 系统 ───
 .DS_Store

@@ -27,6 +27,7 @@ from operator_agent.core.backend_caps import (
     OPTIONAL_CAP_METHODS, Backend, CapabilityMissing, Cap, concrete_backends,
 )
 from operator_agent.execute.mock_gpu import MockGPU, _has_cuda
+from operator_agent.execute.fake_backend import FakeBackend
 from operator_agent.execute.remote_executor import (
     HTTPExecutor, LocalExecutor, RemoteExecutor, SSHExecutor,
 )
@@ -76,6 +77,8 @@ STUB_CALLS = {
 
 #: 登记表: 条目名 → (类名, 不联网的构造器, 期望声明)
 REGISTRY = {
+    "FakeBackend": ("FakeBackend", FakeBackend,
+                    {Cap.TEST_ONLY, Cap.EMULATED, Cap.SIMULATED_PERF, Cap.FULL_OUTPUT_TENSOR}),
     "MockGPU": ("MockGPU", lambda: MockGPU(), _MOCK_CAPS),
     "SSHExecutor(nvidia)": ("SSHExecutor", lambda: SSHExecutor(host="h", user="u", persistent=True), _SSH_CAPS),
     "SSHExecutor(xpu)": ("SSHExecutor",

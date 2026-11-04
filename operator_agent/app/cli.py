@@ -72,7 +72,7 @@ def _parser() -> argparse.ArgumentParser:
     ver.add_argument("--candidate-origin", choices=list(CANDIDATE_ORIGINS), default=None,
                      help="候选来源（归因，不进判据）；不给则回包记 undeclared")
     ver.add_argument("--stop-after", choices=["L1", "L2", "L3"], default=None)
-    ver.add_argument("--backend", default="mock", choices=["mock", "local", "ssh"])
+    ver.add_argument("--backend", default="mock", choices=["mock", "local", "ssh", "fake"])
     ver.add_argument("--host", help="ssh 后端的主机（~/.ssh/config 别名即可）")
     ver.add_argument("--port", type=int, default=None)
     ver.add_argument("--user", default=None)
@@ -102,7 +102,14 @@ def _parser() -> argparse.ArgumentParser:
                      help="任务内模型调用总额度，失败调用同样计数")
     run.add_argument("--oracle-total", type=int, default=20,
                      help="验证 case 派发额度，最终确认预留不可挪用")
-    run.add_argument("--backend", default="mock", choices=["mock", "local", "ssh"])
+    run.add_argument("--backend", default="mock", choices=["mock", "local", "ssh", "fake"])
+    from ..execute.fake_backend.config import SCENARIOS, PROFILES
+    run.add_argument("--fake-scenario", choices=SCENARIOS,
+                     help="backend=fake 的故障场景；默认 success")
+    run.add_argument("--fake-profile", choices=PROFILES,
+                     help="声明式测试硬件规格；默认 small")
+    run.add_argument("--llm-mode", choices=["fake", "live"],
+                     help="仅 backend=fake：默认 fake，不读凭据、不发模型请求")
     run.add_argument("--host", default=None)
     run.add_argument("--port", type=int, default=None)
     run.add_argument("--user", default=None)
@@ -130,7 +137,7 @@ def _parser() -> argparse.ArgumentParser:
     rep.add_argument("--oracle-total", type=int, default=20,
                      help="验证输入组派发额度，确认预留不可挪用")
     rep.add_argument("--stop-after", choices=["L1", "L2", "L3"], default=None)
-    rep.add_argument("--backend", default="mock", choices=["mock", "local", "ssh"])
+    rep.add_argument("--backend", default="mock", choices=["mock", "local", "ssh", "fake"])
     rep.add_argument("--host", default=None)
     rep.add_argument("--port", type=int, default=None)
     rep.add_argument("--user", default=None)
@@ -252,6 +259,9 @@ def main(argv=None) -> int:
         elif args.action == "prepare":
             payload = prepare(_declaration_from_args(args), args.run_dir)
         elif args.action == "run":
+            fake = {key: value for key, value in (
+                ('scenario', args.fake_scenario), ('profile', args.fake_profile),
+                ('llm', args.llm_mode)) if value is not None}
             payload = run_autonomous(
                 _declaration_from_args(args), args.run_dir,
                 max_rounds=args.max_rounds, backend=args.backend, host=args.host,
@@ -259,7 +269,7 @@ def main(argv=None) -> int:
                 work_dir=args.work_dir, timeout=args.timeout,
                 persistent=args.persistent, target_gflops=args.target_gflops,
                 wall_clock_s=args.wall_clock_s, max_llm_calls=args.max_llm_calls,
-                oracle_total=args.oracle_total)
+                oracle_total=args.oracle_total, fake=fake or None)
         elif args.action == "repair":
             from ..app.tool_calls import run_tool_call
             payload = run_tool_call('operator_repair', dict(run_dir=args.run_dir, code=_read_code(args),

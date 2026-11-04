@@ -1,6 +1,6 @@
 {
   "name": "dsh-operator-agent",
-  "version": "0.1.16",
+  "version": "0.2.0-rc.2",
   "description": "GPU 算子开发判定层 for DeepSeek Harness — 把 operator-agent 的判定/修复/无人值守能力接成 DSH 工具（MCP）",
   "type": "module",
   "private": false,
@@ -13,7 +13,8 @@
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
-    "NOTICE"
+    "NOTICE",
+    "examples/v07/**"
   ],
   "repository": {
     "type": "git",

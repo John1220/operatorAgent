@@ -23,7 +23,7 @@ ALLOWED_ROOT = {
     ".git", ".gitignore", ".github",
     # 构建与元数据
     "README.md", "LICENSE", "NOTICE", "MANIFEST.in", "THIRD_PARTY_NOTICES.md",
-    "pyproject.toml", "config.example.yaml",
+    "pyproject.toml", ".python-version", "config.example.yaml",
     # 源码与文档
     "operator_agent", "remote_scripts", "benchmarks", "tests", "docs",
     "integrations", "operator-dev-agent-design",

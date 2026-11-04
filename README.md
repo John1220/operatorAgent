@@ -4,11 +4,14 @@
 attention 等），由 LLM agent 设计、生成、修复 Triton / CUDA 核，经三级验证
 （L1 编译 → L2 功能 → L3 性能 + Roofline）后产出**可审计**的结论。
 
-- 版本：`0.6.5`（见 [operator_agent/__init__.py](operator_agent/__init__.py)）
+- 版本：`0.7.0rc2`（v0.7 本地候选，正式 GPU 与交付验收待完成；见 [operator_agent/__init__.py](operator_agent/__init__.py)）
 - 运行模式：**无人值守** —— 无人在环内裁决歧义或发现失效
 - DSL：Triton / CUDA 为主；后端接口预留模板型后端
 
 ## 30 秒开始
+
+默认开发版本为 **Python 3.12**，由仓库根目录的 `.python-version` 固定；包的最低兼容版本仍为 3.9。
+使用 uv 时可运行 `uv venv --python 3.12`，然后激活 `.venv`。
 
 ```bash
 # 依赖极少，本仓库没有 requirements.txt
@@ -46,7 +49,7 @@ python test_nvidia_matmul.py
 
 除此之外：
 
-- **长期产品路线**：[算子开发助手：价值、架构与演进路线](docs/design/operator-development-product-roadmap.md) —— 用户与需求依据、DSH/其他 Agent/独立应用的取舍、阶段推进条件与收益评价；作为长期方向，不替代技术规范或实现状态
+- **长期产品路线**：[算子开发助手：可用版本迭代路线](docs/design/operator-development-product-roadmap.md) —— v0.7 基础闭环 → v0.8 优化增强 → v0.9 业务接入 → v1.0 稳定发布 → v1.1 团队复用 → v1.2 批量运行；每版的用户工作流、交付与验收条件，未来版本均为计划
 - **方案评审（2026-10-26）**：[算子开发方案评审](docs/design/operator-development-review-20261026.md) —— 当前入口与设计的一致性、生成质量与成本证据、后续改进优先级；评审建议不替代设计规范
 - **插件封版待执行计划**：[收尾顺序与验收清单](docs/design/dsh-operator-completion-plan-20261026.md) —— 证据留存、任务取消、资源预检、当前入口验收、整体对照及交付包
   ；[S0 固定起点验收](docs/status/dsh-operator-s0-20261026.md) —— 工作区快照、实际入口能力、历史证据清单与持久归档
@@ -56,6 +59,10 @@ python test_nvidia_matmul.py
   ；[S5 有限范围结项](docs/status/dsh-operator-s5-closeout-20261030.md)与[三分钟演示/简历口径](docs/design/dsh-operator-s5-resume-demo-20261030.md) —— 真实插件闭环、脱敏案例及独立批次结果；完整重复对照未完成，未建立插件整体增益
  ；[S6 安装与交付验收](docs/status/dsh-operator-s6-acceptance-20261030.md) —— 本地工件安装/卸载、离线证据包和演示材料；按用户决定不录制视频
 - **操作指南**：[docs/user_guide.md](docs/user_guide.md) —— 安装、示例、`Conductor` 参数、环境变量全表
+- **无 GPU 的功能检查**：[FakeBackend 使用说明](docs/testing/fake-backend.md) —— 脚本模型、故障场景、预算/取消与测试结果隔离；真实 GPU 验收另行执行
+  ；[一期 A/B 自动执行与回放](docs/testing/phase1-rehearsal.md) —— 八格离线演练、统一预算核对、独立终评和带来源的事件汇总
+  ；[模型 / SSH / DSH 入口接入](docs/testing/phase1-connected.md) —— 显式模型与 GPU 身份、共同预算、独立终评；正式同卡对照另行冻结
+  ；[v0.7 候选安装与交付](docs/testing/v07-delivery.md) —— Python 3.12、wheel/tgz 干净安装、随包离线示例、导出与回退
 - **生成与修复质量**：[共享规约、诊断与固定任务对照](docs/design/operator-quality-improvement.md) —— 插件修复闭环、离线回放和真实评测入口
   ；[预检与同候选配对](docs/design/operator-quality-paired-evaluation.md) —— 模型调用前检查环境，生成一次、独立比较两种修复策略
   ；[三候选完整 L2 筛选](docs/design/operator-quality-portfolio.md) —— 三种生成策略、首槽基线、完整费用与失败记录

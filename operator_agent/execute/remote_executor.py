@@ -1394,6 +1394,17 @@ class SSHExecutor(Backend):
                     "selected_gpu": result.get("selected_gpu", 0),
                     "gpu_memory": result.get("gpu_memory", []),
                 }
+            # runner 自描述的硬件事实（每 SM 共享内存 / 块 opt-in / L2 / 每 SM 线程数 …）
+            # **必须原样透传**：`agents.smem_budget()` 读的就是这个键，而这里是它唯一的
+            # 生产者。2026-11-01 在 RTX 3080（cc 8.6）上实测踩到：runner 明明回了
+            # `hardware_report.shared_memory_per_sm_kb=100`，但上面两个分支都是「按字面量
+            # 重建一个新字典」，把它丢了 ⇒ `smem_budget()` 落到 cc 常量表（没有 8.6 行）
+            # ⇒ legacy 字段是 "unknown" ⇒ `HardwareProbeFailed`，于是一个**环境事实**
+            # 被记成候选侧失败。半成品升级比不升级更难查：两侧各自都有用例，唯独中间
+            # 这一跳没人看。
+            report = result.get("hardware_report")
+            if report:
+                self._gpu_info_cache["hardware_report"] = report
             # 打印 GPU 选择日志
             gpu_log = result.get("gpu_selection_log", "")
             if gpu_log:

@@ -269,7 +269,9 @@ class TestTheDshReleaseShape(unittest.TestCase):
         self.assertIs(pkg.get("private"), False,
                       "private 不为 false 时 npm publish 直接拒绝")
         self.assertEqual(pkg["license"], "Apache-2.0")
-        self.assertRegex(pkg["version"], r"^\d+\.\d+\.\d+$")
+        # Local candidates use npm's rc prerelease form; final releases keep
+        # the existing three-number version shape.
+        self.assertRegex(pkg["version"], r"^\d+\.\d+\.\d+(?:-rc\.\d+)?$")
         self.assertNotEqual(pkg["version"], "0.1.9",
                             "0.1.9 已被两份本地构建占用，发布版必须换号")
 

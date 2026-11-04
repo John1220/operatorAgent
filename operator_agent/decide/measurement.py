@@ -1031,6 +1031,7 @@ class MeasurementAssessment:
     #: 所以与 `capability_shortfall` 同族: 拒 `passed` (见 `l3_pass_is_refused`)。
     correctness_unverified: bool = False
     ruler_identity_error: str = ""
+    test_only: bool = False
 
     @property
     def can_gate(self) -> bool:
@@ -1060,7 +1061,7 @@ class MeasurementAssessment:
         doc 49 §五 第 4 片的验收条件就是这一条: `mode == "simulated"` 的 L3 结果
         不许 `passed=True` (当任务声明了 `REAL_DEVICE`)。
         """
-        if self.capability_shortfall:
+        if self.test_only or self.capability_shortfall:
             return True
         # 正确性没凭据 (设计 §14-10 / §20.4) 与出处缺失同族: 一份"我们还没确认它算得对"
         # 的核, 它的速率读数不是测得不准, 而是**没有指称对象** ⇒「通过」不许为 True。
@@ -1082,6 +1083,8 @@ class MeasurementAssessment:
         (`tests/unit/test_measurement_validity.py`), 免得将来加了第四个成因只改一处。
         """
         causes = []
+        if self.test_only:
+            causes.append("test_only 后端只提供测试证据，未执行真实 GPU 性能验收")
         if self.ruler_identity_error:
             causes.append("计时量具身份/锚点不成立: " + self.ruler_identity_error)
         if self.correctness_unverified:
@@ -1291,6 +1294,9 @@ def assess(median_time_ms: Optional[float] = None,
             reasons.append("任务声明了 required_caps 但调用方没提供后端能力, 未做出处检查")
     else:
         real_device = Cap.REAL_DEVICE in frozenset(backend_caps)
+        if Cap.TEST_ONLY in frozenset(backend_caps):
+            validity = Validity.UNINFORMATIVE
+            reasons.append("test_only 后端：脚本化测试读数不能用于 GPU 验收、性能选优或生产入库")
         shortfall, conflicts = provenance_conflicts(
             backend_caps, required_caps, reported_mode, reported_device)
         if shortfall:
@@ -1343,6 +1349,7 @@ def assess(median_time_ms: Optional[float] = None,
         backend_real_device=real_device,
         environment_drift=drift,
         correctness_unverified=(correctness_verified is False),
+        test_only=Cap.TEST_ONLY in frozenset(backend_caps or ()),
     )
 
 # ── 可归因证据门 (#103 第 1 片, 外部依据 HarnessLens `2608.27311v1` 行 99/715/878-880) ──

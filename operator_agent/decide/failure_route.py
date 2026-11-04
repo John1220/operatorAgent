@@ -91,9 +91,22 @@ def _error_shape_of(results) -> Optional[str]:
 
 
 _INFRA_MARKERS = (
-    "ssh", "timeout", "connection", "network", "oom", "out of memory",
+    # 裸词 "ssh" 曾经在这里，代价是**每一个远端编译错误都被判成基础设施**：
+    # SSH 后端编译失败的消息形如 "Remote compile error via SSH: Compile error: ..."，
+    # 里面必然含 "ssh"。2026-11-04 relu-large-B 就因此把一次 `launch_pdl` 编译失败
+    # 记成 infra_retry，白烧 1148 s / 20 次调用。改成具体形态，不再按后缀命中。
+    "ssh connect", "ssh: connect", "ssh 连接失败", "ssh 握手",
+    "timeout", "connection", "network", "oom", "out of memory",
     "transport", "deploy", "no usable remote baseline", "hardware probe",
     "backendunavailable", "connectionreset", "broken pipe",
+)
+
+#: 编译错误的形态。它们**优先于**基础设施判定 —— 远端编译错误的消息里天然带 SSH。
+#: 判错了方向不是措辞问题：infra 会让这一轮「不计进度、退避重试」，编译错误该走修。
+_COMPILE_MARKERS = (
+    "compile error", "compilation failed", "compilation error", "syntaxerror",
+    "typeerror:", "nameerror:", "attributeerror:", "indentationerror:",
+    "modulenotfounderror", "importerror:",
 )
 
 _SILENT_MARKERS = (
@@ -158,6 +171,11 @@ def classify(verify_results: Iterable,
     if any(m in texts for m in _SILENT_MARKERS) or "reference_uninformative" in low:
         return Route(ROUTE_HOLD, "silent", False, False, False,
                      "参考侧没有可比对象: 不动候选、不沉淀教训")
+
+    # 4a) 编译错误先于基础设施：远端编译失败的消息里一定有 "ssh"
+    if any(m in low for m in _COMPILE_MARKERS):
+        return Route(ROUTE_FIX, "compile", True, True, False,
+                     "编译失败：就地修，不算基础设施")
 
     # 4) 基础设施
     if any(m in low for m in _INFRA_MARKERS):

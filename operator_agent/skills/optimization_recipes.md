@@ -1051,10 +1051,17 @@ def _mm_persistent(a_ptr, b_ptr, c_ptr, M, N, K,
 
   | 位置 | 写法 | 漏掉的后果 |
   |---|---|---|
-  | kernel 装饰器 | `@triton.jit(launch_pdl=True)` | 依赖启动根本不生效 |
-  | 启动点 | `kernel[grid](..., launch_pdl=True)` | 同上（两处都要写） |
+  | kernel 装饰器 | `@triton.jit`（**不要加任何参数**） | —— |
+  | 启动点 | `kernel[grid](..., launch_pdl=True)` | 依赖启动根本不生效 |
   | 读上游数据之前 | `tl.extra.cuda.gdc_wait()` | **静默读到未写完的数据 → 结果错** |
   | 本核数据写完之后 | `tl.extra.cuda.gdc_launch_dependents()` | 后继核无法提前启动，白开 PDL |
+
+  ⚠️ **`launch_pdl` 只能写在启动点，装饰器上写了必然 L1 编译失败。** Triton 3.7.1
+  的 `triton.jit()` 签名是 `(fn, version, repr, launch_metadata, do_not_specialize,
+  do_not_specialize_on_alignment, debug, noinline)` —— **没有 `launch_pdl`**，写了就是
+  `TypeError: jit() got an unexpected keyword argument 'launch_pdl'`。启动点的
+  `launch_pdl=True` 走 `run(**kwargs)` 透传，是有效的（2026-11-04 在 H20 + triton
+  3.7.1 上实测：装饰器写法编不过、启动点写法编过并跑通）。
 
   ⚠️ `gdc_wait()` 的位置是**正确性问题**不是性能问题：PDL 让后继核提前跑起来了，
   如果不在读输入前 wait，就会读到前一个核还没写完的 buffer。这类 bug 在小 shape
@@ -1074,7 +1081,7 @@ def _mm_persistent(a_ptr, b_ptr, c_ptr, M, N, K,
 # ⚠️ 设备函数**不要叫 `kernel`**: 调用方固定 `kernel(**输入)` 全关键字调用, 所以
 # `kernel` 必须是收张量的 wrapper。本例以前写成 `def kernel(x_ptr, y_ptr, n, BLOCK)`,
 # 照着抄就会被 L1 的接口契约检查直接判掉 (也都会在 L2 抛 TypeError) —— 见 docs/research/41。
-@triton.jit(launch_pdl=True)                       # ← 装饰器上要写
+@triton.jit                                        # ← 装饰器上不许带参数
 def _pdl_copy(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
@@ -1087,7 +1094,7 @@ def kernel(X):                                     # ← wrapper: 参数名 == �
     Y = torch.empty_like(X)
     n = X.numel()
     grid = (triton.cdiv(n, 1024),)
-    # 启动点同样要写, 只写一处不生效:
+    # PDL 只在这里开: 启动点带 launch_pdl=True (装饰器上写会 TypeError):
     _pdl_copy[grid](X, Y, n, BLOCK=1024, launch_pdl=True)
     return Y
 ```

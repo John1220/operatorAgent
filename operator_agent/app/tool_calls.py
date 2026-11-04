@@ -16,6 +16,7 @@ import uuid
 
 from ..app.autonomous import _atomic_json
 from ..execute import exec_guard
+from ..execute.fake_backend.config import tool_context
 from ..execute.task_cancellation import (cancellation, launch_identity, partial_artifacts,
                                 publish_json, read_json, request_cancel, stop_event)
 
@@ -50,6 +51,8 @@ class ToolCall:
         if not isinstance(arguments, dict) or not arguments.get('run_dir'):
             raise ToolError('run_dir_required', f'{name} requires run_dir')
         self.run = Path(arguments['run_dir']).resolve()
+        self.context = tool_context(arguments.get('backend'),
+            model_mode='live' if name == 'operator_repair' else 'not_used')
         from ..execute.backend_ownership import owned_persistent_ssh
         self.graceful_remote = owned_persistent_ssh(
             arguments, persistent_default=name == 'operator_bench')
@@ -71,7 +74,8 @@ class ToolCall:
             self.deadline = self.started_monotonic + self.repair_policy.wall_clock_s
         self.directory = self.run/'tool-calls'/self.invocation_id
         self.directory.mkdir(parents=True)
-        launch_identity(self.directory, self.invocation_id, kind='tool_call', tool=name)
+        launch_identity(self.directory, self.invocation_id, kind='tool_call', tool=name,
+                        **self.context)
         args = dict(arguments, run_dir=str(self.run))
         # File references must survive the worker's fixed repository cwd.
         if args.get('code_file'):
@@ -89,7 +93,7 @@ class ToolCall:
         self.status = dict(phase='running', stage='starting', kind='tool_call', tool=name,
             pid=os.getpid(), invocation_id=self.invocation_id, started_at=time.time(),
             pid_identity=exec_guard.process_identity(os.getpid()),
-            run_dir=str(self.run), tool_call_dir=str(self.directory))
+            run_dir=str(self.run), tool_call_dir=str(self.directory), **self.context)
         if self.repair_policy:
             self.status['task_budget'] = self.repair_policy.as_dict()
         self.response = None
@@ -184,7 +188,8 @@ class ToolCall:
 
     def _finish(self):
         body = json.loads(self.response['content'][0]['text'])
-        body.update(invocation_id=self.invocation_id, tool_call_dir=str(self.directory))
+        body.update(invocation_id=self.invocation_id, tool_call_dir=str(self.directory),
+                    **self.context)
         if self.repair_policy:
             if 'budget' not in self.status:
                 self.status['budget'] = self._repair_snapshot()
@@ -267,6 +272,13 @@ def main(argv=None):
                                   persistent_default=request.get('name') == 'operator_bench')
     with (owned_worker_scope(directory, launch['invocation_id']) if graceful else nullcontext()):
         response = handle_message(dict(jsonrpc='2.0', id=1, method='tools/call', params=request))
+        arguments = request.get('arguments') or {}
+        context = tool_context(arguments.get('backend'), model_mode=(
+            'live' if request.get('name') == 'operator_repair' else 'not_used'))
+        if context:
+            content = response['result']['content'][0]
+            content['text'] = json.dumps(dict(json.loads(content['text']), **context),
+                                         ensure_ascii=False, sort_keys=True)
         publish_json(directory/'worker-result.json', dict(invocation_id=launch['invocation_id'],
             finished_monotonic=monotonic(), response=response['result']))
         return 0

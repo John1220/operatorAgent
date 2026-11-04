@@ -39,7 +39,10 @@ CC_DERIVED = {"8.0": "a100", "9.0": "h100", "7.5": "3090", "7.0": "v100"}
 CC_LOCAL = {"8.6", "8.9"}
 #: 只有 hardware_caps 知道的型号：都不是 NVIDIA 卡（或本就是假件），roofline 表按规格页
 #: 组织，本来就不收录。加卡时这里必须一起动 —— 逼一次有意的决定。
-CAPS_ONLY = {"ascend910b", "mi250", "mock"}
+#: 2026-11-01 加 "3080"：本仓第一条**只补了实测几何、刻意不补峰值行**的 NVIDIA 条目。
+#: 理由记在 `hardware_caps` 那条注释里 —— 它的四个 fp*_tflops 与带宽留 0.0（未知），
+#: 因为规格页口径的 cc 8.6 兜底行对本卡偏大 2.2–9.4 倍，实测分母走 `peak_probe`。
+CAPS_ONLY = {"3080", "ascend910b", "mi250", "mock"}
 #: 只有 verifier 知道的型号：hardware_caps 里没有条目。补上它们要连 launch_floor_us /
 #: shared_mem_per_sm_kb / 能力位一起补齐，缺实测就是臆造（docs/research/49 §八 第 5 条）。
 PEAK_ONLY = {"4090", "a5000", "a6000", "h200", "t4"}

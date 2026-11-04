@@ -257,6 +257,35 @@ _KNOWN_HARDWARE: dict[str, HardwareCaps] = {
         has_l2_cache_hint=False, has_software_pipelining=False,
         supported_dsls={"triton", "cuda_c", "python"},
     ),
+    # RTX 3080 (GA102, 20 GB 版). 2026-11-01 在一台 gpushare 容器上实测:
+    # 68 SM / L2 5 MB / smem 100 KB/SM(opt-in 101376 B) / 1536 线程/SM。
+    # ⚠️ **这一条只填实测到的字段**。四个 fp*_tflops 与 global_mem_bandwidth_gbs
+    #    刻意留 0.0（= 未知）：它们会被当 roofline 分母用，而从规格页抄来的 cc 8.6 兜底行
+    #    对本卡偏大 2.2–9.4 倍（实测 fp16 65.44 / bf16 65.90 / tf32 33.36 / fp32 22.14
+    #    TFLOPS，带宽 706.4 GB/s）。把「一张卡的规格」写进这里只会再造一个假分母；
+    #    真正的实测分母走 `peak_probe` → `measured_peaks_for` 那条路。
+    #    地板记 **3.07 µs = L2 冲刷口径**（与 runner `_timed_runs` 同口径，空核 900 样本的
+    #    min）。不冲刷口径是 **76.8 µs**（200 样本 median；H20 那行记的是这个口径的 20.24）。
+    #    **为什么记冲刷口径而不是「与 H20 那行一致」**：2026-11-01 由 relu 那格反推出来的，
+    #    不是选的 —— relu 16384×6144 跑到 700.9 GB/s = 本卡实测带宽上界(706.4)的 99.2%，
+    #    若 574.4 µs 里真有 76.8 µs 是 launch 开销，搬运期就得跑 809 GB/s > 上界，
+    #    物理上不可能；开销的上界只有 4.5 µs。用 76.8 会把 574 µs 的核判成 13% 支配 ⇒
+    #    degraded，那是**这个字段的口径**造成的假降级，不是测量真的不好。
+    #    附带：H20 那行的 20.24 有同样的问题（注释里自己写着冲刷口径只有 4.64 µs）。
+    "3080": HardwareCaps(
+        vendor="nvidia", device_name="RTX 3080",
+        compute_capability="8.6",
+        has_tensor_core=True, tensor_core_version=3,
+        l2_cache_size_kb=5120,
+        launch_floor_us=3.07,
+        shared_mem_per_sm_kb=100, shared_mem_bank_count=32,
+        sm_count=68, max_threads_per_sm=1536,
+        registers_per_thread=255,
+        has_l2_cache_hint=True, has_software_pipelining=True,
+        has_double_buffering=True, has_block_reduce=True,
+        has_warp_shuffle=True, has_atomic_fadd=True,
+        supported_dsls={"triton", "cuda_c", "python"},
+    ),
     # RTX 3090 / Ampere consumer
     "3090": HardwareCaps(
         vendor="nvidia", device_name="RTX 3090",

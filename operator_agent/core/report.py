@@ -608,6 +608,11 @@ def build_report(*, artifact: Any, task: Any = None,
              f"- kernel_id: `{getattr(artifact, 'kernel_id', '')}`",
              f"- 轮数: {len(_rounds(artifact))}",
              ""]
+    context = (getattr(artifact, 'metadata', None) or {}).get('execution_context') or {}
+    if context.get('test_only') or any((getattr(v, 'metrics', None) or {}).get('test_only')
+                                      for v in (getattr(artifact, 'verification_results', None) or [])):
+        lines += ["> **FAKE / test_only：本报告用于离线组件测试。** Python 候选在 CPU 执行；"
+                  "固定性能值不具备 GPU 正确性或性能验收资格，不得作为生产语料。", ""]
     lines += _candidate_origin_lines(artifact)
     lines += _claim_level_lines(m)
     lines += _best_known_good(artifact, m)

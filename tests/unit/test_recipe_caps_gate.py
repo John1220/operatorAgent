@@ -411,3 +411,20 @@ class TestRecipeFileStructureIntact(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPdlRecipeDoesNotFailItsOwnCompile(unittest.TestCase):
+    """配方不许教模型写一个编译不过的装饰器。
+
+    2026-11-04 真机：配方原写 `@triton.jit(launch_pdl=True)`，而 triton 3.7.1 的
+    `jit()` 没有这个参数 ⇒ 照抄的候选 L1 必挂，且当时还被判成 infra_retry。
+    """
+
+    def test_decorator_form_of_launch_pdl_never_appears(self):
+        from pathlib import Path
+        text = Path(__file__).resolve().parents[2].joinpath(
+            'operator_agent/skills/optimization_recipes.md').read_text(encoding='utf-8')
+        self.assertNotIn('@triton.jit(launch_pdl', text.replace(' ', ''),
+                         '配方又在教装饰器带 launch_pdl：triton.jit() 不接受它，候选必编译失败')
+        self.assertIn('launch_pdl=True', text,
+                      '启动点的写法不见了：PDL 只在那里生效')

@@ -183,6 +183,68 @@ class TestRunnerReportsTheSameKey(unittest.TestCase):
             self.assertIn(attr, self.strings, "%s 不是 torch 的属性名了？" % attr)
 
 
+class TestTheMiddleHopCarriesItToo(unittest.TestCase):
+    """写者（runner）与读者（Designer）之间那一跳：`SSHExecutor.get_gpu_info()`。
+
+    2026-11-01 在 RTX 3080（cc 8.6）上实测踩到的正是这里：runner 回了
+    `hardware_report.shared_memory_per_sm_kb=100`，上面那组「写者侧」用例是绿的、
+    「读者侧」用例也是绿的，**但中间这一层按字面量重建了一个新字典，把键丢了** ⇒
+    `smem_budget()` 落到 cc 常量表（没有 8.6 行）⇒ legacy 字段 "unknown" ⇒
+    `HardwareProbeFailed`，于是一个环境事实被记成候选侧失败。
+    两侧各自有守卫不等于接上了；守卫必须覆盖**缝合处**。
+    """
+
+    GPU_INFO = {"name": "NVIDIA GeForce RTX 3080", "compute_capability": "8.6",
+                "total_memory_gb": 21.04, "multiprocessor_count": 68,
+                "device": "cuda", "device_count": 1, "selected_gpu": 0,
+                "torch_version": "2.9.1+cu128", "triton_version": "3.5.1",
+                "hardware_report": {"shared_memory_per_sm_kb": 100,
+                                    "shared_memory_per_block_optin_bytes": 101376,
+                                    "l2_cache_size_bytes": 5242880,
+                                    "max_threads_per_sm": 1536,
+                                    "probed_by": "torch.cuda.get_device_properties"}}
+
+    def _executor(self, payload):
+        from operator_agent.execute.remote_executor import SSHExecutor
+        ex = SSHExecutor(host="unit-test-host", platform="nvidia")
+        ex._deployed = True                  # 不连网、不部署
+        ex._ssh_exec_json = lambda p: dict(payload)
+        return ex
+
+    def test_the_report_survives_the_rebuild(self):
+        info = self._executor(self.GPU_INFO).get_gpu_info()
+        self.assertEqual(self.GPU_INFO["hardware_report"], info.get("hardware_report"),
+                         "get_gpu_info() 又把 hardware_report 丢了：Designer 会退回拒绝")
+
+    def test_and_that_makes_an_unknown_cc_usable(self):
+        """cc 8.6 不在仓内常量表里 —— 只有透传成功，这张卡才排得出 tile 预算。"""
+        info = self._executor(self.GPU_INFO).get_hardware_info()
+        self.assertEqual((100, 1536, 32), smem_budget(info))
+
+    def test_a_known_card_falls_back_to_the_table_when_the_runner_stays_silent(self):
+        """没有 `hardware_report` 的老 payload：**已知卡**退到常量表那一级，不抛。
+
+        2026-11-01 之前这条断言的是「抛」—— 当时 RTX 3080 不在 `_KNOWN_HARDWARE` 里，
+        cc 8.6 又不在 `_CC_SMEM_FALLBACK`（只有 9.0/8.0），三级兜底全落空。给 3080 补了
+        条目之后 `detect_hardware_caps()` 报得出 `100KB/SM`，`memory.local.size` 从
+        "unknown" 变成 "100KB/SM"，正好落在 **实测 > cc 表 > legacy 申报 > 抛** 的第三级。
+        这是那张表存在的意义，不是「把没测过的当测过了」——值来自本卡实测，只是换了条路到达。
+        """
+        payload = {k: v for k, v in self.GPU_INFO.items() if k != "hardware_report"}
+        info = self._executor(payload).get_gpu_info()
+        self.assertNotIn("hardware_report", info)
+        self.assertEqual(100, smem_budget(info)[0])
+
+    def test_an_unknown_card_still_refuses(self):
+        """反向对照必须留着：表里没有的卡，三级兜底全落空就该抛。"""
+        payload = dict(self.GPU_INFO, name="NVIDIA Some Future Card",
+                       compute_capability="10.0")
+        payload.pop("hardware_report", None)
+        info = self._executor(payload).get_gpu_info()
+        with self.assertRaises(HardwareProbeFailed):
+            smem_budget(info)
+
+
 class TestCallSiteIsWired(unittest.TestCase):
     """抽了函数却没人调 = 缺陷原样还在，而上面所有用例照样全绿。"""
 

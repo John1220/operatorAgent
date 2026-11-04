@@ -102,6 +102,44 @@ def test_performance_c_build_needs_no_public_verifier_config(tmp_path,runtime,mo
     assert mcp['config']['toolCallTimeoutMs']==690000
     assert 'OPERATOR_AGENT_S5_DEV_CONFIG' not in built['env']
     assert not any('PYTHONPATH' in item['config'].get('env',{}) for item in patches)
+    assert all(item['config']['command']==str(Path(sys.executable).resolve()) for item in patches)
+
+
+def test_python_read_literals_include_multihop_link_and_framework_files(tmp_path,monkeypatch):
+    base=tmp_path/'base';(base/'bin').mkdir(parents=True)
+    binary=base/'bin/python';binary.write_text('binary')
+    (base/'Python').write_text('framework')
+    framework=base/'Resources/Python.app/Contents/MacOS/Python';framework.parent.mkdir(parents=True)
+    framework.write_text('launcher')
+    intermediate=tmp_path/'opt';intermediate.mkdir()
+    (intermediate/'python').symlink_to(binary)
+    alias=tmp_path/'alias';alias.symlink_to(intermediate,target_is_directory=True)
+    venv=tmp_path/'venv';venv.mkdir();entry=venv/'python';entry.symlink_to(alias/'python')
+    monkeypatch.setattr(env.sys,'executable',str(entry))
+    monkeypatch.setattr(env.sys,'base_prefix',str(base))
+    files=set(env._python_files())
+    assert {entry,alias,alias/'python',intermediate/'python',binary,base/'Python',framework}<=files
+    assert not any(path.is_dir() and not path.is_symlink() for path in files)
+
+
+@pytest.mark.skipif(not READY,reason='macOS Seatbelt required')
+def test_venv_stdlib_works_but_ambient_site_packages_remain_hidden(tmp_path,runtime):
+    built=build('C',tmp_path/'participant',runtime)
+    code=('import json,pathlib,sys,importlib.util\n'
+          'p=pathlib.Path(sys.base_prefix)/"lib"/f"python{sys.version_info.major}.{sys.version_info.minor}"/"site-packages"\n'
+          'try:\n p.stat(); denied=False\n'
+          'except (PermissionError,FileNotFoundError):\n denied=True\n'
+          'print(json.dumps(dict(version=list(sys.version_info[:2]),numpy=importlib.util.find_spec("numpy") is not None,base_site_denied=denied)))')
+    result=subprocess.run(env.wrap(built,[sys.executable,'-c',code]),env=built['env'],cwd=built['work'],
+        capture_output=True,text=True,timeout=10)
+    assert result.returncode==0,result.stderr
+    observed=json.loads(result.stdout)
+    assert observed['version']==list(sys.version_info[:2])
+    assert observed['numpy'] is False
+    assert observed['base_site_denied'] is True
+    profile=Path(built['isolation']['profile']).read_text()
+    assert str((Path(sys.base_prefix)/'lib').resolve()) in profile
+    assert '/site-packages(/|$)' in profile
 
 
 def test_plugin_timeout_must_be_explicit_without_public_verifier(tmp_path,runtime,monkeypatch):
@@ -116,7 +154,15 @@ def test_plugin_timeout_must_be_explicit_without_public_verifier(tmp_path,runtim
 def actual_proof(tmp_path_factory):
     if not READY:pytest.skip('macOS Seatbelt required')
     root=tmp_path_factory.mktemp('s5-plugin-proof')/'acceptance'
-    report=probe.run(root)
+    # The historical S5 dependency tree is a CPython 3.9 artifact. Freeze this
+    # test interpreter's NumPy instead of injecting that ABI into Python 3.12.
+    import numpy
+    from benchmarks.experiments.s5 import s5_runtime
+    deps=tmp_path_factory.mktemp('s5-current-deps')/'site'
+    s5_runtime.materialize(Path(numpy.__file__).parent.parent,deps)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv('S5_RUNTIME_DEPS',str(deps))
+        report=probe.run(root)
     assert report['passed'],report
     return root,report
 

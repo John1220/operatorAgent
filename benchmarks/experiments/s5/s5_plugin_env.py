@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -10,6 +11,26 @@ from benchmarks.experiments.s5 import s5_arm_env as legacy, s5_seatbelt as seatb
 
 ROOT=Path(__file__).resolve().parents[3]
 ARMS=('A','C')
+
+
+def _python_files():
+    # A venv can traverse .venv/bin -> Homebrew opt -> Cellar/bin -> framework.
+    # Seatbelt needs literal reads for the intermediate symlinks as well as the
+    # final binary. Keep those individual files, never the surrounding tree.
+    files=set()
+    path=Path(sys.executable).absolute()
+    for _ in range(16):
+        files.add(path)
+        files.update(parent for parent in path.parents if parent.is_symlink())
+        physical=path.parent.resolve()/path.name
+        files.add(physical)
+        if not physical.is_symlink():break
+        target=Path(os.readlink(physical))
+        path=Path(os.path.abspath(target if target.is_absolute() else physical.parent/target))
+    else:raise ValueError('Python executable symlink chain exceeds bound')
+    base=Path(sys.base_prefix).resolve()
+    files.update(p for p in (base/'Python',base/'Resources/Python.app/Contents/MacOS/Python') if p.is_file())
+    return sorted(files)
 
 
 def stage_runtime(dest):
@@ -75,11 +96,11 @@ def build(arm,*,runtime,relay=None,plugin_tool_timeout_ms=None,**kwargs):
         plugin=str(Path(runtime['root'])/'plugin/index.mjs')
         built['patch'].append(dict(insert=[
             dict(id='mcp-operator',name=str(legacy.MCP_CLIENT),config=dict(
-                serverName='operator',transport='stdio',command=sys.executable,
+                serverName='operator',transport='stdio',command=str(Path(sys.executable).resolve()),
                 args=[proxy,'--config',str(config),'--stdio'],
                 toolCallTimeoutMs=plugin_tool_timeout_ms,
                 failOnStartupError=True,env=dict(PYTHONNOUSERSITE='1'))),
-            dict(id='operator-tools',name=plugin,config=dict(command=sys.executable,
+            dict(id='operator-tools',name=plugin,config=dict(command=str(Path(sys.executable).resolve()),
                 args=[proxy,'--config',str(config)],env=dict(PYTHONNOUSERSITE='1')))]))
         built['mcp_client_config']=str(config)
     built['patch_sha256']=hashlib.sha256(json.dumps(built['patch'],sort_keys=True,
@@ -95,7 +116,7 @@ def configure(built,runtime):
     root=Path(built['home']).parent
     if root.resolve().is_relative_to(ROOT):raise ValueError('participant must be outside source repository')
     reads=[Path(legacy.DSH_ROOT).parents[1],root/'bin']
-    files=[Path(sys.executable),Path(legacy.NODE),root/'patch.json']
+    files=[*_python_files(),Path(legacy.NODE),root/'patch.json']
     development_config=built['env'].get('OPERATOR_AGENT_S5_DEV_CONFIG')
     if development_config:
         files.append(Path(development_config))
@@ -108,7 +129,7 @@ def configure(built,runtime):
     built['env'].update(TMPDIR=str(root/'tmp'),PYTHONDONTWRITEBYTECODE='1',
         DSH_PERMISSION_MODE='danger-full-access',OPERATOR_AGENT_S5_OUTER_REQUIRED='1')
     built['env'].pop('PYTHONPATH',None)
-    text=seatbelt.profile(reads,files,writes,python_prefix=sys.prefix)
+    text=seatbelt.profile(reads,files,writes,python_prefix=sys.base_prefix)
     path=root/'isolation.sb'
     with path.open('x')as f:f.write(text)
     # Reuse the proven wrapping implementation, while marking the different
@@ -128,6 +149,6 @@ def wrap(built,command):
     verify_runtime(policy['runtime'])
     p=Path(policy['profile'])
     if (p.is_symlink()or not p.is_file()or seatbelt.checksum(p)!=policy['profile_sha256']
-        or p.read_text()!=seatbelt.profile(policy['read_roots'],policy['read_files'],policy['write_roots'],python_prefix=sys.prefix)):
+        or p.read_text()!=seatbelt.profile(policy['read_roots'],policy['read_files'],policy['write_roots'],python_prefix=sys.base_prefix)):
         raise ValueError('plugin isolation policy drift')
     return [seatbelt.SANDBOX,'-f',str(p),*command]

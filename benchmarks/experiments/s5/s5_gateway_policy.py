@@ -23,7 +23,7 @@ from benchmarks.experiments.s5.s5_gateway_transport import MAX_RESPONSE_BYTES
 
 _ALLOWED = frozenset({'model','messages','max_tokens','max_completion_tokens',
     'stream','stream_options','temperature','tools','tool_choice','n',
-    'chat_template_kwargs','enable_thinking','store'})
+    'chat_template_kwargs','enable_thinking','reasoning_effort','store'})
 _RESPONSES_ALLOWED = frozenset({'model','input','max_output_tokens','stream','store',
     'tools','tool_choice','temperature','instructions','prompt_cache_key','reasoning','include'})
 PROTOCOLS = ('chat_completions','responses')
