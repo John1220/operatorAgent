@@ -181,7 +181,7 @@ $ DSH_HOME=~/.dsh dsh plugin --profile desktop add dsh-operator-agent-0.2.0-rc.1
 **发现的真缺陷**：该 profile 的 patch 层里那条 `mcp-operator` 写的是
 
 ```
-command: /Users/zh/opt/miniconda3/bin/python3
+command: ~/opt/miniconda3/bin/python3
 args: [-m, operator_agent.mcp_server]        ← 顶层没有这个模块
 ```
 
@@ -189,7 +189,7 @@ args: [-m, operator_agent.mcp_server]        ← 顶层没有这个模块
 把它变成了**静默不可用**：本应用日志里连续记着
 
 ```
-host.stderr  | /Users/zh/opt/miniconda3/bin/python3: No module named operator_agent.mcp_server
+host.stderr  | ~/opt/miniconda3/bin/python3: No module named operator_agent.mcp_server
 host.kernel.mcp-client | mcp-client(operator): connection attempt failed: SdkError: Connection closed
                        | retrying in 16000ms (attempt 6/10) … (attempt 7/10)
 ```
@@ -198,7 +198,7 @@ host.kernel.mcp-client | mcp-client(operator): connection attempt failed: SdkErr
 
 ```
 $ ps -ef | grep operator_agent.app.mcp_server
-  pid=53966 ppid=44701(桌面端)  /Users/zh/opt/miniconda3/bin/python3 -m operator_agent.app.mcp_server
+  pid=53966 ppid=44701(桌面端)  ~/opt/miniconda3/bin/python3 -m operator_agent.app.mcp_server
 ```
 
 且其后日志里**没有** operator/mcp 相关的 error 或 warn。`patch: entry "mcp-operator" not found`
@@ -248,7 +248,7 @@ $ DSH_HOME=.../dsh-home dsh --profile v07-check --dump-config | grep -E "id: (mc
 
 ```
 $ ps -ef | grep operator_agent.app.mcp_server
-  pid=59897 ppid=44701 | /Users/zh/opt/miniconda3/envs/py12/bin/python -m operator_agent.app.mcp_server
+  pid=59897 ppid=44701 | ~/opt/miniconda3/envs/py12/bin/python -m operator_agent.app.mcp_server
 $ ~/opt/miniconda3/envs/py12/bin/python -V
   Python 3.12.13
 ```
@@ -319,7 +319,7 @@ $ cd /tmp && .../v07-venv/bin/python -c "import operator_agent; print(operator_a
 | `docs/testing/v07-delivery.md` §6 | 由模板改为**实测记录**：工件哈希、干净安装、三场景、独立终评入口、DSH profile、5 项待验收 |
 | `integrations/dsh-operator/examples/v07/` | **未改动**。本轮为写 §6 才发现它已经存在（22:21 建，`package.json` 的 `files` 已含 `examples/v07/**`，`npm pack` 会自动收）。我曾另写一份放到仓根 `examples/v07/`，发现重复后**已删除**，并把一度加进 `ALLOWED_ROOT` 的 `examples` 也还原 —— 保持单一真源：示例随插件包发，而不在仓根再造一份 |
 
-工件与示例落在交付目录 `/Users/zh/op-agent-delivery/v0.7.0rc1/`（`manifest.json` + `artifacts-SHA256.txt`），解包后的插件在 `.../unpacked/package/`，三份运行证据在 `.../runs-shipped/`。
+工件与示例落在交付目录 `~/op-agent-delivery/v0.7.0rc1/`（`manifest.json` + `artifacts-SHA256.txt`），解包后的插件在 `.../unpacked/package/`，三份运行证据在 `.../runs-shipped/`。
 回归：`tests/unit tests/hygiene` **5990 passed / 1 skipped**（skip 为需要真实 CUDA 的那条）。
 
 ## 8. 无需租卡准备收口（2026-11-04，独立候选）

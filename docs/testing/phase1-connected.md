@@ -81,13 +81,15 @@ python -B -m benchmarks.experiments.phase1 cancel --execution /absolute/path/new
 
 此表是候选范围，尚未成为全部组合的真机发布承诺。旧式未声明 profile 的 affine LayerNorm 契约保留兼容，不属于本接入范围。
 
+> **2026-11-04 起冻结版见 [v0.7 支持清单](v07-support.md)**：那一份逐行标了证据等级（真机 / 仅契约 / 仅离线 / 不支持），并写明失效条件。本节的表作为候选阶段的快照保留，不再作为边界依据。
+
 ## 本地验证
 
 后续开发与验证默认使用 **Python 3.12**（仓库根目录 `.python-version`）。当前本机默认 `python` 为 3.12.16。下面的 3.9.12 读数保留为当时实际使用的环境记录，尚未由 3.12 重跑替代。
 
 新增测试用本地 HTTP 服务经过真实 `LLMClient`、共享预算、受管子进程和普通 CPU 验证执行 A/B，检查独立终评、只读回放、取消、失败及凭据不落盘。MCP 单元测试经过真实生产 handler，核对冻结参数、调用归属与 DSH 配置构造；实际宿主由下方集成用例覆盖。
 
-2026-11-03，使用 `/Users/zh/opt/miniconda3/bin/python`（Python 3.9.12）验证：核心声明/契约修正后的 `tests/unit tests/hygiene` 为 **5948 passed / 1 skipped**，275.83 秒；skip 为需要真实 CUDA 的用例。随后接入层补强的最终范围 `tests/unit/phase1 tests/hygiene tests/acceptance/phase1` 为 **349 passed**，58.46 秒，没有重跑无关的发布全量。
+2026-11-03，使用 `~/opt/miniconda3/bin/python`（Python 3.9.12）验证：核心声明/契约修正后的 `tests/unit tests/hygiene` 为 **5948 passed / 1 skipped**，275.83 秒；skip 为需要真实 CUDA 的用例。随后接入层补强的最终范围 `tests/unit/phase1 tests/hygiene tests/acceptance/phase1` 为 **349 passed**，58.46 秒，没有重跑无关的发布全量。
 
 最终范围包含一次**实际已安装 DSH 会话**：使用本地假 HTTP 模型，通过真实插件/MCP 完成握手、发现、单次委派、终态轮询和独立完整 L2；A/B 模型预算均可核，DSH 外层与内层确实共用额度。该检查证明本地接线可用，模型是 fixture、后端是 fake，仍不计真 GPU、付费模型对照或干净安装工件验收。
 

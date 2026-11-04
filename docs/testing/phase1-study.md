@@ -97,7 +97,7 @@ python -B -m benchmarks.experiments.phase1 cancel --execution /absolute/new-exec
 
 ## 5. 初版 4K 预登记与本地验证（2026-11-04）
 
-已按当前桌面配置登记阿里云模型 `deepseek-v4.1-flash-1017`；专有地址仅保留在仓外私有资料中。持久目录为 `/Users/zh/op-agent-delivery/phase1-study-20261104/`，其中 `preregister.json` 是冻结对象，`verification.json` 是本地验证汇总，归档包含 378 份源码/资源及逐文件摘要。
+已按当前桌面配置登记阿里云模型 `deepseek-v4.1-flash-1017`；专有地址仅保留在仓外私有资料中。持久目录为 `~/op-agent-delivery/phase1-study-20261104/`，其中 `preregister.json` 是冻结对象，`verification.json` 是本地验证汇总，归档包含 378 份源码/资源及逐文件摘要。
 
 预登记摘要为 `190909f60efc04f653de558c84b36f2367d6d106b07787b638200b9fafecc17a`。状态为 `preregistered_pending_instance`：模型元数据已配置，GPU、远端运行时、实际部署及 provider 行为均未伪造为已验证。
 
@@ -115,4 +115,4 @@ A、B 共用 DSH 输出上限和流空闲超时。32K 的单次请求上限为�
 
 本轮新预登记沿用 v7 的阿里云模型元数据，历史 v5、v6 的真机试跑和 v7 的实例绑定继续保存在原目录。新预登记的实例身份待重新核对和绑定。
 
-相关本地回归共 571 项通过，另有一次实际 DSH 双臂验收。回归覆盖普通接入、32K 长流、账本核对，以及探针和标定脚本。v8 的私有预登记、源码摘要和验证回执保存在 `/Users/zh/op-agent-delivery/phase1-study-20261104-v8/`。
+相关本地回归共 571 项通过，另有一次实际 DSH 双臂验收。回归覆盖普通接入、32K 长流、账本核对，以及探针和标定脚本。v8 的私有预登记、源码摘要和验证回执保存在 `~/op-agent-delivery/phase1-study-20261104-v8/`。
