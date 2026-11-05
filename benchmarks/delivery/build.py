@@ -19,7 +19,9 @@ ROOT=Path(__file__).resolve().parents[2]
 if (Path(__file__).resolve().parent.parent/'source/pyproject.toml').is_file():
     ROOT=Path(__file__).resolve().parent.parent/'source'
 FILES=('README.md','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md','MANIFEST.in',
-       'pyproject.toml','config.example.yaml','.python-version','docs/testing/v07-delivery.md')
+       'pyproject.toml','config.example.yaml','.python-version','docs/testing/v07-delivery.md',
+       'docs/testing/v07-support.md','docs/testing/v071-support.md',
+       'docs/status/v071-model-relay-acceptance-20261105.md')
 DIRECTORIES=('operator_agent','remote_scripts','integrations/dsh-operator','benchmarks/delivery')
 
 
@@ -82,7 +84,11 @@ def build(output,python,source=ROOT):
     plugin=root/'plugin';plugin.mkdir()
     with tarfile.open(tgz) as archive:archive.extractall(plugin,filter='data')
     guides=root/'guide';guides.mkdir()
-    shutil.copy2(source/'docs/testing/v07-delivery.md',guides/'v07-delivery.md')
+    for name in FILES:
+        if name.startswith('docs/'):
+            # Keep relative links in their original source/docs layout.
+            (guides/Path(name).name).write_text(
+                '[打开完整文档](../source/'+name+')\n', encoding='utf-8')
     tools=root/'tools';tools.mkdir()
     for name in ('build.py','installed_smoke.py','dsh_profile.py'):
         if (source/'benchmarks/delivery'/name).is_file():shutil.copy2(source/'benchmarks/delivery'/name,tools/name)

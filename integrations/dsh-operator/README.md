@@ -12,7 +12,7 @@
 ## 1. 前置
 
 - DSH `0.2.1-rc.2`（本包按这个版本声明 `engines.dsh`；升版前先看 `CHANGELOG.md`）
-- 默认开发与本候选安装验收使用 Python 3.12；最低兼容版本仍为 3.9，且 `operator-agent` 可被宿主进程导入
+- 默认开发与安装验收使用 Python 3.12；最低兼容版本仍为 3.9，且 `operator-agent` 可被宿主进程导入
 - 真机执法需要 `ssh` 与目标机器的 `~/.ssh/config` 别名（可选，先跑 mock 也行）
 
 ## 2. 安装
@@ -35,8 +35,8 @@ pip install operator-agent
 
 ```bash
 python3.12 -m venv /absolute/path/operator-v07-env
-/absolute/path/operator-v07-env/bin/python -m pip install /path/to/operator_agent-0.7.0-py3-none-any.whl
-dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.2.0.tgz
+/absolute/path/operator-v07-env/bin/python -m pip install /path/to/operator_agent-0.7.1-py3-none-any.whl
+dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.2.1.tgz
 ```
 
 确认安装命令可见：
@@ -48,7 +48,7 @@ command -v operator-agent-mcp
 
 如果 DSH 从 GUI 启动，GUI 未继承安装 Python 环境的 `PATH`，应在 profile 的 `cordis.patch.yml` 中将 `mcp-operator` 与 `operator-tools` 的命令改成对应绝对路径。卸载 `.tgz` 与源码目录安装相同，见 §2.4。
 
-当前为 v0.7.0 本地有限支持版；安装步骤、边界和回退见 [v0.7 交付记录](../../docs/testing/v07-delivery.md)，可运行离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md) 仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，当前 Python 3.12 应使用匹配的平台依赖。
+当前为 v0.7.1 本地有限支持版；边界见 [v0.7.1 支持清单](../../docs/testing/v071-support.md)，安装与回退见 [交付记录 §12](../../docs/testing/v07-delivery.md#12-v071-本地封版)，可运行离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md) 仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，当前 Python 3.12 应使用匹配的平台依赖。
 
 ### 2.3 DSH 侧
 
@@ -150,9 +150,9 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
 >
 > `/op`（宿主插件自己起的那条子进程）用的是**同一套规则**：先洗、再合并配置里的 `env`。
 
-### 3.1 v0.7.1 开发预览 · 通过 DSH 发出内层模型请求
+### 3.1 v0.7.1 · 通过 DSH 发出内层模型请求
 
-此预览使用 Python `0.7.1.dev1` 和 DSH 插件 `0.2.1-rc.2`。兼容的 DSH 可以为 `operator_run` 和 `operator_repair` 发出内层模型请求。Python 继续组装角色消息、推进生成或修复循环，并在任务账本中记录请求和用量。DSH 使用指定的宿主模型路由及该路由已有的凭据。这个入口默认关闭，独立 CLI 和现有 MCP 配置可继续使用各自的模型客户端。
+本版使用 Python `0.7.1` 和 DSH 插件 `0.2.1`。兼容的 DSH 可以为 `operator_run` 和 `operator_repair` 发出内层模型请求。Python 继续组装角色消息、推进生成或修复循环，并在任务账本中记录请求和用量。DSH 使用指定的宿主模型路由及该路由已有的凭据。这个入口默认关闭，独立 CLI 和现有 MCP 配置可继续使用各自的模型客户端。
 
 在本机可信的隔离 profile 中，先生成单独的转发凭据。使用一个自己拥有、权限为 `0700` 的目录，并为每个 profile 使用单独的回环端口和凭据文件。下面的命令会创建新目录和权限为 `0600` 的文件。
 
