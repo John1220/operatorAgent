@@ -155,9 +155,20 @@ def run(plugin, python, output, *, dsh_bin=DEFAULT_DSH):
         patch = profile/'cordis.patch.yml'
         saved_patch = patch.read_bytes()
         (root/'profile-patch-before.yml').write_bytes(saved_patch)
-        override = [dict(id='mcp-operator', config=dict(command=str(console['operator-agent-mcp']))),
-                    dict(id='operator-tools', config=dict(command=str(console['operator-agent'])))]
-        save(patch, override)
+        # DSH replaces the whole config in an override, including required MCP fields.
+        mcp_config = dict(serverName='operator', transport='stdio',
+                          command=str(console['operator-agent-mcp']),
+                          toolCallTimeoutMs=3600000, failOnStartupError=True)
+        slash_config = dict(command=str(console['operator-agent']), timeoutMs=60000)
+        example = profile/'node_modules'/NAME/'examples/v07/profile-absolute-paths.patch.yml'
+        override = example.read_text(encoding='utf-8')
+        for name, path in console.items():
+            placeholder = '/absolute/path/to/v07-venv/bin/'+name
+            if not any(line.strip() == 'command: '+placeholder for line in override.splitlines()):
+                raise ValueError('shipped profile example lacks the command placeholder for '+name)
+            override = override.replace('command: '+placeholder+'\n',
+                                        'command: '+json.dumps(str(path))+'\n')
+        patch.write_text(override, encoding='utf-8')
         (root/'profile-patch-installed.yml').write_bytes(patch.read_bytes())
         call(['--profile', PROFILE, '--dump-config'], 'profile-composed')
         # Parse the real DSH composition with its installed YAML dependency.
@@ -171,9 +182,9 @@ def run(plugin, python, output, *, dsh_bin=DEFAULT_DSH):
         entries = json.loads(invoke([node, '--input-type=module', '-e', parser, app_boot,
             root/'profile-composed.stdout'], 'profile-inspected', root, env, commands))
         by_id = {entry['id']:entry for entry in entries}
-        if (by_id.get('mcp-operator',{}).get('config',{}).get('command') != str(console['operator-agent-mcp'])
-                or by_id.get('operator-tools',{}).get('config',{}).get('command') != str(console['operator-agent'])):
-            raise ValueError('DSH composition did not select installed console scripts')
+        if (by_id.get('mcp-operator', {}).get('config') != mcp_config
+                or by_id.get('operator-tools', {}).get('config') != slash_config):
+            raise ValueError('DSH composition did not preserve the installed entry configuration')
         manifest['composed_entries'] = entries
         manifest['installation_verified'] = True
     except Exception as exc:

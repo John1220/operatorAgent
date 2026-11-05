@@ -331,12 +331,16 @@ def test_suite_transport_unknown_stops_remaining_requests_and_preserves_hold(mon
     unknown = VerificationResult(Level.L2_FUNCTION, False, metrics=dict(
         transport_outcome=TRANSPORT_UNKNOWN, session_state="timeout", session_phase="send"))
     monkeypatch.setattr(verifier, "_verify_primary_function", Mock(return_value=unknown if where == "primary" else passed))
-    singles = Mock(side_effect=[passed, unknown] if where == "repeat" else [unknown])
+    singles = Mock(side_effect={
+        "primary": [],
+        "case": [unknown, unknown],  # A new request after the first unknown also fails.
+        "repeat": [passed, unknown],
+    }[where])
     monkeypatch.setattr(verifier, "_verify_single_set", singles)
     result = verifier._verify_function("import numpy as np\ndef kernel(X): return X", {"X": np.ones((2,3))}, None, task)
     assert result.metrics["correctness"]["verdict"] == "unknown"
     assert result.metrics["transport_outcome"] == TRANSPORT_UNKNOWN
-    assert singles.call_count == {"primary": 0, "case": 1, "repeat": 2}[where]
+    assert singles.call_count == {"primary": 0, "case": 2, "repeat": 2}[where]
     assert any(r["verdict"] == "not_run" for r in result.metrics["correctness"]["cases"])
     route = classify([result])
     assert route.route == ROUTE_HOLD and route.kind == "infra"

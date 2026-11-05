@@ -2,28 +2,30 @@
 
 | 项目 | 说明 |
 |---|---|
-| 文档性质 | 真机执行记录；**不是**收益结论，也不是 v0.7 发布验收 |
-| 计划 | `phase1-agent-comparison-v2`（`target_plan_id`），plan hash `77a54047…` |
+| 文档性质 | 真机接入执行记录，供复核正确性、终态与测量有效性。正式对照及安装工件验收见 §6 |
+| 计划 | 接入计划 `phase1-entry-integration-v1`，目标计划 `phase1-agent-comparison-v2`，plan hash `77a54047…` |
 | 预登记 | `da00f988…`（据此冻结采样与预算） |
 | 实例 | H20 物理 3 号卡 `GPU-634bbc76-…`，root@h20，`/root/op-agent-runtime`，runner 15 文件全等 |
 | 采样 | `max_tokens=32768`、`enable_thinking=true`、`reasoning_effort=medium`、`temperature=0.1`、`n=1` |
 | 预算 | 每格 30 次模型调用 / 2400 s 墙钟 / 20 次 oracle |
-| 工件 | 仓外 `…/operator-v07-candidate-20261103/execution-s5/`（`summary.json`、八格 `cells/`、`transport-failures.jsonl`） |
+| 运行留档 | 仓外 `…/h20-bind-20261104/execution-s5/`（`plan.json`、`summary.json`、八格 `cells/`） |
 
 ## 1. 八格终态
 
-| 格 | 终态 | 归因 | 耗时 | 调用 | L1/L2/L3 | speedup |
-|---|---|---|---|---|---|---|
-| matmul-4096-A | failed | `no_gain_2_rounds` | 474 s | 30 | — | — |
-| matmul-4096-B | done | `converged` | 358 s | 19 | ✓✓✗ | 0.944 |
-| relu-large-B | done | `passed` | 368 s | 19 | ✓✓✓ | 1.009 |
-| relu-large-A | done | `native_host_returned` | 605 s | 29 | ✓✓✓ | 未落盘 |
-| softmax-4096-A | failed | `budget_calls_exhausted` | 666 s | 30 | ✓✓✗ | — |
-| **softmax-4096-B** | done | **`passed`** | **228 s** | **10** | ✓✓✓ | **1.8815** |
-| relu-small-B | done | `fix_error` | 569 s | 28 | ✓✗ | — |
-| relu-small-A | done | `native_host_returned` | 507 s | 30 | ✓✓✗ | — |
+| 格 | 终态 | 归因 | 耗时 | 调用 | 独立终评 L1 / L2 / L3 | 独立终评倍率 | L3 测量有效性 |
+|---|---|---|---|---|---|---|---|
+| matmul-4096-A | failed | `no_gain_2_rounds` | 474 s | 30 | ✓ / ✓ / ✗ | 0.9393× | `valid` |
+| matmul-4096-B | done | `converged` | 358 s | 19 | ✓ / ✓ / ✗ | 0.9670× | `degraded` |
+| relu-large-B | done | `passed` | 368 s | 19 | ✓ / ✓ / ✓ | 1.0011× | `degraded` |
+| relu-large-A | done | `native_host_returned` | 605 s | 29 | ✓ / ✓ / ✓ | 1.0759× | `degraded` |
+| softmax-4096-A | failed | `budget_calls_exhausted` | 666 s | 30 | ✓ / ✓ / ✗ | 2.6839× | `uninformative` |
+| softmax-4096-B | done | `passed` | 228 s | 10 | ✓ / ✓ / ✓ | 1.8873× | `degraded` |
+| relu-small-B | done | `fix_error` | 569 s | 28 | ✓ / ✗ / 未执行 | — | — |
+| relu-small-A | done | `native_host_returned` | 507 s | 30 | ✓ / ✓ / ✗ | 0.9696× | `uninformative` |
 
-合计 **195 次模型调用**，八格全部有归宿（无 `not_dispatched`），总墙钟 74 分钟。
+合计 **195 次模型调用**，八格全部留有终态和独立终评，总墙钟 74 分钟。**7/8 格通过完整 L2**。
+`relu-small-B` 的连续布局主用例通过，失败发生在 `auto-cols32-rows8-fp16-random-strided` 派生用例。
+终评列取自各格 `cells/<格>/final/final-result.json` 和 `final/verify-1.json`。`passed` 是格位的停止归因，L3 勾选是验证器回执，正式达标还要求 `measurement_validity=valid`。
 
 ## 2. 可归因的三条停止理由实机验证
 
@@ -31,32 +33,26 @@
 |---|---|---|
 | `no_gain_2_rounds` | matmul-4096-A | 连续 2 次 **valid** 的「跑对但没更快」⇒ 关闭验证服务；两次 `degraded` 读数按设计**不计入** |
 | `budget_calls_exhausted` | softmax-4096-A | 读账本 `remaining_calls == 0`，不靠错误文本匹配 |
-| `fix_error` | relu-small-B | L2 始终不过，候选失败如实记录 |
+| `fix_error` | relu-small-B | 终稿的独立 L2 在 strided 派生用例失败 |
 
 三条此前都不存在或被误记（曾把编译错误判成 `infra_retry`、把预算耗尽判成 `native_host_failed`）。
 
 ## 3. 断流：本轮 0 次
 
-178 条流观测记录，**失败 0**；单条最大 **1,528,144 字节**（约 1.46 MiB，已越过旧 1 MiB 上限 50%）。
+178 条流观测记录，**失败 0**。单条最大 **1,528,144 字节**（约 1.46 MiB，比旧 1 MiB 上限大约 46%）。
 
 旧上限的失效方式已复现过：同一请求重复 6 次，5 次在 `1,048,xxx` 字节处被掐断，
 `code=response_limit`，而子进程只看到 `Stream ended without finish_reason`。
 修复后大输出档为 32 MiB / 65536 块（4K 档保持原值）。
 
-## 4. 哪些数能用，哪些不能用
+## 4. 性能观测与测量有效性
 
-**能用的只有一条**：`softmax-4096-B = 1.8815`。它比当前判决带宽（见下）宽 6.8 倍，
-量级差异在这台机器上站得住。
+- `softmax-4096-B` 的开发测量为 **1.8815×**，开发确认测量为 **1.8661×**，独立终评为 **1.8873×**，三份回执均为 `degraded`。终评记录了 launch 地板占比 28.7% 和同卡的另一 harness 进程。这些倍率只保留为观测值。
+- `relu-large-B` 的开发测量为 **1.009×**，独立终评为 **1.0011×**，均为 `degraded`。A 臂独立终评也为 `degraded`。
+- `matmul-4096-A` 的独立终评为 `valid`，**0.9393×** 低于 1.0× 门槛。B 臂终评为 `degraded`。
+- `softmax-4096-A` 和 `relu-small-A` 的终评 L3 为 `uninformative`。`relu-small-B` 在独立终评的 L2 阶段失败，未执行 L3。
 
-**不能当结论的两条**：
-
-- `relu-large-B = 1.009`：同一格在另一次运行里是 `1.0769`，两次都判 `passed`，
-  差值 7 倍于判决带宽 ⇒ 只能记「无可判差异」。
-- `matmul-4096-B = 0.944`：落在带内偏低，方向（打不过 cuBLAS）与历史一致，
-  但不能据此给出精度结论。
-
-**结构性不可判的**：`relu-small`（1024×768，launch 地板支配 55–68%）、
-`matmul-4096-A`（连续无增益）、`softmax-4096-A`（预算耗尽）。
+复核 Softmax B 时可对照同一格的 `host-terminal-status.json`、`work/output/softmax/nvidia_gpu/20261104_224405_f0ddee44/confirmation.json` 和 `final/verify-1.json`。
 
 ## 5. 读数环境：这与结论强相关
 
@@ -71,13 +67,9 @@
 
 ## 6. 结论边界
 
-- 本轮 4 组 A/B 中，**只有 softmax 这一对可判**（A 臂 L3 未过，B 臂 1.88x 达标）。
-- 按预登记的达标定义（完整 L2 + 至少一次 valid L3 + speedup ≥ 1.0），B 臂记 1 格达标、
-  A 臂 0 格。**这不足以支持「插件有收益」**：4 格中 3 格各有不可判原因，
-  且 +1 的最小可检出单位要求两臂 4 格全部可判。
-- `sampling_comparability` 仍为 `not_established`：DSH 外层 usage 对账缺失，
-  费用保持 unknown。
-- 本轮所有 L3 数字都带 `measurement_validity` 标签，`degraded` 的不进入任何性能结论。
+- 按[预登记条件](../testing/phase1-study.md#1-当前固定设计)，达标要求完整 L2、至少一次 `valid` L3 且倍率 ≥ 1.0×。本轮独立终评未确认任何格位达标，四组 A/B 均缺少可比较的终评证据。原先的「仅 Softmax 可判，B 达标 1 格 / A 达标 0 格」计数撤回。A/B 达标差值保持未知。
+- 八格预算均可审计。`sampling_comparability` 仍为 `not_established`，DSH 外层 usage 缺少对账，费用和人工分钟保持未知。
+- 原始 `summary.json` 记录 `dsh_entry_verified=true`、`formal_comparison_credit=false`、`installed_plugin_acceptance=false`，分别对应接入路径实跑、正式对照资格及最终安装工件验收状态。
 
 ## 7. 本轮之外、同日的实现变更（进入本版身份）
 
@@ -89,6 +81,7 @@
 | A 臂「连续 2 次有效无增益即停」 | `test_native.py::test_consecutive_no_gain_closes_the_native_verifier` |
 | 编译错误优先于基础设施判定（`_INFRA_MARKERS` 去掉裸词 `ssh`） | `test_failure_route.py::TestRemoteCompileErrorIsNotInfra` |
 | PDL 配方纠正：`launch_pdl` 只能写在启动点 | `test_recipe_caps_gate.py::TestPdlRecipeDoesNotFailItsOwnCompile` |
+
 ## 8. 尝试过但无效的降噪手段：CPU 亲和
 
 设想：抖动来自主机 CPU（SM 时钟恒 1980、显存稳定），把测量进程钉到固定核上应能减少迁移与抢占。

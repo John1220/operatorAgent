@@ -1,6 +1,6 @@
-# v0.7 候选版：无需租卡的安装与交付
+# v0.7 安装与交付
 
-本说明针对本地候选工件，**v0.7 尚未正式发布**。产品版本、Python wheel 和 DSH 插件包版本分别记录，以交付目录里的身份清单与 SHA256 为准。下面的离线流程使用脚本模型及 CPU FakeBackend，不需要模型账户、SSH 或 GPU。
+本说明适用于 v0.7 本地交付。产品版本、Python wheel 和 DSH 插件包版本分别记录，以交付目录里的身份清单与 SHA256 为准。下面的离线流程使用脚本模型及 CPU FakeBackend，无需模型账户、SSH 或 GPU。
 
 ## 1. 在干净 Python 3.12 环境安装
 
@@ -60,7 +60,23 @@ DSH_HOME=/absolute/path/to/new-dsh-home dsh plugin --profile v07-check add /abso
 DSH_HOME=/absolute/path/to/new-dsh-home dsh --profile v07-check --dump-config
 ```
 
-合成配置应包含 `mcp-operator` 和 `operator-tools`。前者连接 MCP，后者提供 `/op`；只有一条配置不足以完成入口检查。GUI 启动的 DSH 常不继承终端 venv 的 PATH，需用 `examples/v07/profile-absolute-paths.patch.yml` 中的形态覆盖两个命令，分别指向干净 venv 的 `operator-agent-mcp`、`operator-agent`，并重新加载该 profile。配置中不需要模型密钥或 `PYTHONPATH`。
+合成配置应包含 `mcp-operator` 和 `operator-tools`。前者连接 MCP，后者提供 `/op`。GUI 启动的 DSH 常不继承终端 venv 的 PATH，需要在隔离 profile 中用绝对路径指定两个命令，并重新加载该 profile。
+
+DSH `0.2.1-rc.2` 按条目整体替换 `config`。v0.7.0 随包的 `examples/v07/profile-absolute-paths.patch.yml` 包含以下完整覆盖。仍在使用 rc2 的用户也可复制这份配置。离线示例无需模型密钥或 `PYTHONPATH`。
+
+```yaml
+- id: mcp-operator
+  config:
+    serverName: operator
+    transport: stdio
+    command: /absolute/path/to/v07-venv/bin/operator-agent-mcp
+    toolCallTimeoutMs: 3600000
+    failOnStartupError: true
+- id: operator-tools
+  config:
+    command: /absolute/path/to/v07-venv/bin/operator-agent
+    timeoutMs: 60000
+```
 
 进入该 profile 后执行 `/op capabilities`，应显示已安装包的版本与 Python 3.12；已有运行可用 `/op status /absolute/path/to/run` 查询。DSH 侧工具名为 `mcp__operator__operator_run`、`mcp__operator__operator_status`、`mcp__operator__operator_cancel`。
 
@@ -373,3 +389,48 @@ Python 3.12 开发环境现已独立安装 NumPy、Torch 和测试依赖；不�
 
 **结论**：rc2 工件在干净 venv 里可安装、可运行、可导出、可独立复评，示例与配置形态正确；
 仍然缺的是「在符合 engines 的宿主上从插件入口跑一次完整真实任务」，以及无网络重建依赖。
+
+## 10. rc2 同版本复验与交付清单
+
+本轮复验针对本地 `release/v0.7` 标签 `v0.7.0rc2`（`54feb2d`）对应的原工件。候选身份及哈希保持固定。功能可用性、测量资格和 A/B 收益分别验收。
+回执归档在本地 rc2 交付目录的 `acceptance-20261104/` 下，表中的回执路径以该目录为根，可用其中的 `SHA256SUMS` 校验。
+
+| 工件 | SHA256 |
+|---|---|
+| Python `operator_agent-0.7.0rc2-py3-none-any.whl` | `48b3c42b7dd185f1a8c4eccde35e28817efd0113a3e059dff1d72c0e2512e403` |
+| DSH `dsh-operator-agent-0.2.0-rc.2.tgz` | `ee61dcabac2ff4e2518a519527ad11ae135d3678d84018b2ee9c1ad5749e651a` |
+
+| 验收项 | 结果 | 回执 |
+|---|---|---|
+| 干净安装 | CPython 3.12.16 新 venv，从本地 wheelhouse 无网络解析并安装 NumPy 2.5.4 与 rc2，依赖检查通过。wheel 内 145 个运行文件与 tgz 内 12 个文件已逐字节复核 | 工件 `SHA256.txt`、离线安装记录 |
+| 宿主安装与回退 | DSH `0.2.1-rc.2` / Node `24.14.1` 在隔离 profile 完成 tgz 安装、完整配置合成和卸载。个人 profile 未参与 | `profile-verified/manifest.json` |
+| 离线 Agent 冒烟 | 真实 DSH Agent 经 MCP 派发并查询到 `done`，完整 L2 通过。外层为本地 HTTP fixture，内层为脚本模型，结果为 `test_only`。同批 CLI/MCP 验了修复、取消、独立终评和导出 | `smoke/smoke-result.json` |
+| DSH 插件契约回归 | 58 项通过，0 失败、0 跳过 | `plugin-contract.log` |
+| Python 首轮全量 | CPython 3.12.16，6775 通过、30 失败、2 跳过。29 项失败集中在旧 S5 的解释器/隔离环境兼容，另 1 项为未随 rc2 重试语义更新的测试 mock | `python-full.log` |
+| Python 兼容环境全量 | Conda CPython 3.12.13，6804 通过、2 失败、1 跳过（需真实 CUDA）。旧 S5 验收和安装工件 DSH 用例通过。两项失败分别是已收集的旧重试 mock，以及独立 runner 子进程清理环境后找不到 Conda 环境外的 Torch | `python-full-compatible.log` |
+| 重试契约复验 | 校正测试 mock，覆盖单个 case 的第一次传输未知、一次补发再次未知、后续验证停在 `hold`。受影响的 RPC deadline 与正确性套件 88 项通过 | `transport-fixture-before.log`、`transport-fixture-after.log` |
+| 兼容全量的失败项复验 | 修正后的 3 个 RPC 参数格在同一 Conda 环境通过。独立 runner 用例在自身可导入 Torch 的 CPython 3.12.16 venv 通过。两份全量日志保留原始结果，本轮未取得单次全量全绿 | `transport-compatible-rerun.log`、`standalone-runner-rerun.log` |
+| 安装工件真机流程 | DSH 隔离 profile 从已安装 tgz 发现 MCP 工具，经 `prepare → run → status → prepare → verify` 完成 H20 FP16 Softmax `4096×4096`。外层由本地确定性 fixture 驱动，内层实际调用模型 6 次，任务 `done`。独立终评通过完整 12 个 L2 case，主用例最大误差 `1.91e-6`，源码与报告已导出 | `host-generation/tools.json`、`export/manifest.json`、`export/final-result.json` |
+| 真机任务取消 | 另起一条 DSH 发起的持久 SSH 验证，等本次 runner 就绪后通过已安装 CLI 按 invocation 提交取消。验收 fixture 未能解析验证工具的取消错误回包，随后用 DSH `operator_status` 单独查询同一实例，确认 `cancelled`、`worker_reaped=true`、`remote_execution=quiescent` | `cancel-result.json` |
+| 真机性能资格 | 独立终评倍率为 **1.6413×**，有效性为 `degraded`，仅作观测。192 核 H20 主机的 1 分钟负载在预检时为 191.74，收尾复核时仍为 190.06。性能资格仍待低噪声窗口复验 | `preflight.json`、`export/final-result.json`、`final-load-check.txt` |
+
+独立终评契约 SHA256 为 `8fd7e3ed178667c3e6ade373b032c98edef82454de6393edcde72bdda6b8413c`，终稿 SHA256 为 `9f288092986168f4d555d289800e9e00ff547b44be5cfc74113750b9da686c01`。预检和事后核对均确认 H20 3 号卡、驱动及运行时身份一致，15 个 runner 文件与安装 wheel 的对应文件逐一相符。
+
+旧 S5 验收依赖 macOS Seatbelt 和隔离的 NumPy 目录。本轮兼容环境使用可在 Seatbelt 内直接启动的 Conda CPython 3.12.13，以 `S5_RUNTIME_DEPS` 指向临时准备的 CPython 3.12 NumPy 2.5.4，历史 CPython 3.9 依赖留档原样保留。安装工件用例仍使用另建的 CPython 3.12.16 rc2 venv，显式提供 wheel 环境、解包 tgz，并开启 DSH 冒烟。
+
+支持边界按[冻结清单](v07-support.md)查阅，本轮安装工件真机闭环只覆盖上述 Softmax 声明。既有[八格接入记录](../status/phase1-eight-cell-20261104.md)提供该环境下的正确性、预算和测量事实，Softmax 的 `degraded` 读数不计正式达标。公开发布未执行。
+
+## 11. v0.7.0 本地封版
+
+本地交付版本为 Python `0.7.0`、DSH 插件 `0.2.0`、工具契约 `10`。正式支持范围为 [H20 FP16 Softmax `4096×4096`](v07-support.md)，本地工件归档在 `op-agent-delivery/v0.7.0/`。公开包仓库发布状态为未发布。
+
+| 工件 | SHA256 |
+|---|---|
+| `operator_agent-0.7.0-py3-none-any.whl` | `c762597a77c54f3b390dac4cb3cc96ef9964a437224738db591f4e3c84a05f94` |
+| `operator_agent-0.7.0.tar.gz` | `a3bddf837d6d855e5a3d08197afe9c5afaf006c34a4519bb77193998f8460d67` |
+| `dsh-operator-agent-0.2.0.tgz` | `6b94fe6dee348f08c0d8f3cb89803b1769edf1cd33d66ec2ebf200fc6caff2ae` |
+
+- **安装与回退**。CPython 3.12.16 干净 venv 从本地 wheelhouse 安装，依赖检查通过。DSH `0.2.1-rc.2` 在隔离 profile 使用最终 tgz 内的绝对路径示例完成配置合成并卸载。最终工件的 DSH 离线冒烟通过，DSH 插件契约 58 项通过。
+- **同版本全量回归**。在临时 CPython 3.12.13 环境启用最终 wheel/tgz 的 DSH 冒烟，旧 S5 使用同 ABI 的临时 NumPy 目录。Python 全量 6806 项通过、598 个子测试通过，1 项需真实 CUDA 跳过，零失败。日志与 JUnit XML 随工件归档。
+- **真机复验**。从最终 tgz 安装的 DSH 工具调用最终 wheel，独立复验 §10 已生成并导出的 Softmax 终稿。H20 实例身份、15 个 runner 哈希、契约和终稿哈希相符，12 个 L2 case 通过。本轮未再次调用模型。rc2 的生成和取消证据继续保留，归属见 §10。
+- **性能与收益**。主机负载降至 7.55/192 核时，独立终评读到 `1.6616×`，launch 地板仍占 26.3%，有效性为 `degraded`。性能资格和 A/B 达标差值继续记为未知。

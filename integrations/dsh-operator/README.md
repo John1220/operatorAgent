@@ -35,8 +35,8 @@ pip install operator-agent
 
 ```bash
 python3.12 -m venv /absolute/path/operator-v07-env
-/absolute/path/operator-v07-env/bin/python -m pip install /path/to/operator_agent-0.7.0rc2-py3-none-any.whl
-dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.2.0-rc.2.tgz
+/absolute/path/operator-v07-env/bin/python -m pip install /path/to/operator_agent-0.7.0-py3-none-any.whl
+dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.2.0.tgz
 ```
 
 确认安装命令可见：
@@ -48,7 +48,7 @@ command -v operator-agent-mcp
 
 如果 DSH 从 GUI 启动，GUI 未继承安装 Python 环境的 `PATH`，应在 profile 的 `cordis.patch.yml` 中将 `mcp-operator` 与 `operator-tools` 的命令改成对应绝对路径。卸载 `.tgz` 与源码目录安装相同，见 §2.4。
 
-当前为 v0.7 本地候选，尚未正式发布；本轮步骤、边界和回退见 [v0.7 交付准备](../../docs/testing/v07-delivery.md)，可运行离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md) 仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，当前 Python 3.12 应使用匹配的平台依赖。
+当前为 v0.7.0 本地有限支持版；安装步骤、边界和回退见 [v0.7 交付记录](../../docs/testing/v07-delivery.md)，可运行离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md) 仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，当前 Python 3.12 应使用匹配的平台依赖。
 
 ### 2.3 DSH 侧
 

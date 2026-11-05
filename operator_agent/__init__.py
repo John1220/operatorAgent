@@ -1,4 +1,4 @@
-"""算子开发Agent v0.7 候选版
+"""算子开发Agent v0.7
 支持 Triton DSL: 矩阵乘法/Softmax/Attention 等 GPU 算子
 模块结构（2026-10-31 分五层，全量归属见 docs/design/repo-slimming-20261031.md §5）:
   core/       词汇与产物  - schemas / contract / run_contract / candidates / kernel_db /
@@ -15,7 +15,7 @@
 外部用法保持不变: `from operator_agent import Conductor` 一类再导出仍走包根 __init__.py,
 `python -m operator_agent` 由包根 __main__.py 委托。"""
 
-__version__ = "0.7.0rc2"
+__version__ = "0.7.0"
 
 from .core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,

@@ -1,10 +1,14 @@
-# Apply after installing the candidate tgz into your own isolated DSH profile.
+# Apply after installing the tgz into your own isolated DSH profile.
 # Replace BOTH commands with absolute paths from the clean Python 3.12 venv.
-# This is an override of the bundle's two existing records, not a second insert.
+# DSH replaces each entry's entire config with this override.
 - id: mcp-operator
   config:
+    serverName: operator
+    transport: stdio
     command: /absolute/path/to/v07-venv/bin/operator-agent-mcp
+    toolCallTimeoutMs: 3600000
     failOnStartupError: true
 - id: operator-tools
   config:
     command: /absolute/path/to/v07-venv/bin/operator-agent
+    timeoutMs: 60000

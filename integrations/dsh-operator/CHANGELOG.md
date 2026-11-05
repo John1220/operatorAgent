@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0
+
+配套 Python `0.7.0`，工具契约 `10`。本地有限支持版修正随包 DSH profile 覆盖示例，保留完整的 MCP 连接配置。真机工作流验收范围为 H20 FP16 Softmax `4096×4096`，性能与两臂收益按交付记录披露。
+
 ## 0.2.0-rc.2
 
 配套 Python `0.7.0rc2`，工具契约 `10`，仍未正式发布。本版把 2026-11-04 真机跑出来的
@@ -27,7 +31,7 @@
 **已知不合格**
 
 - `sampling_comparability` 仍为 `not_established`（DSH 外层 usage 对账缺失，费用 unknown）。
-- 八格本轮只有 softmax 一对可判；`relu-large` 的 1.009 落在判决带宽内，不能当收益。
+- 八格的 Softmax B 测量均为 `degraded`，达标差值未知，详见更正后的八格记录。
 - 主机满载（load 188/192）时 valid 带宽涨到 10–14%，此时任何 speedup 比较都不可判。
 
 ## 0.2.0-rc.1
