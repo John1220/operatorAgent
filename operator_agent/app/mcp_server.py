@@ -1,4 +1,4 @@
-"""最小 MCP stdio server：把 `hitl_tools` 的八个工具暴露给宿主的 agent
+"""MCP stdio server：host 六工具与兼容的 legacy 工具面。
 
 为什么是这个形态（`docs/dsh-plugin-evaluation.md` §6.2 / §9.6）：
 
@@ -15,7 +15,7 @@ DSH 的插件必须是 Cordis 的 ESM 模块，而本仓是 Python —— 两者
     notifications/initialized  → 无响应（通知没有 id）
     notifications/cancelled    → 请求取消对应的前台 worker；通知不响应
     ping                       → {}
-    tools/list                 → 八个工具的 JSON Schema（静态表：改了要重启进程）
+    tools/list                 → 当前工作流的 JSON Schema（改了要重启进程）
     tools/call                 → 转发给 hitl_tools；拒绝时 isError=true + 可归因的文本
 
 硬约束：**stdout 只许走协议行**。任何别的 print 都会把流打断（DSH 那条 `id` 校验会报
@@ -109,6 +109,50 @@ required_caps）。`validity=degraded` 或 `uninformative` 的读数不驱动调
 INSTRUCTIONS += ("\n离线检查组件可用 backend=fake（只支持 CPU Python）：operator_run 默认使用脚本模型，"
                  "无需 API 凭据。fake={scenario, profile, llm} 选择故障与硬件规格，llm=live 才调用"
                  "真实模型。结果标记 test_only，固定性能值不可用于 GPU 验收或生产语料。\n")
+
+HOST_INSTRUCTIONS = """\
+算子开发工具。当前 workflow=host：由你（DSH 外层模型）理解用户与项目上下文，
+选择本轮领域材料、组装最终模型上下文、生成源码，并决定修复或结束。
+插件只提供冻结契约、领域知识、确定性诊断、执行与验证，不调用内部模型。
+DSH 中工具名为 mcp__operator__*。
+
+流程：operator_prepare 冻结任务及有限验证预算；operator_context(phase=generate,
+backend=实际后端) 取得权威任务事实、ABI、生成规约和指导材料；结合用户意图生成完整
+kernel 源码，调用 operator_verify(code=..., candidate_origin=outer)。代码生成前必须取得
+context，不要凭算子名推测参数名、dtype、shape 或 strides。领域指导不能覆盖冻结契约。
+真实 GPU 用 backend=ssh 和用户已授权的目标；离线用 fake 与 Python/NumPy，始终 test_only。
+
+验证失败时调用 operator_context(phase=repair, verification_round=返回的 round,
+backend=实际后端)，取得绑定该源码和验证结果的反馈，再自行修改代码并验证。
+上下文中的原始角色模板是可选材料，你负责最终拼接；它们不是已经渲染好的模型消息。
+route 与 eligibility 一起读；conflict.action=hold_for_measurement 时先恢复观测资格。
+validity=degraded/unknown 不支持性能提升或继续调参的结论。诊断是假设，不是通过凭据。
+
+完整 L2 通过后，使用同一源码再次 operator_verify(verification_purpose=final) 完成独立
+终评；探索调用不能用掉预留的最终验证。报告源码/契约哈希、源码和报告路径、L1/L2/L3、
+validity 以及剩余预算。失败、取消、未知和已发生的调用均保留，不能靠新建目录重置同一任务预算。
+operator_status 可恢复任务账本与最后已证明正确的候选；这不代表它性能最佳。
+
+验证次数与墙钟由插件跨调用约束；模型调用和 token 由 DSH 持有，当前插件未强制限制
+主会话累计模型用量，不要将提示中的调用上限说成硬门。准备新的任务或改变契约需用户明确要求。
+operator_cancel(run_dir, invocation_id) 取消在飞验证，随后查 status 确认 worker 清理。
+工具取消不自动终止整个 DSH 会话；宿主取消也不证明服务商已停止执行/计费。
+本模式不提供 operator_run/operator_repair/operator_bench；不得用旧内层循环替代外层生成。
+"""
+
+HOST_TOOLS = frozenset(('operator_prepare', 'operator_context', 'operator_verify',
+                        'operator_status', 'operator_cancel', 'operator_capabilities'))
+
+
+def _host_mode():
+    from .host_workflow import enabled
+    from ..execute.s5_verify_client import enabled as supervised
+    return enabled() and not supervised()
+
+
+def _guard_host_tool(name):
+    if _host_mode() and name not in HOST_TOOLS:
+        raise ToolError('host_workflow_only', 'This profile uses host-owned generation and verification.')
 
 _SHAPES = {"type": "array", "minItems": 1,
            "items": {"type": "array", "minItems": 1,
@@ -328,6 +372,33 @@ def _tool_definitions() -> list[dict]:
             "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
         },
     ]
+    definitions.insert(1, {
+        'name': 'operator_context',
+        'description': '取得本轮领域材料与权威任务事实，由宿主组装上下文并写代码；不调用模型、不执行候选。修复/优化需选择完成的验证轮次。',
+        'inputSchema': {'type': 'object', 'additionalProperties': False,
+            'required': ['run_dir', 'backend'],
+            'properties': {
+                'run_dir': {'type': 'string'},
+                'backend': {'type': 'string', 'enum': ['mock', 'local', 'ssh', 'fake']},
+                'phase': {'type': 'string', 'enum': ['generate', 'repair', 'optimize'], 'default': 'generate'},
+                'verification_round': {'type': 'integer', 'minimum': 1},
+            }},
+    })
+    verify_tool = next(tool for tool in definitions if tool['name'] == 'operator_verify')
+    verify_tool['inputSchema']['properties']['verification_purpose'] = {
+        'type': 'string', 'enum': ['explore', 'final'], 'default': 'explore',
+        'description': 'host task 的探索验证或预留的独立终评；final 需相同源码已完整 L2 通过。'}
+    if _host_mode():
+        selected = [tool for tool in definitions if tool['name'] in HOST_TOOLS]
+        prepared = next(tool for tool in selected if tool['name'] == 'operator_prepare')
+        prepared['inputSchema']['properties']['host_budget'] = {
+            'type': 'object', 'additionalProperties': False,
+            'properties': {
+                'wall_clock_s': {'type': 'number', 'exclusiveMinimum': 0, 'default': 600},
+                'max_verifications': {'type': 'integer', 'minimum': 2, 'maximum': 1000, 'default': 6},
+            },
+            'description': '跨工具调用的验证任务预算，固定预留一次独立终评；模型用量由宿主管理。'}
+        return selected
     from ..execute.s5_verify_client import enabled
     if enabled():
         conf, _, timeout = _supervised_configuration()
@@ -405,9 +476,11 @@ def _jsonrpc_err(msg_id: Any, code: int, message: str, data: Any = None) -> dict
     return {"jsonrpc": "2.0", "id": msg_id, "error": err}
 
 
-def _text_result(payload: dict, *, is_error: bool = False) -> dict:
+def _text_result(payload: dict, *, is_error: bool = False, compact=False) -> dict:
     """`tools/call` 的结果：正文是 JSON 文本，模型与宿主都能直接读。"""
-    body = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    body = json.dumps(payload, ensure_ascii=False, indent=None if compact else 2, sort_keys=True)
+    if compact and len(body.encode('utf-16-le'))//2 > 48000:
+        raise ToolError('context_too_large', 'Domain materials exceed the supported inline host result size.')
     out = {"content": [{"type": "text", "text": body}]}
     if is_error:
         out["isError"] = True
@@ -422,9 +495,21 @@ _RUN_OPTION_KEYS = ("max_rounds", "backend", "host", "port", "user", "key_path",
 
 
 def _call_tool(name: str, arguments: dict) -> dict:
+    _guard_host_tool(name)
+    if _host_mode() and name in ('operator_context', 'operator_verify'):
+        from ..execute.host_task_budget import host_task_enabled
+        if not arguments.get('run_dir') or not host_task_enabled(arguments['run_dir']):
+            raise ToolError('host_task_required', 'Use operator_prepare to start a bounded host task first.')
+    if name == 'operator_context':
+        from .host_workflow import context
+        return _text_result(context(**dict(arguments or {})), compact=True)
     if name == "operator_capabilities":
         from ..execute.s5_verify_client import enabled
-        return _text_result(_supervised_capabilities() if enabled() else capabilities())
+        payload = _supervised_capabilities() if enabled() else capabilities()
+        if _host_mode():
+            payload.update(workflow='host', context_owner='host', model_owner='host',
+                           available_tools=sorted(HOST_TOOLS))
+        return _text_result(payload)
     if name == "operator_repair":
         args = dict(arguments or {})
         run_dir = args.pop("run_dir", None)
@@ -456,7 +541,10 @@ def _call_tool(name: str, arguments: dict) -> dict:
         run_dir = args.pop("run_dir", None)
         if not run_dir:
             raise ToolError("run_dir_required", "prepare 需要 run_dir")
-        return _text_result(prepare(args, run_dir))
+        host_budget = args.pop('host_budget', {} if _host_mode() else None)
+        if _host_mode() and type(host_budget) is not dict:
+            raise ToolError('invalid_host_budget', 'host_budget must be an object in host workflow.')
+        return _text_result(prepare(args, run_dir, host_budget=host_budget))
     if name == "operator_verify":
         args = dict(arguments or {})
         from ..execute.s5_verify_client import enabled
@@ -504,7 +592,8 @@ def handle_message(message: dict) -> Optional[dict]:
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             # 使用说明跟着 server 走（见 INSTRUCTIONS 的注释）：客户端渲染进上下文，
             # 于是宿主的提示段与工具描述不会各说一套。
-            "instructions": _supervised_instructions() if enabled() else INSTRUCTIONS,
+            "instructions": (_supervised_instructions() if enabled() else
+                             HOST_INSTRUCTIONS if _host_mode() else INSTRUCTIONS),
         })
     if method == "ping":
         return _jsonrpc_ok(msg_id, {})

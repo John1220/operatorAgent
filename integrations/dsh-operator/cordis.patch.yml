@@ -1,5 +1,5 @@
 # DSH 侧接线：两条记录。
-#   1) mcp-operator   —— MCP stdio server（八个工具；判定/修复/无人值守都走它，
+#   1) mcp-operator   —— MCP stdio server（host 六工具；legacy 保留内层入口，
 #                        给模型的说明也在它这里：server 的 `initialize.instructions`）
 #   2) operator-tools —— 本包自己（只有斜杠命令 `/op`，**不**再注册提示段）
 #
@@ -18,7 +18,9 @@
         # 客户端 abort 后它仍会算完再写一个没人认领的响应。宁可给足，别让它超时。
         toolCallTimeoutMs: 3600000
         failOnStartupError: false
-        # env:
+        env:
+          OPERATOR_AGENT_WORKFLOW: host
+        # Legacy inner-model workflow: set OPERATOR_AGENT_WORKFLOW: legacy
         #   LLM_BASE_URL: https://your-endpoint/v1
         #   LLM_MODEL: your-inner-model
         #   LLM_API_KEY_FILE: ~/.config/operator_agent/llm.key

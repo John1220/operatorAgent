@@ -71,7 +71,8 @@ from ..execute.fake_backend.config import tool_context
 #: 8: 资源预检按明确共享存储证据裁决，L1 保留未知/来源，不再从逻辑 tile 猜物理占用。
 #: 9: repair 有限任务预算、独立模型/验证账本和监督截止；新增阶段/usage 审计元数据。
 #: 10: 显式 fake 后端、run 场景/模型配置与 test_only 执行上下文。
-TOOL_VERSION = 10
+#: 11: host workflow 的领域材料、跨调用验证预算和预留的独立终评。
+TOOL_VERSION = 11
 
 #: 允许进 `declaration` 的键（§6.3 的白名单）。**没列在这里的一律拒绝** ——
 #: 「先收下、以后再判断」是这一层最不能有的形状：它等于给未来开了一个没说出口的口子。
@@ -132,6 +133,12 @@ def _origin_of(value: Any) -> str:
             f"candidate_origin 只能是 {' / '.join(CANDIDATE_ORIGINS)} 之一"
             f"（或省略 = {UNDECLARED_ORIGIN}）；收到 {value!r}")
     return str(value)
+
+
+def _legacy_task_only(run_dir):
+    from ..execute.host_task_budget import host_task_enabled
+    if host_task_enabled(run_dir):
+        raise ToolError('host_workflow_only', 'Use context and budgeted verify for this host-owned task.')
 
 #: 回给外层的 metrics 只留这几项 —— 把整份 metrics 丢出去会让「读哪个数」变成猜。
 _METRIC_KEYS = (
@@ -411,7 +418,44 @@ def _conflict(route: Route, eligibility: Optional[dict], validity: Optional[str]
 
 
 # ── 动作 1: prepare ──────────────────────────────────────────────────────
-def prepare(declaration: dict, run_dir: str | Path, *, now: Optional[float] = None) -> dict:
+def prepare(declaration: dict, run_dir: str | Path, *, now: Optional[float] = None,
+            host_budget: Optional[dict] = None) -> dict:
+    from ..execute.host_task_budget import (HostTaskBudget, HostTaskBudgetError,
+        HostTaskLimits, host_task_enabled, initialize_host_task)
+    run = Path(run_dir)
+    managed = host_budget is not None or host_task_enabled(run)
+    if not managed:
+        return _prepare_unlocked(declaration, run, now=now)
+    from .host_workflow import prepare_lock, prepared_task
+    try:
+        limits = HostTaskLimits.from_dict(host_budget) if host_budget is not None else None
+        with prepare_lock(run):
+            if (run/'declaration.json').exists():
+                _, _, existing = prepared_task(run)
+                stored = json.loads((run/'declaration.json').read_text())
+                if stored != declaration:
+                    raise ToolError('host_task_binding', 'Use the frozen declaration for this host task.')
+                if not host_task_enabled(run):
+                    raise ToolError('host_task_binding', 'Start a host task in a fresh directory.')
+                now = json.loads((run/'run.json').read_text()).get('created_at', now)
+                if limits is None:
+                    HostTaskBudget(run, existing.hash).snapshot()
+            result = _prepare_unlocked(declaration, run, now=now)
+            result['host_task'] = (initialize_host_task(run, result['contract_hash'], limits)
+                if limits is not None else HostTaskBudget(run, result['contract_hash']).snapshot())
+            result['workflow'] = 'host'
+            for case in result['cases']:
+                case.pop('seed', None)
+            return result
+    except HostTaskBudgetError as error:
+        raise ToolError(error.code, error.detail) from error
+    except (TypeError, ValueError) as error:
+        if isinstance(error, ToolError):
+            raise
+        raise ToolError('invalid_host_budget', str(error)) from error
+
+
+def _prepare_unlocked(declaration: dict, run_dir: str | Path, *, now: Optional[float] = None) -> dict:
     """把一份声明冻结成「可复算的回合」：契约 + 输入 + 身份，落进 run 目录。"""
     task = build_task(declaration)
     try:
@@ -481,7 +525,38 @@ def prepare(declaration: dict, run_dir: str | Path, *, now: Optional[float] = No
 
 
 # ── 动作 2: verify ───────────────────────────────────────────────────────
-def verify(run_dir: str | Path, code: str, *, stop_after: Any = None,
+def verify(run_dir: str | Path, code: str, *, verification_purpose='explore', **options) -> dict:
+    from ..execute.host_task_budget import HostTaskBudget, HostTaskBudgetError, host_task_enabled
+    run = Path(run_dir)
+    if not host_task_enabled(run):
+        if verification_purpose != 'explore':
+            raise ToolError('host_task_required', 'final requires a prepared host task.')
+        return _verify_candidate(run_dir, code, **options)
+    from .host_workflow import prepared_task
+    _, _, contract = prepared_task(run)
+    budget = HostTaskBudget(run, contract.hash)
+    reservation = None
+    try:
+        if not isinstance(code, str) or not code.strip():
+            raise ToolError('code_required', 'verify needs candidate source.')
+        from .tool_calls import host_context
+        owner = host_context(run)
+        reservation = budget.reserve(code_hash(code), purpose=verification_purpose,
+            owner_invocation_id=owner['invocation_id'] if owner else None)
+        result = _verify_candidate(run_dir, code, **options)
+        snapshot = budget.finish(reservation['id'], result=result)
+        result['host_task'] = snapshot
+        result['verification_purpose'] = verification_purpose
+        return result
+    except HostTaskBudgetError as error:
+        raise ToolError(error.code, error.detail) from error
+    except BaseException:
+        if reservation is not None:
+            budget.finish(reservation['id'], outcome='failed')
+        raise
+
+
+def _verify_candidate(run_dir: str | Path, code: str, *, stop_after: Any = None,
            backend: str = "mock", target_gflops: float = 0.0,
            host: Optional[str] = None, port: Optional[int] = None,
            user: Optional[str] = None, key_path: Optional[str] = None,
@@ -655,6 +730,7 @@ def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
     `persistent=True` 默认：一次部署、一个常驻会话，逐臂之间只付测量本身。
     """
     _s5_development_only()
+    _legacy_task_only(run_dir)
     run = Path(run_dir)
     decl_path = run / "declaration.json"
     if not decl_path.is_file():
@@ -856,6 +932,7 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
     这一格是**派生的**，不由调用方声明。
     """
     _s5_development_only()
+    _legacy_task_only(run_dir)
     from ..execute.task_budget import TaskBudgetConfig, snapshot, stopped_reason
     from ..execute.task_clock import monotonic
     from ..app.tool_calls import repair_context
@@ -1144,6 +1221,7 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
     进程分离（`start_new_session`）的理由见 `operator_agent/app/autonomous.py` 的 docstring。
     """
     _s5_development_only()
+    _legacy_task_only(run_dir)
     context = {}
     if backend not in _BACKENDS:
         raise ToolError('backend_not_wired', f'Unknown backend: {backend}')
@@ -1239,6 +1317,16 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
 def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) -> dict:
     """Query autonomous/foreground invocation; missing owners are explicitly lost."""
     run = Path(run_dir)
+    from ..execute.host_task_budget import HostTaskBudget, host_task_enabled
+    if invocation_id is None and host_task_enabled(run):
+        from .host_workflow import prepared_task
+        _, _, contract = prepared_task(run)
+        budget = HostTaskBudget(run, contract.hash).snapshot()
+        calls = sorted((run/'tool-calls').glob('*/run-status.json'))
+        return dict(ok=True, workflow='host', phase=budget['phase'], run_dir=str(run),
+            host_task=budget, calls=[autonomous_status(p.parent) for p in calls],
+            last_correct_candidate=budget.get('last_correct_candidate'),
+            context_owner='host', model_calls='host_owned_not_observed_by_plugin')
     from ..execute.task_cancellation import read_json, cancellation, partial_artifacts, valid_invocation
     if invocation_id is not None:
         if not valid_invocation(invocation_id):

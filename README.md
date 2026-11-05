@@ -4,9 +4,9 @@
 attention 等），由 LLM agent 设计、生成、修复 Triton / CUDA 核，经三级验证
 （L1 编译 → L2 功能 → L3 性能 + Roofline）后产出**可审计**的结论。
 
-- 版本：`0.7.1`，本地有限支持版；支持范围见 [v0.7.1 支持清单](docs/testing/v071-support.md)，安装与回退见 [交付记录](docs/testing/v07-delivery.md#12-v071-本地封版)。公开包仓库未发布。
+- 版本：`0.7.2.dev2`（开发中），正在改为 [DSH 外层组装上下文与迭代](docs/design/dsh-host-context-workflow.md)。已封版的 `0.7.1` 支持范围见 [支持清单](docs/testing/v071-support.md)，安装与回退见 [交付记录](docs/testing/v07-delivery.md#12-v071-本地封版)。公开包仓库未发布。
 - 固定 DSH 模型路由已完成[真实模型与 H20 验收](docs/status/v071-model-relay-acceptance-20261105.md)，转发仍需显式启用，性能提升未确立。历史 `0.7.0` 的[冻结支持清单](docs/testing/v07-support.md)保持原样。
-- 运行模式：**无人值守** —— 无人在环内裁决歧义或发现失效
+- 运行模式：DSH 外层驱动上下文、生成与迭代；独立 CLI 保留无人值守流程
 - DSL：Triton / CUDA 为主；后端接口预留模板型后端
 
 ## 30 秒开始

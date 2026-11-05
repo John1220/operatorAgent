@@ -13,6 +13,19 @@ import { apply, formatCapabilities, formatStatus, normalizeConfig, runCli, scrub
 const fixture = (name) =>
   JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 
+test("host 状态呈现验证预算和终评，不推测后台进程或性能最佳", () => {
+  const output = formatStatus({ workflow: "host", phase: "final_complete",
+    host_task: { reserved: 2, limits: { max_verifications: 6 }, remaining_exploration: 4,
+      remaining_final: 0, remaining_s: 20, development_closed: true },
+    last_correct_candidate: { source_hash: "a".repeat(64) },
+  });
+  assert.ok(output.startsWith("✓ 查询完成 · 宿主任务 final_complete"));
+  assert.ok(output.includes("验证派发：2 / 6"));
+  assert.ok(output.includes("不代表性能最佳"));
+  assert.ok(output.includes("插件未强制"));
+  assert.ok(!output.includes("进程"));
+});
+
 function fakeCtx({ cwd = undefined } = {}) {
   const commandDefs = [];
   const sections = [];

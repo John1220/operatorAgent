@@ -114,11 +114,11 @@ class TestToolSurface(unittest.TestCase):
         cls.replies = conversation([{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
         cls.tools = {t["name"]: t for t in cls.replies[0]["result"]["tools"]}
 
-    def test_the_eight_actions_are_exposed(self):
+    def test_the_legacy_actions_and_domain_context_are_exposed(self):
         self.assertEqual(set(self.tools),
                          {"operator_prepare", "operator_verify", "operator_bench",
                           "operator_run", "operator_status", "operator_repair",
-                          "operator_capabilities", "operator_cancel"})
+                          "operator_capabilities", "operator_cancel", "operator_context"})
 
     def test_every_tool_has_a_closed_json_schema(self):
         for name, tool in self.tools.items():

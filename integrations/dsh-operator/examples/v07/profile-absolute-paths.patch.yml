@@ -8,6 +8,8 @@
     command: /absolute/path/to/v07-venv/bin/operator-agent-mcp
     toolCallTimeoutMs: 3600000
     failOnStartupError: true
+    env:
+      OPERATOR_AGENT_WORKFLOW: host
 - id: operator-tools
   config:
     command: /absolute/path/to/v07-venv/bin/operator-agent

@@ -22,12 +22,20 @@ from ..execute.task_cancellation import (cancellation, launch_identity, partial_
 
 LONG_TOOLS = frozenset(('operator_verify', 'operator_repair', 'operator_bench'))
 _REPAIR_CONTEXT = None
+_HOST_CONTEXT = None
 
 
 def repair_context(run):
     """Trusted worker context; never read a user-supplied deadline argument."""
     if _REPAIR_CONTEXT and Path(run).resolve() == Path(_REPAIR_CONTEXT['run_dir']):
         return dict(_REPAIR_CONTEXT)
+    return None
+
+
+def host_context(run):
+    """Supervisor-owned binding, never accepted as a public tool argument."""
+    if _HOST_CONTEXT and Path(run).resolve() == Path(_HOST_CONTEXT['run_dir']):
+        return dict(_HOST_CONTEXT)
     return None
 
 
@@ -46,6 +54,8 @@ class ToolCall:
     """One parent-owned Popen, immutable identity, cancel marker and final receipt."""
     def __init__(self, name, arguments):
         from ..app.hitl_tools import ToolError
+        from ..app.mcp_server import _guard_host_tool
+        _guard_host_tool(name)
         if name not in LONG_TOOLS:
             raise ToolError('unknown_tool', str(name))
         if not isinstance(arguments, dict) or not arguments.get('run_dir'):
@@ -57,6 +67,7 @@ class ToolCall:
         self.graceful_remote = owned_persistent_ssh(
             arguments, persistent_default=name == 'operator_bench')
         self.repair_policy = None
+        self.host_budget = None
         self.deadline = None
         if name == 'operator_repair':
             from ..execute.task_budget import TaskBudgetConfig
@@ -68,10 +79,24 @@ class ToolCall:
                 raise ToolError('invalid_task_budget', str(exc)) from exc
         if not (self.run/'declaration.json').is_file():
             raise ToolError('run_not_prepared', 'Prepare the run directory first.')
+        if name == 'operator_verify':
+            from ..execute.host_task_budget import HostTaskBudget, HostTaskBudgetError, host_task_enabled
+            if host_task_enabled(self.run):
+                from .host_workflow import prepared_task
+                _, _, contract = prepared_task(self.run)
+                try:
+                    self.host_budget = HostTaskBudget(self.run, contract.hash)
+                    remaining = self.host_budget.snapshot()['remaining_s']
+                except HostTaskBudgetError as error:
+                    raise ToolError(error.code, error.detail) from error
+                if remaining <= 0:
+                    raise ToolError('host_task_deadline', 'Host verification task deadline expired.')
         self.invocation_id = uuid.uuid4().hex
         self.started_monotonic = monotonic()
         if self.repair_policy:
             self.deadline = self.started_monotonic + self.repair_policy.wall_clock_s
+        elif self.host_budget:
+            self.deadline = self.started_monotonic + remaining
         self.directory = self.run/'tool-calls'/self.invocation_id
         self.directory.mkdir(parents=True)
         launch_identity(self.directory, self.invocation_id, kind='tool_call', tool=name,
@@ -89,6 +114,9 @@ class ToolCall:
             request['repair_budget'] = dict(run_dir=str(self.run), directory=str(self.directory),
                 invocation_id=self.invocation_id, started_monotonic=self.started_monotonic,
                 deadline=self.deadline, task_budget=self.repair_policy.as_dict())
+        if self.host_budget:
+            request['host_budget_context'] = dict(run_dir=str(self.run),
+                invocation_id=self.invocation_id, deadline=self.deadline)
         publish_json(self.directory/'request.json', request)
         self.status = dict(phase='running', stage='starting', kind='tool_call', tool=name,
             pid=os.getpid(), invocation_id=self.invocation_id, started_at=time.time(),
@@ -96,6 +124,8 @@ class ToolCall:
             run_dir=str(self.run), tool_call_dir=str(self.directory), **self.context)
         if self.repair_policy:
             self.status['task_budget'] = self.repair_policy.as_dict()
+        if self.host_budget:
+            self.status['host_task'] = self.host_budget.snapshot()
         self.response = None
         self.process = None
         self.groups = exec_guard.OwnedGroups()
@@ -168,7 +198,7 @@ class ToolCall:
                 self.status['budget'] = self._repair_snapshot(now=finished)
         elif reason == 'budget_wall_clock':
             self.status.update(phase='done', stopped_reason=reason)
-            self.response = _error('task_budget_exhausted', 'The repair wall-clock budget expired.',
+            self.response = _error('task_budget_exhausted', 'The task wall-clock budget expired.',
                                   passed=False, phase='done', stopped_reason=reason)
         elif reason:
             self.status.update(phase='cancelled', stopped_reason='user_cancelled')
@@ -177,6 +207,12 @@ class ToolCall:
         else:
             self.status.update(phase='failed', stopped_reason='worker_failed')
             self.response = _error('worker_failed', 'Worker exited without a terminal result.')
+        if self.host_budget and cleanup.get('worker_reaped') is True:
+            rejected = not (valid and (event_at is None or finished <= event_at))
+            if rejected:
+                self.host_budget.settle_owner(self.invocation_id,
+                    outcome='cancelled' if self.status['phase']=='cancelled' else 'failed',
+                    reject_completed=True)
         if self.repair_policy and 'budget' not in self.status:
             self.status['budget'] = self._repair_snapshot()
         elif self.repair_policy and not (valid and (event_at is None or finished <= event_at)):
@@ -190,6 +226,9 @@ class ToolCall:
         body = json.loads(self.response['content'][0]['text'])
         body.update(invocation_id=self.invocation_id, tool_call_dir=str(self.directory),
                     **self.context)
+        if self.host_budget:
+            self.status['host_task'] = self.host_budget.snapshot()
+            body['host_task'] = self.status['host_task']
         if self.repair_policy:
             if 'budget' not in self.status:
                 self.status['budget'] = self._repair_snapshot()
@@ -257,6 +296,10 @@ def main(argv=None):
     directory = Path((sys.argv[1:] if argv is None else argv)[0]).resolve()
     launch = read_json(directory/'launch.json') or {}
     request = read_json(directory/'request.json') or {}
+    if request.get('name') == 'operator_verify':
+        import operator_agent.app.tool_calls as canonical
+        context = request.get('host_budget_context')
+        canonical._HOST_CONTEXT = dict(context) if isinstance(context, dict) else None
     if request.get('name') == 'operator_repair':
         # -m executes this file as __main__; publish to the canonical module used
         # by hitl_tools, rather than accepting context via public tool arguments.

@@ -200,6 +200,20 @@ export function formatCapabilities(payload) {
  * `runDir` 可选：传了就回显**实际读的那个路径**——相对路径解析出问题时，这是唯一线索。
  */
 export function formatStatus(payload, runDir = undefined) {
+  if (payload.workflow === "host") {
+    const budget = payload.host_task || {};
+    const count = (value) => Number.isFinite(value) && value >= 0 ? value : "未知";
+    const lines = [`✓ 查询完成 · 宿主任务 ${payload.phase}`];
+    if (runDir) lines.push(`目录：${runDir}`);
+    lines.push(`验证派发：${count(budget.reserved)} / ${count(budget.limits?.max_verifications)}`);
+    lines.push(`探索剩余：${count(budget.remaining_exploration)} · 独立终评剩余：${count(budget.remaining_final)}`);
+    lines.push(`任务剩余：${count(budget.remaining_s)} s`);
+    if (budget.development_closed) lines.push("开发已关闭，以独立终评证据确认结果");
+    const correct = payload.last_correct_candidate;
+    if (correct) lines.push(`最近完整 L2 候选：${correct.source_hash}（不代表性能最佳）`);
+    lines.push("模型用量由 DSH 记录；插件未强制主会话累计调用上限");
+    return lines.join("\n");
+  }
   if (payload.phase === "tool_calls") {
     return [`✓ 查询完成 · ${payload.calls?.length ?? 0} 次工具调用`,
       ...(payload.calls || []).map((call) => `${call.invocation_id} · ${call.phase}`)].join("\n");

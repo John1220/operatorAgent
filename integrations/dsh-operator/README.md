@@ -35,8 +35,8 @@ pip install operator-agent
 
 ```bash
 python3.12 -m venv /absolute/path/operator-v07-env
-/absolute/path/operator-v07-env/bin/python -m pip install /path/to/operator_agent-0.7.1-py3-none-any.whl
-dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.2.1.tgz
+/absolute/path/operator-v07-env/bin/python -m pip install /path/to/operator_agent-0.7.2.dev2-py3-none-any.whl
+dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.2.2-rc.3.tgz
 ```
 
 确认安装命令可见：
@@ -48,7 +48,7 @@ command -v operator-agent-mcp
 
 如果 DSH 从 GUI 启动，GUI 未继承安装 Python 环境的 `PATH`，应在 profile 的 `cordis.patch.yml` 中将 `mcp-operator` 与 `operator-tools` 的命令改成对应绝对路径。卸载 `.tgz` 与源码目录安装相同，见 §2.4。
 
-当前为 v0.7.1 本地有限支持版；边界见 [v0.7.1 支持清单](../../docs/testing/v071-support.md)，安装与回退见 [交付记录 §12](../../docs/testing/v07-delivery.md#12-v071-本地封版)，可运行离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md) 仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，当前 Python 3.12 应使用匹配的平台依赖。
+当前分支为 Python `0.7.2.dev2` / 插件 `0.2.2-rc.3` 开发预览，尚未封版。前版边界见 [v0.7.1 支持清单](../../docs/testing/v071-support.md)，安装与回退见 [交付记录 §12](../../docs/testing/v07-delivery.md#12-v071-本地封版)，legacy 离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md) 仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，当前 Python 3.12 应使用匹配的平台依赖。
 
 ### 2.3 DSH 侧
 
@@ -121,6 +121,10 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
 找不到命令，宿主日志里记一条 `operator-tools: 找不到命令 …`（error 级，同类只记一次）。
 
 ## 3. 配置内层 LLM（只有 `operator_run` / `operator_repair` 需要）
+
+**v0.7.2 开发分支的组合包默认由 DSH 外层驱动。** MCP 环境设置 `OPERATOR_AGENT_WORKFLOW: host`，工作流为 `operator_prepare → operator_context → DSH 写代码 → operator_verify → DSH 修复 → final verify`。插件提供领域事实与指导，DSH 负责最终上下文、模型选择和迭代；此模式不需要 Python 的模型凭据或 `modelRelay`。验证预算跨调用持久化，并预留一次同源码的独立终评。主会话模型用量由 DSH 持有，当前插件不强制累计模型/token 上限。详见[外层工作流说明](../../docs/design/dsh-host-context-workflow.md)。
+
+以下配置针对 v0.7.1 和兼容的内层模式。新版本需要显式设置 `OPERATOR_AGENT_WORKFLOW: legacy`，并保留 MCP 的完整连接字段，才会暴露 `operator_run`、`operator_repair` 和 `operator_bench`。
 
 `operator_prepare` / `operator_verify` / `operator_capabilities` **不需要** LLM。
 需要的是「让本仓自己设计/写核/修复」的那两条路。在 mcp-client 那一行加 `env`
@@ -210,7 +214,11 @@ dsh --profile <profile> --dump-config | grep mcp-operator
 然后在会话里让模型调一次 `operator_capabilities`：返回 `backends.{mock,local,ssh}.wired`
 就说明链路通了。
 
-## 5. 八个工具
+## 5. 工具与工作流
+
+host 模式提供六个工具：`operator_capabilities`、`operator_prepare`、`operator_context`、`operator_verify`、`operator_status`、`operator_cancel`。调用 `operator_prepare` 时可设置 `host_budget: {wall_clock_s: 600, max_verifications: 6}`；普通 verify 消耗探索额度，完整 L2 通过后对同源码设置 `verification_purpose: final` 做独立终评，随后任务关闭。`operator_context` 通过 `phase: generate/repair/optimize` 按需返回材料，repair/optimize 还需 `verification_round`。插件不组装最终 messages 或调用内层模型。
+
+以下为 legacy 模式的原工具说明；该模式另提供 `operator_context`，但不自动启用跨调用的 host 验证预算。
 
 工具契约 **6** 起，`verify` / `repair` / `bench` 各轮独立留存源码与完整结果。
 回包的 `evidence` 指向完整事实，`verify` / `repair` 还给出源码路径与完整 SHA256；

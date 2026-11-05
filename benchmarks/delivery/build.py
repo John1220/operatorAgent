@@ -21,7 +21,8 @@ if (Path(__file__).resolve().parent.parent/'source/pyproject.toml').is_file():
 FILES=('README.md','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md','MANIFEST.in',
        'pyproject.toml','config.example.yaml','.python-version','docs/testing/v07-delivery.md',
        'docs/testing/v07-support.md','docs/testing/v071-support.md',
-       'docs/status/v071-model-relay-acceptance-20261105.md')
+       'docs/status/v071-model-relay-acceptance-20261105.md',
+       'docs/design/dsh-host-context-workflow.md')
 DIRECTORIES=('operator_agent','remote_scripts','integrations/dsh-operator','benchmarks/delivery')
 
 

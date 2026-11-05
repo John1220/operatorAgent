@@ -1,6 +1,15 @@
 """Closed, serializable test scenarios; no device or provider auto-detection."""
 from dataclasses import asdict, dataclass
 
+GENERATION_INSTRUCTIONS = (
+    "[execution-backend]\n"
+    "FakeBackend executes CPU Python with NumPy ndarray inputs. "
+    "Import only numpy/math. Do not import torch, triton, cupy or other libraries. "
+    "Use NumPy operations and preserve the declared input/output dtype and actual strides. "
+    "All execution and timing evidence remains FAKE / test_only.\n"
+    "[/execution-backend]"
+)
+
 
 SCENARIOS = ("success", "compile-repair", "correctness-repair", "no-improvement",
              "timeout", "transport-unknown", "hardware-missing")

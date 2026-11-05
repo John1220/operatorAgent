@@ -230,7 +230,7 @@ test("server 的 instructions 真的到达 MCP 客户端（宿主据此渲染 mc
     const { tools } = await client.listTools();
     // 工具面是契约：加工具就得在这里显式加一笔（tool_version 也要 +1）。
     assert.deepEqual(tools.map((x) => x.name).sort(), [
-      "operator_bench", "operator_cancel", "operator_capabilities", "operator_prepare",
+      "operator_bench", "operator_cancel", "operator_capabilities", "operator_context", "operator_prepare",
       "operator_repair", "operator_run", "operator_status", "operator_verify",
     ]);
   } finally {

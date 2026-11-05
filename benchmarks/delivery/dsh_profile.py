@@ -158,7 +158,8 @@ def run(plugin, python, output, *, dsh_bin=DEFAULT_DSH):
         # DSH replaces the whole config in an override, including required MCP fields.
         mcp_config = dict(serverName='operator', transport='stdio',
                           command=str(console['operator-agent-mcp']),
-                          toolCallTimeoutMs=3600000, failOnStartupError=True)
+                          toolCallTimeoutMs=3600000, failOnStartupError=True,
+                          env=dict(OPERATOR_AGENT_WORKFLOW='host'))
         slash_config = dict(command=str(console['operator-agent']), timeoutMs=60000)
         example = profile/'node_modules'/NAME/'examples/v07/profile-absolute-paths.patch.yml'
         override = example.read_text(encoding='utf-8')
