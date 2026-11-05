@@ -47,6 +47,17 @@ class FakeBackend(Backend):
     def name(self):
         return self.label
 
+    @property
+    def generation_instructions(self):
+        return (
+            "[execution-backend]\n"
+            "FakeBackend executes CPU Python with NumPy ndarray inputs. "
+            "Import only numpy/math. Do not import torch, triton, cupy or other libraries. "
+            "Use NumPy operations and preserve the declared input/output dtype and actual strides. "
+            "All execution and timing evidence remains FAKE / test_only.\n"
+            "[/execution-backend]"
+        )
+
     def _event(self, operation, source=None, **fields):
         self._event_index += 1
         if self.event_path is not None:

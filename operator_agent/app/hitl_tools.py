@@ -994,6 +994,7 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
             pre_reserved.add(1)
             try:
                 from ..generate.fixer import FixerAgent
+                from ..generate.prompt_manager import PromptManager
                 from ..execute.llm_client import LLMClient
                 from ..generate.repair_loop import repair as run_repair
                 ledger = production_budget(policy.llm_limits(min(120., policy.wall_clock_s)),
@@ -1009,7 +1010,10 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
                         timeout=timeout, persistent=persistent)
                     verifier = Verifier(backend_obj)
                     install_level_recorder(verifier, evidence.path)
-                    result = run_repair(code, task, inputs, verifier, FixerAgent(llm=llm),
+                    prompt_manager = PromptManager(
+                        generation_instructions=backend_obj.generation_instructions)
+                    result = run_repair(code, task, inputs, verifier,
+                        FixerAgent(llm=llm, prompt_manager=prompt_manager),
                         max_rounds=max_rounds, target_gflops=float(target_gflops),
                         stop_after=level, on_verification=retain_verification,
                         before_verification=reserve_verification)

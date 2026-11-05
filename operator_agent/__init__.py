@@ -15,7 +15,7 @@
 外部用法保持不变: `from operator_agent import Conductor` 一类再导出仍走包根 __init__.py,
 `python -m operator_agent` 由包根 __main__.py 委托。"""
 
-__version__ = "0.7.1.dev0"
+__version__ = "0.7.1.dev1"
 
 from .core.schemas import (
     TaskSchema, SourceSpec, TargetSpec, ConstraintSpec,

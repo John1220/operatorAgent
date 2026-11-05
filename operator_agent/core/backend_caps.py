@@ -141,6 +141,11 @@ class Backend(ABC):
     def capabilities(self) -> frozenset:
         """本后端**真实**具备的 `Cap` 集合。声明得比实际多, 就是 3.3 那类静默降级"""
 
+    @property
+    def generation_instructions(self) -> str:
+        """Execution restrictions to include in generated candidate prompts."""
+        return ""
+
     def correctness_input_support(self, kernel_code: str, layout: str) -> tuple:
         """Whether L2 preserves suite values/layout in candidate execution.
 

@@ -44,11 +44,13 @@ class PromptManager:
         prompts_dir: Optional[str] = None,
         skills_dir: Optional[str] = None,
         skill_file: Optional[str] = None,
+        generation_instructions: str = "",
     ):
         base = Path(__file__).resolve().parents[1]
         self._prompts_dir = Path(prompts_dir) if prompts_dir else base / "prompts"
         self._skills_dir = Path(skills_dir) if skills_dir else base / "skills"
         self._skill_file = skill_file
+        self._generation_instructions = generation_instructions
         self._template_cache: dict[str, str] = {}
         self._skill_cache: Optional[dict[str, str]] = None
 
@@ -184,7 +186,10 @@ class PromptManager:
         # (notably Fixer); no new placeholder or per-call opt-in is required.
         if (name.startswith(("designer_", "planner_", "coder_", "fixer_", "search_"))
                 or agent_role in ("designer", "planner", "coder", "fixer", "search")):
-            return GENERATION_SPEC + "\n\n" + rendered
+            prefix = GENERATION_SPEC
+            if self._generation_instructions:
+                prefix += "\n\n" + self._generation_instructions
+            return prefix + "\n\n" + rendered
         return rendered
 
     def reload(self, name: Optional[str] = None):

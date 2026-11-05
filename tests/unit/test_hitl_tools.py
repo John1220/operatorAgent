@@ -575,6 +575,7 @@ class TestRepairAttributesTheFinalCodeNotTheInput(unittest.TestCase):
 
     def _repair(self, rounds, origin=None):
         from unittest import mock
+        from types import SimpleNamespace
 
         from operator_agent.generate import fixer as fixer_module, repair_loop
         from operator_agent.execute import llm_client
@@ -582,12 +583,13 @@ class TestRepairAttributesTheFinalCodeNotTheInput(unittest.TestCase):
         def fake_loop(code, *args, **kwargs):
             return {"passed": False, "rounds": rounds, "code": code, "log": "",
                     "initial_full_l2_passed": False, "final_full_l2_passed": False}
+        backend = SimpleNamespace(generation_instructions="")
 
         # `_llm_problem` 与 `LLMClient` 都要挡：前者是配置门，后者一构造就去读
         # `LLM_BASE_URL`（没有就抛），而这条用例测的是**来源怎么派生**，不是凭据。
         with mock.patch.object(ht, "_llm_problem", lambda: None), \
              mock.patch.object(llm_client, "LLMClient", lambda **k: object()), \
-             mock.patch.object(ht, "_make_backend", lambda *a, **k: (object(), {})), \
+             mock.patch.object(ht, "_make_backend", lambda *a, **k: (backend, {})), \
              mock.patch.object(ht, "Verifier", lambda backend: object()), \
              mock.patch.object(fixer_module, "FixerAgent", lambda **k: object()), \
              mock.patch.object(repair_loop, "repair", fake_loop):

@@ -229,7 +229,7 @@ v0.7 同时提供 [FakeBackend 离线组件检查](../testing/fake-backend.md)�
 
 **v0.7.1 完善 v0.7 的 DSH 委托链路。** 算子后端维护生成规约、角色模板、冻结任务和搜索状态，DSH 保留用户与项目上下文。先让普通 Triton Coder 明确看到任务声明的形状，再试接 DSH 的模型调用入口，核对同一份角色消息、任务预算、用量和取消回执。独立 CLI 保留原模型客户端。v0.8 仍按 §5 的优化增强目标和增量收益验收。
 
-首个开发预览提供[显式启用的本地模型转发](../../integrations/dsh-operator/README.md#31-v071-开发预览--通过-dsh-发出内层模型请求)。Python 保留任务账本，DSH 从 profile 配置选择固定宿主路由。当前验证覆盖真实宿主与本地模型 fixture，真实 provider、按会话选择路由和宿主任务归因仍待验证。
+开发预览提供[显式启用的本地模型转发](../../integrations/dsh-operator/README.md#31-v071-开发预览--通过-dsh-发出内层模型请求)。Python 保留任务账本，DSH 从 profile 配置选择固定宿主路由。[真实模型验收](../status/v071-model-relay-acceptance-20261105.md)已覆盖 FakeBackend 生成、修复、在飞取消，以及 H20 FP16 Softmax 的生成、独立终评和导出；H20 的 12 个 L2 用例通过，性能仍为 degraded。当前免费默认路由受配额限制，阿里云路由需匹配宿主兼容字段。按会话选择路由和宿主主会话归因仍待验证，转发继续默认关闭，v0.7.1 尚未封版。
 
 [事件驱动与持久任务架构提案](dsh-operator-event-driven-architecture.md)提供控制面候选方案。其 P0-A/P0-B 优先级是提案内部排序，不自动成为一期执行优先级，也不因本文引用而进入实施范围。
 

@@ -487,7 +487,8 @@ class Conductor:
             self.kernel_db = kernel_db if kernel_db is not None else KernelDatabase()
             self.failure_db = failure_db if failure_db is not None else FailureDatabase()
         self.llm = llm
-        self.pm = prompt_manager or PromptManager()
+        self.pm = prompt_manager or PromptManager(
+            generation_instructions=self.backend.generation_instructions)
         self.store = ArtifactStore(output_dir=str(fake_root/'output')) if test_only else ArtifactStore()
         self.router = Router()
         self.max_optimize_rounds = max_optimize_rounds

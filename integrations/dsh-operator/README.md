@@ -152,7 +152,7 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
 
 ### 3.1 v0.7.1 开发预览 · 通过 DSH 发出内层模型请求
 
-此预览使用 Python `0.7.1.dev0` 和 DSH 插件 `0.2.1-rc.1`。兼容的 DSH 可以为 `operator_run` 和 `operator_repair` 发出内层模型请求。Python 继续组装角色消息、推进生成或修复循环，并在任务账本中记录请求和用量。DSH 使用指定的宿主模型路由及该路由已有的凭据。这个入口默认关闭，独立 CLI 和现有 MCP 配置可继续使用各自的模型客户端。
+此预览使用 Python `0.7.1.dev1` 和 DSH 插件 `0.2.1-rc.2`。兼容的 DSH 可以为 `operator_run` 和 `operator_repair` 发出内层模型请求。Python 继续组装角色消息、推进生成或修复循环，并在任务账本中记录请求和用量。DSH 使用指定的宿主模型路由及该路由已有的凭据。这个入口默认关闭，独立 CLI 和现有 MCP 配置可继续使用各自的模型客户端。
 
 在本机可信的隔离 profile 中，先生成单独的转发凭据。使用一个自己拥有、权限为 `0700` 的目录，并为每个 profile 使用单独的回环端口和凭据文件。下面的命令会创建新目录和权限为 `0600` 的文件。
 
@@ -189,6 +189,16 @@ printf '%s\n' "$relay_dir/token"
 ```
 
 转发凭据只供同一 profile 的 Python 客户端使用，服务商密钥保留在 DSH。转发服务只监听本机 IPv4 回环地址，接受指定模型的非流式文本请求，并随 profile 卸载。调用超时或连接断开时会请求中止宿主调用。Python 继续按既有账本扣减已派发调用，服务商是否已经停止以可观测证据为准。缺失的服务商用量保持未知。当前路由在 profile 配置中固定，宿主主会话切换模型时可单独调整这条路由。恢复直连时删除 `modelRelay`，把 MCP 的 `env` 恢复为原模型配置并重新加载 profile。
+
+宿主路由还需要正确的服务商兼容配置。Python 的 `LLM_THINKING_PARAMETER` 只控制本地转发请求；发往服务商的字段由 DSH 适配器决定。本轮阿里云 OpenAI Completions 路由要求顶层 `enable_thinking: false` 和 `max_tokens`，在隔离 profile 的对应模型条目中使用以下兼容字段，已核对实际出站请求。保留该条目的其他字段及 provider 中的其他模型；其他服务按其实际协议配置。
+
+```yaml
+compat:
+  thinkingFormat: qwen
+  maxTokensField: max_tokens
+```
+
+这里的 `qwen` 是 DSH 适配器发送顶层思考开关的格式名称。仅声明 `reasoningEfforts` 支持 `off`，在本轮原配置中没有发出关闭字段，曾导致 Designer 输出截断。截断结果会被拒绝并保留已消耗的调用预算。
 
 ## 4. 验证装好了
 

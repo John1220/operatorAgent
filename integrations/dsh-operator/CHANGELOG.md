@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1-rc.2
+
+配套 Python `0.7.1.dev1` 的真实模型验收。FakeBackend 的 NumPy/math 执行限制加入生成和修复提示，避免 Python 候选使用执行侧不支持的 Torch。
+
 ## 0.2.1-rc.1
 
 v0.7.1 开发候选提供可选的 DSH 宿主模型转发。启用后，Python 保留生成消息和预算账本，模型请求由 DSH 的 `ctx.llm` 发送。插件配置需要指定一条宿主模型路由和本地转发凭据。

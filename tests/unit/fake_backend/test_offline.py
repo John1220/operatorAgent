@@ -35,6 +35,12 @@ def test_full_pipeline_uses_no_device_probe_or_model_transport(tmp_path, monkeyp
     monkeypatch.setenv('LLM_API_KEY_FILE', '/no/offline/credential/file')
     budget = ProductionLLMCallBudget(TaskBudgetConfig(max_llm_calls=4).llm_limits(), tmp_path/'journal')
     llm = FakeLLM('relu', call_budget=budget)
+    prompts = {}
+    respond = llm._respond
+    def record_prompt(messages, **kwargs):
+        prompts[kwargs['caller_tag']] = messages[0]['content']
+        return respond(messages, **kwargs)
+    monkeypatch.setattr(llm, '_respond', record_prompt)
     task = ht.build_task(DECL)
     inputs = freeze_from_task(task).cases[0].materialize()
     backend = FakeBackend(event_path=tmp_path/'events.jsonl')
@@ -65,6 +71,31 @@ def test_full_pipeline_uses_no_device_probe_or_model_transport(tmp_path, monkeyp
     assert list((tmp_path/'log').glob('*.log'))
     records = data['candidate_records']
     assert records and all(row['source_author'] == 'test_fixture' for row in records)
+    assert {'Designer', 'Coder'} <= prompts.keys()
+    assert all('Import only numpy/math.' in prompt for prompt in prompts.values())
+
+
+def test_repair_prompt_includes_fake_execution_restrictions(tmp_path, monkeypatch):
+    from operator_agent.execute import llm_client
+    prompts = []
+    def client(**options):
+        llm = FakeLLM('relu', call_budget=options['call_budget'], timeout=options['timeout'])
+        respond = llm._respond
+        def record_prompt(messages, **kwargs):
+            prompts.append(messages[0]['content'])
+            return respond(messages, **kwargs)
+        llm._respond = record_prompt
+        return llm
+    monkeypatch.setenv('LLM_BASE_URL', 'http://unused.invalid/v1')
+    monkeypatch.setenv('LLM_API_KEY', 'unused-fixture-key')
+    monkeypatch.setattr(llm_client, 'LLMClient', client)
+    ht.prepare(DECL, tmp_path)
+    wrong = 'import numpy as np\ndef kernel(X):\n    return X.copy()\n'
+    result = ht.repair(tmp_path, wrong, backend='fake', stop_after='L2', max_rounds=2,
+                       max_llm_calls=3, wall_clock_s=30)
+    assert result['initial_full_l2_passed'] is False
+    assert result['full_l2_passed'] is True
+    assert len(prompts) == 1 and 'Import only numpy/math.' in prompts[0]
 
 
 def test_backend_executes_wrong_candidate_instead_of_substituting_reference():
