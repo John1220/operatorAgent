@@ -7,6 +7,7 @@
 - 算子类型: {{kernel_type}}
 - 硬件: {{hardware}}
 - 精度: {{precision}}
+- 任务声明形状: {{declared_shapes}}
 
 ## 设计草图 (Sketch)
 {{sketch}}

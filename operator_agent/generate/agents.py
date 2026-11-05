@@ -316,6 +316,7 @@ class CoderAgent:
             hardware=context['task']['hardware'],
             dsl=sketch.target_dsl,
             precision=context['task']['precision'],
+            declared_shapes=json.dumps(task.constraints.shapes) if task.constraints.shapes else "未声明",
             sketch=json.dumps(sketch.to_prompt_dict(), ensure_ascii=False, indent=2),
             ref_code=ref_code or "无",
             optimization_hints=optimization_hints,

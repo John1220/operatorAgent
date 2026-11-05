@@ -200,6 +200,15 @@ class TestBothCoderPathsRenderIt(unittest.TestCase):
         CoderAgent(kernel_db=_EmptyDB(), llm=llm)._llm_generate_code(_sketch(), _task())
         self.assertIn(HEADER, llm.prompts[0])
 
+    def test_triton_coder_prompt_contains_declared_shapes(self):
+        code = "import triton\n@triton.jit\ndef _helper():\n    pass\n\ndef kernel(X):\n    return X\n"
+        llm = _RecordingLLM(code, GUESS_PLAN)
+        task = _task(dsl="triton", kernel_type="softmax")
+        task.constraints.shapes = ((4096, 4096), (128, 96))
+        CoderAgent(kernel_db=_EmptyDB(), llm=llm).run(
+            _sketch(dsl="triton", algorithm="softmax"), task)
+        self.assertIn("任务声明形状: [[4096, 4096], [128, 96]]", llm.prompts[0])
+
     def test_pipeline_prompt_contains_the_broadcast_for_every_candidate(self):
         llm = _RecordingLLM(MATMUL_CODE, GUESS_PLAN)
         pipe = CoderPipeline(llm=llm, kernel_db=_EmptyDB())
