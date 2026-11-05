@@ -2,8 +2,7 @@
  * DSH 宿主插件：斜杠命令 `/op`。
  *
  * 它**不执行判定**——判定永远在 Python 侧（`operator-agent` CLI / MCP server）。
- * 这个模块只做一件宿主侧的事：让**人**不经过模型就能查能力/状态（输出直接给人看，
- * 不进模型上下文）。
+ * 默认提供人读的能力、状态和取消命令；启用 modelRelay 时，宿主也可以代发内层模型请求。
  *
  * 「什么时候该用 `operator_*` 工具、回来怎么读」的那段说明**不在这里**：它是 MCP
  * server 的 `initialize.instructions`（`operator_agent/mcp_server.py`），宿主会自动
@@ -17,6 +16,7 @@
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
+import { startModelRelay } from "./model-relay.mjs";
 
 export const name = "operator-tools";
 export const inject = ["commands"];
@@ -73,7 +73,7 @@ export function scrubEnv(source = process.env) {
   return out;
 }
 
-const KNOWN_CONFIG_KEYS = new Set(["command", "args", "timeoutMs", "env"]);
+const KNOWN_CONFIG_KEYS = new Set(["command", "args", "timeoutMs", "env", "modelRelay"]);
 
 /**
  * 配置校验。**不校验的代价是静默**：`comand:` 拼错会让 `/op` 悄悄换成另一个二进制，
@@ -253,6 +253,14 @@ export function formatStatus(payload, runDir = undefined) {
 }
 
 export function apply(ctx, config = {}) {
+  const relayConfig = config?.modelRelay;
+  if (relayConfig !== undefined) {
+    // The opt-in relay follows the host LLM service lifecycle. /op only requires commands.
+    ctx.inject(["llm"], async function operatorModelRelay(relayCtx) {
+      await relayCtx.effect(() => startModelRelay(relayCtx, relayConfig), "operator-tools.modelRelay");
+    });
+  }
+
   // 宿主日志里留痕（`ctx.logger` 是 cordis 核心服务，不用 inject）。**同一件事只说一次**：
   // 配置错一次就够，命令没装/超时会被反复撞上，都不该刷屏；`said` 随插件实例生灭。
   const said = new Set();

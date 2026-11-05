@@ -150,6 +150,46 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
 >
 > `/op`（宿主插件自己起的那条子进程）用的是**同一套规则**：先洗、再合并配置里的 `env`。
 
+### 3.1 v0.7.1 开发预览 · 通过 DSH 发出内层模型请求
+
+此预览使用 Python `0.7.1.dev0` 和 DSH 插件 `0.2.1-rc.1`。兼容的 DSH 可以为 `operator_run` 和 `operator_repair` 发出内层模型请求。Python 继续组装角色消息、推进生成或修复循环，并在任务账本中记录请求和用量。DSH 使用指定的宿主模型路由及该路由已有的凭据。这个入口默认关闭，独立 CLI 和现有 MCP 配置可继续使用各自的模型客户端。
+
+在本机可信的隔离 profile 中，先生成单独的转发凭据。使用一个自己拥有、权限为 `0700` 的目录，并为每个 profile 使用单独的回环端口和凭据文件。下面的命令会创建新目录和权限为 `0600` 的文件。
+
+```sh
+relay_dir="$(mktemp -d)"
+(umask 077; node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url") + "\n")' > "$relay_dir/token")
+printf '%s\n' "$relay_dir/token"
+```
+
+安装插件后，在该 profile 的覆盖配置中填入实际路径、空闲端口，以及 DSH 已配置的一组 provider/model。DSH 会整体替换每个条目的 `config`，因此需要保留 MCP 的连接字段。
+
+```yaml
+- id: operator-tools
+  config:
+    command: /absolute/path/to/venv/bin/operator-agent
+    modelRelay:
+      provider: YOUR_DSH_PROVIDER
+      model: YOUR_DSH_MODEL
+      port: 43718
+      tokenFile: /absolute/path/to/private-relay-dir/token
+- id: mcp-operator
+  config:
+    serverName: operator
+    transport: stdio
+    command: /absolute/path/to/venv/bin/operator-agent-mcp
+    toolCallTimeoutMs: 3600000
+    failOnStartupError: true
+    env:
+      LLM_BASE_URL: http://127.0.0.1:43718/v1
+      LLM_API_KEY_FILE: /absolute/path/to/private-relay-dir/token
+      LLM_MODEL: YOUR_DSH_MODEL
+      LLM_FALLBACK_MODEL: ""
+      LLM_THINKING_PARAMETER: enable_thinking
+```
+
+转发凭据只供同一 profile 的 Python 客户端使用，服务商密钥保留在 DSH。转发服务只监听本机 IPv4 回环地址，接受指定模型的非流式文本请求，并随 profile 卸载。调用超时或连接断开时会请求中止宿主调用。Python 继续按既有账本扣减已派发调用，服务商是否已经停止以可观测证据为准。缺失的服务商用量保持未知。当前路由在 profile 配置中固定，宿主主会话切换模型时可单独调整这条路由。恢复直连时删除 `modelRelay`，把 MCP 的 `env` 恢复为原模型配置并重新加载 profile。
+
 ## 4. 验证装好了
 
 ```bash
