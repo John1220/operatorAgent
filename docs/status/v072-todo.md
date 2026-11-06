@@ -79,7 +79,7 @@ rc1 插件完整测试 **116 passed / 0 failed / 0 skipped**（`/private/tmp/ope
 
 ## 7. P0：兼容回归与正式封版
 
-**当前必须完成：F4 正式版本/工件、F5 正式版本安装与必要源码复评、F6 封版归档及本地标签。** rc3 自动入口、真实用户失败修复、普通讨论及简短需求测试已完成，不再作为未验功能重复列项。F2 的 Python 全量仍属于 rc1，rc3 的相关 Python 与完整插件回归单独留证；最终变更需按影响范围完成检查。
+**F 组已全部完成：正式工件、安装回归、归档与本地标签在 2026-11-06 封版。** rc3 自动入口、真实用户失败修复、普通讨论及简短需求测试已完成。F2 的 Python 全量属于 rc1；最终包另有第二轮完整全量与最终安装/复评回执，见下。
 
 - [x] **F1 更新设计和用户说明。** 将已验收的新预算/恢复口径同步到工作流、MCP instructions、安装示例、状态呈现及支持清单。历史 dev2 记录保持原工件身份，不批量改写历史“未强制预算”的事实。
 - [x] **F2 运行完整兼容回归。** 完成 Python 全量及插件测试，重点覆盖旧 CLI、legacy MCP/modelRelay、新 host 工具面、预算、取消与恢复。失败先分类和修复，保留首轮日志；需要真实设备的跳过项明确披露。
@@ -88,9 +88,14 @@ rc1 插件完整测试 **116 passed / 0 failed / 0 skipped**（`/private/tmp/ope
   - 插件完整测试 **116 passed / 0 failed / 0 skipped**（`/private/tmp/operator-v072-plugin-clock-final.log`）。本机另一次复跑为 112 passed / 0 failed / 4 skipped：该 4 项要求本机 DSH 安装含 `node_modules/@deepseek-ai/cordis` 布局（`DSH_APP_ROOT` 可指定），本机为 `DSH NEXT.app/…/app.asar`，属环境跳过而非失败。
   - 证据：`/private/tmp/operator-v072-closeout.rVQIRa/regression/python-full-final.log` 与 `python-full-final.xml`（failures=0 / errors=0）；候选安装冒烟 `smoke-rc1`、隔离 profile `profile-rc1` 见[本轮验收记录](v072-budget-resume-acceptance-20261106.md)。临时目录内容随 F6 归档。
 - [x] **F3 使用真实外层做最终验收。** 新限额下完成 FakeBackend 生成与修复、超限拒绝、取消、恢复和中途干预，同时复核 C 组的分工、材料到达和领域反馈；H20 完成主用例及完整 L2、独立终评、导出。外层决策来自真实模型，不能由脚本替它选择工具或候选。
-- [ ] **F4 冻结正式版本与工件。** Python `0.7.2`、插件 `0.2.2`，保留已验 DSH 宿主兼容号；对 wheel/sdist/tgz、源码、协议与候选建立可核对清单。
-- [ ] **F5 对最终工件做安装回归。** 干净环境安装、依赖检查、隔离 DSH 安装/配置/卸载和回退均通过；必要的最终源码复评与对应包身份分别留证。
-- [ ] **F6 归档与本地标签。** 保存成功、失败、未知、模型用量、预算、源码和报告，核对文件哈希后提交并打本地 `v0.7.2` 标签；v0.7.1 回退目录与标签保留。公开发布及远端推送另按授权执行。
+- [x] **F4 冻结正式版本与工件。** Python `0.7.2`、插件 `0.2.2`，保留已验 DSH 宿主兼容号；对 wheel/sdist/tgz、源码、协议与候选建立可核对清单。
+  - 工件与 `SHA256SUMS`、`candidate/candidate.json`、`candidate/source-manifest.json` 位于 `/Users/zh/op-agent-delivery/v0.7.2/`，封版时 `shasum -a 256` 复算一致（wheel `26b55843…`、sdist `4d66fa47…`、tgz `78b5addf…`）。
+- [x] **F5 对最终工件做安装回归。** 干净环境安装、依赖检查、隔离 DSH 安装/配置/卸载和回退均通过；必要的最终源码复评与对应包身份分别留证。
+  - `receipts/final-pip.log`（干净 venv + `pip check`）、`receipts/profile-final/manifest.json`（隔离 DSH 安装/组合/卸载）、`receipts/desktop-configure.log`、`receipts/rollback/`（安装→回滚→恢复）均通过。
+  - 最终源码复评：2 个真实用户源、0 模型调用、0 GPU（`receipts/source-reevaluation-final/receipt.json`）；rc1→final 运行时差异仅版本号与 host instructions（`receipts/rc1-runtime-diff.json`）。
+  - 最终包插件回归 **146 passed / 0 failed / 0 skipped**（`receipts/plugin-final.log`）；第二轮完整 `tests/` **6900 passed / 0 failed / 1 skipped**（`receipts/python-full-final.log` / `.xml`）。首轮 30 失败的分类与修复见[封版记录](v072-release-20261106.md#封版结果2026-11-06-补充)。
+- [x] **F6 归档与本地标签。** 保存成功、失败、未知、模型用量、预算、源码和报告，核对文件哈希后提交并打本地 `v0.7.2` 标签；v0.7.1 回退目录与标签保留。公开发布及远端推送另按授权执行。
+  - 代码提交 `854da6d`，本地标签 `v0.7.2`；交付目录含 `release.json`（`sealed_local`）、`receipts/`、`notes/`、`user-trials/`。首轮失败回执原样保留，未删除。
 
 **F 组出口条件：** C、M、R 与 U 组验收完成；最终安装包可独立使用、可查询证据、可恢复或明确停止、可回退。性能 `uninformative` 不冒称收益，也不作为本版控制面功能的封版阻碍。
 
@@ -115,6 +120,6 @@ rc1 插件完整测试 **116 passed / 0 failed / 0 skipped**（`/private/tmp/ope
 - [x] 实际用户普通讨论不创建任务、不增加旧任务记账；新一轮简短需求无 `/op new` 自动 prepare，新 task_id 与目录，完整 L2 及同源码独立终评通过。
 - [ ] **输出体验小修。** 默认总结优先源码、验证结果和报告链接；内部 ABI/后端/预算细节按需展开。纠正解释中的容差泛化：本回执的失败要求绝对误差同时超过 atol 与相对容差，不能说单独超过 atol 就必失败。修改后检查相关 instructions 与回执口径，不新增领域诊断器或额外编排循环。
 - [ ] **交付文档统一。** 当前支持清单、安装示例等仍有 rc2 口径；正式构建前统一最新自动入口和正式版本路径，保留 rc1/rc2/rc3 验收身份。
-- [ ] **F4→F5→F6。** 冻结 Python 0.7.2 / 插件 0.2.2，构建并核对 wheel/sdist/tgz；对最终包做干净安装、隔离 profile/回退及受影响路径回归，按变更影响决定最终源码复评；持久归档、提交代码及本地 v0.7.2 标签。当前尚有未提交实现与未跟踪证据，不能只打标签冒称已封版。
+- [x] **F4→F5→F6。** 冻结 Python 0.7.2 / 插件 0.2.2，构建并核对 wheel/sdist/tgz；对最终包做干净安装、隔离 profile/回退及受影响路径回归，按变更影响决定最终源码复评；持久归档、提交代码及本地 v0.7.2 标签。
 
 不要求为本次封版新增算子、GPU 性能搜索、专用 ReLU 诊断器或多代理能力；这些不改变既定 v0.8 路线。现有 H20 uninformative 结果继续如实保留，不作加速比主张。
