@@ -21,6 +21,11 @@ import sys
 import unittest
 from pathlib import Path
 
+import pytest
+
+# 起子进程跑驱动: 并行时与其他子进程测试抢资源, 串行执行。
+pytestmark = pytest.mark.serial
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 

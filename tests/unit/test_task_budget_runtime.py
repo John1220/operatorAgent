@@ -10,6 +10,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+# 进程/截止/取消时序敏感: 并行运行时抖动, 用 -m serial 单独串行跑。
+pytestmark = pytest.mark.serial
+
 from operator_agent.app import autonomous, hitl_tools as ht
 from operator_agent.execute.task_budget import TaskBudgetConfig, snapshot
 from tests.unit.test_autonomous import SKETCH, CODE

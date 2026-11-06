@@ -45,10 +45,12 @@ def prepared(tmp_path, monkeypatch):
     ht.prepare(DECL, run)
     monkeypatch.setattr(ht, '_llm_problem', lambda: None)
     monkeypatch.setattr(llm_client, 'LLMClient', OfflineClient)
-    monkeypatch.setattr(ht, '_make_backend', lambda *a, **kw: (object(), {}))
+    monkeypatch.setattr(ht, '_make_backend', lambda *a, **kw: (
+        SimpleNamespace(generation_instructions=''), {}))
     monkeypatch.setattr(ht, 'Verifier', lambda backend: object())
     from operator_agent.generate import fixer
-    monkeypatch.setattr(fixer, 'FixerAgent', lambda llm: SimpleNamespace(llm=llm))
+    monkeypatch.setattr(fixer, 'FixerAgent', lambda llm, prompt_manager: SimpleNamespace(
+        llm=llm, pm=prompt_manager))
     monkeypatch.setattr(tool_calls, '_REPAIR_CONTEXT', None)
     return run
 
@@ -151,8 +153,9 @@ def test_real_repair_loop_consumes_the_shared_ledger_and_stops_at_the_model_limi
     verifier = FakeVerifier([bad])
 
     class BudgetedFixer:
-        def __init__(self, llm):
+        def __init__(self, llm, prompt_manager):
             self.llm = llm
+            self.pm = prompt_manager
 
         def run_with_action(self, code, *args, **kwargs):
             self.llm.call()
@@ -178,7 +181,7 @@ def test_direct_library_expiry_does_not_claim_hard_worker_termination(prepared, 
 
     def backend(*args, **kwargs):
         clock[0] += 2  # A direct-library call cooperates after this returns.
-        return object(), {}
+        return SimpleNamespace(generation_instructions=''), {}
 
     monkeypatch.setattr(ht, '_make_backend', backend)
     verifier = Mock()
@@ -210,7 +213,8 @@ def test_repair_schema_uses_run_finite_defaults_without_exposing_them_to_verify(
     verify = definitions['operator_verify']['inputSchema']['properties']
     assert {key: repair[key]['default'] for key in expected} == expected
     assert not set(expected).intersection(verify)
-    assert ht.TOOL_VERSION == 10
+    assert 'host_budget' not in verify
+    assert ht.TOOL_VERSION == 12
 
 
 @pytest.fixture

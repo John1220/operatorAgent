@@ -78,7 +78,10 @@ def test_profile_runtime_drift_and_missing_boundary_refuse(tmp_path,runtime,monk
 
 def test_staging_contains_no_core_or_deps(tmp_path):
     staged=env.stage_runtime(tmp_path/'runtime')
-    assert set(staged['files'])=={'plugin/index.mjs','plugin/package.json','proxy.py','check.py'}
+    assert set(staged['files'])=={
+        'plugin/index.mjs','plugin/model-relay.mjs','plugin/host-model-budget.mjs',
+        'plugin/host-model-ledger.mjs','plugin/host-session-lifecycle.mjs',
+        'plugin/package.json','proxy.py','check.py'}
     assert not(Path(staged['root'])/'core').exists()
     assert not(Path(staged['root'])/'deps').exists()
     env.verify_runtime(staged)

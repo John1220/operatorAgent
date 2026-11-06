@@ -200,7 +200,7 @@ def test_repair_entry_routes_inner_calls_to_shared_ledger(tmp_path, monkeypatch)
     monkeypatch.setenv('OPERATOR_AGENT_S5_SHARED_LEDGER',str(ledger_path))
     monkeypatch.setenv('OPERATOR_AGENT_S5_TASK_ID','task-01')
     monkeypatch.setattr(ht,'_llm_problem',lambda:None)
-    monkeypatch.setattr(ht,'_make_backend',lambda *a,**kw:(object(),{}))
+    monkeypatch.setattr(ht,'_make_backend',lambda *a,**kw:(SimpleNamespace(generation_instructions=''),{}))
     monkeypatch.setattr(ht,'Verifier',lambda backend:object())
     monkeypatch.setattr(tool_calls,'_REPAIR_CONTEXT',None)
     class OfflineClient:
@@ -212,7 +212,7 @@ def test_repair_entry_routes_inner_calls_to_shared_ledger(tmp_path, monkeypatch)
             self.call_budget.finish(n,outcome='answered',usage_source='api_usage',
                                     usage={'prompt_tokens':10,'completion_tokens':2,'total_tokens':12})
     monkeypatch.setattr(llm_client,'LLMClient',OfflineClient)
-    monkeypatch.setattr(fixer,'FixerAgent',lambda llm:SimpleNamespace(llm=llm))
+    monkeypatch.setattr(fixer,'FixerAgent',lambda llm,**kwargs:SimpleNamespace(llm=llm))
     def loop(code,task,inputs,verifier,fixer,*,before_verification,**kwargs):
         assert before_verification(1,code)
         fixer.llm.call()
@@ -221,7 +221,8 @@ def test_repair_entry_routes_inner_calls_to_shared_ledger(tmp_path, monkeypatch)
             final_full_l2_passed=None,candidate_records=[],selected_source_hash=ht.code_hash(code))
     monkeypatch.setattr(repair_loop,'repair',loop)
     run=tmp_path/'run'; ht.prepare({'request':'matmul fp32','shapes':[[8,8,8]],'precision':'fp32'},run)
-    ht.repair(run,'def kernel(A, B):\n    return A @ B\n',max_llm_calls=3,oracle_total=5)
+    result=ht.repair(run,'def kernel(A, B):\n    return A @ B\n',max_llm_calls=3,oracle_total=5)
+    assert result['ok'], result
     data=shared.snapshot(ledger_path)
     assert data['reserved_calls']==1 and data['calls'][0]['participant']=='inner'
     assert data['calls'][0]['api_usage']['total_tokens']==12

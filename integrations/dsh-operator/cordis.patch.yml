@@ -1,7 +1,7 @@
 # DSH 侧接线：两条记录。
-#   1) mcp-operator   —— MCP stdio server（host 六工具；legacy 保留内层入口，
+#   1) mcp-operator   —— MCP stdio server（host 七工具；legacy 保留内层入口，
 #                        给模型的说明也在它这里：server 的 `initialize.instructions`）
-#   2) operator-tools —— 本包自己（只有斜杠命令 `/op`，**不**再注册提示段）
+#   2) operator-tools —— 斜杠命令 `/op` 和原生主模型预算硬门，不注册提示段
 #
 # 这里**不写死绝对路径**：默认假定 `pip install operator-agent` 装出了 `operator-agent`
 # 与 `operator-agent-mcp` 两个命令。若装在 venv、或想直接从源码树跑，用下面注释里的形态。
@@ -21,6 +21,7 @@
         env:
           OPERATOR_AGENT_WORKFLOW: host
         # Legacy inner-model workflow: set OPERATOR_AGENT_WORKFLOW: legacy
+        # and set operator-tools.config.hostModelBudget: false below.
         #   LLM_BASE_URL: https://your-endpoint/v1
         #   LLM_MODEL: your-inner-model
         #   LLM_API_KEY_FILE: ~/.config/operator_agent/llm.key
@@ -31,6 +32,7 @@
       config:
         command: operator-agent
         timeoutMs: 60000
+        hostModelBudget: {}
         # 从源码树跑的形态（没 pip install 时）：
         # command: /abs/path/to/python3
         # args: ["-m", "operator_agent"]

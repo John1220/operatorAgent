@@ -22,8 +22,21 @@ test("host 状态呈现验证预算和终评，不推测后台进程或性能最
   assert.ok(output.startsWith("✓ 查询完成 · 宿主任务 final_complete"));
   assert.ok(output.includes("验证派发：2 / 6"));
   assert.ok(output.includes("不代表性能最佳"));
-  assert.ok(output.includes("插件未强制"));
+  assert.ok(output.includes("没有有效宿主收据"));
   assert.ok(!output.includes("进程"));
+});
+
+test("host 模型额度耗尽时旁路状态仍给出失败源码、报告和在飞取消身份", () => {
+  const output = formatStatus({ workflow: "host", phase: "awaiting_host",
+    host_task: { model_budget: { receipt_verified: true, enforcement: "host_enforced_receipt",
+      calls: { reserved: 1, limit: 1, remaining: 0 }, tokens: { output_reserved: 128, reservation_limit: 128 } } },
+    latest_verification: { source: "/task/verify-1/candidate.py", report: "/task/verify-1/report.md", full_l2_passed: false },
+    calls: [{ invocation_id: "a".repeat(32), phase: "running" }],
+  });
+  assert.ok(output.includes("模型派发：1 / 1 · 剩余 0"));
+  assert.ok(output.includes("尚未取得完整 L2 资格"));
+  assert.ok(output.includes("/task/verify-1/report.md"));
+  assert.ok(output.includes("a".repeat(32)));
 });
 
 function fakeCtx({ cwd = undefined } = {}) {

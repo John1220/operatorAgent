@@ -1,17 +1,19 @@
 # dsh-operator-agent
 
 把 [operator-agent](../../README.md) 的**判定层**接成 DeepSeek Harness（DSH）的工具：
-判一个算子核能不能编译、对不对、快不快，读数可不可信，以及按处方自动修。
+判一个算子核能不能编译、对不对、快不快，读数可不可信，并向 DSH 外层提供生成与修复材料。
 
 **它不是什么**：不是新的 agent。判定全部来自 `operator-agent` 既有模块
 （`Verifier` / `measurement` / `eligibility` / `anticheat` / `failure_route`），
-这个包只提供 DSH 侧的安装壳与配置。
+这个包提供 DSH 侧的安装配置、`/op` 命令与原生主模型预算 hook。
+
+首次试用 v0.7.2，请从[自助试跑指南](../../docs/testing/v072-quickstart.md)开始：先用自然语言描述 CPU ReLU 需求，再按需查看安装、证据和可选验收步骤。正式本地版为 Python **0.7.2** / 插件 **0.2.2** / 工具契约 **12**，未向 PyPI/npm 公开发布。
 
 ---
 
 ## 1. 前置
 
-- DSH `0.2.1-rc.2`（本包按这个版本声明 `engines.dsh`；升版前先看 `CHANGELOG.md`）
+- 原生集成测试基线为 DSH `0.2.1-rc.2` / Node `24.14.1`；`engines.dsh` 从该宿主版本声明兼容。DSH NEXT `0.2.1-rc.4` 已有 CPU 用户功能证据，见[自然语言入口复核](../../docs/examples/v072-natural-user-review.md)，不扩大为完整宿主兼容矩阵。
 - 默认开发与安装验收使用 Python 3.12；最低兼容版本仍为 3.9，且 `operator-agent` 可被宿主进程导入
 - 真机执法需要 `ssh` 与目标机器的 `~/.ssh/config` 别名（可选，先跑 mock 也行）
 
@@ -29,40 +31,48 @@ pip install operator-agent
 
 装完应有两个命令：`operator-agent`（CLI）与 `operator-agent-mcp`（MCP stdio server）。
 
-### 2.2 从本地构建工件安装
+### 2.2 从本地正式工件安装
 
-本地交付的 wheel 与 DSH `.tgz` 尚未发布到包仓库。先将 wheel 安装到 DSH 启动时可访问的 Python 环境，再把 `.tgz` 加到目标 profile：
+本地正式交付为 Python `0.7.2` / 插件 `0.2.2`，工具契约 **12**，尚未发布到包仓库。本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`；实际完成状态以正式安装回执和 UI 核对为准，不沿用候选回执。
 
-```bash
-python3.12 -m venv /absolute/path/operator-v07-env
-/absolute/path/operator-v07-env/bin/python -m pip install /path/to/operator_agent-0.7.2.dev2-py3-none-any.whl
-dsh plugin --profile <profile> add /path/to/dsh-operator-agent-0.2.2-rc.3.tgz
-```
-
-确认安装命令可见：
+先把 wheel 装入 DSH 启动时可访问的 Python 3.12 环境：
 
 ```bash
-command -v operator-agent
-command -v operator-agent-mcp
+python3.12 -m venv "$HOME/.local/share/operator-agent/v0.7.2/venv"
+"$HOME/.local/share/operator-agent/v0.7.2/venv/bin/python" -m pip install "$HOME/.local/share/operator-agent/v0.7.2/artifacts/operator_agent-0.7.2-py3-none-any.whl"
 ```
 
-如果 DSH 从 GUI 启动，GUI 未继承安装 Python 环境的 `PATH`，应在 profile 的 `cordis.patch.yml` 中将 `mcp-operator` 与 `operator-tools` 的命令改成对应绝对路径。卸载 `.tgz` 与源码目录安装相同，见 §2.4。
+**Desktop 使用 GUI 安装插件**：在 DSH 的 **插件 → 添加插件 → 安装第三方插件** 输入 `/absolute/path/operator-agent/v0.7.2/artifacts/dsh-operator-agent-0.2.2.tgz`，请从本机正式目录复制实际绝对路径替换占位符（GUI 不展开 `~` 或 `$HOME`）。安装后启用，再运行配置助手：
 
-当前分支为 Python `0.7.2.dev2` / 插件 `0.2.2-rc.3` 开发预览，尚未封版。前版边界见 [v0.7.1 支持清单](../../docs/testing/v071-support.md)，安装与回退见 [交付记录 §12](../../docs/testing/v07-delivery.md#12-v071-本地封版)，legacy 离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md) 仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，当前 Python 3.12 应使用匹配的平台依赖。
+```bash
+"$HOME/.local/share/operator-agent/v0.7.2/examples/configure-v072.command"
+```
+
+该助手用 `--configure-only` 备份配置、写入 CLI/MCP 两处绝对路径并检查七个 host 工具；追加 `--dry-run` 可预览。Desktop profile 由 Electron 独占，普通 CLI 不能安装或导出，退出应用也不能解除。不要将下方自定义 profile 的命令用于 desktop。
+
+自定义非 desktop profile 可以通过[安装助手](../../benchmarks/delivery/install_dsh.py)的 `--profile <profile>` 一次安装并配置，或使用普通 CLI：
+
+```bash
+dsh plugin --profile <非desktop的profile> add /path/to/dsh-operator-agent-0.2.2.tgz
+```
+
+GUI 通常不继承 venv 的 `PATH`，因此 `mcp-operator` 与 `operator-tools` 均需使用相应 Python 环境中的绝对命令路径。配置助手检查不代替实际加载：重开 DSH，确认插件页 `0.2.2` 的两个组件运行中，并用 `/op capabilities` 核对 Python `0.7.2` / 工具契约 `12`。卸载见 §2.4。
+
+当前边界见 [v0.7.2 支持清单](../../docs/testing/v072-support.md)。历史候选的[生命周期验收](../../docs/status/v072-session-lifecycle-acceptance-20261106.md)与[自动入口验收](../../docs/status/v072-auto-task-acceptance-20261106.md)保留原版本和安装身份。前版边界与回退见 [v0.7.1 支持清单](../../docs/testing/v071-support.md)及[交付记录 §12](../../docs/testing/v07-delivery.md#12-v071-本地封版)。legacy 离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md)仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，Python 3.12 应使用匹配的平台依赖。
 
 ### 2.3 DSH 侧
 
 ```bash
-# 本地目录安装（不需要发布 npm）
-dsh plugin --profile <profile> add /path/to/operatorAgent/integrations/dsh-operator
+# 自定义非 desktop profile：本地源码安装（不需要发布 npm）
+dsh plugin --profile <非desktop的profile> add /path/to/operatorAgent/integrations/dsh-operator
 ```
 
-> **`desktop` 这个 profile 有前置条件**：DSH Desktop 自己拥有它，CLI 会要求你先
-> **完全退出 Desktop** 再跑（否则直接拒绝）。更顺的是在 GUI 里装：侧边栏的
-> **插件**页，或让模型用 `plugin_manager` 工具——两者都不需要退出。
+> **`desktop` profile 由 Electron 独占管理**：普通 CLI 会直接拒绝管理它，退出 Desktop 也不能解除。
+> 请在 DSH 的 **插件 → 添加插件 → 安装第三方插件** 输入本地包路径，安装后启用。
+> 当前本机的配置助手可自动备份并配置 Python 路径，见[自助试跑指南](../../docs/testing/v072-quickstart.md)。
 
-本包的 `cordis.patch.yml` 会插**两条**记录：`mcp-operator`（八个工具 + server 的
-`instructions`）与 `operator-tools`（只有斜杠命令 `/op`；给模型的提示段不在这里，
+本包的 `cordis.patch.yml` 会插**两条**记录：`mcp-operator`（host 模式七个工具 + server 的
+`instructions`）与 `operator-tools`（斜杠命令 `/op` 和原生模型预算 hook；给模型的提示段不在这里，
 见 §5.5）。手工安装时两条都要复制。
 
 > **装成组合包，别装成手工条目**：只有前者会出现在 GUI 插件页（有图标、可开关）。
@@ -113,18 +123,18 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
 | 手段 | 效果 |
 |---|---|
 | **GUI 侧边栏 插件 页**：关开关（禁用）/ 删除 | 推荐。删除会同时摘掉 profile 的 `dependencies` 与 `dsh.profile.bundles`；禁用只是让 bundle 不生效（patch 不再插入），文件还在 |
-| `dsh plugin --profile <profile> remove dsh-operator-agent` | 实测（本机 CLI `0.1.1-rc.2`）**会同时**摘掉 profile 的 `dependencies` 与 `dsh.profile.bundles`。你的 CLI 版本不同的话，卸完 `grep dsh-operator-agent <profile>/package.json` 确认一眼即可。`desktop` profile 还要求先完全退出 Desktop |
+| `dsh plugin --profile <profile> remove dsh-operator-agent` | 用于自定义非 desktop profile；同时摘掉 profile 的依赖与 bundle。desktop 请在 GUI 插件页卸载 |
 | 纯手工 | 从 profile（或你放这两行的那个 patch）里删掉 `mcp-operator` 与 `operator-tools` 两条，再把名字从 `dsh.profile.bundles` 去掉 |
 
 两半是**独立**的：卸载插件不影响 Python 侧的 `operator-agent` CLI；反过来
-`pip uninstall operator-agent` 会让八个 MCP 工具全部变成「命令不存在」——`/op` 会明说
+`pip uninstall operator-agent` 会让 MCP 工具变成「命令不存在」——`/op` 会明说
 找不到命令，宿主日志里记一条 `operator-tools: 找不到命令 …`（error 级，同类只记一次）。
 
-## 3. 配置内层 LLM（只有 `operator_run` / `operator_repair` 需要）
+## 3. 模型调用模式：默认 host 与 legacy 配置
 
-**v0.7.2 开发分支的组合包默认由 DSH 外层驱动。** MCP 环境设置 `OPERATOR_AGENT_WORKFLOW: host`，工作流为 `operator_prepare → operator_context → DSH 写代码 → operator_verify → DSH 修复 → final verify`。插件提供领域事实与指导，DSH 负责最终上下文、模型选择和迭代；此模式不需要 Python 的模型凭据或 `modelRelay`。验证预算跨调用持久化，并预留一次同源码的独立终评。主会话模型用量由 DSH 持有，当前插件不强制累计模型/token 上限。详见[外层工作流说明](../../docs/design/dsh-host-context-workflow.md)。
+**v0.7.2 组合包默认由 DSH 外层驱动。** MCP 环境设置 `OPERATOR_AGENT_WORKFLOW: host`，工作流为 `operator_prepare → operator_context → DSH 写代码 → operator_verify → DSH 修复 → final verify`。插件提供领域事实与指导，DSH 负责最终上下文、模型选择和迭代；此模式不需要 Python 的模型凭据或 `modelRelay`。验证预算跨调用持久化，并预留一次同源码的独立终评。默认 `operator-tools.config.hostModelBudget: {}` 启用主模型发送前硬门：prepare/resume 成功绑定后按任务预留模型次数及输出 token，重启不补额度。详见 §5 和[外层工作流说明](../../docs/design/dsh-host-context-workflow.md)。
 
-以下配置针对 v0.7.1 和兼容的内层模式。新版本需要显式设置 `OPERATOR_AGENT_WORKFLOW: legacy`，并保留 MCP 的完整连接字段，才会暴露 `operator_run`、`operator_repair` 和 `operator_bench`。
+以下配置针对 v0.7.1 和兼容的内层模式。新版本需要在 MCP 环境显式设置 `OPERATOR_AGENT_WORKFLOW: legacy`，并在 `operator-tools.config` 设置 `hostModelBudget: false`；保留 MCP 的完整连接字段，才会按 legacy 模式使用 `operator_run`、`operator_repair` 和 `operator_bench`。两项必须一起修改，避免把 legacy 回执当作 host 任务绑定。
 
 `operator_prepare` / `operator_verify` / `operator_capabilities` **不需要** LLM。
 需要的是「让本仓自己设计/写核/修复」的那两条路。在 mcp-client 那一行加 `env`
@@ -156,7 +166,7 @@ pkill -f operator_agent.mcp_server     # 宿主会在 500ms 后自动重连并 r
 
 ### 3.1 v0.7.1 · 通过 DSH 发出内层模型请求
 
-本版使用 Python `0.7.1` 和 DSH 插件 `0.2.1`。兼容的 DSH 可以为 `operator_run` 和 `operator_repair` 发出内层模型请求。Python 继续组装角色消息、推进生成或修复循环，并在任务账本中记录请求和用量。DSH 使用指定的宿主模型路由及该路由已有的凭据。这个入口默认关闭，独立 CLI 和现有 MCP 配置可继续使用各自的模型客户端。
+v0.7.1 当时使用 Python `0.7.1` 和 DSH 插件 `0.2.1`；此处保留该 legacy 入口说明。兼容的 DSH 可以为 `operator_run` 和 `operator_repair` 发出内层模型请求。Python 继续组装角色消息、推进生成或修复循环，并在任务账本中记录请求和用量。DSH 使用指定的宿主模型路由及该路由已有的凭据。这个入口默认关闭，独立 CLI 和现有 MCP 配置可继续使用各自的模型客户端。
 
 在本机可信的隔离 profile 中，先生成单独的转发凭据。使用一个自己拥有、权限为 `0700` 的目录，并为每个 profile 使用单独的回环端口和凭据文件。下面的命令会创建新目录和权限为 `0600` 的文件。
 
@@ -172,6 +182,7 @@ printf '%s\n' "$relay_dir/token"
 - id: operator-tools
   config:
     command: /absolute/path/to/venv/bin/operator-agent
+    hostModelBudget: false
     modelRelay:
       provider: YOUR_DSH_PROVIDER
       model: YOUR_DSH_MODEL
@@ -185,6 +196,7 @@ printf '%s\n' "$relay_dir/token"
     toolCallTimeoutMs: 3600000
     failOnStartupError: true
     env:
+      OPERATOR_AGENT_WORKFLOW: legacy
       LLM_BASE_URL: http://127.0.0.1:43718/v1
       LLM_API_KEY_FILE: /absolute/path/to/private-relay-dir/token
       LLM_MODEL: YOUR_DSH_MODEL
@@ -207,16 +219,40 @@ compat:
 ## 4. 验证装好了
 
 ```bash
-operator-agent-mcp --selftest     # 不依赖宿主，走一遍握手
-dsh --profile <profile> --dump-config | grep mcp-operator
+"$HOME/.local/share/operator-agent/v0.7.2/venv/bin/operator-agent-mcp" --selftest
+# 下条只用于自定义非 desktop profile
+dsh --profile <非desktop的profile> --dump-config | rg mcp-operator
 ```
 
-然后在会话里让模型调一次 `operator_capabilities`：返回 `backends.{mock,local,ssh}.wired`
-就说明链路通了。
+Desktop 重开后应在插件页核对插件 `0.2.2` 启用且两个组件运行中，再直接 `/op capabilities` 核对 Python `0.7.2` / 工具契约 `12`。在会话中让模型调用 `operator_capabilities` 可进一步核对 MCP 链路；`backends.{mock,local,ssh}.wired` 只说明接线，不证明已通过 GPU/SSH 验收。
 
 ## 5. 工具与工作流
 
-host 模式提供六个工具：`operator_capabilities`、`operator_prepare`、`operator_context`、`operator_verify`、`operator_status`、`operator_cancel`。调用 `operator_prepare` 时可设置 `host_budget: {wall_clock_s: 600, max_verifications: 6}`；普通 verify 消耗探索额度，完整 L2 通过后对同源码设置 `verification_purpose: final` 做独立终评，随后任务关闭。`operator_context` 通过 `phase: generate/repair/optimize` 按需返回材料，repair/optimize 还需 `verification_round`。插件不组装最终 messages 或调用内层模型。
+host 模式提供七个工具：`operator_capabilities`、`operator_prepare`、`operator_context`、`operator_verify`、`operator_resume`、`operator_status`、`operator_cancel`。插件不组装最终 messages 或调用内层模型。
+
+`operator_prepare.host_budget` 的默认值为：
+
+```json
+{
+  "wall_clock_s": 600,
+  "max_verifications": 6,
+  "max_model_calls": 12,
+  "max_output_tokens_per_call": 8192,
+  "total_output_token_reservations": 98304
+}
+```
+
+这些值在 prepare 时冻结。普通 verify 消耗探索额度，固定保留一次同源码独立终评；完整 L2 通过后设置 `verification_purpose: final` 再验证，随后开发关闭。`operator_context` 通过 `phase: generate/repair/optimize` 按需返回材料，repair/optimize 还需 `verification_round`。性能观测无资格时不因存在 optimize 材料就继续调参。
+
+### 5.0 host 模型预算、恢复与取材
+
+默认组合包同时启用 `hostModelBudget: {}`。此配置只接受空对象，限额由 Python 的冻结 policy 提供；不要在 profile 里另配一套额度。原生 hook 在绑定后的主模型请求到达 provider 前预留一次调用和该次 `maxTokens`，并限制单次输出。失败、取消、输出少于预留或 usage 缺失均不退款；usage 缺失保持 unknown。它约束的是**成功 prepare/resume 绑定后的主模型派发**，不包括绑定前准备、标题等辅助模型和 legacy 转发，不是全会话或精确账单上限。final 后的模型汇总继续计入原任务。
+
+本版支持一个主会话同时绑定一个活动任务；上一项结束后，用户可在同一会话直接提出下一项自然语言需求，无需 `/op new`。绑定后允许上述七个算子工具，拒绝 shell、子代理、PTC 和其他工具路径；fork/委托会话不支持 host 开发。请在 prepare 前取得需要的项目文件与背景；DSH 已有会话背景和用户后续消息仍参与外层上下文。绑定后通过 `operator_context` 取得当前任务/阶段材料，验证回包和 `operator_status` / `operator_resume` 提供候选与证据路径。当前没有通用的绑定后文件读取工具，超出这套取材方式的工作流需另行支持；这项白名单是本版预算支持边界。
+
+同一 DSH session 进程重启时，从本会话原生用户轮次、prepare/resume 回执、可选的手动切换命令及 turn/end 恢复阶段和绑定，在首个后续主模型请求前核对原账本。也可调用 `operator_resume(run_dir, backend)` 读取现有任务的 `next_action`、`next_context`、最近验证与最后完整 L2 候选；恢复不重新 prepare，不改变 task_id、契约、deadline 或已花额度。模型 owner 无法确认已退出时保留不确定状态并拒绝继续；确认旧进程退出后可将遗留请求记为 abandoned，额度仍保留。旧 policy 没有模型字段时不会自动补额度，损坏或身份不符的账本会拒绝绑定。改变 shape、精度等冻结判据需要明确的新任务，可在同一主会话的新用户轮次顺序开启；不能靠换目录给原任务补额度。
+
+验证终评预留不保证还剩足够的模型调用来发起终评或汇总，模型用完时必须如实停止。用户可直接运行 `/op status <run_dir>` 查看预算、候选源码与报告路径、在飞 invocation ID，再用 `/op cancel <run_dir> <invocation_id>` 取消验证；这两条命令不调用模型，即使模型额度已耗尽仍可用。DSH 会话取消由宿主处理；本地 abort 不证明服务商已停止执行或计费。
 
 以下为 legacy 模式的原工具说明；该模式另提供 `operator_context`，但不自动启用跨调用的 host 验证预算。
 
@@ -263,7 +299,10 @@ CLI Ctrl-C/SIGTERM 会清理本机 worker 后返回取消 JSON（退出码 130�
 
 ```
 /op capabilities          这台机器能做什么（只读，不跑活）
-/op status <run_dir>      查无人值守的相位（running/done/failed/lost）
+/op status                查看当前会话阶段
+/op status <run_dir>      查看任务状态、预算、候选与证据
+/op new [new_run_dir]     可选手动新任务入口（日常直接描述新需求即可）
+/op cancel <run_dir> <invocation_id>  按实例取消验证，再查 status 确认清理
 /op help                  用法
 ```
 
@@ -281,8 +320,9 @@ CLI Ctrl-C/SIGTERM 会清理本机 worker 后返回取消 JSON（退出码 130�
 也读得到 —— 两条都在本机验过，所以这条解析在真机上是生效的。
 输出里会回显**实际读取的目录**，所以相对路径写歪了一眼能看出来。
 
-需要「判定/修复/从头自动化」时用模型工具（`mcp__operator__*`）：命令只是旁路，
-不替模型做判定。
+host 任务的 status 还显示验证与模型预算、最后完整 L2 候选或最近失败验证的源码/报告路径，以及在飞工具实例。`host_enforced_receipt` 表示 Python 已核对宿主账本收据，不单凭该收据证明当前 hook 正在运行或服务商执行已经停止。`not_bound`、`receipt_invalid` 和旧 policy 状态会明确显示，不作为有额度的证明。
+
+需要开发决策和工具验证时用模型工具（`mcp__operator__*`）；旁路命令供用户直接查询、取回路径与取消。
 
 ### 输出长什么样（以及为什么首行必须是回执）
 
@@ -294,7 +334,7 @@ CLI Ctrl-C/SIGTERM 会清理本机 worker 后返回取消 JSON（退出码 130�
 
 | 情形 | 首行 |
 |---|---|
-| `/op capabilities` | `✓ 已执行 · 算子判定层 0.6.0 · 后端 local/mock/ssh · 10 个算子有输入布局` |
+| `/op capabilities` | `✓ 已执行 · 算子判定层 0.7.2 · 后端 local/mock/ssh · 10 个算子有输入布局` |
 | `/op status …` | `✓ 查询完成 · 相位 done（进程已结束）` |
 | 判定层拒绝 / 未装 / 非 JSON | `✗ …`（原因跟在后面） |
 | 被宿主取消 | `已取消`（取消是人的正常操作，不挂 `✗`） |
@@ -314,7 +354,7 @@ CLI Ctrl-C/SIGTERM 会清理本机 worker 后返回取消 JSON（退出码 130�
 
 > 给模型的**使用说明**（什么时候该用、回来怎么读）不存在于本插件里：它是 Python 侧
 > `operator_agent/mcp_server.py` 的 `initialize.instructions`，宿主会自动渲染成
-> `mcp:operator` 提示段。只有一处来源，换任何 MCP 客户端也都在 —— 插件只负责 `/op`。
+> `mcp:operator` 提示段。只有一处来源，换任何 MCP 客户端也都在。JS 插件另负责 `/op` 与 DSH 原生预算 hook；其他 MCP 客户端不能仅凭 Python policy 声称具备 DSH 主模型硬门。
 
 细节（契约、拒绝码、数据布局、扩展点）见
 [实现说明](../../docs/design/dsh-plugin-implementation.md)。
@@ -343,15 +383,15 @@ CLI Ctrl-C/SIGTERM 会清理本机 worker 后返回取消 JSON（退出码 130�
 ## 8. 构建与发版（维护者）
 
 ```bash
-npm test        # 58 条：注册面/行为/格式化契约（真 CLI fixture）+ 真宿主契约
+npm test        # 注册/命令/格式、模型预算、生命周期与原生宿主集成
 ```
 
 `npm test` 里有两层守卫，别只跑一层：
 
 | 文件 | 钉住什么 | 依赖 |
 |---|---|---|
-| `test/plugin.test.mjs`（49 条） | 注册面、`/op` 行为、路径解析、超时/取消、`scrubEnv`/`normalizeConfig`、宿主日志（同类只记一次）、两个 formatter 吃**真 CLI fixture** | 无（替身 ctx + 假 CLI） |
-| `test/host-contract.test.mjs`（9 条） | 把插件注册进**装在机器上的** DSH 自己的 `cordis` + `dsh-commands` 服务真执行（含 `agent` 透传），并用真 `readPluginMeta` 读一遍「脸」、用真 `evaluatePluginCompatibility` 核 `engines.dsh`；最后一条用**真 MCP SDK 客户端**连真 server 验 `instructions` 到达客户端 | DSH 安装；最后一条还需要能 import 判定层的 python3。找不到就**跳过**（`DSH_APP_ROOT` / `OPERATOR_AGENT_PYTHON`） |
+| `test/plugin.test.mjs` | 注册面、`/op` 行为、路径解析、超时/取消、`scrubEnv`/`normalizeConfig`、宿主日志（同类只记一次）、两个 formatter 吃**真 CLI fixture** | 无（替身 ctx + 假 CLI） |
+| `test/host-contract.test.mjs` | 把插件注册进**装在机器上的** DSH 自己的 `cordis` + `dsh-commands` 服务真执行（含 `agent` 透传），并用真 `readPluginMeta` 读一遍「脸」、用真 `evaluatePluginCompatibility` 核 `engines.dsh`；最后一条用**真 MCP SDK 客户端**连真 server 验 `instructions` 到达客户端 | DSH 安装；最后一条还需要能 import 判定层的 python3。找不到就**跳过**（`DSH_APP_ROOT` / `OPERATOR_AGENT_PYTHON`） |
 
 第二层是必要的：替身 ctx 只会照单全收，而宿主的 `normalizeDefinition` / `normalizeResult`
 会拒绝不合规的命令定义与返回值；元数据那几条更只认**真模块解析器 + `exports` 映射**。
@@ -378,11 +418,9 @@ python -m pip wheel . --no-deps -w dist/
 - 从干净导出构建：`rsync -a --exclude output --exclude logs --exclude triton --exclude .git ./ /tmp/oa-src/`
   然后在 `/tmp/oa-src` 里构建。
 
-发布形态（2026-10-30 起）：`private` 已改为 `false`、`LICENSE`/`NOTICE` 已随包、可以发布。
-版本号现推进到 `0.1.16`（Python 侧 `0.6.7`）——`0.6.1` 曾同时指平铺 wheel 与分层源码，同号两物，
-换号理由与身份断链的明细见 `docs/phase1/delivery-identity-rebind-20261031.md`。
-实际执行顺序是 Python 包（PyPI）→ npm 壳（`npm publish`）→ README 里补一行 `dsh plugin add dsh-operator-agent`。
-工具契约仍是 **9**，本次没有改工具行为。逐字节副本与发版形态由
+当前正式本地交付身份为 Python **0.7.2** / 插件 **0.2.2** / 工具契约 **12**，未执行 PyPI/npm 公开发布。正式工件从保留源码快照构建并核对包内身份；本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`，安装成功需另有回执及 UI 版本核对。
+
+历史 `0.1.16` 插件 / Python `0.6.7` 的换号原因仍见[身份重绑定记录](../../docs/phase1/delivery-identity-rebind-20261031.md)，不作为当前版本说明。`private: false` 及随包 `LICENSE`/`NOTICE` 说明发布形态，不代表已上架。逐字节副本与发版形态由
 `tests/hygiene/test_packaging.py::TestTheDshReleaseShape` 和 CI 的 `release-shape` 作业守住
 （`.github/workflows/ci.yml`）。若将来把 `operator-dev-agent-design/` 的静态资源打进
 发布物，记得把 `THIRD_PARTY_NOTICES.md` 也列进 `files`。
@@ -393,3 +431,11 @@ python -m pip wheel . --no-deps -w dist/
 （版权人：`the operator-agent authors`）。npm 包里各带一份逐字节副本
 （[LICENSE](LICENSE)、[NOTICE](NOTICE)），因为安装方拿到的只有包内文件。
 第三方组件（ECharts / Mermaid）保留各自许可，见 [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md)。
+
+## v0.7.2 自然语言任务入口
+
+直接发送“帮我实现一个 FP32 ReLU，输入 4×8，在本机 CPU 验证正确性并给出源码，暂不测性能”即可；无需指定工具、预算、目录或 `/op new`。已有任务结束后，新用户轮次的独立需求可在同一主会话自动开启全新目录。解释结果或查询状态保持讨论；含糊的“继续”应先澄清。意图由 DSH 模型判断，插件执行轮次、目录、账本和清理硬门，每轮最多成功开启一项任务，不能同轮自动循环建目录补额度。真实用户证据见[自然语言入口复核](../../docs/examples/v072-natural-user-review.md)，保留 rc3/rc.6 的历史身份。
+
+独立终评后原轮总结仍计入任务预算，原轮结束后进入结果讨论。预算耗尽或到期的原轮停止，之后可继续讨论；普通讨论使用 DSH 模型正常计费，旧任务不能继续执行。新任务不改变旧任务的截止、消耗和证据。
+
+`/op new [新的绝对目录]` 保留为用户直接输入的手动入口，不调用模型；命令后下一次 prepare 才创建新契约和预算。`/op status` 无参数查看会话阶段，带目录查看相应任务。存在未结算模型请求、在飞验证或未知清理状态时禁止切换，需等待结算或 `/op cancel` 并确认终态。重启从本会话原生事件和账本恢复阶段，已结束任务不会因旧 prepare 回执重新占用会话。

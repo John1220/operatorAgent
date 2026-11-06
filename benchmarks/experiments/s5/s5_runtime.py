@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_DEPS = ROOT / 'output' / 'plugin_completion' / '20261027-s5' / 'runtime-deps' / 'site'
 MANIFEST = 'runtime-deps-manifest.json'
 HASH = re.compile(r'[0-9a-f]{64}\Z')
-OWNED = ('numpy', 'numpy.libs', 'numpy-2.0.2.dist-info')
+OWNED = ('numpy', 'numpy.libs')
 
 
 def deps_dir():
@@ -79,6 +79,10 @@ def materialize(from_site, dest=None):
     names = [name for name in OWNED if (source / name).exists()]
     if not (source / 'numpy').is_dir():
         raise ValueError('numpy installation not found in the supplied site-packages')
+    metadata = sorted(p.name for p in source.glob('numpy-*.dist-info') if p.is_dir())
+    if len(metadata) != 1:
+        raise ValueError('exactly one numpy distribution metadata directory is required')
+    names.extend(metadata)
     dest.mkdir(parents=True, mode=0o700)
     for name in names:
         src, target = source / name, dest / name

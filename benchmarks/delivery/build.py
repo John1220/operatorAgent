@@ -20,10 +20,19 @@ if (Path(__file__).resolve().parent.parent/'source/pyproject.toml').is_file():
     ROOT=Path(__file__).resolve().parent.parent/'source'
 FILES=('README.md','LICENSE','NOTICE','THIRD_PARTY_NOTICES.md','MANIFEST.in',
        'pyproject.toml','config.example.yaml','.python-version','docs/testing/v07-delivery.md',
-       'docs/testing/v07-support.md','docs/testing/v071-support.md',
+       'docs/testing/v07-support.md','docs/testing/v071-support.md','docs/testing/v072-support.md',
        'docs/status/v071-model-relay-acceptance-20261105.md',
-       'docs/design/dsh-host-context-workflow.md')
-DIRECTORIES=('operator_agent','remote_scripts','integrations/dsh-operator','benchmarks/delivery')
+       'docs/design/dsh-host-context-workflow.md','docs/status/v072-todo.md',
+       'docs/testing/v072-quickstart.md','docs/examples/v072-h20-softmax.md',
+       'docs/testing/v072-next-cases.md','docs/status/v072-session-lifecycle-acceptance-20261106.md',
+       'docs/status/v072-budget-resume-acceptance-20261106.md',
+       'docs/status/v072-auto-task-acceptance-20261106.md','docs/status/v072-release-20261106.md',
+       'docs/examples/v072-relu-user-review.md',
+       'docs/examples/v072-repair-user-review.md','docs/examples/v072-repair-user-review.json',
+       'docs/examples/v072-natural-user-review.md','docs/examples/v072-natural-user-review.json',
+       'docs/status/v072-host-context-acceptance-20261105.md')
+DIRECTORIES=('operator_agent','remote_scripts','integrations/dsh-operator','benchmarks/delivery',
+             'docs/examples/v072-test-prompts')
 
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -77,7 +86,8 @@ def build(output,python,source=ROOT):
                 raise ValueError('wheel source differs from snapshot: '+name)
     with tarfile.open(tgz) as archive:
         npm_names=archive.getnames()
-        required=['package/'+n for n in ('index.mjs','cordis.patch.yml','package.json','LICENSE','NOTICE',
+        required=['package/'+n for n in ('index.mjs','host-model-budget.mjs','host-model-ledger.mjs','host-session-lifecycle.mjs',
+            'cordis.patch.yml','package.json','LICENSE','NOTICE',
             'examples/v07/offline_smoke.py','examples/v07/profile-absolute-paths.patch.yml')]
         if any(n not in npm_names for n in required):raise ValueError('plugin missing delivery files')
         if any('__pycache__' in n or n.endswith('.pyc') for n in npm_names):
@@ -91,7 +101,7 @@ def build(output,python,source=ROOT):
             (guides/Path(name).name).write_text(
                 '[打开完整文档](../source/'+name+')\n', encoding='utf-8')
     tools=root/'tools';tools.mkdir()
-    for name in ('build.py','installed_smoke.py','dsh_profile.py'):
+    for name in ('build.py','installed_smoke.py','dsh_profile.py','install_dsh.py'):
         if (source/'benchmarks/delivery'/name).is_file():shutil.copy2(source/'benchmarks/delivery'/name,tools/name)
     project=tomllib.loads((snapshot/'pyproject.toml').read_text())['project']
     npm=json.loads((snapshot/'integrations/dsh-operator/package.json').read_text())

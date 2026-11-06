@@ -17,6 +17,7 @@ import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { startModelRelay } from "./model-relay.mjs";
+import { installHostModelBudget } from "./host-model-budget.mjs";
 
 export const name = "operator-tools";
 export const inject = ["commands"];
@@ -25,6 +26,8 @@ const USAGE = [
   "✓ 已执行 · /op help",
   "用法：",
   "  /op capabilities            这台机器能做什么（只读，不跑活）",
+  "  /op new [run_dir]            在本会话显式开启下一项独立任务（不调用模型）",
+  "  /op status                  查本会话的任务/讨论状态",
   "  /op status <run_dir> [invocation_id]  查任务/工具调用（含 cancelled）",
   "  /op cancel <run_dir> <invocation_id>  请求取消，再查 status 确认",
   "  /op help                    这段说明",
@@ -34,8 +37,9 @@ const USAGE = [
   "输出直接显示在对话里（一个可点开折叠的节点），**不进模型上下文**；",
   "折叠时只显示首行（以 ✓ 开头的那行），点它展开看完整明细。这是旁路查询，不产生轮次。",
   "",
-  "判定/修复/无人值守请用模型工具 mcp__operator__*：",
-  "  prepare → verify（外层写核）· repair（给一份已有的核）· run + status（无人值守）",
+  "开发请用模型工具 mcp__operator__*：",
+  "  host: prepare → context → 外层写核 → verify；resume 恢复原任务",
+  "  legacy: repair（已有核）· run + status（内层无人值守）",
 ].join("\n");
 
 
@@ -73,7 +77,7 @@ export function scrubEnv(source = process.env) {
   return out;
 }
 
-const KNOWN_CONFIG_KEYS = new Set(["command", "args", "timeoutMs", "env", "modelRelay"]);
+const KNOWN_CONFIG_KEYS = new Set(["command", "args", "timeoutMs", "env", "modelRelay", "hostModelBudget"]);
 
 /**
  * 配置校验。**不校验的代价是静默**：`comand:` 拼错会让 `/op` 悄悄换成另一个二进制，
@@ -211,7 +215,26 @@ export function formatStatus(payload, runDir = undefined) {
     if (budget.development_closed) lines.push("开发已关闭，以独立终评证据确认结果");
     const correct = payload.last_correct_candidate;
     if (correct) lines.push(`最近完整 L2 候选：${correct.source_hash}（不代表性能最佳）`);
-    lines.push("模型用量由 DSH 记录；插件未强制主会话累计调用上限");
+    const model = budget.model_budget;
+    if (model?.receipt_verified && model.enforcement === "host_enforced_receipt") {
+      lines.push(`模型派发：${count(model.calls?.reserved)} / ${count(model.calls?.limit)} · 剩余 ${count(model.calls?.remaining)}`);
+      lines.push(`输出 token 预留：${count(model.tokens?.output_reserved)} / ${count(model.tokens?.reservation_limit)}`);
+      lines.push("范围：任务绑定后的主模型请求；准备/辅助调用不在此限额，费用未知");
+    } else {
+      lines.push(`模型预算：${model?.enforcement ?? "未绑定或未知"}（没有有效宿主收据）`);
+    }
+    if (correct?.source) lines.push(`源码：${correct.source}`);
+    if (correct?.report) lines.push(`报告：${correct.report}`);
+    if (!correct && payload.latest_verification) {
+      lines.push("最近验证尚未取得完整 L2 资格，保留源码与失败报告");
+      if (payload.latest_verification.source) lines.push(`源码：${payload.latest_verification.source}`);
+      if (payload.latest_verification.report) lines.push(`报告：${payload.latest_verification.report}`);
+    }
+    for (const call of payload.calls || []) {
+      if (["running", "cancelling", "lost"].includes(call.phase) && call.invocation_id) {
+        lines.push(`工具实例：${call.invocation_id} · ${call.phase}`);
+      }
+    }
     return lines.join("\n");
   }
   if (payload.phase === "tool_calls") {
@@ -267,6 +290,16 @@ export function formatStatus(payload, runDir = undefined) {
 }
 
 export function apply(ctx, config = {}) {
+  let hostBudget;
+  if (config?.hostModelBudget !== undefined && config.hostModelBudget !== false) {
+    ctx.inject(["llm", "tools", "agents", "sessionQuery"], async function operatorHostBudget(hostCtx) {
+      await hostCtx.effect(() => {
+        const controller = installHostModelBudget(hostCtx, config.hostModelBudget);
+        hostBudget = controller;
+        return () => { if (hostBudget === controller) hostBudget = undefined; controller(); };
+      }, "operator-tools.hostModelBudget");
+    });
+  }
   const relayConfig = config?.modelRelay;
   if (relayConfig !== undefined) {
     // The opt-in relay follows the host LLM service lifecycle. /op only requires commands.
@@ -317,10 +350,19 @@ export function apply(ctx, config = {}) {
     return cwd ? resolvePath(cwd, text) : text;
   };
 
-  const handle = async (rawInput, signal, agent) => {
+  const handle = async (rawInput, signal, agent, commandId) => {
     const { sub, rest } = parseInput(rawInput);
     if (sub === "help" || sub === "-h" || sub === "--help") {
       return { kind: "success", text: USAGE };
+    }
+    if (sub === "new" || (sub === "status" && !rest && config.hostModelBudget !== undefined && config.hostModelBudget !== false)) {
+      if (!hostBudget) return { kind: "error", text: "✗ 任务入口尚未就绪：请确认 hostModelBudget 已启用，或等待插件加载后再试。" };
+      try {
+        const text = sub === "new"
+          ? await hostBudget.newTask({ agent, commandId, signal, ...(rest ? { runDir: resolveRunDir(rest, agent) } : {}) })
+          : await hostBudget.sessionStatus({ agent, signal });
+        return { kind: "success", text };
+      } catch (error) { return { kind: "error", text: `✗ 未切换任务 · ${error.message}` }; }
     }
     if (sub === "capabilities") {
       const out = await run(["capabilities"], signal);
@@ -366,9 +408,9 @@ export function apply(ctx, config = {}) {
     definitionId: "dsh-operator-agent",
     name: "op",
     description: "算子判定层：查能力 / 查无人值守状态（不经过模型）",
-    input: { hint: "capabilities | status <run_dir> [invocation_id] | cancel <run_dir> <invocation_id> | help" },
+    input: { hint: "new [run_dir] | capabilities | status [run_dir] [invocation_id] | cancel <run_dir> <invocation_id> | help" },
     // `agent` 是宿主给的（invocation = {commandId, agent, rawInput, attachments, signal}），
     // 只有它带着会话工作区，相对路径要靠它才能落到人想去的地方。
-    handler: async ({ rawInput, signal, agent }) => handle(rawInput, signal, agent),
+    handler: async ({ rawInput, signal, agent, commandId }) => handle(rawInput, signal, agent, commandId),
   });
 }

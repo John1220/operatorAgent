@@ -98,7 +98,7 @@ test("真宿主的 commands 服务收下 /op：名字、definitionId、hint 都�
   assert.equal(listed.length, 1);
   assert.equal(listed[0].name, "op");
   assert.equal(listed[0].definitionId, "dsh-operator-agent");
-  assert.equal(listed[0].input.hint, "capabilities | status <run_dir> [invocation_id] | cancel <run_dir> <invocation_id> | help");
+  assert.equal(listed[0].input.hint, "new [run_dir] | capabilities | status [run_dir] [invocation_id] | cancel <run_dir> <invocation_id> | help");
   // 真宿主上同样**不该**有自注册的提示段：说明来自 server 的 instructions，
   // 由 mcp-client 注册成 `mcp:operator`（见 dsh-mcp-client 的 registerServerContext）。
   assert.deepEqual(sections, []);

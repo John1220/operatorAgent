@@ -30,6 +30,9 @@ STATE = 'host-task.json'
 LOCK = '.host-task.lock'
 SCHEMA = 'operator-host-task-budget-v1'
 _HASH = re.compile(r'[0-9a-f]{64}\Z')
+MODEL_LIMIT_FIELDS = ('max_model_calls', 'max_output_tokens_per_call',
+                      'total_output_token_reservations')
+MODEL_STATE = 'host-model-budget.json'
 
 
 class HostTaskBudgetError(ValueError):
@@ -44,6 +47,9 @@ class HostTaskLimits:
     wall_clock_s: float = 600.0
     max_verifications: int = 6
     final_reserve: int = 1
+    max_model_calls: int = 12
+    max_output_tokens_per_call: int = 8192
+    total_output_token_reservations: int = 98304
 
     def __post_init__(self):
         if (type(self.wall_clock_s) not in (int, float)
@@ -53,6 +59,12 @@ class HostTaskLimits:
             raise ValueError('max_verifications must be an integer from 2 to 1000')
         if type(self.final_reserve) is not int or self.final_reserve != 1:
             raise ValueError('exactly one independent final verification must be reserved')
+        for name, maximum in (('max_model_calls', 1000),
+                              ('max_output_tokens_per_call', 40960),
+                              ('total_output_token_reservations', 40960000)):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError(name+' must be a positive integer no greater than '+str(maximum))
 
     def as_dict(self):
         return asdict(self)
@@ -177,7 +189,8 @@ def initialize_host_task(run, contract_hash, limits=None):
         if not host_task_enabled(run):
             policy = dict(schema=SCHEMA, contract_hash=contract_hash,
                           limits=limits.as_dict(), required_case_ids=cases)
-            body = (json.dumps(policy, sort_keys=True, allow_nan=False)+'\n').encode()
+            body = (json.dumps(policy, ensure_ascii=False, sort_keys=True,
+                               separators=(',', ':'), allow_nan=False)+'\n').encode('utf-8')
             write_once_artifact(run/POLICY, body)
             _write_state(run, dict(schema=SCHEMA, policy_hash=digest(policy),
                 task_id=uuid.uuid4().hex, started_epoch=time.time(),
@@ -203,6 +216,9 @@ class HostTaskBudget:
             raise HostTaskBudgetError('host_task_binding', 'host task journal binding differs')
         try:
             HostTaskLimits.from_dict(policy['limits'])
+            model_fields = set(policy['limits']) & set(MODEL_LIMIT_FIELDS)
+            if model_fields and model_fields != set(MODEL_LIMIT_FIELDS):
+                raise ValueError('incomplete frozen model limits')
             records = state['records']
             if (type(records) is not list
                     or [r['id'] for r in records] != list(range(1, len(records)+1))
@@ -267,6 +283,7 @@ class HostTaskBudget:
             phase, stop_reason = 'awaiting_host', None
         development_closed = final is not None or expired or remaining_exploration <= 0
         return dict(schema=SCHEMA, task_id=state['task_id'], contract_hash=self.contract_hash,
+            run_dir=str(self.run),
             phase=phase, stop_reason=stop_reason, development_closed=development_closed,
             terminal=phase in ('final_complete','final_failed','exhausted'),
             terminal_scope='task_budget_only_not_worker_or_provider_stop',
@@ -284,17 +301,109 @@ class HostTaskBudget:
             last_correct_candidate=(dict(source_hash=last['source_hash'], evidence=last['evidence'],
                 source=last.get('source'), report=last.get('report'), verification_id=last['id'],
                 scope='latest_complete_l2_only_not_performance_best') if last else None),
-            model_budget=dict(owner='host', enforcement='not_enforced_by_plugin',
-                              calls=None, tokens=None, cost='unknown'),
+            policy_hash=state['policy_hash'],
+            model_budget=self._model_budget(policy, state),
             wall_clock_scope='task_elapsed_across_calls; worker supervisor enforces in-flight deadline',
             reservation_unit='verification_dispatches_no_refund_not_gpu_seconds')
 
-    def snapshot(self):
+    def snapshot(self, *, readonly=False):
         with _locked(self.run):
             policy, state = self._load()
-            state['max_elapsed_s'] = self._elapsed(state)
-            _write_state(self.run,state)
+            if not readonly:
+                state['max_elapsed_s'] = self._elapsed(state)
+                _write_state(self.run,state)
             return self._snapshot(policy, state)
+
+    def _model_budget(self, policy, state):
+        limits = policy['limits']
+        base = dict(owner='host', calls=None, tokens=None, cost='unknown',
+                    task_id=state['task_id'], scope='native_main_model_dispatches_after_successful_prepare',
+                    preparation_request='excluded_before_successful_task_binding')
+        if not all(name in limits for name in MODEL_LIMIT_FIELDS):
+            return dict(base, enforcement='legacy_policy_without_model_limits',
+                        receipt_verified=False, limits=None)
+        model_limits = {name: limits[name] for name in MODEL_LIMIT_FIELDS}
+        path = self.run/MODEL_STATE
+        if not path.exists() and not path.is_symlink():
+            return dict(base, enforcement='not_bound', receipt_verified=False,
+                        limits=model_limits)
+        try:
+            receipt = _read(path)
+            def integer(value, minimum=0):
+                return type(value) is int and minimum <= value <= 9007199254740991
+            def integer_json(value):
+                if value is None or type(value) in (str, bool, int):
+                    return type(value) is not int or -9007199254740991 <= value <= 9007199254740991
+                if type(value) is list:
+                    return all(integer_json(item) for item in value)
+                return (type(value) is dict and all(type(key) is str and integer_json(item)
+                        for key, item in value.items()))
+            if (not integer_json(receipt)
+                    or receipt.get('state_hash') != digest({k:v for k,v in receipt.items() if k!='state_hash'})
+                    or receipt.get('schema') != 'operator-host-model-budget-v1'
+                    or receipt.get('task_id') != state['task_id']
+                    or receipt.get('contract_hash') != self.contract_hash
+                    or receipt.get('policy_hash') != state['policy_hash']
+                    or receipt.get('policy_bytes_sha256') != hashlib.sha256((self.run/POLICY).read_bytes()).hexdigest()
+                    or receipt.get('limits') != model_limits
+                    or receipt.get('scope') != base['scope']):
+                raise ValueError('model receipt binding or digest differs')
+            lease, records = receipt.get('lease'), receipt.get('records')
+            if (type(lease) is not dict or not isinstance(lease.get('id'),str) or not lease['id']
+                    or not isinstance(lease.get('session_id'),str) or not lease['session_id']
+                    or not integer(lease.get('owner_pid'),1) or not integer(lease.get('generation'),1)
+                    or not integer(lease.get('bound_at')) or type(records) is not list
+                    or len(records) > limits['max_model_calls']):
+                raise ValueError('invalid model lease or calls')
+            usage_fields = ('inputTokens','outputTokens','totalTokens','cacheReadTokens','cacheWriteTokens')
+            known_usage = []
+            for index, record in enumerate(records,1):
+                if (type(record) is not dict or type(record.get('id')) is not int or record['id']!=index
+                        or record.get('status') not in ('reserved','answered','failed','cancelled','abandoned')
+                        or any(type(record.get(key)) is not str or not record[key]
+                               for key in ('request_id','session_id','lease_id','provider','model'))
+                        or not integer(record.get('owner_pid'),1)
+                        or not integer(record.get('reserved_at'))
+                        or not integer(record.get('max_output_tokens_reserved'),1)
+                        or record['max_output_tokens_reserved'] > limits['max_output_tokens_per_call']
+                        or (record['status']=='reserved' and record.get('finished_at') is not None)
+                        or (record['status']!='reserved' and not integer(record.get('finished_at')))):
+                    raise ValueError('invalid model reservation')
+                usage = record.get('usage')
+                if usage is not None:
+                    if (type(usage) is not dict or set(usage)-set(usage_fields)
+                            or any(not integer(value) for value in usage.values())):
+                        raise ValueError('invalid model usage counters')
+                    if all(key in usage for key in ('inputTokens','outputTokens','totalTokens')):
+                        base_tokens=usage['inputTokens']+usage['outputTokens']
+                        cache_tokens=usage.get('cacheReadTokens',0)+usage.get('cacheWriteTokens',0)
+                        if usage['totalTokens'] not in (base_tokens,base_tokens+cache_tokens):
+                            raise ValueError('inconsistent model usage counters')
+                    if (record['status']!='reserved' and integer(usage.get('inputTokens'))
+                            and integer(usage.get('outputTokens')) and any(usage.values())):
+                        known_usage.append(usage)
+            reserved_output = sum(record['max_output_tokens_reserved'] for record in records)
+            if reserved_output > limits['total_output_token_reservations']:
+                raise ValueError('model output reservations exceed frozen policy')
+            known_output = sum(usage['outputTokens'] for usage in known_usage)
+            known_total = sum(usage.get('totalTokens',0) for usage in known_usage)
+            all_known = len(known_usage)==len(records)
+            return dict(base, enforcement='host_enforced_receipt', receipt_verified=True,
+                verification_scope='Frozen binding, integer self-hash and arithmetic only; '
+                                   'not proof of current hook installation, model attention or provider stop.',
+                limits=model_limits, lease=lease,
+                calls=dict(reserved=len(records),remaining=limits['max_model_calls']-len(records),
+                    limit=limits['max_model_calls'],unfinished=sum(record['status']=='reserved' for record in records)),
+                tokens=dict(output_reserved=reserved_output,
+                    remaining_reservations=limits['total_output_token_reservations']-reserved_output,
+                    reservation_limit=limits['total_output_token_reservations'],
+                    known_api_output_tokens=known_output, api_output_tokens=known_output if all_known else None,
+                    known_api_total_tokens=known_total,
+                    api_total_tokens=known_total if all_known and all('totalTokens' in usage for usage in known_usage) else None),
+                api_usage_known_calls=len(known_usage),api_usage_unknown_calls=len(records)-len(known_usage))
+        except (HostTaskBudgetError, OSError, ValueError, TypeError, KeyError):
+            return dict(base,enforcement='receipt_invalid',receipt_verified=False,limits=model_limits,
+                        receipt_error='host_model_receipt_invalid')
 
     def reserve(self, source_hash, *, purpose='explore', evidence=None, owner_invocation_id=None):
         _hash(source_hash, 'source_hash')

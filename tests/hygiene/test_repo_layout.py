@@ -56,7 +56,7 @@ DIRECTORY_BUDGETS = {
     "operator_agent/app": 12,
     "docs/design": 62,
     "docs/research": 75,
-    "docs/status": 46,
+    "docs/status": 51,            # v0.7.2：预算、生命周期、自动入口、封版与待办记录
     "docs/phase1": 8,               # 一期文档：清单 + 两份记录 + 目录索引
 }
 

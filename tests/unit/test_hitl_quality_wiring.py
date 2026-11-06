@@ -45,7 +45,8 @@ def test_mcp_repair_receives_diagnosis_and_returns_compact_evidence(tmp_path, mo
                     Level.L2_FUNCTION, True, metrics={'correctness':{'verdict':'passed'}})]]
     verification = Mock(side_effect=outcomes)
     monkeypatch.setattr(ht, 'Verifier', lambda _: SimpleNamespace(verify=verification))
-    monkeypatch.setattr(ht, '_make_backend', lambda *a, **k: (object(), {'requested':'mock'}))
+    monkeypatch.setattr(ht, '_make_backend', lambda *a, **k: (
+        SimpleNamespace(generation_instructions=''), {'requested':'mock'}))
     source = (Path(__file__).resolve().parents[1]/'fixtures/single_candidate_unmasked_variance.txt').read_text()
     source = source.replace('.to(tl.float16)', '.to(tl.float32)')
     corrected = source.replace('x_centered = x - mean',

@@ -70,6 +70,19 @@ def test_task_text_matches_the_earlier_vertical_runs():
     assert s5_preflight_plan.TASK == vertical_task
 
 
+def test_dependency_freeze_includes_the_supplied_numpy_distribution_metadata(tmp_path):
+    site = tmp_path / 'site'; (site / 'numpy').mkdir(parents=True)
+    (site / 'numpy/__init__.py').write_text('__version__ = "9.8.7"\n')
+    metadata = site / 'numpy-9.8.7.dist-info'; metadata.mkdir()
+    (metadata / 'METADATA').write_text('Name: numpy\nVersion: 9.8.7\n')
+    facts = s5_runtime.materialize(site, tmp_path / 'frozen')
+    assert facts['copied'] == ['numpy', 'numpy-9.8.7.dist-info']
+    assert (tmp_path / 'frozen/numpy-9.8.7.dist-info/METADATA').read_bytes() == (metadata / 'METADATA').read_bytes()
+    (site / 'numpy-1.0.0.dist-info').mkdir()
+    with pytest.raises(ValueError, match='exactly one numpy distribution'):
+        s5_runtime.materialize(site, tmp_path / 'ambiguous')
+
+
 def test_arm_surfaces_differ_only_by_installed_components(tmp_path):
     plans = {}
     for arm in ('A', 'B', 'C'):

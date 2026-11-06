@@ -1,0 +1,83 @@
+{
+  "session_id": "session-e21a4967-bc99-493f-85db-21dd3907d8d1",
+  "task_id": "2ce7aae534e8489a95a3a9469e1ff9b5",
+  "run_dir": "/Users/.../.local/share/operator-agent/trials/relu-repair-06292db7",
+  "checks": {
+    "round_1_integrity": true,
+    "round_1_source_binding": true,
+    "round_1_test_only": true,
+    "round_2_integrity": true,
+    "round_2_source_binding": true,
+    "round_2_test_only": true,
+    "round_3_integrity": true,
+    "round_3_source_binding": true,
+    "round_3_test_only": true,
+    "first_failed_as_requested": true,
+    "repair_and_final_full_suite": true,
+    "same_final_source": true,
+    "repair_feedback_bound": true,
+    "host_context_no_inner_model": true,
+    "all_workers_reaped": true,
+    "all_verifications_settled_on_time": true,
+    "all_model_calls_settled": true,
+    "old_ledger_unchanged": true,
+    "independent_task_same_contract": true,
+    "no_shell_or_other_workflow": true,
+    "submitted_code_matches_artifacts": true
+  },
+  "passed": true,
+  "rounds": [
+    {
+      "round": 1,
+      "purpose": "explore",
+      "levels": {
+        "L1": true,
+        "L2": false
+      },
+      "source_hash": "08abe3ce713fdb99d1a08f56b73f2daaec3c542debe17f8f9e309d932016f299",
+      "max_error": 1.0,
+      "suite_passed": 0,
+      "suite_not_run": 12
+    },
+    {
+      "round": 2,
+      "purpose": "explore",
+      "levels": {
+        "L1": true,
+        "L2": true
+      },
+      "source_hash": "9e1f490149ecc74ca07748cbdafe9ca5e3ef88585139935b182521aa9c85986d",
+      "max_error": 0.0,
+      "suite_passed": 12,
+      "suite_not_run": 0
+    },
+    {
+      "round": 3,
+      "purpose": "final",
+      "levels": {
+        "L1": true,
+        "L2": true
+      },
+      "source_hash": "9e1f490149ecc74ca07748cbdafe9ca5e3ef88585139935b182521aa9c85986d",
+      "max_error": 0.0,
+      "suite_passed": 12,
+      "suite_not_run": 0
+    }
+  ],
+  "budget": {
+    "verifications_used": 3,
+    "verifications_limit": 4,
+    "model_calls_used": 6,
+    "model_calls_remaining": 6,
+    "output_reserved": 49152,
+    "output_reservations_remaining": 49152,
+    "observed_api_output_tokens": 3311
+  },
+  "limits_of_evidence": {
+    "prior_successful_op_new": true,
+    "natural_language_only_test": false,
+    "gpu_acceptance": false,
+    "diagnosis_state": "unknown",
+    "diagnosis_reason": "unsupported_task_contract"
+  }
+}

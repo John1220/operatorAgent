@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -45,7 +46,7 @@ def test_same_policy_cannot_recreate_credit_or_change_contract(tmp_path):
     first=budget.snapshot()
     again=hb.initialize_host_task(run,budget.contract_hash)
     assert again['task_id']==first['task_id'] and again['reserved']==1
-    assert again['model_budget']['enforcement']=='not_enforced_by_plugin'
+    assert again['model_budget']['enforcement']=='not_bound'
     assert again['model_budget']['calls'] is None
     with pytest.raises(hb.HostTaskBudgetError,match='policy differs'):
         hb.initialize_host_task(run,budget.contract_hash,hb.HostTaskLimits(max_verifications=10))
@@ -457,3 +458,139 @@ def test_cooperative_system_exit_failure_is_normalized_by_owning_cancel_supervis
     assert rows[already_settled['id']]['settled_by']=='owning_supervisor'
     assert normalized['reserved']==3 and normalized['remaining_verifications']==5
     assert budget.settle_owner(owner,reject_completed=True)['settled_reservation_ids']==[]
+
+
+def test_model_policy_is_frozen_without_inventing_host_receipts(tmp_path):
+    run,budget=prepared(tmp_path,hb.HostTaskLimits(max_model_calls=3,
+        max_output_tokens_per_call=100,total_output_token_reservations=200))
+    policy=json.loads((run/hb.POLICY).read_text())
+    before=(run/hb.POLICY).read_bytes()
+    snapshot=budget.snapshot(readonly=True)
+    assert snapshot['run_dir']==str(run.resolve())
+    assert hashlib.sha256(before.removesuffix(b'\n')).hexdigest()==snapshot['policy_hash']
+    assert snapshot['model_budget']['enforcement']=='not_bound'
+    assert snapshot['model_budget']['limits']==dict(max_model_calls=3,
+        max_output_tokens_per_call=100,total_output_token_reservations=200)
+    assert snapshot['model_budget']['preparation_request']=='excluded_before_successful_task_binding'
+    assert not (run/hb.MODEL_STATE).exists() and (run/hb.POLICY).read_bytes()==before
+    with pytest.raises(hb.HostTaskBudgetError,match='policy differs'):
+        hb.initialize_host_task(run,budget.contract_hash,hb.HostTaskLimits(max_model_calls=4))
+    assert json.loads((run/hb.POLICY).read_text())==policy
+
+
+def model_receipt(run,budget):
+    policy=json.loads((run/hb.POLICY).read_text())
+    state=json.loads((run/hb.STATE).read_text())
+    lease=dict(id='lease-one',session_id='会话-one',owner_pid=os.getpid(),generation=1,bound_at=1000)
+    receipt=dict(schema='operator-host-model-budget-v1',task_id=state['task_id'],
+        contract_hash=budget.contract_hash,policy_hash=state['policy_hash'],
+        policy_bytes_sha256=hashlib.sha256((run/hb.POLICY).read_bytes()).hexdigest(),
+        scope='native_main_model_dispatches_after_successful_prepare',
+        limits={name:policy['limits'][name] for name in hb.MODEL_LIMIT_FIELDS},lease=lease,
+        records=[dict(id=1,request_id='request-one',session_id=lease['session_id'],
+            lease_id=lease['id'],owner_pid=os.getpid(),provider='provider',model='model',
+            max_output_tokens_reserved=100,status='answered',reserved_at=1001,finished_at=1002,
+            usage=dict(inputTokens=9,outputTokens=4,totalTokens=13)),
+            dict(id=2,request_id='request-two',session_id=lease['session_id'],
+            lease_id=lease['id'],owner_pid=os.getpid(),provider='provider',model='model',
+            max_output_tokens_reserved=100,status='failed',reserved_at=1003,finished_at=1004,usage=None)])
+    receipt['state_hash']=hb.digest(receipt)
+    hb.atomic_json(run/hb.MODEL_STATE,receipt)
+    return receipt
+
+
+def test_matching_integer_model_receipt_projects_known_and_unknown_usage(tmp_path):
+    run,budget=prepared(tmp_path)
+    receipt=model_receipt(run,budget)
+    snapshot=budget.snapshot(readonly=True)['model_budget']
+    assert snapshot['receipt_verified'] is True and snapshot['enforcement']=='host_enforced_receipt'
+    assert snapshot['calls']==dict(reserved=2,remaining=10,limit=12,unfinished=0)
+    assert snapshot['tokens']['output_reserved']==200
+    assert snapshot['tokens']['api_output_tokens'] is None
+    assert snapshot['tokens']['known_api_output_tokens']==4
+    assert snapshot['api_usage_known_calls']==1 and snapshot['api_usage_unknown_calls']==1
+    assert snapshot['lease']==receipt['lease'] and snapshot['cost']=='unknown'
+
+
+@pytest.mark.skipif(not shutil.which('node'),reason='Node is required for the DSH ledger wire check')
+def test_real_javascript_ledger_roundtrips_to_python_receipt(tmp_path):
+    run,budget=prepared(tmp_path)
+    task=budget.snapshot()['task_id']
+    module=Path(__file__).resolve().parents[2]/'integrations/dsh-operator/host-model-ledger.mjs'
+    program='''import{pathToFileURL}from'node:url';
+const{HostModelLedger}=await import(pathToFileURL(process.argv[1]).href);
+const ledger=new HostModelLedger(process.argv[2],{taskId:process.argv[3],contractHash:process.argv[4]});
+const bound=ledger.bind('python-wire-session');
+const fs=await import('node:fs');
+const host=JSON.parse(fs.readFileSync(process.argv[2]+'/host-task.json','utf8'));
+const policy=JSON.parse(fs.readFileSync(process.argv[2]+'/host-task-policy.json','utf8'));
+ledger.clock({remainingSeconds:Math.max(0,host.started_epoch+policy.limits.wall_clock_s-Date.now()/1000),
+  deadlineEpoch:host.started_epoch+policy.limits.wall_clock_s});
+const request=ledger.reserve('python-wire-session',bound.lease.id,{requestId:'wire-request',maxTokens:100,provider:'wire-provider',model:'wire-model'});
+ledger.finish('python-wire-session',bound.lease.id,request.id,{usage:{inputTokens:9,outputTokens:4,totalTokens:13}});
+'''
+    result=subprocess.run(['node','--input-type=module','-e',program,str(module),str(run),task,budget.contract_hash],
+        capture_output=True,text=True,timeout=15)
+    assert result.returncode==0,result.stderr
+    value=budget.snapshot(readonly=True)['model_budget']
+    assert value['receipt_verified'] is True and value['calls']['reserved']==1
+    assert value['tokens']['api_output_tokens']==4 and value['api_usage_unknown_calls']==0
+    assert value['lease']['session_id']=='python-wire-session'
+
+
+@pytest.mark.parametrize('mutation',[
+    lambda receipt:receipt.update(task_id='different'),
+    lambda receipt:receipt.update(policy_hash='a'*64),
+    lambda receipt:receipt.update(policy_bytes_sha256='b'*64),
+    lambda receipt:receipt['limits'].update(max_model_calls=99),
+    lambda receipt:receipt['records'][0].update(max_output_tokens_reserved=40961),
+    lambda receipt:receipt['records'][0].update(id=2),
+    lambda receipt:receipt['records'][0].update(reserved_at=1001.0),
+    lambda receipt:receipt['records'][0]['usage'].update(outputTokens=-1),
+])
+def test_invalid_model_receipt_never_claims_enforcement(tmp_path,mutation):
+    run,budget=prepared(tmp_path)
+    receipt=model_receipt(run,budget);mutation(receipt)
+    receipt['state_hash']=hb.digest({key:value for key,value in receipt.items() if key!='state_hash'})
+    hb.atomic_json(run/hb.MODEL_STATE,receipt)
+    value=budget.snapshot(readonly=True)['model_budget']
+    assert value['enforcement']=='receipt_invalid' and value['receipt_verified'] is False
+    assert value['calls'] is None and value['tokens'] is None
+
+
+def test_model_receipt_digest_and_symlink_fail_closed(tmp_path):
+    run,budget=prepared(tmp_path)
+    receipt=model_receipt(run,budget)
+    receipt['records'][0]['max_output_tokens_reserved']=50
+    hb.atomic_json(run/hb.MODEL_STATE,receipt)
+    assert budget.snapshot()['model_budget']['enforcement']=='receipt_invalid'
+    moved=run/'other-model-state.json';(run/hb.MODEL_STATE).rename(moved)
+    (run/hb.MODEL_STATE).symlink_to(moved)
+    assert budget.snapshot()['model_budget']['receipt_verified'] is False
+
+
+def test_legacy_policy_keeps_verification_credit_without_minting_model_limits(tmp_path):
+    run,budget=prepared(tmp_path)
+    policy=json.loads((run/hb.POLICY).read_text())
+    for name in hb.MODEL_LIMIT_FIELDS:policy['limits'].pop(name)
+    (run/hb.POLICY).chmod(0o600)
+    hb.atomic_json(run/hb.POLICY,policy)
+    state=json.loads((run/hb.STATE).read_text());state['policy_hash']=hb.digest(policy)
+    hb._write_state(run,state)
+    before=(run/hb.POLICY).read_bytes()
+    value=budget.snapshot(readonly=True)
+    assert value['model_budget']['enforcement']=='legacy_policy_without_model_limits'
+    assert value['model_budget']['limits'] is None
+    reservation=budget.reserve(code_hash(WRONG));budget.finish(reservation['id'],outcome='failed')
+    assert budget.snapshot()['reserved']==1 and (run/hb.POLICY).read_bytes()==before
+    with pytest.raises(hb.HostTaskBudgetError,match='policy differs'):
+        hb.initialize_host_task(run,budget.contract_hash)
+
+
+@pytest.mark.parametrize('options',[
+    dict(max_model_calls=0),dict(max_model_calls=True),dict(max_model_calls=1001),
+    dict(max_output_tokens_per_call=40961),dict(total_output_token_reservations=0),
+    dict(total_output_token_reservations=1.5),
+])
+def test_model_limits_are_strict_positive_integer_policies(options):
+    with pytest.raises(ValueError):hb.HostTaskLimits(**options)

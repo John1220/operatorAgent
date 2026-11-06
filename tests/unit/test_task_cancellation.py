@@ -13,6 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
+# 进程/截止/取消时序敏感: 并行运行时抖动, 用 -m serial 单独串行跑。
+pytestmark = pytest.mark.serial
+
 from operator_agent.execute.task_clock import monotonic
 from operator_agent.app import autonomous, hitl_tools as ht
 from operator_agent.execute import exec_guard

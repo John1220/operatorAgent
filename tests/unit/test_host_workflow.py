@@ -36,6 +36,10 @@ def test_host_generates_repairs_and_independently_verifies_without_inner_llm(tmp
     assert 'Import only numpy/math.' in json.dumps(materials)
     failed = tool('operator_verify', run_dir=run, code=WRONG, backend='fake', stop_after='L2', candidate_origin='outer')
     assert failed['levels']['L2'] is False
+    stopped = tool('operator_status', run_dir=run)
+    assert stopped['last_correct_candidate'] is None
+    assert stopped['latest_verification']['source_hash'] == code_hash(WRONG)
+    assert Path(stopped['latest_verification']['report']).is_file()
     repair = tool('operator_context', run_dir=run, backend='fake', phase='repair', verification_round=failed['round'])
     assert repair['context']['candidate']['source'] == WRONG
     assert repair['context']['candidate']['source_hash'] == code_hash(WRONG)
@@ -51,7 +55,7 @@ def test_host_generates_repairs_and_independently_verifies_without_inner_llm(tmp
     assert final['host_task']['remaining_final'] == 0 and final['host_task']['reserved'] == 3
     recovered = tool('operator_status', run_dir=run)
     assert recovered['last_correct_candidate']['source_hash'] == code_hash(CORRECT)
-    assert recovered['host_task']['model_budget']['enforcement'] == 'not_enforced_by_plugin'
+    assert recovered['host_task']['model_budget']['enforcement'] == 'not_bound'
     assert not (Path(run)/'model-journal').exists()
 
 

@@ -29,6 +29,21 @@ def build(arm, root, runtime, **kwargs):
         isolation_runtime=runtime, **kwargs)
 
 
+@pytest.mark.skipif(not s5_runtime.available(), reason='frozen runtime deps unavailable')
+def test_staged_plugin_dependencies_are_bound_to_the_current_source(tmp_path):
+    runtime = jail.stage_runtime(tmp_path / 'runtime')
+    expected = {'plugin/index.mjs', 'plugin/model-relay.mjs', 'plugin/host-model-budget.mjs',
+                'plugin/host-model-ledger.mjs', 'plugin/host-session-lifecycle.mjs', 'plugin/package.json'}
+    assert {name for name in runtime['files'] if name.startswith('plugin/')} == expected
+    jail.verify_source_version(runtime)
+    module = Path(runtime['root']) / 'plugin/host-session-lifecycle.mjs'
+    module.write_text(module.read_text() + '\n// changed frozen dependency\n')
+    runtime['files']['plugin/host-session-lifecycle.mjs'] = jail.checksum(module)
+    jail.verify_runtime(runtime)
+    with pytest.raises(ValueError, match='staged plugin no longer matches'):
+        jail.verify_source_version(runtime)
+
+
 @pytest.mark.skipif(not READY, reason='macOS Seatbelt/runtime unavailable')
 @pytest.mark.parametrize('arm', ['A','B','C'])
 def test_file_visibility_matrix_and_child_processes(tmp_path, staged, arm):
@@ -113,6 +128,7 @@ def test_actual_dsh_bootstraps_inside_outer_file_boundary(tmp_path, staged, arm)
             response=s5_arm_env.start_headless(built,'Reply OK.',timeout=45)
     (tmp_path/'bootstrap.json').write_text(json.dumps(response,indent=2))
     assert response['returncode']==0,response['stderr']
+    assert 'did not activate' not in response['stderr']
     assert _final_text(response['events'])=='OK'
 
 

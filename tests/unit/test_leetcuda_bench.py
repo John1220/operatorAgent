@@ -11,6 +11,11 @@ import sys
 import unittest
 from pathlib import Path
 
+import pytest
+
+# 评分器子进程自测: 13 个用例约 41 s, 日常循环用 -m 'not slow' 跳过。
+pytestmark = pytest.mark.slow
+
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 

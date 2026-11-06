@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "operator-agent"
-version = "0.7.2.dev2"
+version = "0.7.2"
 description = "无人值守 GPU 算子开发 agent：设计/生成/验证/修复 Triton 核，并给出可审计的判定"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -29,3 +29,11 @@ include = ["operator_agent*", "remote_scripts*"]
 
 [tool.setuptools.package-data]
 operator_agent = ["prompts/*.md", "skills/*.md"]
+
+[tool.pytest.ini_options]
+# 裸跑 `pytest` 也只收集 tests/，不再扫到根目录的真机 driver 与 vendored triton。
+testpaths = ["tests"]
+markers = [
+  "slow: 验收/子进程重的用例（tests/acceptance 整组、LeetCUDA 评分器子进程自测），日常用 -m 'not slow' 跳过",
+  "serial: 进程、截止与取消时序敏感的用例，并行运行时须单独串行执行",
+]

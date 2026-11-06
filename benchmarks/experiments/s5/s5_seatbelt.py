@@ -17,6 +17,8 @@ from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT, NODE
 
 SANDBOX = '/usr/bin/sandbox-exec'
 ROOT = Path(__file__).resolve().parents[3]
+PLUGIN_FILES = ('index.mjs', 'model-relay.mjs', 'host-model-budget.mjs',
+                'host-model-ledger.mjs', 'host-session-lifecycle.mjs', 'package.json')
 
 
 def checksum(path):
@@ -32,7 +34,7 @@ def stage_runtime(output):
         shutil.copytree(ROOT / name, out / 'core' / name, ignore=ignore)
     shutil.copytree(s5_runtime.deps_dir(), out / 'deps', ignore=ignore)
     (out / 'plugin').mkdir()
-    for name in ('index.mjs', 'package.json'):
+    for name in PLUGIN_FILES:
         shutil.copyfile(ROOT / 'integrations/dsh-operator' / name, out / 'plugin' / name)
     files = {}
     for f in sorted(out.rglob('*')):
@@ -60,13 +62,34 @@ def verify_source_version(runtime):
     for name, expected in protocol_identity().items():
         if runtime['files'].get('core/'+name)!=expected:
             raise ValueError('staged core no longer matches the supervisor source version')
-    for name in ('index.mjs','package.json'):
+    for name in PLUGIN_FILES:
         if runtime['files'].get('plugin/'+name)!=checksum(ROOT/'integrations/dsh-operator'/name):
             raise ValueError('staged plugin no longer matches the source version')
 
 
 def _quote(path):
     return json.dumps(str(Path(path).resolve()), ensure_ascii=False)
+
+
+def python_files():
+    """Freeze only Python's launcher/link chain and framework executables."""
+    files = set()
+    path = Path(sys.executable).absolute()
+    for _ in range(16):
+        files.add(path)
+        files.update(parent for parent in path.parents if parent.is_symlink())
+        physical = path.parent.resolve() / path.name
+        files.add(physical)
+        if not physical.is_symlink():
+            break
+        target = Path(os.readlink(physical))
+        path = Path(os.path.abspath(target if target.is_absolute() else physical.parent / target))
+    else:
+        raise ValueError('Python executable symlink chain exceeds bound')
+    base = Path(sys.base_prefix).resolve()
+    files.update(p for p in (base / 'Python', base / 'Resources/Python.app/Contents/MacOS/Python')
+                 if p.is_file())
+    return sorted(files)
 
 
 def profile(read_roots, read_files, write_roots, *, python_prefix):
@@ -116,14 +139,14 @@ def configure(built, runtime):
         reads.append(runtime_root / 'core')
     if built['arm'] == 'C':
         reads.append(runtime_root / 'plugin')
-    files = [Path(sys.executable), Path(NODE), arm_root / 'patch.json']
+    files = [*python_files(), Path(NODE), arm_root / 'patch.json']
     files += [Path(p) for p in ('/private/etc/hosts', '/private/etc/resolv.conf',
                                '/private/etc/localtime', '/private/etc/services',
                                '/private/var/select/sh')]
     if built.get('development_enabled'):
         files.append(Path(built['env']['OPERATOR_AGENT_S5_DEV_CONFIG']))
     writes = [Path(built['home']), Path(built['work']), tmp]
-    text = profile(reads, files, writes, python_prefix=sys.prefix)
+    text = profile(reads, files, writes, python_prefix=sys.base_prefix)
     target = arm_root / 'isolation.sb'
     with target.open('x') as f:
         f.write(text)
@@ -154,7 +177,7 @@ def wrap(built, command):
     verify_runtime(policy['runtime'])
     path = Path(policy['profile'])
     expected = profile(policy['read_roots'], policy['read_files'], policy['write_roots'],
-                       python_prefix=sys.prefix)
+                       python_prefix=sys.base_prefix)
     if (path.is_symlink() or not path.is_file() or checksum(path) != policy['profile_sha256']
             or path.read_text() != expected):
         raise ValueError('isolation policy drift; refusing unsandboxed launch')

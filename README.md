@@ -4,9 +4,14 @@
 attention 等），由 LLM agent 设计、生成、修复 Triton / CUDA 核，经三级验证
 （L1 编译 → L2 功能 → L3 性能 + Roofline）后产出**可审计**的结论。
 
-- 版本：`0.7.2.dev2`（开发中），正在改为 [DSH 外层组装上下文与迭代](docs/design/dsh-host-context-workflow.md)。已封版的 `0.7.1` 支持范围见 [支持清单](docs/testing/v071-support.md)，安装与回退见 [交付记录](docs/testing/v07-delivery.md#12-v071-本地封版)。公开包仓库未发布。
+- 版本：`0.7.2`，采用 [DSH 外层组装上下文与迭代](docs/design/dsh-host-context-workflow.md)。本地交付状态及工件身份见 [v0.7.2 封版记录](docs/status/v072-release-20261106.md)，能力与限制见 [支持清单](docs/testing/v072-support.md)。已封版的 `0.7.1` 与[安装回退记录](docs/testing/v07-delivery.md#12-v071-本地封版)保留。公开包仓库未发布。
+- 当前开发与封版剩余事项见 [v0.7.2 封版待办](docs/status/v072-todo.md)。
+- [v0.7.2 技术方案与图示](docs/design/dsh-host-context-workflow.md)包含总体架构图、开发流程图、恢复时序图和模块职责映射。
+- [完整执行示例与日志](docs/examples/v072-h20-softmax.md)：真实 DSH 外层在 H20 上生成 Softmax、完成验证和独立终评，并附修复与同会话恢复实例。
+- [v0.7.2 自助试跑指南](docs/testing/v072-quickstart.md)：本机配置、可复制的 ReLU 提示词、日志查看与取消/恢复。
 - 固定 DSH 模型路由已完成[真实模型与 H20 验收](docs/status/v071-model-relay-acceptance-20261105.md)，转发仍需显式启用，性能提升未确立。历史 `0.7.0` 的[冻结支持清单](docs/testing/v07-support.md)保持原样。
 - 运行模式：DSH 外层驱动上下文、生成与迭代；独立 CLI 保留无人值守流程
+- DSH 默认配置为绑定后的主模型请求执行任务级调用与输出预留硬门；同会话恢复保留原任务和预算，`operator_resume` 返回候选与证据引用。任务结束后可讨论，用户在新一轮直接提出新任务，由 DSH 自动准备独立任务；`/op new` 保留为手动入口。绑定前准备和辅助调用不在该限额内，费用未知。
 - DSL：Triton / CUDA 为主；后端接口预留模板型后端
 
 ## 30 秒开始
@@ -34,9 +39,22 @@ python3 benchmarks/demos/demo_spine_local.py
 python test_nvidia_matmul.py
 ```
 
-> ⚠️ 请始终用 `python -m pytest tests/`，**不要裸跑 `pytest`**：根目录没有 pytest 配置，
-> 裸跑会收集到根目录那几个需要真机的 driver，还会钻进本地 vendored 的 `triton/` 检出
-> （实测 76 个 collection error）。
+> ⚠️ 请始终用 `python -m pytest tests/`：`pyproject.toml` 已设 `testpaths`，裸跑也只收集
+> `tests/`，不会扫到根目录那几个需要真机的 driver 或 vendored 的 `triton/` 检出。
+
+日常循环不必跑全量（全量约 12 分钟，含真实 DSH/沙箱子进程）：`tests/acceptance` 整组和
+LeetCUDA 评分器子进程自测标了 `slow`，`-m "not slow"` 可跳过；进程/截止/取消敏感的用例标了
+`serial`，并行运行时须单独串行。常用组合：
+
+```bash
+python -m pytest -q -m "not slow and not serial" -n 4 --dist loadfile    # 日常，约 80 s
+python -m pytest -q -m "slow"                                             # 验收组，约 4 min（普通终端）
+python -m pytest -q -m "serial"                                           # 时序组，约 20 s
+python -m pytest -q                                                        # 全量（封版前），约 12 min
+```
+
+> 需要 `pytest-xdist`（`uv pip install pytest-xdist`）。并发度别开到 `-n auto`：
+> 本机 11 核实测会让几个依赖时序/共享状态的用例偶发失败（`-n 4` 连跑两遍全绿）。
 
 ## 先读哪份文档
 

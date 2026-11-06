@@ -1,4 +1,4 @@
-"""MCP stdio server：host 六工具与兼容的 legacy 工具面。
+"""MCP stdio server：host 七工具与兼容的 legacy 工具面。
 
 为什么是这个形态（`docs/dsh-plugin-evaluation.md` §6.2 / §9.6）：
 
@@ -129,18 +129,37 @@ route 与 eligibility 一起读；conflict.action=hold_for_measurement 时先恢
 validity=degraded/unknown 不支持性能提升或继续调参的结论。诊断是假设，不是通过凭据。
 
 完整 L2 通过后，使用同一源码再次 operator_verify(verification_purpose=final) 完成独立
-终评；探索调用不能用掉预留的最终验证。报告源码/契约哈希、源码和报告路径、L1/L2/L3、
-validity 以及剩余预算。失败、取消、未知和已发生的调用均保留，不能靠新建目录重置同一任务预算。
-operator_status 可恢复任务账本与最后已证明正确的候选；这不代表它性能最佳。
+终评；探索调用不能用掉预留的最终验证。默认简洁交付用户可用的源码或源码链接、验证结论和
+报告链接；用户要求完整源码时给出完整源码。说明测试范围与未完成项，不逐段复述内部流程。
+ABI、工具参数、完整哈希、后端选路与预算细节保留在证据中，用户询问时再展开；
+预算耗尽、验证失败或证据不足时仍须说明原因与可采取的操作，不能省略影响结论的限制。
+引用模型用量时标明它是总结前快照，最终结算以模型账本为准。
+解释数值容差时遵循该回执的具体判据，不把单独超过 atol 说成必然失败：
+当前元素比较失败要求绝对误差同时超过 atol 与相对容差 rtol*abs(reference)，
+其他 oracle/套件仍以实际工具回执为准，不把有限测试通过扩大为任意输入域证明。
+失败、取消、未知和已发生的调用均保留，不能靠新建目录重置同一任务预算。
+operator_status 查询任务账本与最后已证明正确的候选；这不代表它性能最佳。
+恢复已有任务用 operator_resume，不要重新 prepare。读取 next_action/next_context，再按需取
+领域材料；保留原 task_id、契约、deadline 和所有已花额度，不自动清理未知在飞 owner。
 
-验证次数与墙钟由插件跨调用约束；模型调用和 token 由 DSH 持有，当前插件未强制限制
-主会话累计模型用量，不要将提示中的调用上限说成硬门。准备新的任务或改变契约需用户明确要求。
+验证次数与墙钟由插件跨调用约束。标准 DSH profile 的 hostModelBudget 在成功绑定任务后，
+为主模型请求发送前预留调用次数及输出 token；失败/取消不退款，恢复不增加额度。
+准备绑定前和辅助模型调用不计入该任务预算，费用保持未知。同一会话同时只执行一个任务；
+原轮 final 后的汇总也计入任务预算，轮次结束后可以讨论已有结果，讨论按 DSH 正常计费。
+普通讨论只使用只读算子工具，不得继续旧任务 verify。用户在新一轮明确要求运行另一项任务或测试新 case 时，
+由你判断意图并直接 prepare 全新目录，无需用户输入命令；新预算只属于独立任务。
+解释结果、查询状态或含糊的“继续”不代表新任务要求；意图不明时先澄清。
+同一轮不能自动循环建立新任务、换目录重试耗尽任务或修改原判据补额度。
+用户的自然语言新任务要求与本轮 prepare 即为自动切换；/op new 仅保留为可选手动入口。
+预算耗尽时如实停止；本轮结束后可以讨论，但旧任务额度不增加。用户可直接 /op status 查会话状态，
+或 /op status <run_dir> 查预算、源码和报告，或 /op cancel 取消验证，
+这些旁路命令不调用模型。改变冻结判据需用户明确要求，并按支持边界开启新任务。
 operator_cancel(run_dir, invocation_id) 取消在飞验证，随后查 status 确认 worker 清理。
 工具取消不自动终止整个 DSH 会话；宿主取消也不证明服务商已停止执行/计费。
 本模式不提供 operator_run/operator_repair/operator_bench；不得用旧内层循环替代外层生成。
 """
 
-HOST_TOOLS = frozenset(('operator_prepare', 'operator_context', 'operator_verify',
+HOST_TOOLS = frozenset(('operator_prepare', 'operator_resume', 'operator_context', 'operator_verify',
                         'operator_status', 'operator_cancel', 'operator_capabilities'))
 
 
@@ -389,6 +408,17 @@ def _tool_definitions() -> list[dict]:
         'type': 'string', 'enum': ['explore', 'final'], 'default': 'explore',
         'description': 'host task 的探索验证或预留的独立终评；final 需相同源码已完整 L2 通过。'}
     if _host_mode():
+        definitions.append({
+            'name': 'operator_resume',
+            'description': '恢复原 host 任务的身份、预算与候选引用；不重置截止/额度，不调用模型。根据 next_action/next_context 继续或报告停止。',
+            'inputSchema': {'type': 'object', 'additionalProperties': False,
+                'required': ['run_dir', 'backend'],
+                'properties': {
+                    'run_dir': {'type': 'string'},
+                    'backend': {'type': 'string', 'enum': ['mock', 'local', 'ssh', 'fake']},
+                    'verification_round': {'type': 'integer', 'minimum': 1},
+                }},
+        })
         selected = [tool for tool in definitions if tool['name'] in HOST_TOOLS]
         prepared = next(tool for tool in selected if tool['name'] == 'operator_prepare')
         prepared['inputSchema']['properties']['host_budget'] = {
@@ -396,8 +426,11 @@ def _tool_definitions() -> list[dict]:
             'properties': {
                 'wall_clock_s': {'type': 'number', 'exclusiveMinimum': 0, 'default': 600},
                 'max_verifications': {'type': 'integer', 'minimum': 2, 'maximum': 1000, 'default': 6},
+                'max_model_calls': {'type': 'integer', 'minimum': 1, 'maximum': 1000, 'default': 12},
+                'max_output_tokens_per_call': {'type': 'integer', 'minimum': 1, 'maximum': 40960, 'default': 8192},
+                'total_output_token_reservations': {'type': 'integer', 'minimum': 1, 'maximum': 40960000, 'default': 98304},
             },
-            'description': '跨工具调用的验证任务预算，固定预留一次独立终评；模型用量由宿主管理。'}
+            'description': '冻结跨调用验证和宿主主模型预算；预留一次独立终评，模型额度在DSH绑定后发送前执行，不是精确账单/GPU秒数上限。'}
         return selected
     from ..execute.s5_verify_client import enabled
     if enabled():
@@ -496,6 +529,9 @@ _RUN_OPTION_KEYS = ("max_rounds", "backend", "host", "port", "user", "key_path",
 
 def _call_tool(name: str, arguments: dict) -> dict:
     _guard_host_tool(name)
+    if name == 'operator_resume':
+        from .host_workflow import resume
+        return _text_result(resume(**dict(arguments or {})), compact=True)
     if _host_mode() and name in ('operator_context', 'operator_verify'):
         from ..execute.host_task_budget import host_task_enabled
         if not arguments.get('run_dir') or not host_task_enabled(arguments['run_dir']):

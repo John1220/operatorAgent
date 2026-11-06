@@ -1,0 +1,49 @@
+{
+  "session_id": "session-e21a4967-bc99-493f-85db-21dd3907d8d1",
+  "task_id": "5d11e4f638994fdc95e305968533846f",
+  "run_dir": "/Users/.../.local/share/operator-agent/trials/relu-4x8-cpu-3ad91e57",
+  "checks": {
+    "round1_integrity": true,
+    "round1_full_L2": true,
+    "round1_test_only": true,
+    "round2_integrity": true,
+    "round2_full_L2": true,
+    "round2_test_only": true,
+    "final_same_source": true,
+    "discussion_no_tools": true,
+    "no_new_command_since_last_task": true,
+    "model_settled": true,
+    "workers_reaped": true,
+    "first_task_byte_unchanged": true,
+    "repair_task_state_unchanged": true,
+    "three_distinct_tasks": true,
+    "only_host_tools": true,
+    "defaults_selected_by_host": true
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "purpose": "explore",
+      "source_hash": "0ea99cb8afad343f4f995f9f4a5ff6a280f4e7d0ff61bec040e77a9a51d7c9c0",
+      "L1": true,
+      "L2": true,
+      "cases_passed": 12,
+      "max_error": 0.0
+    },
+    {
+      "round": 2,
+      "purpose": "final",
+      "source_hash": "0ea99cb8afad343f4f995f9f4a5ff6a280f4e7d0ff61bec040e77a9a51d7c9c0",
+      "L1": true,
+      "L2": true,
+      "cases_passed": 12,
+      "max_error": 0.0
+    }
+  ],
+  "model_calls_bound": 4,
+  "model_calls_before_binding": 2,
+  "output_reserved": 32768,
+  "API_output_tokens_bound": 3551,
+  "old_repair_task_state_hash": "096ef81d60acd69bb2bc65ec1013d01c98adad159f5be7c3b50ae4ce1460aea3",
+  "passed": true
+}

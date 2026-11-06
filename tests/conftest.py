@@ -35,6 +35,10 @@ enable_for_harness()
 _SESSION_LOG_DIR = tempfile.mkdtemp(prefix="operator_agent_tests_logs_")
 _SESSION_OUTPUT_DIR = tempfile.mkdtemp(prefix="operator_agent_tests_output_")
 
+# configure 之后真正生效的目录; 守卫比这个, 而不是 import 时创建的临时目录
+# (xdist worker 会继承主进程的 env, 两者本来就可能不同)。
+_EXPECTED = {}
+
 
 def pytest_configure(config):
     os.environ.setdefault("OPERATOR_AGENT_LOG_DIR", _SESSION_LOG_DIR)
@@ -47,13 +51,17 @@ def pytest_configure(config):
     # 负样本库同一条纪律 (doc 45)。它比正样本库更危险: 每条失败都写, 不做入库门,
     # 一次测试批次就能把语料灌满 mock 的假失败。
     os.environ.setdefault("OPERATOR_AGENT_FAILURE_DB", "off")
+    # pytest-xdist 的 worker 会继承主进程已设的 env, 而每个进程在 import 时都建过自己的
+    # 临时目录 —— 所以守卫要比的是「本进程 configure 后真正生效的值」, 不是 import 时的变量。
+    _EXPECTED.update(log=os.environ["OPERATOR_AGENT_LOG_DIR"],
+                     output=os.environ["OPERATOR_AGENT_OUTPUT_DIR"])
 
 
 @pytest.fixture(scope="session", autouse=True)
 def _assert_side_effects_are_redirectable():
     """守住这条机制本身: 变量若被改掉, 测试又会开始写仓库的 logs/ 与 output/。"""
-    assert os.environ.get("OPERATOR_AGENT_LOG_DIR") == _SESSION_LOG_DIR, (
+    assert os.environ.get("OPERATOR_AGENT_LOG_DIR") == _EXPECTED["log"], (
         "OPERATOR_AGENT_LOG_DIR 没生效 —— 单元测试会重新污染仓库的 logs/ 目录")
-    assert os.environ.get("OPERATOR_AGENT_OUTPUT_DIR") == _SESSION_OUTPUT_DIR, (
+    assert os.environ.get("OPERATOR_AGENT_OUTPUT_DIR") == _EXPECTED["output"], (
         "OPERATOR_AGENT_OUTPUT_DIR 没生效 —— 单元测试会重新往仓库 output/ 灌 mock 现场")
     yield

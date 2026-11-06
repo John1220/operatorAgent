@@ -72,7 +72,8 @@ from ..execute.fake_backend.config import tool_context
 #: 9: repair 有限任务预算、独立模型/验证账本和监督截止；新增阶段/usage 审计元数据。
 #: 10: 显式 fake 后端、run 场景/模型配置与 test_only 执行上下文。
 #: 11: host workflow 的领域材料、跨调用验证预算和预留的独立终评。
-TOOL_VERSION = 11
+#: 12: 宿主模型预算政策、收据与不重置原任务的恢复入口。
+TOOL_VERSION = 12
 
 #: 允许进 `declaration` 的键（§6.3 的白名单）。**没列在这里的一律拒绝** ——
 #: 「先收下、以后再判断」是这一层最不能有的形状：它等于给未来开了一个没说出口的口子。
@@ -1323,10 +1324,15 @@ def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) 
         _, _, contract = prepared_task(run)
         budget = HostTaskBudget(run, contract.hash).snapshot()
         calls = sorted((run/'tool-calls').glob('*/run-status.json'))
+        latest = next((record for record in reversed(budget['records'])
+            if record['status']=='completed' and record.get('source') and record.get('report')
+            and record.get('accepted_by_supervisor') is not False), None)
         return dict(ok=True, workflow='host', phase=budget['phase'], run_dir=str(run),
             host_task=budget, calls=[autonomous_status(p.parent) for p in calls],
             last_correct_candidate=budget.get('last_correct_candidate'),
-            context_owner='host', model_calls='host_owned_not_observed_by_plugin')
+            latest_verification=({key:latest.get(key) for key in ('id','source_hash','source','report',
+                'evidence','full_l2_passed','validity')} if latest else None),
+            context_owner='host', model_calls='host_owned_see_verified_model_budget_receipt')
     from ..execute.task_cancellation import read_json, cancellation, partial_artifacts, valid_invocation
     if invocation_id is not None:
         if not valid_invocation(invocation_id):

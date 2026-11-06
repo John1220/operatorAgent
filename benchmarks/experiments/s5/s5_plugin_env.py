@@ -2,7 +2,6 @@
 from __future__ import annotations
 import hashlib
 import json
-import os
 from pathlib import Path
 import shutil
 import sys
@@ -14,29 +13,12 @@ ARMS=('A','C')
 
 
 def _python_files():
-    # A venv can traverse .venv/bin -> Homebrew opt -> Cellar/bin -> framework.
-    # Seatbelt needs literal reads for the intermediate symlinks as well as the
-    # final binary. Keep those individual files, never the surrounding tree.
-    files=set()
-    path=Path(sys.executable).absolute()
-    for _ in range(16):
-        files.add(path)
-        files.update(parent for parent in path.parents if parent.is_symlink())
-        physical=path.parent.resolve()/path.name
-        files.add(physical)
-        if not physical.is_symlink():break
-        target=Path(os.readlink(physical))
-        path=Path(os.path.abspath(target if target.is_absolute() else physical.parent/target))
-    else:raise ValueError('Python executable symlink chain exceeds bound')
-    base=Path(sys.base_prefix).resolve()
-    files.update(p for p in (base/'Python',base/'Resources/Python.app/Contents/MacOS/Python') if p.is_file())
-    return sorted(files)
+    return seatbelt.python_files()
 
 
 def stage_runtime(dest):
     root=Path(dest).resolve();root.mkdir(parents=True,exist_ok=False,mode=0o700)
-    sources={'plugin/index.mjs':ROOT/'integrations/dsh-operator/index.mjs',
-             'plugin/package.json':ROOT/'integrations/dsh-operator/package.json',
+    sources={**{'plugin/'+name:ROOT/'integrations/dsh-operator'/name for name in seatbelt.PLUGIN_FILES},
              'proxy.py':ROOT/'benchmarks/experiments/s5/s5_plugin_proxy.py',
              'check.py':ROOT/'operator_agent/execute/s5_verify_client.py'}
     files={}
@@ -48,8 +30,7 @@ def stage_runtime(dest):
 
 def verify_runtime(runtime):
     root=Path(runtime['root'])
-    expected={'plugin/index.mjs':ROOT/'integrations/dsh-operator/index.mjs',
-              'plugin/package.json':ROOT/'integrations/dsh-operator/package.json',
+    expected={**{'plugin/'+name:ROOT/'integrations/dsh-operator'/name for name in seatbelt.PLUGIN_FILES},
               'proxy.py':ROOT/'benchmarks/experiments/s5/s5_plugin_proxy.py',
               'check.py':ROOT/'operator_agent/execute/s5_verify_client.py'}
     if runtime.get('schema')!='s5-plugin-runtime-v1' or not root.is_dir() or root.is_symlink():

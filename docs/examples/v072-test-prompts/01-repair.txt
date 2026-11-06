@@ -1,0 +1,20 @@
+这是一个新的、独立授权的 v0.7.2 host 功能测试，不是给此前已终评任务续额度。
+请在当前主会话中只使用本次给定 run_dir；若本会话已有已结束旧任务，请根据本条新 case 要求直接 prepare 全新目录，无需用户输入 /op new；旧任务预算保留。声明为 request="relu fp32"、shapes=[[4,8]]、precision="fp32"、dsl="python"、hardware="mock_gpu"。
+执行 backend="fake"，stop_after="L2"，candidate_origin="outer"。代码仅导入 numpy/math，不用 Torch/Triton。结果始终 FAKE/test_only，不使用 GPU/SSH、不作性能结论。
+所有源码和决策由你在 DSH 外层产生；禁止 operator_run/operator_repair/operator_bench、shell、文件工具与子代理。源码用 code 文本提交，产物路径及哈希从 operator 工具回包取得，不用 shell 补查。未知和失败保留；到期或超限时如实停止，不能新建目录、重置或增加本任务预算。
+
+测试目标：验证失败后的完整诊断、修复及独立终评闭环。
+唯一 run_dir：/Users/.../.local/share/operator-agent/trials/relu-repair-06292db7
+prepare 使用 host_budget={"wall_clock_s":600,"max_verifications":4,"max_model_calls":12,"max_output_tokens_per_call":8192,"total_output_token_reservations":98304}。
+
+先 prepare 冻结声明，再取 operator_context(phase="generate",backend="fake") 核对 ABI。
+下面是用户提供的故意错误候选，第一次 explore verify 必须先提交它，不能先修好再验证；末尾换行差异不影响本测试，但实际执行源码必须保留在证据里：
+
+import numpy as np
+
+def kernel(X):
+    return np.maximum(X, 0) + 1
+
+预期首次 L2=false。之后调用 operator_context(phase="repair",verification_round=实际失败轮,backend="fake")，读取绑定当前源码的反馈；由你修复并再次 explore verify。
+完整 L2 通过后，使用修复后完全相同源码执行 verification_purpose="final" 的新一轮验证。
+最后汇报每轮源码/报告路径与哈希、首次失败和修复后 L1/L2、独立终评状态、test_only 与预算。总结中明确模型用量是生成总结前快照，最终结算以模型账本为准。

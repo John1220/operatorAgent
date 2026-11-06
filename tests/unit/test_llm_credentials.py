@@ -202,7 +202,7 @@ def test_repair_constructs_client_from_file_without_model_or_gpu(
     received = []
     source = "def kernel(A, B):\n    return A @ B\n"
 
-    def capture_fixer(*, llm):
+    def capture_fixer(*, llm, prompt_manager):
         received.append(llm.api_key)
         assert_key_not_exported()
         return SimpleNamespace(llm=llm)
@@ -210,7 +210,8 @@ def test_repair_constructs_client_from_file_without_model_or_gpu(
     def no_execution_repair(code, *args, **kwargs):
         return {"passed": False, "rounds": [], "code": code, "log": ""}
 
-    monkeypatch.setattr(hitl_tools, "_make_backend", lambda *args, **kwargs: (object(), {}))
+    monkeypatch.setattr(hitl_tools, "_make_backend", lambda *args, **kwargs: (
+        SimpleNamespace(generation_instructions=''), {}))
     monkeypatch.setattr(hitl_tools, "Verifier", lambda backend: object())
     monkeypatch.setattr(fixer_module, "FixerAgent", capture_fixer)
     monkeypatch.setattr(repair_loop, "repair", no_execution_repair)

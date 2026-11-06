@@ -1,0 +1,8 @@
+继续刚才的原任务，run_dir=/Users/.../.local/share/operator-agent/trials/relu-steer-8d4f49c0，不重新 prepare、不改变冻结声明与预算。
+我新增一项源码要求：实际生成并验证的源码必须保留独立注释行
+# USER_NOTE_V072_STEER
+
+先 operator_resume(run_dir=原目录,backend="fake") 核对 task_id、契约、deadline、历史与剩余额度，遵照 next_action/next_context 按需取材。
+然后在外层生成完整 NumPy ReLU 源码并 explore verify；完整 L2 通过后，同源码独立 final verify。
+保持 backend=fake、stop_after=L2、candidate_origin=outer，结果标记test_only。若已过期/耗尽，如实停止，不给原任务补额度。
+不用 shell/文件工具或子代理，直接从operator回包汇报源码/报告路径、哈希及结果。

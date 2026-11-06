@@ -14,3 +14,4 @@
   config:
     command: /absolute/path/to/v07-venv/bin/operator-agent
     timeoutMs: 60000
+    hostModelBudget: {}

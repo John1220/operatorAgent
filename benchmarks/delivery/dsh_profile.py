@@ -160,7 +160,7 @@ def run(plugin, python, output, *, dsh_bin=DEFAULT_DSH):
                           command=str(console['operator-agent-mcp']),
                           toolCallTimeoutMs=3600000, failOnStartupError=True,
                           env=dict(OPERATOR_AGENT_WORKFLOW='host'))
-        slash_config = dict(command=str(console['operator-agent']), timeoutMs=60000)
+        slash_config = dict(command=str(console['operator-agent']), timeoutMs=60000, hostModelBudget={})
         example = profile/'node_modules'/NAME/'examples/v07/profile-absolute-paths.patch.yml'
         override = example.read_text(encoding='utf-8')
         for name, path in console.items():
