@@ -5,9 +5,10 @@
  * 这里不碰网络、不碰 GPU、不调模型；只测纯函数。
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { formatDoctor, locate, PAIRED_PYTHON, EXPECTED_TOOL_VERSION } from "../index.mjs";
@@ -98,4 +99,13 @@ test("patchText handles the JSON-array profile format with id-based replacement"
 test("patchText refuses duplicated or unbalanced managed markers", () => {
   const doubled = `${BEGIN}\n- {}\n${END}\n${BEGIN}\n- {}\n${END}\n`;
   assert.throws(() => patchText(doubled, entries("/opt/venv/bin/python")), /托管标记/);
+});
+
+test("bin 通过符号链接调用时仍然执行（npm .bin 就是符号链接）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "op-bin-"));
+  const link = join(dir, "dsh-operator-agent-setup");
+  symlinkSync(resolve("bin/setup.mjs"), link);
+  const out = spawnSync(process.execPath, [link, "--help"], { encoding: "utf8" });
+  assert.equal(out.status, 0);
+  assert.match(out.stdout, /用法：dsh-operator-agent-setup/);
 });

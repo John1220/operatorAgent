@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4
+
+修 `0.2.3` 的入口 bug：`bin/setup.mjs` 用路径字符串判断"是否被当作脚本执行"，而 npm 安装后的
+`.bin/dsh-operator-agent-setup` 是**符号链接**，`npx dsh-operator-agent-setup` 会静默退出（exit 0
+但什么都不做）。改用 `realpath` 比较，并补一条通过符号链接调用的回归测试。功能与 `0.2.3` 相同，
+`0.2.3` 已 deprecated。
+
 ## 0.2.3
 
 配套 Python `0.7.2`（工具契约 12）的**安装体验版**，不改判定语义、不改工件身份。新增：

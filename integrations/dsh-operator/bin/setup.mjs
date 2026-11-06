@@ -17,11 +17,12 @@
  *   npx dsh-operator-agent-setup --python ~/.local/share/operator-agent/v0.7.2/venv/bin/python
  *   npx dsh-operator-agent-setup --python <exe> --dry-run     # 只打印，不写文件
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, copyFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, copyFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 
 /** 本插件配套的 Python 版本；与 package.json 的 version 一起决定安装目录。 */
 export const PYTHON_VERSION = "0.7.2";
@@ -222,8 +223,17 @@ function main(argv) {
   return 0;
 }
 
-const invoked = process.argv[1] ? resolve(process.argv[1]) : "";
-if (invoked && resolve(new URL(import.meta.url).pathname) === invoked) {
+/**
+ * 是否"被当作脚本执行"。**必须比 realpath**：npm 装出来的 `.bin/xxx` 是符号链接，
+ * 直接比字符串会让 `npx dsh-operator-agent-setup` 静默退出（exit 0 但什么都不做）。
+ */
+export function invokedAsScript(argv1 = process.argv[1], moduleUrl = import.meta.url) {
+  if (!argv1) return false;
+  try { return realpathSync(argv1) === realpathSync(fileURLToPath(moduleUrl)); }
+  catch { return false; }
+}
+
+if (invokedAsScript()) {
   try {
     process.exitCode = main(process.argv.slice(2));
   } catch (error) {
