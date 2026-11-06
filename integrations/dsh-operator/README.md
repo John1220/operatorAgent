@@ -42,6 +42,17 @@ python3.12 -m venv "$HOME/.local/share/operator-agent/v0.7.2/venv"
 "$HOME/.local/share/operator-agent/v0.7.2/venv/bin/python" -m pip install "$HOME/.local/share/operator-agent/v0.7.2/artifacts/operator_agent-0.7.2-py3-none-any.whl"
 ```
 
+也可以让插件自带助手一次完成「环境 + 配置」：
+
+```bash
+# 用本地 wheel 建 venv 并安装，再写 profile 配置
+npx dsh-operator-agent-setup --wheel /path/to/operator_agent-0.7.2-py3-none-any.whl
+# 已经有 venv 时，只做校验与配置
+npx dsh-operator-agent-setup --python "$HOME/.local/share/operator-agent/v0.7.2/venv/bin/python"
+```
+
+它会起一次真实 MCP 握手核对七个 host 工具，写前备份原 `cordis.patch.yml` 并留回执，重复执行幂等；加 `--dry-run` 只预览。**插件包本身仍要在 GUI 安装**，助手不碰 Desktop profile 的安装锁。
+
 **Desktop 使用 GUI 安装插件**：在 DSH 的 **插件 → 添加插件 → 安装第三方插件** 输入 `/absolute/path/operator-agent/v0.7.2/artifacts/dsh-operator-agent-0.2.2.tgz`，请从本机正式目录复制实际绝对路径替换占位符（GUI 不展开 `~` 或 `$HOME`）。安装后启用，再运行配置助手：
 
 ```bash
@@ -56,7 +67,7 @@ python3.12 -m venv "$HOME/.local/share/operator-agent/v0.7.2/venv"
 dsh plugin --profile <非desktop的profile> add /path/to/dsh-operator-agent-0.2.2.tgz
 ```
 
-GUI 通常不继承 venv 的 `PATH`，因此 `mcp-operator` 与 `operator-tools` 均需使用相应 Python 环境中的绝对命令路径。配置助手检查不代替实际加载：重开 DSH，确认插件页 `0.2.2` 的两个组件运行中，并用 `/op capabilities` 核对 Python `0.7.2` / 工具契约 `12`。卸载见 §2.4。
+GUI 通常不继承 venv 的 `PATH`，因此 `mcp-operator` 与 `operator-tools` 均需使用相应 Python 环境中的绝对命令路径。配置助手检查不代替实际加载：重开 DSH，确认插件页 `0.2.2` 的两个组件运行中，并用 `/op doctor` 核对（CLI/MCP 是否可执行、工具契约与版本配对、已接线后端；失败项直接给修复命令）。卸载见 §2.4。
 
 当前边界见 [v0.7.2 支持清单](../../docs/testing/v072-support.md)。历史候选的[生命周期验收](../../docs/status/v072-session-lifecycle-acceptance-20261106.md)与[自动入口验收](../../docs/status/v072-auto-task-acceptance-20261106.md)保留原版本和安装身份。前版边界与回退见 [v0.7.1 支持清单](../../docs/testing/v071-support.md)及[交付记录 §12](../../docs/testing/v07-delivery.md#12-v071-本地封版)。legacy 离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md)仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，Python 3.12 应使用匹配的平台依赖。
 

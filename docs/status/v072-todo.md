@@ -89,7 +89,7 @@ rc1 插件完整测试 **116 passed / 0 failed / 0 skipped**（`/private/tmp/ope
   - 证据：`/private/tmp/operator-v072-closeout.rVQIRa/regression/python-full-final.log` 与 `python-full-final.xml`（failures=0 / errors=0）；候选安装冒烟 `smoke-rc1`、隔离 profile `profile-rc1` 见[本轮验收记录](v072-budget-resume-acceptance-20261106.md)。临时目录内容随 F6 归档。
 - [x] **F3 使用真实外层做最终验收。** 新限额下完成 FakeBackend 生成与修复、超限拒绝、取消、恢复和中途干预，同时复核 C 组的分工、材料到达和领域反馈；H20 完成主用例及完整 L2、独立终评、导出。外层决策来自真实模型，不能由脚本替它选择工具或候选。
 - [x] **F4 冻结正式版本与工件。** Python `0.7.2`、插件 `0.2.2`，保留已验 DSH 宿主兼容号；对 wheel/sdist/tgz、源码、协议与候选建立可核对清单。
-  - 工件与 `SHA256SUMS`、`candidate/candidate.json`、`candidate/source-manifest.json` 位于 `/Users/zh/op-agent-delivery/v0.7.2/`，封版时 `shasum -a 256` 复算一致（wheel `26b55843…`、sdist `4d66fa47…`、tgz `78b5addf…`）。
+  - 工件与 `SHA256SUMS`、`candidate/candidate.json`、`candidate/source-manifest.json` 位于仓库外的本地交付目录 `v0.7.2/`（含 `release.json`），封版时 `shasum -a 256` 复算一致（wheel `26b55843…`、sdist `4d66fa47…`、tgz `78b5addf…`）。
 - [x] **F5 对最终工件做安装回归。** 干净环境安装、依赖检查、隔离 DSH 安装/配置/卸载和回退均通过；必要的最终源码复评与对应包身份分别留证。
   - `receipts/final-pip.log`（干净 venv + `pip check`）、`receipts/profile-final/manifest.json`（隔离 DSH 安装/组合/卸载）、`receipts/desktop-configure.log`、`receipts/rollback/`（安装→回滚→恢复）均通过。
   - 最终源码复评：2 个真实用户源、0 模型调用、0 GPU（`receipts/source-reevaluation-final/receipt.json`）；rc1→final 运行时差异仅版本号与 host instructions（`receipts/rc1-runtime-diff.json`）。

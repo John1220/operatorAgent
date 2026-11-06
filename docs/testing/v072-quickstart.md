@@ -19,13 +19,18 @@ DSH Desktop 的安装与配置分两步：
    /absolute/path/operator-agent/v0.7.2/artifacts/dsh-operator-agent-0.2.2.tgz
    ```
 
-2. 安装后运行配置助手，备份原配置并写入两处 Python 绝对路径：
+2. 安装后配置 profile。插件 `0.2.3` 起自带助手，一条命令完成「校验环境 + 写入两处 Python 绝对路径 + 备份回执」：
 
    ```bash
-   "$HOME/.local/share/operator-agent/v0.7.2/examples/configure-v072.command"
+   npx dsh-operator-agent-setup --python "$HOME/.local/share/operator-agent/v0.7.2/venv/bin/python"
    ```
 
-   追加 `--dry-run` 可只预览。配置检查通过后重开 DSH，在插件页确认 `0.2.2` 启用且两个组件运行中，再直接输入 `/op capabilities`，核对 Python `0.7.2` 与工具契约 `12`。配置检查不能代替实际加载验证。
+   旧版本可用配置助手：`"$HOME/.local/share/operator-agent/v0.7.2/examples/configure-v072.command"`；
+   两者都支持 `--dry-run` 预览。助手会起一次真实 MCP 握手核对七个 host 工具，重复执行幂等。
+
+   配置检查通过后重开 DSH，在插件页确认插件启用且两个组件运行中，再输入 `/op doctor`：
+   它会逐项报告 CLI/MCP 是否可执行、工具契约是否 `12`、Python 运行时与已接线后端，失败项直接给修复命令。
+   配置检查不能代替实际加载验证。
 
 **Desktop profile 由 Electron 应用独占管理，普通 CLI 不能安装或导出该 profile；退出应用也不能解除限制。** Desktop 必须先用 GUI 安装，再用助手的 `--configure-only` 配置。上面的快捷助手已包含该参数。自定义非 desktop profile 可由[安装助手](../../benchmarks/delivery/install_dsh.py)的 `--profile` 完成安装和配置。
 

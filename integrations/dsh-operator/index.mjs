@@ -14,10 +14,17 @@
  */
 
 import { execFile } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve as resolvePath } from "node:path";
+import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { startModelRelay } from "./model-relay.mjs";
 import { installHostModelBudget } from "./host-model-budget.mjs";
+
+/** 插件自身版本（package.json）；doctor 用它说明"配对的是哪一版". */
+const PLUGIN_VERSION = (() => {
+  try { return JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version; }
+  catch { return "?"; }
+})();
 
 export const name = "operator-tools";
 export const inject = ["commands"];
@@ -26,6 +33,7 @@ const USAGE = [
   "✓ 已执行 · /op help",
   "用法：",
   "  /op capabilities            这台机器能做什么（只读，不跑活）",
+  "  /op doctor                  安装自检：CLI/MCP/工具契约/版本配对（不调模型）",
   "  /op new [run_dir]            在本会话显式开启下一项独立任务（不调用模型）",
   "  /op status                  查本会话的任务/讨论状态",
   "  /op status <run_dir> [invocation_id]  查任务/工具调用（含 cancelled）",
@@ -176,6 +184,80 @@ function processNote(phase, alive) {
   if (phase === "lost") return "进程已退出（没了但没写终态）";
   if (phase === "done" || phase === "failed" || phase === "cancelled") return "进程已结束";
   return "进程状态未知";
+}
+
+/** 本插件配对的 Python 判定层版本与工具契约号；升级时两处一起改。 */
+export const PAIRED_PYTHON = "0.7.2";
+export const EXPECTED_TOOL_VERSION = 12;
+
+/** 按 PATH 找可执行文件；绝对路径直接判存在。找不到返回 null（不抛）。 */
+export function locate(command, pathValue = process.env.PATH || "") {
+  if (!command) return null;
+  if (command.includes("/")) return existsSync(command) ? command : null;
+  for (const dir of String(pathValue).split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, command);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * 自检读数。**它只说事实与下一步**，不猜"应该没问题"：
+ * 每条失败都带一条可复制的修复命令，因为安装问题九成是「Python 装了但不在 PATH」。
+ */
+export function formatDoctor(facts) {
+  const problems = [];
+  const lines = [];
+  const ok = (text) => lines.push(`✓ ${text}`);
+  const bad = (text, fix) => { problems.push(text); lines.push(`✗ ${text}`); if (fix) lines.push(`  修复：${fix}`); };
+
+  lines.push(`插件：dsh-operator-agent ${facts.pluginVersion || "?"}（配对 Python ${PAIRED_PYTHON} / 工具契约 ${EXPECTED_TOOL_VERSION}）`);
+
+  if (!facts.cliFound) {
+    bad(`CLI 未找到 · PATH 里没有 ${facts.command}`,
+        `npx dsh-operator-agent-setup --wheel <operator_agent-${PAIRED_PYTHON}-py3-none-any.whl>`);
+  } else {
+    ok(`CLI：${facts.cliPath}`);
+    if (!facts.mcpFound) {
+      bad(`MCP server 未找到 · 期望 ${facts.mcpPath || "operator-agent-mcp"}`,
+          "同一个 venv 里应同时有 operator-agent 与 operator-agent-mcp；重装该 wheel");
+    } else ok(`MCP：${facts.mcpPath}`);
+
+    if (!facts.capabilitiesOk) {
+      bad(`capabilities 跑不通 · ${facts.capabilitiesError || "未知原因"}`,
+          `${facts.cliPath} capabilities   # 先看这条命令自己的报错`);
+    } else {
+      const cap = facts.capabilities || {};
+      // capabilities 回包用 snake_case；这里同时接受 camelCase，避免两处拼写漂移。
+      const toolVersion = cap.toolVersion ?? cap.tool_version;
+      if (toolVersion === EXPECTED_TOOL_VERSION) ok(`工具契约：${toolVersion}`);
+      else bad(`工具契约 ${toolVersion ?? "?"} ≠ 期望 ${EXPECTED_TOOL_VERSION}`,
+               `pip install --upgrade operator-agent==${PAIRED_PYTHON}（插件与判定层版本必须配对）`);
+      if (cap.version === PAIRED_PYTHON) ok(`判定层：${cap.version}`);
+      else bad(`判定层 ${cap.version || "?"} ≠ 配对版本 ${PAIRED_PYTHON}`,
+               `pip install --upgrade operator-agent==${PAIRED_PYTHON}`);
+      const python = (cap.runtime && cap.runtime.python) || "";
+      const major = Number(String(python).split(".")[0]);
+      const minor = Number(String(python).split(".")[1]);
+      if (!python) bad("运行时 python 版本读不到", `${facts.cliPath} capabilities`);
+      else if (major === 3 && minor >= 9) ok(`运行时：python ${python}`);
+      else bad(`运行时 python ${python} 低于 3.9`, "换 Python 3.12 建 venv 后重跑 setup");
+      const backends = Object.keys(cap.backends || {}).filter((name) => cap.backends[name] && cap.backends[name].wired);
+      if (backends.length) ok(`已接线后端：${backends.join(" / ")}`);
+    }
+  }
+
+  const workflow = facts.workflow || "";
+  if (workflow === "host") ok("工作流：host");
+  else if (workflow) bad(`工作流是 ${workflow}，本插件默认 host`, "检查 profile patch 里 mcp-operator 的 env：OPERATOR_AGENT_WORKFLOW: host");
+  // 插件进程本身不必设置它：MCP 子进程的 env 由 profile patch 注入，缺省即 host。
+  else lines.push("· 工作流：插件进程未设置（MCP 的工作流由 profile patch 注入，默认 host）");
+
+  const head = problems.length
+    ? `✗ 安装自检发现 ${problems.length} 项问题`
+    : `✓ 安装自检通过 · ${lines.length - 1} 项`;
+  return [head, ...lines].join("\n");
 }
 
 export function formatCapabilities(payload) {
@@ -364,6 +446,29 @@ export function apply(ctx, config = {}) {
         return { kind: "success", text };
       } catch (error) { return { kind: "error", text: `✗ 未切换任务 · ${error.message}` }; }
     }
+    if (sub === "doctor") {
+      const cliPath = locate(command);
+      const mcpPath = cliPath ? join(dirname(cliPath), "operator-agent-mcp") : locate("operator-agent-mcp");
+      const facts = {
+        command, cliFound: Boolean(cliPath), cliPath: cliPath || command,
+        mcpFound: Boolean(mcpPath && existsSync(mcpPath)), mcpPath: mcpPath || "",
+        workflow: (extraEnv && extraEnv.OPERATOR_AGENT_WORKFLOW) || process.env.OPERATOR_AGENT_WORKFLOW || "",
+        pluginVersion: PLUGIN_VERSION, capabilitiesOk: false, capabilities: null, capabilitiesError: "",
+      };
+      if (cliPath) {
+        const out = await run(["capabilities"], signal);
+        if (!out.ok) facts.capabilitiesError = out.detail || out.reason;
+        else {
+          try {
+            const payload = JSON.parse(out.text);
+            if (payload.ok === false) facts.capabilitiesError = payload.detail || payload.error || "判定层拒绝";
+            else { facts.capabilitiesOk = true; facts.capabilities = payload; }
+          } catch { facts.capabilitiesError = "返回的不是 JSON"; }
+        }
+      }
+      const healthy = facts.cliFound && facts.mcpFound && facts.capabilitiesOk;
+      return { kind: healthy ? "success" : "error", text: formatDoctor(facts) };
+    }
     if (sub === "capabilities") {
       const out = await run(["capabilities"], signal);
       if (!out.ok) return fail(out);
@@ -408,7 +513,7 @@ export function apply(ctx, config = {}) {
     definitionId: "dsh-operator-agent",
     name: "op",
     description: "算子判定层：查能力 / 查无人值守状态（不经过模型）",
-    input: { hint: "new [run_dir] | capabilities | status [run_dir] [invocation_id] | cancel <run_dir> <invocation_id> | help" },
+    input: { hint: "new [run_dir] | capabilities | doctor | status [run_dir] [invocation_id] | cancel <run_dir> <invocation_id> | help" },
     // `agent` 是宿主给的（invocation = {commandId, agent, rawInput, attachments, signal}），
     // 只有它带着会话工作区，相对路径要靠它才能落到人想去的地方。
     handler: async ({ rawInput, signal, agent, commandId }) => handle(rawInput, signal, agent, commandId),
