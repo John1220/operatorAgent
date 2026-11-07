@@ -862,31 +862,67 @@ def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
 
 
 # ── 动作 0（只读）: capabilities ─────────────────────────────────────────
-def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None,
+def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=None,
+                    repeat=8,
                     host=None, port=None, user=None, key_path=None, work_dir=None,
                     timeout=300, persistent=False) -> dict:
     """一条命令回答: 这个窗口现在能不能给出可判的性能读数。
 
     只量**这台机器围绕一个参照核的重复散布**, 不判任何候选、不发任何信用。回执里的
     `action` 三个值: start / hold / refuse —— hold 是「窗口太吵」而不是「候选不行」。
+
+    `shape=[M,N,K]` 给出时改用**目标尺寸的 triton matmul** 探针, 走远端 CUDA event
+    通道 (与候选核同一条计时路径)。不给则用小参照核, 那只覆盖计时通道本身 ——
+    真机实测: 24×24 参照核在 SSH 上落在远端 `perf_counter` 分支, 量的是主机 CPU。
     """
     from ..decide import calibration
-    from ..decide.noise_preflight import MIN_REPS, run_preflight
+    from ..decide.noise_preflight import MIN_REPS, matmul_probe_source, run_preflight
     if type(reps) is not int or reps < MIN_REPS:
         raise ToolError("bad_reps", f"reps 必须是 >= {MIN_REPS} 的整数（当前 {reps!r}）")
+    dims = None
+    if shape is not None:
+        if (not isinstance(shape, (list, tuple)) or len(shape) != 3
+                or any(type(value) is not int or not 16 <= value <= 65536 for value in shape)):
+            raise ToolError("bad_shape",
+                            f"shape 必须是三个 [16, 65536] 的整数 (M,N,K), 当前 {shape!r}")
+        dims = list(shape)
+        if backend != "ssh":
+            # 其它后端的计时不是这张卡的; 尺寸一上 4096 纯 Python 也跑不动。
+            # **不静默换成小核** —— 那会把「没量到这张卡」说成合格。
+            raise ToolError("preflight_shape_backend",
+                            "shape 探针只支持 backend=ssh: 其它后端量不到这张卡的 CUDA event 通道")
     (backend_obj, resolution), _build_log = _quiet(
         _make_backend, backend, host=host, port=port, user=user, key_path=key_path,
         work_dir=work_dir, timeout=timeout, persistent=persistent)
-    bench = calibration.backend_bench_fn(backend_obj)
     notes = ["measures the machine around one reference kernel, not any candidate"]
+    if dims is None:
+        bench = calibration.backend_bench_fn(backend_obj)
+        call = lambda: bench(calibration.known_good_kernel, calibration.default_inputs())
+        channel = f'backend:{resolution.get("resolved") or backend}'
+        notes.append("small reference kernel: this exercises the timing channel, not the GPU; "
+                     "pass shape=[M,N,K] to probe a real workload size")
+    else:
+        import numpy as np
+        m, n, k = dims
+        # 本地只占位拿 shape/dtype: SSH 侧按 spec 在远端生成数据, 不传 67 MB。
+        inputs = {"A": np.empty((m, k), dtype=np.float16),
+                  "B": np.empty((k, n), dtype=np.float16)}
+        # 每个 episode 内部采 `repeat` 个样本, 再用**各 episode 的中位**算跨轮散布:
+        # 与 L3 的做法一致 (真机一次 L3 是 30~46 样本)。reps=5 且每个 episode 只采
+        # 1 个样本时, iqr 只是 5 个点上的顺序统计量, 会把手抖放大成 6% 的判决带宽
+        # —— 2026-11-07 真机现场就是这个数 (真值 ~0.1%)。
+        bench = calibration.source_bench_fn(backend_obj, matmul_probe_source(),
+                                            warmup=2, repeat=repeat)
+        call = lambda: bench(inputs)
+        channel = f'triton-matmul-{m}x{n}x{k}-cuda-event'
+        notes.append("the remote runner times the kernel with CUDA events and flushes L2 per run")
     if backend in ("fake", "mock"):
         notes.append("test_only: 这个后端的计时来自模拟或控制机 CPU, 不构成真机窗口证据")
     try:
         receipt, _log = _quiet(
-            run_preflight, lambda: bench(calibration.known_good_kernel, calibration.default_inputs()),
-            reps=reps, planned_effect_pct=planned_effect_pct,
-            channel=f'backend:{resolution.get("resolved") or backend}',
-            identity=dict(resolution, backend=backend), notes=notes)
+            run_preflight, call, reps=reps, planned_effect_pct=planned_effect_pct,
+            channel=channel, identity=dict(resolution, backend=backend, shape=dims),
+            notes=notes)
     except ValueError as error:
         raise ToolError("preflight_refused", str(error)) from error
     receipt["test_only"] = backend in ("fake", "mock")

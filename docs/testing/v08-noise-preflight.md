@@ -9,13 +9,23 @@
 ## 1. 怎么跑
 
 ```bash
-# 本地 CPU：只用来验证接线，不能当窗口证据
-python -m operator_agent preflight --backend local --reps 5
+# 真机窗口：租到卡后、启动任何配对之前。**用 --shape，别用小参照核**
+python -m operator_agent preflight --backend ssh --host h20 \
+    --shape 4096,4096,4096 --reps 5 --repeat 8 \
+    --planned-effect-pct 1 --json-out /path/to/preflight.json
 
-# 真机窗口：租到卡后、启动任何配对之前
-python -m operator_agent preflight --backend ssh --host h20 --reps 5 \
-    --planned-effect-pct 5 --json-out /path/to/preflight.json
+# 只检查计时通道是否通（量的是主机 CPU，不是这张卡）
+python -m operator_agent preflight --backend local --reps 5
 ```
+
+**`--shape` 是必须的**：不带它时参照核是 24×24 的纯 Python matmul，在 SSH 上落在远端
+`perf_counter` 分支——量的是主机 CPU 的重复性，与候选核的 CUDA event 通道不是一件事。
+2026-11-07 在 H20 上实测过这个差异，结论写进
+[真机回执记录](../status/v08-real-receipt-20261107.md)。`--shape` 只支持 `backend=ssh`，
+其它后端会以 `preflight_shape_backend` 明确拒绝，**不会静默换成小核**。
+
+`--repeat` 是每个 episode 内部的采样次数（默认 8）。先用 1 跑过一次：5 个单样本点上
+的 iqr 把 4096³ 的手抖放大成 2.02%（真实值 0.07%），判决带宽从 0.2% 虚高到 6.1%。
 
 `--planned-effect-pct` 是**你打算判别的效应大小**（百分点）。给了它，回执才能回答
 「这次配对看不看得出这么大」；不给就只报散布与档位。
@@ -57,6 +67,7 @@ python -m operator_agent preflight --backend ssh --host h20 --reps 5 \
 ## 4. 门槛与拒绝
 
 - `reps < 3` 直接拒绝（`bad_reps`，exit 2）：三样本以下的分位数没有意义。
+- `--shape` 不是三个 `[16, 65536]` 整数 ⇒ `bad_shape`；`--shape` 配非 ssh 后端 ⇒ `preflight_shape_backend`。
 - 任何一次采样抛错或返回非有限/非正值 ⇒ `ok=false`、`action=refuse`：**缺读数不是 0 成本**。
 - `mock` / `fake` 后端的回执带 `test_only=true`：那是模拟或控制机 CPU 的计时，不构成真机窗口证据。
 

@@ -27,6 +27,51 @@ MIN_REPS = 3
 #: (见那里的注释)。这里只算, 不另立系数。
 BAND_MULTIPLE = 3.0
 
+#: 目标尺寸的参照核。**必须走 CUDA event 通道**: 24×24 的纯 Python 参照核在 SSH 上落在
+#: 远端 `perf_counter` 分支, 量的是主机 CPU —— 那与候选核的计时不是一件事, 拿它当
+#: 「窗口能不能判」的门会给出假绿灯 (2026-11-07 真机确认)。
+MATMUL_PROBE = """import triton
+import triton.language as tl
+import torch
+
+
+@triton.jit
+def _probe_matmul(a_ptr, b_ptr, c_ptr, M, N, K,
+                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    ks = tl.arange(0, BLOCK_K)
+    a_ptrs = a_ptr + rows[:, None] * K + ks[None, :]
+    b_ptrs = b_ptr + ks[:, None] * N + cols[None, :]
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_K)):
+        remaining = K - k * BLOCK_K
+        a = tl.load(a_ptrs, mask=(rows[:, None] < M) & (ks[None, :] < remaining), other=0.0)
+        b = tl.load(b_ptrs, mask=(cols[None, :] < N) & (ks[:, None] < remaining), other=0.0)
+        accumulator = tl.dot(a, b, accumulator)
+        a_ptrs += BLOCK_K
+        b_ptrs += BLOCK_K * N
+    c_ptrs = c_ptr + rows[:, None] * N + cols[None, :]
+    tl.store(c_ptrs, accumulator.to(c_ptr.dtype.element_ty),
+             mask=(rows[:, None] < M) & (cols[None, :] < N))
+
+
+def kernel(A, B):
+    M, K = A.shape
+    _, N = B.shape
+    C = torch.empty((M, N), dtype=A.dtype, device=A.device)
+    grid = (triton.cdiv(M, 128), triton.cdiv(N, 128))
+    _probe_matmul[grid](A, B, C, M, N, K, BLOCK_M=128, BLOCK_N=128, BLOCK_K=64,
+                        num_stages=3)
+    return C
+"""
+
+
+def matmul_probe_source():
+    """The probe kernel for a shape-aware run. Inputs are generated on the far side."""
+    return MATMUL_PROBE
+
+
 BOUNDARY = (
     'This receipt describes the measurement window around one reference kernel. It is not '
     'a speedup for any candidate, not a correctness result, and not a verdict on any task. '

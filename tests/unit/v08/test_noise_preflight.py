@@ -125,3 +125,46 @@ def test_cli_refuses_a_receipt_it_cannot_stand_behind():
     payload = json.loads(buf.getvalue())
     assert payload['ok'] is False and payload['error'] == 'bad_reps'
     assert 'reps' in payload['detail']
+
+
+def test_shape_probe_is_a_triton_kernel_on_the_gpu_channel():
+    from operator_agent.decide.noise_preflight import matmul_probe_source
+
+    source = matmul_probe_source()
+    assert 'import triton' in source and '@triton.jit' in source
+    assert 'torch.cuda' not in source          # 计时由远端 runner 的 CUDA event 分支负责
+    assert 'BLOCK_M=128' in source and 'num_stages=3' in source
+    assert matmul_probe_source() == source     # 逐字稳定: 同一窗口的两次探针必须同源
+
+
+def test_shape_probe_refuses_backends_that_cannot_time_this_card():
+    import contextlib
+    import io
+    import json
+
+    from operator_agent.app.cli import main as cli_main
+
+    for backend in ('mock', 'local', 'fake'):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cli_main(['preflight', '--backend', backend, '--reps', '3',
+                             '--shape', '4096,4096,4096'])
+        assert code == 2, backend
+        payload = json.loads(buf.getvalue())
+        assert payload['error'] == 'preflight_shape_backend'
+        assert 'ssh' in payload['detail']
+
+
+def test_a_malformed_shape_is_named_not_ignored():
+    import contextlib
+    import io
+    import json
+
+    from operator_agent.app.cli import main as cli_main
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = cli_main(['preflight', '--backend', 'ssh', '--reps', '3', '--shape', '4096,4096'])
+    assert code == 2
+    payload = json.loads(buf.getvalue())
+    assert payload['error'] == 'bad_shape'

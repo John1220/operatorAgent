@@ -53,6 +53,11 @@ def _parser() -> argparse.ArgumentParser:
     pf = sub.add_parser("preflight", help="一条命令：这个窗口能不能给出可判的性能读数（不判候选）")
     pf.add_argument("--reps", type=int, default=5,
                     help="同一参照核连跑几次（>=3）；回执里记原始读数")
+    pf.add_argument("--repeat", type=int, default=8,
+                    help="每个 episode 内采样几次（--shape 时有效，默认 8）")
+    pf.add_argument("--shape", default=None,
+                    help="M,N,K：用目标尺寸的 triton matmul 探针（仅 backend=ssh），"
+                         "走与候选核同一条 CUDA event 通道")
     pf.add_argument("--planned-effect-pct", type=float, default=None,
                     help="你打算判别的效应（百分点，如 5 表示 5%%）；给了才能回答"
                          "「这次配对看不看得出这么大」")
@@ -282,8 +287,11 @@ def main(argv=None) -> int:
         if args.action == "capabilities":
             payload = capabilities()
         elif args.action == "preflight":
+            shape = ([int(part) for part in args.shape.split(",")]
+                     if args.shape else None)
             payload = noise_preflight(backend=args.backend, reps=args.reps,
                                       planned_effect_pct=args.planned_effect_pct,
+                                      shape=shape, repeat=args.repeat,
                                       host=args.host, port=args.port, user=args.user,
                                       key_path=args.key_path, work_dir=args.work_dir,
                                       timeout=args.timeout, persistent=args.persistent)

@@ -185,6 +185,33 @@ def backend_bench_fn(backend, *, warmup: int = 1, repeat: int = 3):
     return bench
 
 
+def _bench_cost(payload):
+    """把后端回包折成一个用时 (median_ms); 读不出来就**抛**, 不返回假数字。"""
+    if not isinstance(payload, dict):
+        raise ValueError(f"后端没有回载荷: {payload!r}")
+    # `_transport_failure` 那类失败**以字典形态返回**而不是抛, 所以必须显式看 success。
+    if payload.get("success") is False:
+        raise RuntimeError(f"后端基准失败: {payload.get('error') or payload!r}")
+    cost = payload.get("median_time_ms")
+    if cost is None:
+        cost = payload.get("avg_time_ms")
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost <= 0:
+        raise ValueError(f"后端没回可用的计时: {payload!r}")
+    return float(cost)
+
+
+def source_bench_fn(backend, source, *, warmup=1, repeat=1):
+    """给**任意源码**的一把 bench —— 与 `backend_bench_fn` 同一条远端通道。
+
+    `backend_bench_fn` 要求参照物是带 `__source__` 的核对象 (它替两个已知参照核服务);
+    窗口探针需要把**目标尺寸的**核塞进同一条通道, 所以这里直接收源码。约束一样:
+    读数不可用就抛。
+    """
+    def bench(inputs=None):
+        return _bench_cost(backend.benchmark(source, inputs or {}, warmup=warmup, repeat=repeat))
+    return bench
+
+
 # ─── 结果与判定 ───────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
