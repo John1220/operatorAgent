@@ -8,7 +8,7 @@
 ## 1. 为什么要它
 
 现有受支持的四个算子（matmul / relu / softmax / layernorm）实测都贴着峰值（fp16 matmul 余量 6–8%），
-先把候选做对、再做快这条路径**测不出插件增量**（见 [候选余量实测](../status/v08/candidate-headroom-20261107.md)）。
+先把候选做对、再做快这条路径**测不出插件增量**（见 [候选余量实测](../../status/v08/candidate-headroom-20261107.md)）。
 attention 是唯一同时满足三件事的热点：
 
 1. 同时吃算力与带宽 → **绑定轴不显然**，靠猜容易选错；
@@ -160,8 +160,40 @@ attention 是"两个 GEMM 夹一个 softmax"，现有 `_roofline_analysis` 按 A
 - 粗估 roofline 给出的"达成率"是估算，不是实测峰值口径（与 `peak_measured` 的区分见
   `measurement.py` 的同名注释）。
 
-## 11. 需要你拍板的三件事
+## 11. 已决定（2026-11-07）
 
-1. **容差标定要不要花真机小时**（C2 建议至少留 2 个窗口）。
-2. **roofline 选 A 还是 B**（我建议 B）。
-3. **causal 是否只做 `j ≤ i`**（我建议是；滑窗另立）。
+| 项 | 决定 | 影响 |
+|---|---|---|
+| 真机 | **可用**，容差标定按 C2 留窗口 | C2 的产出是实测表，不是估值 |
+| roofline | **选 B（粗估模型）** | `bound_type` 由 `FLOPs/bytes` 与脊点比值得出；`reference_lower_bound=false`，诊断走 `audited_peak` |
+| causal | **只做 `j ≤ i`** | 滑窗/加性 bias 不进 Scope A |
+
+## 12. C1 的第一个发现：`causal` 不能当张量传
+
+设计文档原本打算把 `causal` 作为 0 维张量塞进 case。核对实现后确认**这条路会静默出错**：
+
+- `BenchmarkCase.materialize()` 委托给 `materialize_seed_inputs()`，按 `seed` 造值；
+  浮点抽 `standard_normal`、**整数抽 `integers(1, 8)`**；
+- 所以一个 `shape=()`、`dtype=int64` 的 `causal` 会被物化成 1..7 之间的随机整数，
+  真值 `0/1` 丢失 —— 这正是 2026-10-01 真机踩过的"标量被随机值顶掉"那一族；
+- 而远端执行器**已经**有标量按值直传的通道（`_serialize_inputs` 的 `scalars`），
+  缺的是控制端把标量放进 case 与契约的途径。
+
+因此 C1 的正确做法是给 `BenchmarkCase` 增加一个**有类型的 `scalars` 字段**，触达点：
+
+| 位置 | 改什么 |
+|---|---|
+| `BenchmarkCase` | 新增 `scalars: dict`；只允许 `bool/int/float/str`，拒绝数组与容器 |
+| `content_dict()` / `to_dict()` / `load_dict()` | 标量进契约哈希与落盘往返（**不进哈希就等于没声明**）|
+| `seed_spec()` → `materialize_seed_inputs` | 标量原样透传，不参与抽样 |
+| `wrapper_calling_convention` | 把标量渲染成普通参数 |
+| `input_fidelity` 回读 | 标量进 digest，否则保真检查漏掉它 |
+| 契约与既有 case | 老 case 没有该字段时行为不变（三态：缺失 ≠ 空）|
+
+这是一处 schema 变更，影响契约哈希；但它是 attention 的**前置**，而且顺带把
+"带标量参数的算子"（causal、eps、scale）整类打开。
+
+C1 的验收因此改写为两条：
+
+1. `Q/K/V` 三张量的 shape/stride/dtype 在远端回读与本端一致；
+2. `causal` 作为标量在远端**取到的是 `0/1`**，而不是随机整数。
