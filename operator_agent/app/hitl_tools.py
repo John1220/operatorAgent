@@ -863,7 +863,7 @@ def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
 
 # ── 动作 0（只读）: capabilities ─────────────────────────────────────────
 def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=None,
-                    op='matmul', repeat=8,
+                    op='matmul', dtype='fp16', repeat=8,
                     host=None, port=None, user=None, key_path=None, work_dir=None,
                     timeout=300, persistent=False) -> dict:
     """一条命令回答: 这个窗口现在能不能给出可判的性能读数。
@@ -906,15 +906,16 @@ def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=N
     else:
         import numpy as np
         # 本地只占位拿 shape/dtype: SSH 侧按 spec 在远端生成数据, 不传几十 MB。
+        element = np.float16 if dtype == 'fp16' else np.float32
         if op == 'layernorm':
             m, n = dims
-            inputs = {"X": np.empty((m, n), dtype=np.float16)}
-            label = f'layernorm-{m}x{n}'
+            inputs = {"X": np.empty((m, n), dtype=element)}
+            label = f'layernorm-{m}x{n}-{dtype}'
         else:
             m, n, k = dims
-            inputs = {"A": np.empty((m, k), dtype=np.float16),
-                      "B": np.empty((k, n), dtype=np.float16)}
-            label = f'matmul-{m}x{n}x{k}'
+            inputs = {"A": np.empty((m, k), dtype=element),
+                      "B": np.empty((k, n), dtype=element)}
+            label = f'matmul-{m}x{n}x{k}-{dtype}'
         # 每个 episode 内部采 `repeat` 个样本, 再用**各 episode 的中位**算跨轮散布:
         # 与 L3 的做法一致 (真机一次 L3 是 30~46 样本)。reps=5 且每个 episode 只采
         # 1 个样本时, iqr 只是 5 个点上的顺序统计量, 会把手抖放大成 6% 的判决带宽

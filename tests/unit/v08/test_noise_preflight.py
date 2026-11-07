@@ -168,3 +168,17 @@ def test_a_malformed_shape_is_named_not_ignored():
     assert code == 2
     payload = json.loads(buf.getvalue())
     assert payload['error'] == 'bad_shape'
+
+
+def test_an_unknown_dtype_is_refused_by_the_parser():
+    """与 `--backend` 同一条路: 取值由 argparse 的 choices 拦下, 不进业务代码。"""
+    import contextlib
+    import io
+
+    from operator_agent.app.cli import main as cli_main
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        with pytest.raises(SystemExit) as raised:
+            cli_main(['preflight', '--backend', 'ssh', '--reps', '3',
+                      '--shape', '4096,4096,4096', '--dtype', 'bf16'])
+    assert raised.value.code == 2

@@ -26,7 +26,22 @@ TASKS = [dict(
     declaration=dict(request='fp16 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
                      precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0),
     why='the only shape measured in a decidable window: 0.203% band on 2026-11-07',
+    measured_headroom_pct=7.7,
+    measured_baseline_gap='naive triton reaches 92.3% of peak and 0.99x of the torch baseline',
+), dict(
+    task_id='matmul-4096-fp32',
+    declaration=dict(request='fp32 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
+                     precision='fp32', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0),
+    # pair 1 证明 fp16 4096³ 已贴着峰值 (余量 7.7%), 门槛 2.5% 在噪声边缘;
+    # fp32 版本同窗口实测: 探针带宽 0.10%, 朴素实现只到 33.8% 峰值 (余量 66.2%),
+    # 且相对基线只有 0.35x —— 余量与基线差距都足够大。
+    why='measured 66.2% headroom and a 0.35x baseline gap on 2026-11-07; gate band 0.10%',
+    measured_headroom_pct=66.2,
+    measured_baseline_gap='naive triton fp32 runs at 0.3545x of the torch baseline',
 )]
+
+#: 任务 → 计划编号。换任务必须新开计划, 不能原位改已冻结的那份。
+PLAN_IDS = {'matmul-4096': PLAN_ID, 'matmul-4096-fp32': 'operator-v08-increment-r2-fp32'}
 
 MEASUREMENT_GATE = dict(
     command=('python -m operator_agent preflight --backend ssh --host <HOST> '
@@ -83,10 +98,13 @@ BUDGET_FIELDS = ('pairs', 'max_model_calls', 'max_output_tokens_per_call',
                  'gpu_minutes')
 
 
-def design():
+def design(task_id='matmul-4096'):
     """The freezable part: no budget, no outcome, no credit."""
-    body = dict(schema=SCHEMA, plan_id=PLAN_ID, status='draft_awaiting_budget',
-                tasks=[json.loads(json.dumps(row)) for row in TASKS],
+    tasks = [json.loads(json.dumps(row)) for row in TASKS if row['task_id'] == task_id]
+    if not tasks:
+        raise ValueError(f'unknown task {task_id!r}; known: {sorted(PLAN_IDS)}')
+    body = dict(schema=SCHEMA, plan_id=PLAN_IDS[task_id], status='draft_awaiting_budget',
+                tasks=tasks,
                 measurement_gate=dict(MEASUREMENT_GATE), detectability=dict(DETECTABILITY),
                 metric=dict(METRIC), stop_rules=json.loads(json.dumps(STOP_RULES)),
                 final_evaluation=dict(FINAL_EVALUATION), boundaries=list(BOUNDARIES),
@@ -107,8 +125,8 @@ def validate(plan):
     problems = []
     if not isinstance(plan, dict) or plan.get('schema') != SCHEMA:
         return ['not an R2 preregistration']
-    if plan.get('plan_id') != PLAN_ID:
-        problems.append(f'plan_id must be {PLAN_ID}')
+    if plan.get('plan_id') not in set(PLAN_IDS.values()):
+        problems.append(f'plan_id must be one of {sorted(set(PLAN_IDS.values()))}')
     body = {key: value for key, value in plan.items() if key != 'hash'}
     if plan.get('hash') is not None and digest(body) != plan.get('hash'):
         problems.append('plan hash does not match its content')
@@ -142,9 +160,9 @@ def validate(plan):
     return problems
 
 
-def freeze(budget, output):
+def freeze(budget, output, task_id='matmul-4096'):
     """Write the plan once, with budgets filled. Refuses to overwrite or to guess."""
-    plan = design()
+    plan = design(task_id)
     plan['budget'] = {name: (budget or {}).get(name) for name in BUDGET_FIELDS}
     plan['status'] = 'frozen'
     problems = validate(plan)
