@@ -72,7 +72,23 @@ r2_plan.freeze(dict(pairs=2, max_model_calls=12, max_output_tokens_per_call=8192
   `temperature/n/enable_thinking`），所以只报**配对观测**，不报绝对收益。
 - 任务没拿到 `valid` 终评时，那是关于**窗口**的结论，不是关于候选的结论。
 
-## 7. 现状
+## 7. 两臂的执行环境（2026-11-07 核实）
+
+两臂必须用**各自独立安装**，否则来回切换工作树会让身份漂移：
+
+| | 臂 B | 臂 C |
+|---|---|---|
+| 源码 | `git worktree` @ tag `v0.7.2`（`/Users/zh/op-agent-delivery/v072-arm-b`） | 当前分支 `codex/v0.8` 工作树 |
+| Python | `/Users/zh/op-agent-delivery/v072-venv/bin/operator-agent*` | `/Users/zh/op-agent-delivery/v08-venv/bin/operator-agent*` |
+| `TOOL_VERSION` | 12 | **12**（工具面相同，这是两臂可比的前提） |
+| `decide.noise_preflight` | 无 | 有 |
+| `generate.optimize_diagnoser` | 无 | 有 |
+
+⚠️ **当前 desktop profile 的 `mcp-operator` 跑的是 `v07-venv` 里 site-packages 的 `0.7.0rc1`**
+（见 `~/.dsh/profiles/desktop/cordis.patch.yml:130`），既不是 B 也不是 C。R2 必须在
+分别指向上面两个 venv 的会话里跑，不能在当前会话里跑。
+
+## 8. 现状
 
 - 计划模板与校验器已完成（[r2_plan.py](../../benchmarks/experiments/v08/r2_plan.py)），7 个用例钉住上述规则。
 - **尚缺**：预算数字（需人填）、实验宿主（`--host`）、以及 R2 的第一对被真实执行。

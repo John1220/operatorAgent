@@ -61,6 +61,7 @@ def test_freezing_requires_every_budget_and_writes_once(tmp_path):
     assert plan['status'] == 'frozen' and plan['budget']['pairs'] == 2
     stored = json.loads((tmp_path/'preregister.json').read_text(encoding='utf-8'))
     assert stored == plan and stored['hash'] == plan['hash']
+    assert r2_plan.validate(stored) == []        # 冻结后的计划必须自己就能过校验
     with pytest.raises(FileExistsError):
         r2_plan.freeze(COMPLETE, tmp_path/'preregister.json')      # 不允许覆盖已冻结的计划
 

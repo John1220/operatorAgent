@@ -109,7 +109,7 @@ def validate(plan):
         return ['not an R2 preregistration']
     if plan.get('plan_id') != PLAN_ID:
         problems.append(f'plan_id must be {PLAN_ID}')
-    body = {key: value for key, value in plan.items() if key not in ('hash', 'design_hash')}
+    body = {key: value for key, value in plan.items() if key != 'hash'}
     if plan.get('hash') is not None and digest(body) != plan.get('hash'):
         problems.append('plan hash does not match its content')
     if plan.get('formal_gain_claim') is not False or plan.get('formal_comparison_credit') is not False:
