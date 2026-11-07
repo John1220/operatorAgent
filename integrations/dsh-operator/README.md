@@ -33,7 +33,7 @@ pip install operator-agent
 
 ### 2.2 从本地正式工件安装
 
-本地正式交付为 Python `0.7.2` / 插件 `0.2.2`，工具契约 **12**，尚未发布到包仓库。本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`；实际完成状态以正式安装回执和 UI 核对为准，不沿用候选回执。
+正式交付为 Python `0.7.2`（PyPI 分布名 `dsh-operator-agent`）/ 插件 `0.2.5`，工具契约 **12**，npm 与 PyPI 均已发布。本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`；实际完成状态以正式安装回执和 UI 核对为准，不沿用候选回执。
 
 先把 wheel 装入 DSH 启动时可访问的 Python 3.12 环境：
 
@@ -439,7 +439,7 @@ python -m pip wheel . --no-deps -w dist/
 - 从干净导出构建：`rsync -a --exclude output --exclude logs --exclude triton --exclude .git ./ /tmp/oa-src/`
   然后在 `/tmp/oa-src` 里构建。
 
-当前正式本地交付身份为 Python **0.7.2** / 插件 **0.2.2** / 工具契约 **12**，未执行 PyPI/npm 公开发布。正式工件从保留源码快照构建并核对包内身份；本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`，安装成功需另有回执及 UI 版本核对。
+当前正式交付身份为 Python **0.7.2**（PyPI `dsh-operator-agent`）/ 插件 **0.2.5** / 工具契约 **12**，已在 PyPI 与 npm 公开发布；封版时的 0.2.2 工件身份保留在交付目录。正式工件从保留源码快照构建并核对包内身份；本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`，安装成功需另有回执及 UI 版本核对。
 
 历史 `0.1.16` 插件 / Python `0.6.7` 的换号原因仍见[身份重绑定记录](../../docs/phase1/delivery-identity-rebind-20261031.md)，不作为当前版本说明。`private: false` 及随包 `LICENSE`/`NOTICE` 说明发布形态，不代表已上架。逐字节副本与发版形态由
 `tests/hygiene/test_packaging.py::TestTheDshReleaseShape` 和 CI 的 `release-shape` 作业守住

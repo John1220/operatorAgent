@@ -4,7 +4,7 @@
 attention 等），由 LLM agent 设计、生成、修复 Triton / CUDA 核，经三级验证
 （L1 编译 → L2 功能 → L3 性能 + Roofline）后产出**可审计**的结论。
 
-- 版本：`0.7.2`，采用 [DSH 外层组装上下文与迭代](docs/design/dsh-host-context-workflow.md)。本地交付状态及工件身份见 [v0.7.2 封版记录](docs/status/v072-release-20261106.md)，能力与限制见 [支持清单](docs/testing/v072-support.md)。已封版的 `0.7.1` 与[安装回退记录](docs/testing/v07-delivery.md#12-v071-本地封版)保留。公开包仓库未发布。
+- 版本：`0.7.2`，采用 [DSH 外层组装上下文与迭代](docs/design/dsh-host-context-workflow.md)。本地交付状态及工件身份见 [v0.7.2 封版记录](docs/status/v072-release-20261106.md)，能力与限制见 [支持清单](docs/testing/v072-support.md)。已封版的 `0.7.1` 与[安装回退记录](docs/testing/v07-delivery.md#12-v071-本地封版)保留。已发布：PyPI [`dsh-operator-agent==0.7.2`](https://pypi.org/project/dsh-operator-agent/) / npm `dsh-operator-agent@0.2.5`；GitHub `main` 与版本标签已推送。
 - 当前开发与封版剩余事项见 [v0.7.2 封版待办](docs/status/v072-todo.md)。
 - [v0.7.2 技术方案与图示](docs/design/dsh-host-context-workflow.md)包含总体架构图、开发流程图、恢复时序图和模块职责映射。
 - [完整执行示例与日志](docs/examples/v072-h20-softmax.md)：真实 DSH 外层在 H20 上生成 Softmax、完成验证和独立终评，并附修复与同会话恢复实例。
