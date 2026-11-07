@@ -197,3 +197,27 @@ C1 的验收因此改写为两条：
 
 1. `Q/K/V` 三张量的 shape/stride/dtype 在远端回读与本端一致；
 2. `causal` 作为标量在远端**取到的是 `0/1`**，而不是随机整数。
+
+## 13. C1 结果（2026-11-07，已完成）
+
+`_attention_case` 已注册进 `_CASE_LAYOUTS`（4 维 `(B,H,S,D)`，三个张量 + `causal` 标量）。
+真机回读用一支**只回读事实的探针核**（返回形状/步长/dtype/标量），H20 实测两次：
+
+| 传入 | 远端返回 | 与本端 |
+|---|---|---|
+| `causal=False`（S=1024, B=1, H=16, D=128） | `[4, 1, 16, 1024, 128, 2097152, 131072, 128, 1, 128, 1024, 2, 0, 1]` | 逐项一致 |
+| `causal=True` | 同上，第 13 位为 `1` | 逐项一致 |
+
+第二位起是 `B,H,S,D`、元素级步长 `(H·S·D, S·D, D, 1)`、`K.D/V.S`、`itemsize=2`（fp16）、
+`causal` 的 `0/1`、以及三个张量都 contiguous。
+
+**这次回读抓到一个既有 bug**：标量过了 SSH 序列化那一关，却死在 runner 的转换层 ——
+`execute` / `benchmark` 两条路对每个输入都做 `torch.from_numpy(v)`，于是按值到达的
+`False` 变成 `TypeError: expected np.ndarray (got bool)`。修法是把转换收进
+`_device_inputs()`：数组转设备张量，**非数组原样透传**。已在
+`tests/unit/test_input_wire_format.py` 加两条回归（按值保留 + 禁止再出现"对每个输入都
+from_numpy"的形状）。
+
+> 边界：这次回读用的是 `execute` 通道里的一支探针核，**不是** L2 的 `input_fidelity`
+> 回执。后者要等 C2 的受信任参考建好才会覆盖 attention；在那之前，这条证据只说明
+> "布局与标量在真机上按声明到达"。

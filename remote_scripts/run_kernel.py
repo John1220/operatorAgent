@@ -782,6 +782,24 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
         return {"success": False, "error": f"Remote verification error: {type(e).__name__}: {e}", **evidence}
 
 
+def _device_inputs(real_inputs, device, *, contiguous=False):
+    """`np.ndarray` → 设备张量；**非数组按值透传**。
+
+    `causal`/`eps` 这类标量走的是序列化的 `scalars` 通道（按值直传，不参与 seed 抽样）。
+    这里若对它们也做 `torch.from_numpy`，就会以 `TypeError: expected np.ndarray (got bool)`
+    失败 —— 2026-11-07 真机在对 attention 布局做回读时抓到的就是这个。
+    """
+    import torch
+    out = {}
+    for key, value in real_inputs.items():
+        if isinstance(value, np.ndarray):
+            tensor = torch.from_numpy(value).to(device)
+            out[key] = tensor.contiguous() if contiguous else tensor
+        else:
+            out[key] = value
+    return out
+
+
 def _execute_triton(code: str, real_inputs: dict) -> dict:
     try:
         import triton
@@ -806,7 +824,7 @@ def _execute_triton(code: str, real_inputs: dict) -> dict:
             spec.loader.exec_module(module)
             kernel_func = module.kernel
 
-            torch_inputs = {k: torch.from_numpy(v).to(device).contiguous() for k, v in real_inputs.items()}
+            torch_inputs = _device_inputs(real_inputs, device, contiguous=True)
 
             # 屏蔽包住 warmup + 计时整段, 而不是包住每一次 kernel 调用:
             # shield_torch 进出各要 setattr 二十多个属性, 在 18.69µs 的 launch
@@ -849,7 +867,7 @@ def _execute_torch_numpy(code: str, real_inputs: dict, lang: str) -> dict:
         if lang == "torch":
             import torch
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            torch_inputs = {k: torch.from_numpy(v).to(device) for k, v in real_inputs.items()}
+            torch_inputs = _device_inputs(real_inputs, device)
             ns = {"__name__": "__kernel__"}
             exec(code, ns)
             kernel_func = ns["kernel"]
@@ -1511,7 +1529,7 @@ def _benchmark_triton(code: str, real_inputs: dict, warmup: int, repeat: int) ->
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         kernel_func = module.kernel
-        torch_inputs = {k: torch.from_numpy(v).to(device).contiguous() for k, v in real_inputs.items()}
+        torch_inputs = _device_inputs(real_inputs, device, contiguous=True)
 
         # 屏蔽包住 warmup + 整个 _timed_runs, 不逐次包裹 (开销理由同 _execute_triton)
         with shield_torch():
@@ -1552,7 +1570,7 @@ def _benchmark_torch_numpy(code: str, real_inputs: dict, warmup: int, repeat: in
         if lang == "torch":
             import torch
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            torch_inputs = {k: torch.from_numpy(v).to(device) for k, v in real_inputs.items()}
+            torch_inputs = _device_inputs(real_inputs, device)
             ns = {"__name__": "__kernel__"}
             exec(code, ns)
             kernel_func = ns["kernel"]

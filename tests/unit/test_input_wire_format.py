@@ -94,3 +94,26 @@ class TestScalarsSurviveTheWire(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestScalarsSurviveTheTensorConversion(unittest.TestCase):
+    """2026-11-07 真机: 标量过了线上那一关, 却死在 runner 的转换层。
+
+    远端 `execute` / `benchmark` 两条路对每个输入都做 `torch.from_numpy(v)`,
+    于是一个按值到达的 `causal=False` 变成
+    `TypeError: expected np.ndarray (got bool)` —— 线上是对的, 下一跳把它弄坏了。
+    """
+
+    def test_conversion_keeps_non_arrays_by_value(self):
+        runner = _runner()
+        values = runner._device_inputs(
+            {"Q": np.zeros((2, 3), np.float16), "causal": False, "eps": 1e-5}, "cpu")
+        self.assertIs(values["causal"], False)
+        self.assertEqual(values["eps"], 1e-5)
+        self.assertEqual(tuple(values["Q"].shape), (2, 3))
+
+    def test_no_call_site_converts_every_input_with_from_numpy(self):
+        """守住的是**形状**而不是行号: 出现 `for ... in real_inputs` 直挂 from_numpy 就红。"""
+        source = (ROOT / "remote_scripts" / "run_kernel.py").read_text(encoding="utf-8")
+        self.assertNotIn("torch.from_numpy(v).to(device).contiguous() for k, v in real_inputs",
+                         source)
+        self.assertNotIn("torch.from_numpy(v).to(device) for k, v in real_inputs", source)

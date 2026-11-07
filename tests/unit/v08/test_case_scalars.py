@@ -97,3 +97,32 @@ def test_a_case_without_scalars_has_no_scalar_rows_in_the_abi():
                           layout='contiguous')
     assert wrapper_calling_convention([meta])['signature'] == 'def kernel(X):'
     assert set(meta) == {'X'}
+
+def test_attention_layout_is_four_dimensional_and_carries_causal():
+    from operator_agent.decide.bench_cases import cases_from_shapes, known_layouts
+
+    assert 'attention' in known_layouts()
+    case = cases_from_shapes('attention', [((1, 16, 1024, 128), 1.0)],
+                             dtype='fp16', seed=5)[0]
+    assert case.name == 'attention-b1h16s1024d128'
+    assert [(t.name, t.shape, t.dtype) for t in case.tensors] == [
+        ('Q', (1, 16, 1024, 128), 'fp16'),
+        ('K', (1, 16, 1024, 128), 'fp16'),
+        ('V', (1, 16, 1024, 128), 'fp16')]
+    assert case.scalars == {'causal': False}
+    assert type(case.scalars['causal']) is bool
+    assert case.validate() == []
+    # 声明成三维就是错的（不猜 head 维）
+    with pytest.raises(BenchCaseError):
+        cases_from_shapes('attention', [((16, 1024, 128), 1.0)], dtype='fp16')
+
+
+def test_attention_case_materializes_causal_by_value_not_by_seed():
+    from operator_agent.decide.bench_cases import cases_from_shapes
+
+    case = cases_from_shapes('attention', [((1, 2, 8, 4), 1.0)], dtype='fp16', seed=5)[0]
+    values = case.materialize()
+    assert values['causal'] is False and type(values['causal']) is bool
+    # 第二个 seed 也一样：标量不随 seed 变
+    other = cases_from_shapes('attention', [((1, 2, 8, 4), 1.0)], dtype='fp16', seed=9)[0]
+    assert other.materialize()['causal'] is False

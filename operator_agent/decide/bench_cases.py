@@ -301,6 +301,18 @@ def _rows_case(kernel_type: str, shape: tuple, dtype: str, seed: int) -> "Benchm
 #: （不猜布局）。缺的是 attention / conv2d / csa_* 这几族：它们的输入布局要按 head 数、
 #: stride、压缩块这些参数才定得下来，本仓没有一份「已验证过的」布局可以照抄 —— 编一个
 #: 出来会让「评的是什么」静默漂移（正是本片要消掉的那类病），所以宁可没有。
+def _attention_case(kernel_type: str, shape: tuple, dtype: str, seed: int) -> "BenchmarkCase":
+    """prefill attention: Q/K/V 同形状 (B,H,S,D) + 按值直传的 `causal` 标量。
+
+    主用例是**全注意力**（causal=False）。causal 派生用例由套件另行生成，不在这里分叉
+    ——否则「同一条 case」会因为一个标量变成两条，而 case 身份按形状签名算。
+    """
+    b, h, s, d = shape
+    spec = tuple(TensorSpec(name, (b, h, s, d), dtype) for name in ("Q", "K", "V"))
+    return BenchmarkCase(name=f"{kernel_type}-b{b}h{h}s{s}d{d}", tensors=spec,
+                         seed=seed, scalars={"causal": False})
+
+
 _CASE_LAYOUTS = {
     "matmul": (3, _matmul_case),
     "gemm": (3, _matmul_case),
@@ -312,6 +324,9 @@ _CASE_LAYOUTS = {
     "relu": (2, _rows_case),
     "gelu": (2, _rows_case),
     "silu": (2, _rows_case),
+    # attention 的输入布局按 (B,H,S,D) 定；head 维与序列长度必须显式声明，
+    # 猜一个会让「评的是什么」静默漂移（见 docs/design/v08/attention-family.md）。
+    "attention": (4, _attention_case),
 }
 
 
