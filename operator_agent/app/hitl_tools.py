@@ -862,6 +862,37 @@ def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
 
 
 # ── 动作 0（只读）: capabilities ─────────────────────────────────────────
+def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None,
+                    host=None, port=None, user=None, key_path=None, work_dir=None,
+                    timeout=300, persistent=False) -> dict:
+    """一条命令回答: 这个窗口现在能不能给出可判的性能读数。
+
+    只量**这台机器围绕一个参照核的重复散布**, 不判任何候选、不发任何信用。回执里的
+    `action` 三个值: start / hold / refuse —— hold 是「窗口太吵」而不是「候选不行」。
+    """
+    from ..decide import calibration
+    from ..decide.noise_preflight import MIN_REPS, run_preflight
+    if type(reps) is not int or reps < MIN_REPS:
+        raise ToolError("bad_reps", f"reps 必须是 >= {MIN_REPS} 的整数（当前 {reps!r}）")
+    (backend_obj, resolution), _build_log = _quiet(
+        _make_backend, backend, host=host, port=port, user=user, key_path=key_path,
+        work_dir=work_dir, timeout=timeout, persistent=persistent)
+    bench = calibration.backend_bench_fn(backend_obj)
+    notes = ["measures the machine around one reference kernel, not any candidate"]
+    if backend in ("fake", "mock"):
+        notes.append("test_only: 这个后端的计时来自模拟或控制机 CPU, 不构成真机窗口证据")
+    try:
+        receipt, _log = _quiet(
+            run_preflight, lambda: bench(calibration.known_good_kernel, calibration.default_inputs()),
+            reps=reps, planned_effect_pct=planned_effect_pct,
+            channel=f'backend:{resolution.get("resolved") or backend}',
+            identity=dict(resolution, backend=backend), notes=notes)
+    except ValueError as error:
+        raise ToolError("preflight_refused", str(error)) from error
+    receipt["test_only"] = backend in ("fake", "mock")
+    return receipt
+
+
 def capabilities() -> dict:
     """不跑活、不联网：只回答「这台机器上这个壳能做什么」。
 

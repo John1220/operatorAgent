@@ -23,7 +23,7 @@
         --reason "门槛在 ±3% 刀刃上" --minutes-band 5-15
     python -m operator_agent ledger-report --run-dir "$op_workspace/run"
 
-子命令：capabilities / prepare / verify / run / repair / status / cancel / ledger-{new,fill,report}。
+子命令：capabilities / prepare / preflight / verify / run / repair / status / cancel / ledger-{new,fill,report}。
 
 与 `benchmarks/demos/demo_hitl_chain.py` 的关系：那个演示给人看；这个 CLI 给程序调。
 """
@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 from ..app.hitl_tools import (CANDIDATE_ORIGINS, ToolError, autonomous_status, cancel_task, capabilities,
-                         prepare, run_autonomous)
+                         noise_preflight, prepare, run_autonomous)
 from ..core import human_ledger
 from ..core.human_ledger import LedgerError
 
@@ -48,6 +48,22 @@ def _parser() -> argparse.ArgumentParser:
 
     cap = sub.add_parser("capabilities", help="不跑活：这台机器上这个壳能做什么")
     cap.add_argument("--json-out", help="同时写一份 JSON 到文件")
+
+    pf = sub.add_parser("preflight", help="一条命令：这个窗口能不能给出可判的性能读数（不判候选）")
+    pf.add_argument("--reps", type=int, default=5,
+                    help="同一参照核连跑几次（>=3）；回执里记原始读数")
+    pf.add_argument("--planned-effect-pct", type=float, default=None,
+                    help="你打算判别的效应（百分点，如 5 表示 5%%）；给了才能回答"
+                         "「这次配对看不看得出这么大」")
+    pf.add_argument("--backend", default="local", choices=["mock", "local", "ssh", "fake"])
+    pf.add_argument("--host", help="ssh 后端的主机（~/.ssh/config 别名即可）")
+    pf.add_argument("--port", type=int, default=None)
+    pf.add_argument("--user", default=None)
+    pf.add_argument("--key-path", default=None)
+    pf.add_argument("--work-dir", default=None)
+    pf.add_argument("--timeout", type=int, default=300)
+    pf.add_argument("--persistent", action="store_true")
+    pf.add_argument("--json-out", help="同时写一份 JSON 到文件")
 
     pre = sub.add_parser("prepare", help="把一份声明冻结成可复算的回合")
     pre.add_argument("--request", help="自然语言请求")
@@ -256,6 +272,12 @@ def main(argv=None) -> int:
     try:
         if args.action == "capabilities":
             payload = capabilities()
+        elif args.action == "preflight":
+            payload = noise_preflight(backend=args.backend, reps=args.reps,
+                                      planned_effect_pct=args.planned_effect_pct,
+                                      host=args.host, port=args.port, user=args.user,
+                                      key_path=args.key_path, work_dir=args.work_dir,
+                                      timeout=args.timeout, persistent=args.persistent)
         elif args.action == "prepare":
             payload = prepare(_declaration_from_args(args), args.run_dir)
         elif args.action == "run":
