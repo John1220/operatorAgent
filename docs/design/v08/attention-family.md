@@ -221,3 +221,53 @@ from_numpy"的形状）。
 > 边界：这次回读用的是 `execute` 通道里的一支探针核，**不是** L2 的 `input_fidelity`
 > 回执。后者要等 C2 的受信任参考建好才会覆盖 attention；在那之前，这条证据只说明
 > "布局与标量在真机上按声明到达"。
+
+## 14. C2：受信任参考与容差标定（2026-11-07）
+
+### 14.1 注册表
+
+`registered_reference(profile)` 现在按 profile 取值，两项目前都在表里：
+
+| profile | 定义 | rtol | rho |
+|---|---|---|---|
+| `builtin-layernorm-fp16-cuda-v2` | `native-pytorch-layernorm-last-axis-no-affine-v2` | 0.01 | 1.0 |
+| `builtin-attention-fp16-cuda-v1` | `native-pytorch-sdpa-mha-prefill-fp16-v1` | 1e-2 | 1.0 |
+
+layernorm 的 `digest()` 逐位未变（`8f779954d3d2b3af…`）——注册表是新增，不是改默认值。
+未知 profile 一律 `fail closed`。
+
+attention 契约的语义字段：`epsilon=0.0`（没有 eps 归一化）、`normalized_axis=-1`、
+`variance=softmax_last_axis`、`affine=False`、`fp_fusion=forbid_native_sdpa`、
+`deterministic_outputs=True`（H20 实测两次逐位相同）、`rtol=1e-2`、`rho=1.0`。
+
+远端 `_reference_torch()` 已按 profile 分流：attention 走
+`F.scaled_dot_product_attention(q,k,v,is_causal=...)`，并把"非布尔 causal / 非 fp16 /
+非 4 维 / 未知 profile"逐条拒绝。
+
+### 14.2 标定实测（H20，`torch 2.14.0+cu130`）
+
+第一次跑的是"按行号分桶"的假设检验，结果**推翻了设计假设**：
+
+| S | causal | 首桶 p95 | 末桶 p95 |
+|---|---|---|---|
+| 512–4096 | False / True | ≈3.5e-3 | ≈3.5e-3 |
+
+误差**不随行号增长**。所以容差按全局 `atol + rtol·|ref|` 定，不按行号桶分档。
+
+随后的判据网格（好实现 = fp32 累加→fp16；匹配率取四种 (S, causal) 的最差值）：
+
+| 变体 | atol=3e-4, rtol=1e-2 | 判定 |
+|---|---|---|
+| 好实现 | **1.0000** | 通过 |
+| 错缩放 `1/sqrt(S)` | 0.0134 | 拒绝 |
+| causal 差一位 | 0.4904 | 拒绝 |
+| **不做 max 平移** | **1.0000** | **未拦住** |
+
+### 14.3 由此得到的两个结论
+
+1. **容差不是充分条件。** 在随机 N(0,1) 输入下 scores 只有 ±4 量级，`exp` 不溢出，
+   所以"漏掉 max 平移"在数值上无害 —— 它必须由**输入模式**抓：套件第 8 条
+   "极值输入（large）"因此从"建议"升级为**必需**。
+2. fp16 softmax 本身不足以为"坏候选" —— H20 上 `torch.softmax(half)` 与后续 matmul
+   仍走 fp32 累加，匹配率 99.99%+。真正能被判否的是**语义错误**（缩放、mask、布局），
+   这正是套件前 7 条 case 的职责。

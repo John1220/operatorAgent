@@ -483,10 +483,28 @@ def _reference_torch(kernel_type: str, inputs: dict, reference_contract=None):
                   if isinstance(v, np.ndarray) else v) for k, v in inputs.items()}
     kind = (kernel_type or "").lower()
     if reference_contract is not None:
-        if (kind != "layernorm" or set(values) != {"X"} or values["X"].dtype != torch.float16
-                or values["X"].ndim != 2 or any(d <= 0 for d in values["X"].shape)):
-            raise ReferenceIdentityError("v2 reference inputs outside declared semantics")
-        return lambda: native_layernorm(values["X"]), "pytorch_eager"
+        profile = (reference_contract or {}).get("profile")
+        if profile == "builtin-layernorm-fp16-cuda-v2":
+            if (kind != "layernorm" or set(values) != {"X"} or values["X"].dtype != torch.float16
+                    or values["X"].ndim != 2 or any(d <= 0 for d in values["X"].shape)):
+                raise ReferenceIdentityError("v2 reference inputs outside declared semantics")
+            return lambda: native_layernorm(values["X"]), "pytorch_eager"
+        if profile == "builtin-attention-fp16-cuda-v1":
+            # 语义与受信任定义一致: 1/sqrt(D) 缩放、末轴 softmax、causal = (j <= i)、
+            # 输入输出 fp16、无 affine / 无 dropout / 无加性 bias。
+            if (kind != "attention" or set(values) != {"Q", "K", "V", "causal"}
+                    or any(values[n].dtype != torch.float16 for n in ("Q", "K", "V"))
+                    or any(values[n].ndim != 4 for n in ("Q", "K", "V"))
+                    or any(d <= 0 for n in ("Q", "K", "V") for d in values[n].shape)):
+                raise ReferenceIdentityError("attention v1 reference inputs outside declared semantics")
+            if type(values["causal"]) is not bool:
+                raise ReferenceIdentityError("attention v1 requires a boolean causal scalar")
+            _c = values["causal"]
+            _q, _k, _v = values["Q"], values["K"], values["V"]
+            return (lambda: F.scaled_dot_product_attention(_q, _k, _v, is_causal=_c),
+                    "pytorch_sdpa")
+        raise ReferenceIdentityError(
+            "v2 reference profile outside the registered semantics: " + str(profile))
     if ("matmul" in kind or "gemm" in kind) and {"A", "B"} <= values.keys():
         return lambda: values["A"] @ values["B"], "pytorch_eager"
     if "softmax" in kind and "X" in values:

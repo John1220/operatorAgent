@@ -13,6 +13,9 @@ import re
 import subprocess
 
 PROFILE_V2 = "builtin-layernorm-fp16-cuda-v2"
+#: attention 的 profile。语义与 layernorm 不同（没有 eps 归一化、没有 affine、softmax 沿末轴），
+#: 所以它是**另一份**契约，不是同一份改默认值。
+PROFILE_ATTENTION = "builtin-attention-fp16-cuda-v1"
 # Filled from isolated read-only attestation, never discovered/accepted from a
 # candidate or auto-updated after a numerical failure.
 PINNED_RUNTIME = dict(
@@ -90,8 +93,49 @@ class ReferenceContract:
         return content_hash(self.content_dict())
 
 
-def registered_reference():
-    return ReferenceContract(ExecutionIdentity(**PINNED_RUNTIME))
+#: 受信任参考的注册表：**按 profile 取值**。当前只有 layernorm 一项 —— attention 要在
+#: C2b（容差标定）拿到实测数字之后才允许登记，在那之前它不在表里，`as_reference()`
+#: 会对它 fail-closed（"不在受信任注册表里"），而不是接受一份拍出来的容差。
+#:
+#: 为什么要注册表而不是就地改默认值：`ReferenceContract` 的字段与默认值本身就是
+#: layernorm 的语义，改它们会让 layernorm 的 `digest()` 变化 —— 那等于把所有已冻结的
+#: layernorm 回执一起作废。
+#: attention 的受信任参考。容差来自 2026-11-07 H20 标定（见
+#: docs/design/v08/attention-family.md §14）：
+#:   - `atol=3e-4, rtol=1e-2, rho=1.0` 让"好实现"全元素通过；
+#:   - 同一组数字把"错缩放(1/sqrt(S))"判否（通过率 0.013）、"causal 差一位"判否（0.49）；
+#:   - **但它抓不住"没做 max 平移"** —— 正常随机输入下 exp 不溢出，必须靠套件里的
+#:     "极值输入"那条 case 才能抓到。容差不是充分条件，这一点写在契约外。
+ATTENTION_REFERENCE = ReferenceContract(
+    ExecutionIdentity(**PINNED_RUNTIME),
+    profile=PROFILE_ATTENTION,
+    definition="native-pytorch-sdpa-mha-prefill-fp16-v1",
+    input_dtype="fp16",
+    candidate_accum="fp32_declared_not_arithmetic_attestation",
+    output_dtype="fp16",
+    reference_accum="native_implementation_pinned",
+    epsilon=0.0,                       # attention 没有 eps 归一化参数
+    normalized_axis=-1,                # softmax 沿末轴
+    variance="softmax_last_axis",
+    affine=False,
+    fp_fusion="forbid_native_sdpa",    # 候选不得调用 SDPA
+    deterministic_outputs=True,        # 同运行两次逐位相同（2026-11-07 H20 实测）
+    comparison="fp32_and",
+    rtol=1e-2,
+    required_matched_ratio=1.0)
+
+REGISTERED = {PROFILE_V2: ReferenceContract(ExecutionIdentity(**PINNED_RUNTIME)),
+              PROFILE_ATTENTION: ATTENTION_REFERENCE}
+
+
+def registered_reference(profile=PROFILE_V2):
+    """按 profile 取受信任参考；未知 profile 抛（不兜默认）。"""
+    try:
+        return REGISTERED[profile]
+    except KeyError:
+        raise ReferenceIdentityError(
+            f"no registered reference for profile {profile!r}; "
+            f"registered: {sorted(REGISTERED)}") from None
 
 
 def _strict_fields(raw, cls):
@@ -135,7 +179,11 @@ def as_reference(raw):
         raise ReferenceIdentityError("semantic types cannot be coerced")
     d["execution"] = ExecutionIdentity(**identity)
     spec = ReferenceContract(**d)
-    if spec != registered_reference():
+    try:
+        expected = registered_reference(spec.profile)
+    except ReferenceIdentityError:
+        raise
+    if spec != expected:
         raise ReferenceIdentityError("reference definition/execution not in trusted v2 registry")
     return spec
 

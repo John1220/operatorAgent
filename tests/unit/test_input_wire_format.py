@@ -117,3 +117,25 @@ class TestScalarsSurviveTheTensorConversion(unittest.TestCase):
         self.assertNotIn("torch.from_numpy(v).to(device).contiguous() for k, v in real_inputs",
                          source)
         self.assertNotIn("torch.from_numpy(v).to(device) for k, v in real_inputs", source)
+
+
+class TestContractReferenceDispatchesByProfile(unittest.TestCase):
+    """受信任参考按 profile 分流：未知 profile 必须失败关闭, 不能落进通用分支。"""
+
+    def test_an_unknown_profile_is_refused_before_any_reference_is_built(self):
+        runner = _runner()
+        with self.assertRaises(Exception) as raised:
+            runner._reference_torch("attention", {"Q": np.zeros((1, 1, 4, 8), np.float16)},
+                                    {"profile": "builtin-attention-fp16-cuda-v99"})
+        self.assertIn("outside the registered semantics", str(raised.exception))
+
+    def test_attention_v1_rejects_non_boolean_causal(self):
+        runner = _runner()
+        values = {"Q": np.zeros((1, 1, 4, 8), np.float16),
+                  "K": np.zeros((1, 1, 4, 8), np.float16),
+                  "V": np.zeros((1, 1, 4, 8), np.float16),
+                  "causal": 1}
+        with self.assertRaises(Exception) as raised:
+            runner._reference_torch("attention", values,
+                                    {"profile": "builtin-attention-fp16-cuda-v1"})
+        self.assertIn("boolean causal", str(raised.exception))
