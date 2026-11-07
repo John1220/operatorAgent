@@ -263,7 +263,43 @@ attention 契约的语义字段：`epsilon=0.0`（没有 eps 归一化）、`nor
 | causal 差一位 | 0.4904 | 拒绝 |
 | **不做 max 平移** | **1.0000** | **未拦住** |
 
-### 14.3 由此得到的两个结论
+## 15. C3：套件与反作弊（2026-11-07）
+
+### 15.1 套件：8 条显式 case
+
+attention **不走** axis 交叉生成器（那套只服务二维算子，S 只会取到边界对齐值）。
+显式清单在 `correctness_profiles.ATTENTION_CASES`，由 `attention_suite()` 生成：
+
+| case | causal | pattern / layout | 抓什么 |
+|---|---|---|---|
+| s1024-nocausal | False | random / contiguous | 主用例 |
+| s1024-causal | True | random / contiguous | mask 语义 |
+| s2048-causal | True | random / contiguous | 规模 |
+| s4096-causal | True | random / contiguous | 长行 |
+| s1000-causal | True | random / contiguous | 非 2 的幂 / 尾部 block |
+| s4096-causal-strided | True | random / strided | 布局假设 |
+| s1024-causal-zeros | True | zeros / contiguous | 全等行、除零路径 |
+| s1024-causal-large | True | **large** / contiguous | **数值稳定化**（§14.3 那条容差抓不住的） |
+
+`_attach_defaults()` 现在对 `kernel_type=attention` + fp16 挂上
+`attention_suite()` 与 `registered_reference(PROFILE_ATTENTION)`；其它 dtype 仍然拒绝。
+
+### 15.2 反作弊：补 import 层面的绕道
+
+调用点那几处早已覆盖（`F/torch/method` 三种写法的 SDPA、`bmm`、`einsum`、`softmax`）。
+C3 补的是 **import 层**——它们绕过的是"调用点屏蔽"本身：
+
+| 禁用入口 | 为什么 |
+|---|---|
+| `flash_attn` / `xformers` | 第三方原生 attention 包装 |
+| `torch.nn.attention` | 内部 API 直连 |
+| `torch._scaled_dot_product_*` | 私有实现直连 |
+| `torch.ops.aten` | 通用后门，任何算子都能绕过 |
+
+静态审计在 AST 分支里先查 import 再查调用点；正则兜底也加了同名规则。
+实测：四种绕道各报 1 条违规，而合法的 `tl.dot` 写法 0 违规。
+
+## 16. 由此得到的两个结论
 
 1. **容差不是充分条件。** 在随机 N(0,1) 输入下 scores 只有 ±4 量级，`exp` 不溢出，
    所以"漏掉 max 平移"在数值上无害 —— 它必须由**输入模式**抓：套件第 8 条

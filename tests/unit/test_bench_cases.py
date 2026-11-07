@@ -189,9 +189,12 @@ class TestTheShapeDistributionBuildsCases(unittest.TestCase):
         self.assertEqual(case_key(inputs_for("layernorm", shape)), mine.key())
 
     def test_an_unknown_kernel_type_is_not_guessed(self):
-        self.assertIsNone(cases_from_shapes("attention", (((8, 64, 64), 1.0),)))
+        # attention 自 2026-11-07 起有布局表（4 维 (B,H,S,D)），所以换 conv2d 当样本。
         self.assertIsNone(cases_from_shapes("conv2d", (((8, 64, 64), 1.0),)))
-        self.assertNotIn("attention", known_layouts())
+        self.assertNotIn("conv2d", known_layouts())
+        # attention 已知，但**形状元数**仍然要卡死：三维声明不是"猜一下"，是拒绝。
+        with self.assertRaises(BenchCaseError):
+            cases_from_shapes("attention", (((8, 64, 64), 1.0),))
 
     def test_a_wrong_arity_is_refused(self):
         with self.assertRaises(BenchCaseError):
@@ -306,7 +309,7 @@ class TestTheTaskChannel(unittest.TestCase):
         self.assertIn("对不上", str(ctx.exception))
 
     def test_an_unknown_layout_is_refused_when_shapes_are_declared(self):
-        task = _task(source=SourceSpec(kernel_type="attention",
+        task = _task(source=SourceSpec(kernel_type="conv2d",
                                        complexity=TaskComplexity.LOW),
                      constraints=_constraints(shapes=((8, 64, 64),)))
         with self.assertRaises(ContractError) as ctx:

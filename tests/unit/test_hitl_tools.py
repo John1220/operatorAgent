@@ -297,7 +297,9 @@ class TestCapabilitiesDoesNoWork(unittest.TestCase):
         self.assertTrue(caps["backends"]["local"]["limits"])
         self.assertTrue(caps["backends"]["ssh"]["limits"])
         self.assertIn("matmul", caps["kernel_types_with_input_layout"])
-        self.assertNotIn("attention", caps["kernel_types_with_input_layout"])
+        # attention 自 2026-11-07 起有布局表（4 维），因此**出现在**清单里；
+        # 它仍然没有 axis 生成器的默认 profile（那套只服务二维算子）。
+        self.assertIn("attention", caps["kernel_types_with_input_layout"])
         self.assertTrue(any("不做网络探测" in n for n in caps["notes"]))
 
 

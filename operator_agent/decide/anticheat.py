@@ -133,6 +133,31 @@ _BLOCKED_FUNCTIONAL_FUNCS = frozenset({
 
 _BLOCKED_NUMPY_FUNCS = frozenset({"matmul", "dot", "einsum", "vdot", "tensordot"})
 
+# attention 这条线的绕道入口: 它们要么是原生 SDPA 的包装, 要么能绕过调用点屏蔽。
+# 按**模块**判而不是按函数名 —— `flash_attn.flash_attn_func` 这类名字在别处没有,
+# 但 `torch.ops.aten.*` 是通用后门, 任何算子都可能被它绕过去。
+_BLOCKED_IMPORT_ROOTS = frozenset({"flash_attn", "xformers"})
+_BLOCKED_MODULE_PATHS = ("torch.nn.attention", "torch._scaled_dot_product", "torch.ops.aten")
+
+
+def _import_violations(tree) -> list:
+    """import 层面的禁用路径; 与调用点审计分开写, 因为它们的绕道方式不同。"""
+    found = []
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names = [node.module]
+        for name in names:
+            root = name.split(".")[0]
+            if root in _BLOCKED_IMPORT_ROOTS or any(
+                    name == p or name.startswith(p + ".") for p in _BLOCKED_MODULE_PATHS):
+                found.append(f"第 {getattr(node, 'lineno', '?')} 行: 禁用的原生实现入口 "
+                             f"`{name}` (回退到库/编译图, 绕过调用点屏蔽)")
+    return found
+
+
 # 张量方法形式 (A.matmul(B)): 接收者解析不出模块归属时按方法名判。
 # 这些名字是 torch 独有的，任何 DSL 下出现都意味着回退。
 _BLOCKED_METHODS = frozenset({
@@ -146,6 +171,11 @@ _KNOWN_MODULE_ROOTS = frozenset({"torch", "numpy", "triton"})
 
 
 # ─── 正则规则 (仅作 AST 解析失败时的兜底，见 static_audit) ──────────
+
+_IMPORT_RULES = ("禁用的原生实现 import", (
+    r"\bimport\s+(?:flash_attn|xformers)\b",
+    r"\bfrom\s+(?:flash_attn|xformers|torch\.nn\.attention|torch\._scaled_dot_product|torch\.ops\.aten)\b",
+))
 
 _TORCH_COMPUTE = (
     r"\btorch\s*\.\s*(?:" + "|".join(sorted(_BLOCKED_TORCH_FUNCS)) + r")\s*\("
@@ -366,6 +396,9 @@ def _audit_by_ast(code: str, dsl: str) -> Optional[list]:
         tree = ast.parse(code)
     except SyntaxError:
         return None
+    imported = _import_violations(tree)
+    if imported:
+        return imported
     visitor = _AuditVisitor(is_python_dsl=(dsl == "python"),
                             cutoff=_find_main_cutoff(tree))
     visitor.visit(tree)
@@ -481,9 +514,9 @@ def static_audit(code: str, dsl: str = "python",
     # 就放行: L1 的 compile() 预检通常会先拦下语法错，但 static_audit 是公开
     # 函数，不能假设调用顺序。
     if numpy_only:
-        rules = [_NUMPY_RULES]
+        rules = [_NUMPY_RULES, _IMPORT_RULES]
     else:
-        rules = _PYTHON_DSL_RULES if is_python_dsl else _GPU_DSL_RULES
+        rules = (_PYTHON_DSL_RULES if is_python_dsl else _GPU_DSL_RULES) + [_IMPORT_RULES]
     return AuditVerdict(_audit_by_regex(code, rules), lang)
 
 

@@ -16,6 +16,39 @@ PROFILE_VERSION = "builtin-l2-v1"
 OPERATORS = ("relu", "matmul", "softmax", "layernorm")
 SCOPE = "内建二维算子有限 L2 子域；layernorm 为无 affine、末轴归一化、eps=1e-5；不是全域证明"
 
+#: attention 的显式 case 清单。它**不走** axis 交叉生成器：S 必须是真实规模
+#: (1000/4096 不是边界对齐值), 而 causal 是 case 级标量而非形状轴。
+#: 最后一条 `large` 是**必需**的 —— 2026-11-07 标定证明: 随机输入下 exp 不溢出,
+#: "漏掉 max 平移" 的实现能骗过容差, 只有极值输入能抓到它。
+ATTENTION_CASES = (
+    ("s1024-nocausal", (1, 16, 1024, 128), False, "random", "contiguous"),
+    ("s1024-causal", (1, 16, 1024, 128), True, "random", "contiguous"),
+    ("s2048-causal", (1, 16, 2048, 128), True, "random", "contiguous"),
+    ("s4096-causal", (1, 16, 4096, 128), True, "random", "contiguous"),
+    ("s1000-causal", (1, 16, 1000, 128), True, "random", "contiguous"),
+    ("s4096-causal-strided", (1, 16, 4096, 128), True, "random", "strided"),
+    ("s1024-causal-zeros", (1, 16, 1024, 128), True, "zeros", "contiguous"),
+    ("s1024-causal-large", (1, 16, 1024, 128), True, "large", "contiguous"),
+)
+
+
+def attention_suite(seed=23):
+    """attention 的默认正确性套件：8 条显式 case（不是全域证明）。
+
+    声明的是"这 8 条", 不是"attention 都一样"。causal 走 case 级标量按值直传;
+    strided 与 large 各一条, 后者对应标定里那个容差抓不住的失败模式。
+    """
+    cases = []
+    for case_id, (b, h, s_len, d), causal, pattern, layout in ATTENTION_CASES:
+        inputs = BenchmarkCase(
+            name=f"attention-b{b}h{h}s{s_len}d{d}",
+            tensors=(TensorSpec("Q", (b, h, s_len, d), "fp16"),
+                     TensorSpec("K", (b, h, s_len, d), "fp16"),
+                     TensorSpec("V", (b, h, s_len, d), "fp16")),
+            seed=seed, scalars={"causal": causal})
+        cases.append(CorrectnessCase(case_id, inputs, pattern, layout))
+    return as_suite({"cases": [case.content_dict() for case in cases]})
+
 
 def default_policy(kernel_type, dtype, version=PROFILE_VERSION):
     if version not in (PROFILE_VERSION, PROFILE_V2):
@@ -157,7 +190,14 @@ def with_default_correctness(task):
             and not task.source.code_path and task.source.framework == "pytorch"
             and not task.source.semantic_parameters):
         try:
-            if task.source.kernel_type == "layernorm" and getattr(task.constraints.precision, "value", None) == "fp16":
+            if (task.source.kernel_type == "attention"
+                    and getattr(task.constraints.precision, "value", None) == "fp16"):
+                # attention 用显式套件 + 自己的受信任参考（不在 OPERATORS 的
+                # axis 生成器里 —— 那套只服务二维算子）。
+                from ..decide.reference_contract import PROFILE_ATTENTION
+                reference = registered_reference(PROFILE_ATTENTION).content_dict()
+                suite = attention_suite().content_dict()
+            elif task.source.kernel_type == "layernorm" and getattr(task.constraints.precision, "value", None) == "fp16":
                 version = PROFILE_V2
                 reference = registered_reference().content_dict()
                 suite = v2_suite().content_dict()
