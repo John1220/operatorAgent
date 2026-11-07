@@ -163,6 +163,21 @@ def profile_check(task, inputs=None):
             validate_gate(c.reference_contract, c.precision.value, c.max_error)
         except (ValueError, TypeError) as exc:
             result.update(status="unknown", reason=str(exc))
+    if result["status"] == "passed" and version == ATTENTION_PROFILE_VERSION:
+        # attention 没有 axis policy，主输入名直接按套件语义核：Q/K/V + 按值直传的 causal。
+        # （`default_policy` 那套"主输入名必须与 policy.tensors 一致"只对二维生成器成立。）
+        try:
+            validate_gate(c.reference_contract, c.precision.value, c.max_error,
+                          kernel_type="attention")
+        except (ValueError, TypeError) as exc:
+            result.update(status="unknown", reason=str(exc))
+        if result["status"] == "passed" and inputs is not None:
+            sets = inputs if isinstance(inputs, list) else [inputs]
+            if not sets or any(not isinstance(v, dict) or set(v) != {"Q", "K", "V", "causal"}
+                               for v in sets):
+                result.update(status="unknown",
+                              reason="attention 主输入必须是 Q/K/V + causal 标量")
+        return result
     if result["status"] != "passed" or inputs is None:
         return result
     try:
