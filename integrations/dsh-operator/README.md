@@ -22,11 +22,11 @@
 ### 2.1 Python 侧
 
 ```bash
-# 从仓库装（当前）
-cd /path/to/operatorAgent && pip install .
+# 从 PyPI（分布名 dsh-operator-agent；import 名仍是 operator_agent）
+pip install dsh-operator-agent==0.7.2
 
-# 或从发布源（尚未上架）
-pip install operator-agent
+# 或直接从仓库装（开发）
+cd /path/to/operatorAgent && pip install .
 ```
 
 装完应有两个命令：`operator-agent`（CLI）与 `operator-agent-mcp`（MCP stdio server）。
@@ -63,7 +63,9 @@ npx dsh-operator-agent-setup --runtime uvx
 首次启动会下载 wheel，之后走 uv 缓存；版本与插件配对，不会漂移。没有 uv 时助手会直接报错，
 退回 `--python`/`--wheel` 形态即可。
 
-**Desktop 使用 GUI 安装插件**：在 DSH 的 **插件 → 添加插件 → 安装第三方插件** 输入 `/absolute/path/operator-agent/v0.7.2/artifacts/dsh-operator-agent-0.2.2.tgz`，请从本机正式目录复制实际绝对路径替换占位符（GUI 不展开 `~` 或 `$HOME`）。安装后启用，再运行配置助手：
+**Desktop 使用 GUI 安装插件**：**插件 → 添加插件 → 安装第三方插件**，直接输入 npm 包名
+`dsh-operator-agent`（已发布，默认拉 `latest`；离线环境可改成本机 tgz 的绝对路径，GUI 不展开 `~`/`$HOME`）。
+安装后启用，再用上面的助手写运行时配置（或直接 `npx dsh-operator-agent-setup --runtime uvx`）。旧版本的等价配置助手：
 
 ```bash
 "$HOME/.local/share/operator-agent/v0.7.2/examples/configure-v072.command"

@@ -27,7 +27,7 @@ cd integrations/dsh-operator && node --test test/*.test.mjs             # 151 �
 工件侧（**用封版原件，不要重新构建**，除非有意换身份）：
 
 ```bash
-cd /Users/zh/op-agent-delivery/v0.7.2 && shasum -a 256 -c SHA256SUMS
+cd "<交付目录>/v0.7.2" && shasum -a 256 -c SHA256SUMS
 uvx twine check artifacts/*.whl artifacts/*.tar.gz        # 均需 PASSED
 ```
 
@@ -73,8 +73,8 @@ uvx --from dsh-operator-agent==0.7.2 operator-agent-mcp   # MCP 握手，host �
 
 ```bash
 cd integrations/dsh-operator && npm pack        # 产出 dsh-operator-agent-0.2.5.tgz
-cp dsh-operator-agent-0.2.5.tgz /Users/zh/op-agent-delivery/dsh-plugin-0.2.5/
-cd /Users/zh/op-agent-delivery/dsh-plugin-0.2.5 && shasum -a 256 *.tgz | tee SHA256SUMS
+cp dsh-operator-agent-0.2.5.tgz "<交付目录>/dsh-plugin-0.2.5/"
+cd "<交付目录>/dsh-plugin-0.2.5" && shasum -a 256 *.tgz | tee SHA256SUMS
 
 npm publish dsh-operator-agent-0.2.5.tgz \
   --registry https://registry.npmjs.org/ --access public --tag latest \
