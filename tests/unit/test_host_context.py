@@ -225,3 +225,96 @@ def test_source_bound_real_verification_can_supply_revision_materials():
     assert context['feedback']['levels']['L2'] is False
     assert context['diagnosis']['candidate_execution'] is False
     assert v == before
+
+
+L3_METRICS = dict(
+    speedup_vs_baseline=1.42, baseline_time_ms=1.90, median_time_ms=1.34, gflops=812.5,
+    gflops_utilization_pct=61.2, bandwidth_utilization_pct=48.0,
+    arithmetic_intensity=64.0, ridge_point=90.5,
+    launch_dominance=0.07, launch_floor_us=18.69,
+    dispersion_iqr_over_median=0.0002, dispersion_max_over_median=0.0031,
+    dispersion_exceeded=False, measurement_validity='valid',
+    measurement_can_gate=True, measurement_can_disable_recipe=True,
+    measurement_can_count_stagnation=True,
+    measurement_validity_reasons=['相位已核', '窗口无抢占'],
+    roofline_analysis=dict(bound_type='compute', compute_used='fp16_tensor_core',
+                           hw_name='NVIDIA H20', reference_lower_bound=True,
+                           peak_trusted=True, hw_peak_gflops=148.0,
+                           hw_peak_bandwidth_gbs=4000.0))
+
+
+def l3_feedback(t, source=CODE, metrics=None):
+    m = dict(L3_METRICS if metrics is None else metrics)
+    v = feedback(t, source)
+    v['verdicts'] = [dict(level='L1', passed=True, metrics={}),
+                     dict(level='L2', passed=True, metrics=dict(max_error=0.0, coverage=1.0)),
+                     dict(level='L3', passed=True, metrics=m)]
+    v['levels'] = dict(L1=True, L2=True, L3=True)
+    v['validity'] = m.get('measurement_validity')
+    return v
+
+
+def test_optimize_context_carries_bounded_performance_facts():
+    from operator_agent.decide.measurement import NOISE_BAND, Validity
+
+    t = task()
+    c = freeze_from_task(t)
+    context = build_host_context(t, c, backend='fake', phase='optimize',
+                                 source=CODE, verification=l3_feedback(t))
+    perf = context['feedback']['performance']
+    assert perf['level'] == 'L3'
+    # 绑定轴与地板占比是 optimize 阶段真正要看的两件事: 它们以前被整块丢掉
+    assert perf['roofline'] == dict(bound_type='compute', compute_used='fp16_tensor_core',
+                                    hw_name='NVIDIA H20', reference_lower_bound=True,
+                                    peak_trusted=True, hw_peak_gflops=148.0,
+                                    hw_peak_bandwidth_gbs=4000.0)
+    assert perf['launch_dominance'] == 0.07
+    assert perf['launch_floor_us'] == 18.69
+    assert perf['binding_attainment_pct'] == 61.2       # max(gflops, bandwidth) 利用率
+    assert perf['improvement_band'] == NOISE_BAND[Validity.VALID]
+    assert perf['reference_ceiling_reached'] is False    # 61.2% 离 90% 还远
+    assert perf['measurement_validity_reasons'] == ['相位已核', '窗口无抢占']
+    assert context['feedback']['performance_policy'].startswith('Performance facts are measurements')
+    # 有界: 日志/输入值/参考源码仍然进不来
+    secret = 'PRIVATE_INPUT_OR_REFERENCE_LITERAL'
+    v = l3_feedback(t)
+    v['verdicts'][2]['metrics'].update(error_log=secret, input_values=[secret],
+                                       reference_source=secret, seed=934810271)
+    result = build_host_context(t, c, backend='fake', phase='optimize', source=CODE, verification=v)
+    assert secret not in json.dumps(result)
+    assert not {'seed', 'input_values', 'reference_source', 'error_log'} & all_keys(result)
+    assert len(json.dumps(result, ensure_ascii=False, separators=(',', ':')).encode()) <= MAX_CONTEXT_BYTES
+
+
+def test_performance_projection_never_defaults_unobserved_facts():
+    t = task()
+    c = freeze_from_task(t)
+    # uninformative 档: 没有带宽 (那一轮没有任何判决用过它), 也没有地板/roofline 观测
+    v = l3_feedback(t, metrics=dict(speedup_vs_baseline=1.01, measurement_validity='uninformative',
+                                    measurement_can_gate=False))
+    perf = build_host_context(t, c, backend='fake', phase='optimize',
+                              source=CODE, verification=v)['feedback']['performance']
+    assert perf['level'] == 'L3' and perf['measurement_can_gate'] is False
+    assert 'improvement_band' not in perf          # 不是 0, 是缺席
+    assert 'roofline' not in perf and 'launch_dominance' not in perf
+    assert 'binding_attainment_pct' not in perf
+    assert perf['reference_ceiling_reached'] is False   # fail-closed: 未证明到顶
+
+
+def test_performance_projection_reports_reference_ceiling_as_its_own_predicate():
+    t = task()
+    c = freeze_from_task(t)
+    metrics = dict(L3_METRICS, gflops_utilization_pct=95.0)
+    perf = build_host_context(t, c, backend='fake', phase='optimize', source=CODE,
+                              verification=l3_feedback(t, metrics=metrics))['feedback']['performance']
+    assert perf['binding_attainment_pct'] == 95.0
+    assert perf['reference_ceiling_reached'] is True
+
+
+def test_generation_and_correctness_only_feedback_stay_free_of_performance_block():
+    t = task()
+    c = freeze_from_task(t)
+    assert build_host_context(t, c, backend='fake')['feedback'] is None
+    repair = build_host_context(t, c, backend='fake', phase='repair', source=CODE,
+                                verification=feedback(t))['feedback']
+    assert 'performance' not in repair and 'performance_policy' not in repair
