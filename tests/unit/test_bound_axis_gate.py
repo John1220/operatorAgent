@@ -324,6 +324,11 @@ class TestBoundReadersAreRegistered(unittest.TestCase):
         "generate/agents.py": "search_optimize prompt 与 _rule_optimize 的 tiling 选择 (缺省 unknown)",
         "generate/triton_opt_rules.py": "normalize_bound_type + 按轴推荐 tiling (unknown 落 mixed)",
         "app/conductor.py": "血缘与 result.json 的落盘搬运",
+        # v0.8 S2: 把绑定轴交给 host 的两个读者。一个是原样透传, 一个是据此选实验轴。
+        "generate/host_context.py": "白名单原样透传 roofline.bound_type 给 host, "
+                                    "不据此选轴; unknown 原样传出去, 不在这里改写成 compute/memory",
+        "generate/optimize_diagnoser.py": "据此选实验轴: 只有 'compute'/'memory' 才配轴, "
+                                          "缺键与占位值 'unknown' 都落 binding=unknown 并且不出实验",
         # #87 第 3 片新增的第 5 个消费端: 「这一轮的尺说的是哪条轴」这件事实。
         "decide/measurement.py": "只当**尺的身份**比较, 不据此选轴; 认得 unknown —— "
                           "`l3_ruler_reading` 明确把 `unknown` 剔出读数 (两轮都 unknown "

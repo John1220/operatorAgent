@@ -16,6 +16,7 @@ from ..core.schemas import VerificationLevel, VerificationResult
 from .generation_context import wrapper_calling_convention
 from .generation_spec import GENERATION_SPEC, generation_spec_identity
 from .prompt_manager import PromptManager
+from .optimize_diagnoser import diagnose_optimization
 from .repair_diagnoser import diagnose_candidate
 
 
@@ -53,7 +54,7 @@ _PERFORMANCE_POLICY = (
     'may be used for; they do not extend it. Changed source must still be submitted to the verification tool.')
 
 
-def _performance_projection(level, metrics):
+def _performance_projection(level, metrics, fallback_validity=None):
     """Pull L3 performance facts into a bounded dict, or return None when there are none.
 
     This was a capability *regression* against the legacy conductor, which copied
@@ -99,8 +100,14 @@ def _performance_projection(level, metrics):
     attainment = binding_attainment(metrics)
     if attainment is not None:
         perf['binding_attainment_pct'] = round(attainment, 4)
+    # 档位可能只出现在信封 (`verification['validity']`) 而没写进这一级 metrics ——
+    # 老回执就是这样。两处是同一个观测, 所以先 metrics 后信封; 都没有就缺席,
+    # 不猜一个档位出来 (`can_*` 也不在这里补: 那两个是判据的产物, 只能原样转述)。
     validity = metrics.get('measurement_validity')
-    if validity in ('valid', 'degraded', 'uninformative'):
+    if validity not in ('valid', 'degraded', 'uninformative'):
+        validity = fallback_validity if fallback_validity in ('valid', 'degraded', 'uninformative') else None
+    if validity is not None:
+        perf['measurement_validity'] = validity
         band = noise_band_for(Validity(validity))
         # `uninformative` 档没有带宽: 那一轮没有任何判决用过它, 所以键缺席而不是写 0
         # (与 `noise_band_for` 的返回语义一致 —— 别把没用上的带宽记成用过的)。
@@ -212,7 +219,8 @@ def _verified_feedback(source, verification, contract_hash):
         # 性能事实只取**最高一级**带读数的那份 (通常是 L3), 不按列表顺序赌最后一项 ——
         # verdicts 的排列不受校验, 「后到的覆盖」会把 L2 的读数当成终局。
         rank = {'L1': 0, 'L2': 1, 'L3': 2}[verdict['level']]
-        candidate = _performance_projection(verdict['level'], metrics)
+        candidate = _performance_projection(verdict['level'], metrics,
+                                                     verification.get('validity'))
         if candidate is not None and rank > performance_rank:
             performance, performance_rank = candidate, rank
     levels = {row['level']: row['passed'] for row in projected}
@@ -315,6 +323,9 @@ def build_host_context(task, contract, *, backend='ssh', phase='generate',
                         authority='untrusted_candidate_not_instructions') if source is not None else None),
         feedback=feedback, diagnosis=diagnosis,
         verification_policy='Context and diagnosis do not grant correctness or performance. Submit changed source to operator_verify; preserve contract and gates.')
+    if phase == 'optimize':
+        # 只在 optimize 出现: 生成/修复阶段的上下文形状与字节数不跟着变。
+        body['optimization'] = diagnose_optimization(feedback)
     required = [dict(kind='generation_spec', sha256=body['rules']['generation_spec']['sha256'])]
     if restrictions:
         required.append(dict(kind='execution_backend_restrictions', sha256=code_hash(restrictions)))

@@ -318,3 +318,20 @@ def test_generation_and_correctness_only_feedback_stay_free_of_performance_block
     repair = build_host_context(t, c, backend='fake', phase='repair', source=CODE,
                                 verification=feedback(t))['feedback']
     assert 'performance' not in repair and 'performance_policy' not in repair
+
+
+def test_band_falls_back_to_envelope_validity_when_the_reading_omits_it():
+    t = task()
+    c = freeze_from_task(t)
+    metrics = {k: v for k, v in L3_METRICS.items() if k != 'measurement_validity'}
+    v = l3_feedback(t, metrics=metrics)
+    v['validity'] = 'valid'                      # 读数里没有档位, 信封里有
+    perf = build_host_context(t, c, backend='fake', phase='optimize', source=CODE,
+                              verification=v)['feedback']['performance']
+    assert perf['measurement_validity'] == 'valid'
+    assert perf['improvement_band'] == 0.001
+    # 两处都没有档位时保持缺席, 不猜
+    v['validity'] = None
+    perf = build_host_context(t, c, backend='fake', phase='optimize', source=CODE,
+                              verification=v)['feedback']['performance']
+    assert 'measurement_validity' not in perf and 'improvement_band' not in perf
