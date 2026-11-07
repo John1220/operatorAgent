@@ -67,8 +67,47 @@ def kernel(A, B):
 """
 
 
-def matmul_probe_source():
+#: 访存型任务的探针: 与 matmul 探针同一个 CUDA event 通道, 但压的是带宽不是算力。
+#: **必须自己写 triton**: 远端 `shield_torch()` 会在验证/基准期间拦下原生算子
+#: (`F.layer_norm` 直接抛 CheatDetectedError, 2026-11-07 真机确认) —— 探针也不例外,
+#: 它跑的就是候选那条通道。
+LAYERNORM_PROBE = """import triton
+import triton.language as tl
+import torch
+
+
+@triton.jit
+def _probe_layernorm(x_ptr, y_ptr, N, eps, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < N
+    x = tl.load(x_ptr + row * N + cols, mask=mask, other=0.0).to(tl.float32)
+    mean = tl.sum(x, axis=0) / N
+    centred = tl.where(mask, x - mean, 0.0)
+    var = tl.sum(centred * centred, axis=0) / N
+    y = centred / tl.sqrt(var + eps)
+    tl.store(y_ptr + row * N + cols, y.to(y_ptr.dtype.element_ty), mask=mask)
+
+
+def kernel(X):
+    M, N = X.shape
+    Y = torch.empty_like(X)
+    _probe_layernorm[(M,)](X, Y, N, 1e-5, BLOCK=triton.next_power_of_2(N), num_warps=8)
+    return Y
+"""
+
+
+def probe_source(op='matmul'):
     """The probe kernel for a shape-aware run. Inputs are generated on the far side."""
+    if op == 'matmul':
+        return MATMUL_PROBE
+    if op == 'layernorm':
+        return LAYERNORM_PROBE
+    raise ValueError(f'unsupported probe op {op!r}; use matmul or layernorm')
+
+
+def matmul_probe_source():
+    """Backwards-compatible alias for the matmul probe."""
     return MATMUL_PROBE
 
 

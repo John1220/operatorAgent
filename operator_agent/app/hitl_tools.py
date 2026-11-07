@@ -863,7 +863,7 @@ def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
 
 # ── 动作 0（只读）: capabilities ─────────────────────────────────────────
 def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=None,
-                    repeat=8,
+                    op='matmul', repeat=8,
                     host=None, port=None, user=None, key_path=None, work_dir=None,
                     timeout=300, persistent=False) -> dict:
     """一条命令回答: 这个窗口现在能不能给出可判的性能读数。
@@ -876,15 +876,17 @@ def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=N
     真机实测: 24×24 参照核在 SSH 上落在远端 `perf_counter` 分支, 量的是主机 CPU。
     """
     from ..decide import calibration
-    from ..decide.noise_preflight import MIN_REPS, matmul_probe_source, run_preflight
+    from ..decide.noise_preflight import MIN_REPS, probe_source, run_preflight
     if type(reps) is not int or reps < MIN_REPS:
         raise ToolError("bad_reps", f"reps 必须是 >= {MIN_REPS} 的整数（当前 {reps!r}）")
     dims = None
     if shape is not None:
-        if (not isinstance(shape, (list, tuple)) or len(shape) != 3
+        want = 2 if op == 'layernorm' else 3
+        if (not isinstance(shape, (list, tuple)) or len(shape) != want
                 or any(type(value) is not int or not 16 <= value <= 65536 for value in shape)):
             raise ToolError("bad_shape",
-                            f"shape 必须是三个 [16, 65536] 的整数 (M,N,K), 当前 {shape!r}")
+                            f"shape 必须是 {want} 个 [16, 65536] 的整数 ("
+                            f"{'M,N' if want == 2 else 'M,N,K'}), 当前 {shape!r}")
         dims = list(shape)
         if backend != "ssh":
             # 其它后端的计时不是这张卡的; 尺寸一上 4096 纯 Python 也跑不动。
@@ -903,18 +905,24 @@ def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=N
                      "pass shape=[M,N,K] to probe a real workload size")
     else:
         import numpy as np
-        m, n, k = dims
-        # 本地只占位拿 shape/dtype: SSH 侧按 spec 在远端生成数据, 不传 67 MB。
-        inputs = {"A": np.empty((m, k), dtype=np.float16),
-                  "B": np.empty((k, n), dtype=np.float16)}
+        # 本地只占位拿 shape/dtype: SSH 侧按 spec 在远端生成数据, 不传几十 MB。
+        if op == 'layernorm':
+            m, n = dims
+            inputs = {"X": np.empty((m, n), dtype=np.float16)}
+            label = f'layernorm-{m}x{n}'
+        else:
+            m, n, k = dims
+            inputs = {"A": np.empty((m, k), dtype=np.float16),
+                      "B": np.empty((k, n), dtype=np.float16)}
+            label = f'matmul-{m}x{n}x{k}'
         # 每个 episode 内部采 `repeat` 个样本, 再用**各 episode 的中位**算跨轮散布:
         # 与 L3 的做法一致 (真机一次 L3 是 30~46 样本)。reps=5 且每个 episode 只采
         # 1 个样本时, iqr 只是 5 个点上的顺序统计量, 会把手抖放大成 6% 的判决带宽
         # —— 2026-11-07 真机现场就是这个数 (真值 ~0.1%)。
-        bench = calibration.source_bench_fn(backend_obj, matmul_probe_source(),
+        bench = calibration.source_bench_fn(backend_obj, probe_source(op),
                                             warmup=2, repeat=repeat)
         call = lambda: bench(inputs)
-        channel = f'triton-matmul-{m}x{n}x{k}-cuda-event'
+        channel = f'{label}-cuda-event'
         notes.append("the remote runner times the kernel with CUDA events and flushes L2 per run")
     if backend in ("fake", "mock"):
         notes.append("test_only: 这个后端的计时来自模拟或控制机 CPU, 不构成真机窗口证据")

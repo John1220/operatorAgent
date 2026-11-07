@@ -55,6 +55,8 @@ def _parser() -> argparse.ArgumentParser:
                     help="同一参照核连跑几次（>=3）；回执里记原始读数")
     pf.add_argument("--repeat", type=int, default=8,
                     help="每个 episode 内采样几次（--shape 时有效，默认 8）")
+    pf.add_argument("--op", default="matmul", choices=["matmul", "layernorm"],
+                    help="--shape 时的探针算子（默认 matmul；layernorm 用 M,N）")
     pf.add_argument("--shape", default=None,
                     help="M,N,K：用目标尺寸的 triton matmul 探针（仅 backend=ssh），"
                          "走与候选核同一条 CUDA event 通道")
@@ -291,7 +293,7 @@ def main(argv=None) -> int:
                      if args.shape else None)
             payload = noise_preflight(backend=args.backend, reps=args.reps,
                                       planned_effect_pct=args.planned_effect_pct,
-                                      shape=shape, repeat=args.repeat,
+                                      shape=shape, op=args.op, repeat=args.repeat,
                                       host=args.host, port=args.port, user=args.user,
                                       key_path=args.key_path, work_dir=args.work_dir,
                                       timeout=args.timeout, persistent=args.persistent)

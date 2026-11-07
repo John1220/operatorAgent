@@ -52,10 +52,32 @@ def test_memory_bound_reading_aims_at_bandwidth_not_flops():
     assert result['basis']['validity'] == 'degraded'
 
 
-def test_launch_floor_share_becomes_its_own_axis():
-    result = diagnose_optimization(envelope(perf(launch_dominance=0.14)))
+def test_launch_floor_is_a_serial_limit_not_a_competing_axis():
+    """地板 14% 的 memory-bound 核 (真机 relu 16384×6144 的形状) 仍然要报带宽轴。"""
+    result = diagnose_optimization(envelope(perf(
+        launch_dominance=0.14,
+        roofline=dict(bound_type='memory', memory_used='fp16',
+                      reference_lower_bound=False, peak_trusted=True),
+        gflops_utilization_pct=3.3, bandwidth_utilization_pct=81.2,
+        binding_attainment_pct=81.2), validity='degraded'))
+    assert result['bottleneck']['binding'] == 'memory_bound'
+    assert result['bottleneck']['attainment_key'] == 'bandwidth_utilization_pct'
+    assert [row['axis'] for row in result['experiments']][0] == 'coalescing'
+    assert result['launch_limit']['dominance'] == 0.14
+    assert result['launch_limit']['max_remaining_fraction'] == 0.86
+    assert result['status'] == 'diagnosed'
+
+
+def test_a_floor_with_no_readable_axis_falls_back_to_work_per_launch():
+    result = diagnose_optimization(envelope(perf(
+        launch_dominance=0.14, roofline=dict(bound_type='unknown'))))
     assert result['bottleneck']['binding'] == 'launch_floor'
     assert [row['axis'] for row in result['experiments']] == ['work_per_launch']
+
+
+def test_a_small_floor_is_not_reported_as_a_limit():
+    result = diagnose_optimization(envelope(perf(launch_dominance=0.0191)))
+    assert result['launch_limit'] is None
 
 
 def test_uninformative_reading_supports_no_comparison_and_no_experiment():

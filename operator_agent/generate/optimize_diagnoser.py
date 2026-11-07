@@ -93,7 +93,13 @@ def _result(status, **fields):
 
 
 def _binding_of(perf):
-    """(binding, evidence) —— 只读投影里的事实, 判不了就 unknown。"""
+    """(binding, evidence) —— 绑定轴只看 roofline, 地板另算。
+
+    地板**不是**与 compute/memory 并列的第三条轴: 它是「同一份代码再快也快不过地板」
+    的串行限制 (2026-11-07 真机: relu 16384×6144 带宽利用率 81.2%、地板占 14.0%,
+    把它判成 launch_floor 会把带宽轴整个吞掉)。所以绑定轴上并列的只有两条轴, 地板
+    以 `launch_limit` 的形式单独报。
+    """
     roofline = perf.get('roofline') if isinstance(perf.get('roofline'), dict) else {}
     dominance = perf.get('launch_dominance')
     evidence = {}
@@ -108,13 +114,28 @@ def _binding_of(perf):
         if type(roofline.get(key)) is str:
             evidence[key] = roofline[key]
     # `bound_type == 'unknown'` 是占位值 (缺分母), 不是判定 —— 照 unknown 处理。
-    if type(dominance) in (int, float) and dominance > LAUNCH_DOMINANCE_VALID:
-        return 'launch_floor', evidence
     if bound == 'compute':
         return 'compute_bound', evidence
     if bound == 'memory':
         return 'memory_bound', evidence
+    if type(dominance) in (int, float) and dominance > LAUNCH_DOMINANCE_VALID:
+        # 绑定轴判不出来, 但地板已经把上限压住了 —— 这是唯一能说的事。
+        return 'launch_floor', evidence
     return 'unknown', evidence
+
+
+def _launch_limit(perf):
+    """地板给出的**串行上限**: 即使另一条轴做到完美, 也只剩 (1-地板占比) 可分。"""
+    dominance = perf.get('launch_dominance')
+    if type(dominance) not in (int, float) or not 0 <= dominance < 1:
+        return None
+    if dominance <= LAUNCH_DOMINANCE_VALID:
+        return None
+    return dict(dominance=round(float(dominance), 4),
+                max_remaining_fraction=round(1.0 - float(dominance), 4),
+                note='the launch floor is shared by every configuration of this kernel: '
+                     'even at infinite bandwidth or FLOPs the median cannot fall below it')
+
 
 
 def diagnose_optimization(feedback):
@@ -148,8 +169,8 @@ def diagnose_optimization(feedback):
 
     if perf.get('measurement_can_gate') is False or basis['validity'] == 'uninformative':
         return _result('hold_for_measurement', basis=basis, bottleneck=dict(binding=binding,
-                       evidence=evidence), decision_band_pct=band_pct, headroom=None,
-                       stop=None, experiments=[],
+                       evidence=evidence), decision_band_pct=band_pct,
+                       launch_limit=_launch_limit(perf), headroom=None, stop=None, experiments=[],
                        reason=('This reading cannot support an improvement comparison'
                                + (': the launch floor dominates the median' if binding == 'launch_floor'
                                   else '') + '. Re-measuring the same source on a quieter window '
@@ -193,6 +214,7 @@ def diagnose_optimization(feedback):
                   basis=basis, bottleneck=dict(binding=binding, evidence=evidence,
                                                attainment_key=_ATTAINMENT_KEY.get(binding),
                                                attainment_pct=attainment),
+                  launch_limit=_launch_limit(perf),
                   decision_band_pct=band_pct, headroom=headroom, stop=stop,
                   experiments=experiments)
     if band_pct is None and stop is None:

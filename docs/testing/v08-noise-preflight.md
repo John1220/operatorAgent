@@ -21,8 +21,12 @@ python -m operator_agent preflight --backend local --reps 5
 **`--shape` 是必须的**：不带它时参照核是 24×24 的纯 Python matmul，在 SSH 上落在远端
 `perf_counter` 分支——量的是主机 CPU 的重复性，与候选核的 CUDA event 通道不是一件事。
 2026-11-07 在 H20 上实测过这个差异，结论写进
-[真机回执记录](../status/v08-real-receipt-20261107.md)。`--shape` 只支持 `backend=ssh`，
+[真机回执记录](../status/v08/real-receipt-20261107.md)。`--shape` 只支持 `backend=ssh`，
 其它后端会以 `preflight_shape_backend` 明确拒绝，**不会静默换成小核**。
+
+访存型任务用 `--op layernorm --shape M,N`：探针换成 triton 的 row-wise layernorm，压的是
+带宽而不是算力。**不能用 `F.layer_norm`**——远端反作弊盾会在基准期间拦下原生算子
+（`CheatDetectedError`），探针跑的就是候选那条通道，所以它也得自己实现。
 
 `--repeat` 是每个 episode 内部的采样次数（默认 8）。先用 1 跑过一次：5 个单样本点上
 的 iqr 把 4096³ 的手抖放大成 2.02%（真实值 0.07%），判决带宽从 0.2% 虚高到 6.1%。
