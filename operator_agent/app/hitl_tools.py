@@ -504,8 +504,13 @@ def _prepare_unlocked(declaration: dict, run_dir: str | Path, *, now: Optional[f
         "generation_spec": generation_spec_identity(),
         "cases": [_case_summary(c) for c in contract.cases],
         "required_cases": list(contract.required_cases),
+        # 输入里可能混着**按值直传的标量**（causal/eps）：它们没有 .shape，
+        # 也不能被当成数组描述。分两处报，别让"标量"被读成"零维张量"。
         "inputs": {name: {"shape": list(arr.shape), "dtype": str(arr.dtype)}
-                   for name, arr in inputs.items()},
+                   for name, arr in inputs.items() if hasattr(arr, "shape")},
+        **({"scalars": {name: value for name, value in inputs.items()
+                        if not hasattr(value, "shape")}}
+           if any(not hasattr(value, "shape") for value in inputs.values()) else {}),
         "correctness_profile": contract.correctness_profile,
         "judgement": {
             "kernel_type": contract.kernel_type,

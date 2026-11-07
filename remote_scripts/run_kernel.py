@@ -1685,9 +1685,12 @@ def _compute_metrics(real_inputs: dict, elapsed: float) -> tuple:
             B, H = 1, 1
         else:
             B, H, S, D = 1, 1, shape[0], shape[1] if len(shape) > 1 else 1
-        # Attention FLOPs: QK^T matmul (2*B*H*S*S*D) + softmax(4*B*H*S*S) + PV matmul (2*B*H*S*S*D)
-        # Ignore softmax (small) => total ~4*B*H*S*S*D FLOPs
+        # Attention FLOPs: QK^T (2*B*H*S*S*D) + PV (2*B*H*S*S*D) => 4*B*H*S*S*D
+        # causal 只算下三角 => x0.5。这个 0.5 必须与控制端 `_ai_numer_denom` 的公式
+        # 一致, 否则"实测带宽"与"算术强度"不是同一个量。
         flops = 4.0 * B * H * S * S * D
+        if real_inputs.get("causal") is True:
+            flops *= 0.5
         gflops = flops / elapsed / 1e9
         # Flash Attention data movement: Q (BHS D*2) K (BHS D*2) V (BHS D*2) O (BHS D*2) [FP16]
         # Actually HBM access = reads of Q once + K & V once each (re-read per tile) + write O

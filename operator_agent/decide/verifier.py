@@ -2649,6 +2649,26 @@ class Verifier:
                 bytes_transferred = (M * K + K * N + M * N) * nbytes
                 return flops, bytes_transferred
 
+        if "attention" in kt or "flash_attn" in kt:
+            # attention 的 roofline 是**粗估**（设计 §8 选项 B）：
+            #   FLOPs = 2 个 GEMM = 4·B·H·S²·D，causal 时再乘 0.5；
+            #   Bytes = Q/K/V 各读一次 + O 写一次 = 4·B·H·S·D·nbytes。
+            # 中间 softmax 的读写不计 —— 它正是"粗估"二字的来源，也写进返回字段。
+            # 两份公式必须与远端 `_compute_metrics` 逐项一致，否则 AI 与实测带宽
+            # 不是同一个量（那会让 bound_type 与实际读数对不上）。
+            if {"Q", "K", "V"} <= set(inputs):
+                q = np.asarray(inputs["Q"])
+                if q.ndim != 4:
+                    return None, None
+                B, H, S, D = (int(q.shape[i]) for i in range(4))
+                if min(B, H, S, D) <= 0:
+                    return None, None
+                flops = 4.0 * B * H * S * S * D
+                if inputs.get("causal") is True:
+                    flops *= 0.5
+                bytes_transferred = 4.0 * B * H * S * D * nbytes
+                return flops, bytes_transferred
+
         if "softmax" in kt:
             # Softmax: ~5*N FLOPs per element (exp, sum, div), memory: N * dtype
             if "X" in inputs:
@@ -2782,6 +2802,10 @@ class Verifier:
             "ridge_point": round(ridge_point, 2),
             "roofline_bound": roofline_bound,
             "name_bound": name_bound,  # 算子名启发式分类 (对比用)
+            # 粗估标记: attention 的 roofline 不计中间 softmax 的读写, 分母是规格峰值。
+            # 这个键只对 attention 出现 —— 别的算子的 AI 是守恒的 (读一次写一次)。
+            **({"coarse_estimate": True, "model": "attention_coarse_v1"}
+               if "attention" in (task.source.kernel_type or "").lower() else {}),
             "bound_type": bound_type,  # 综合判定 (roofline + 启发式)
             "gflops_utilization_pct": round(gflops_util, 1),
             "bandwidth_utilization_pct": round(bw_util, 1),

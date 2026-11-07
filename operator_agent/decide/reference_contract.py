@@ -263,18 +263,31 @@ def execution_receipt(raw):
         raise ReferenceIdentityError("reference identity probe unavailable: " + type(exc).__name__) from exc
 
 
+#: 每个 profile 允许的绝对容差上限。数字来自标定，不是随手写的：
+#: layernorm 1e-5（既有 v2 标定），attention 3e-4（2026-11-07 H20 网格：
+#: 好实现全过、错缩放与 causal 差一位被判否）。
+MAX_ATOL = {'builtin-layernorm-fp16-cuda-v2': 1e-5,
+            'builtin-attention-fp16-cuda-v1': 3e-4}
+_PROFILE_OPERATOR = {'builtin-layernorm-fp16-cuda-v2': 'layernorm',
+                     'builtin-attention-fp16-cuda-v1': 'attention'}
+
+
 def validate_gate(raw, precision, max_error, reference_source="", kernel_type="layernorm"):
     spec = as_reference(raw)
-    if (precision != "fp16" or kernel_type != "layernorm" or reference_source
-            or type(max_error) not in (int, float) or not 0 < max_error <= 1e-5):
-        raise ReferenceIdentityError("v2 operator/dtype/source/tolerance mismatch")
+    expected_operator = _PROFILE_OPERATOR.get(spec.profile)
+    ceiling = MAX_ATOL.get(spec.profile)
+    if expected_operator is None or ceiling is None:
+        raise ReferenceIdentityError("unknown reference profile for the numerical gate")
+    if (precision != "fp16" or kernel_type != expected_operator or reference_source
+            or type(max_error) not in (int, float) or not 0 < max_error <= ceiling):
+        raise ReferenceIdentityError("operator/dtype/source/tolerance mismatch")
     if __package__:
         from ..core import tolerance
     else:
         import tolerance
     atol, rtol, rho = tolerance.effective_atol(precision, max_error)
     if (atol, rtol, rho) != (max_error, spec.rtol, spec.required_matched_ratio):
-        raise ReferenceIdentityError("v2 numerical gate drifted")
+        raise ReferenceIdentityError("numerical gate drifted")
     return spec
 
 

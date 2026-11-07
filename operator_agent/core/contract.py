@@ -378,10 +378,18 @@ def freeze(kernel_type: str,
         try:
             reference_contract = as_reference(reference_contract)
             validate_gate(reference_contract, dtype_semantics.dtype, max_error, kernel_type=kernel_type)
-            if (correctness_profile != PROFILE_V2 or baseline.name != "pytorch_eager"
+            # 受信任参考必须与"谁的 profile、哪个基线、什么精度语义"三条同时对上。
+            # attention 与 layernorm 共用同一组要求（fp32 累加、不开 tf32/降精度、确定性），
+            # 只有 profile 与基线名字不同 —— 所以这里按参考自己的 profile 取值，
+            # 不是把 PROFILE_V2 写成唯一合法值。
+            # 基线名仍然是 pytorch_eager：它指「速度对照臂」，而 attention 的 eager 对照
+            # 就是 torch 的那条路径。**正确性**参考（SDPA）由 reference_contract 决定，
+            # 两者不是同一个概念，别把基线名绑到参考 profile 上。
+            expected_profile = reference_contract.profile
+            if (correctness_profile != expected_profile or baseline.name != "pytorch_eager"
                     or dtype_semantics.accum != "fp32" or dtype_semantics.tf32
                     or dtype_semantics.allow_reduced_precision or not dtype_semantics.deterministic):
-                raise ContractError("v2 参考/基线/精度声明不一致")
+                raise ContractError("参考/基线/精度声明不一致")
         except (ValueError, TypeError) as exc:
             errs.append(f"reference_contract: {exc}")
     errs += [f"dtype_semantics: {e}" for e in dtype_semantics.validate()]

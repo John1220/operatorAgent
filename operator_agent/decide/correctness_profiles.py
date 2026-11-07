@@ -8,7 +8,11 @@ from dataclasses import replace
 from ..decide.bench_cases import BenchCaseError
 from ..decide.correctness import as_suite, CorrectnessCase, CorrectnessSuite
 from ..decide.bench_cases import BenchmarkCase, TensorSpec
-from ..decide.reference_contract import PROFILE_V2, as_reference, registered_reference, validate_gate
+from ..decide.reference_contract import (PROFILE_ATTENTION, PROFILE_V2, as_reference,
+                                         registered_reference, validate_gate)
+#: attention 的 correctness profile 与它的参考 profile 是**同一个字符串** ——
+#: 与 layernorm（PROFILE_V2 同时充当两者）保持同一种写法，免得两份名字各自漂。
+ATTENTION_PROFILE_VERSION = PROFILE_ATTENTION
 from ..decide.correctness_boundaries import (BoundaryAxis, BoundaryPolicy, TensorAxes,
                                     as_policy, lint_coverage)
 
@@ -109,6 +113,18 @@ def declaration_check(kernel_type, dtype, version, suite, reference_contract=Non
             if as_suite(suite).digest() != v2_suite().digest():
                 raise BenchCaseError("v2 必须保留完整 32 组标定套件，不能删改低方差/单列反例")
             result.update(reference_hash=spec.digest(), scope="H20 CUDA 指定 native 构建；32 组有限 L2 标定域，不证明全域/内部算术")
+        elif version == ATTENTION_PROFILE_VERSION:
+            spec = as_reference(reference_contract)
+            if spec.profile != ATTENTION_PROFILE_VERSION:
+                raise BenchCaseError("attention profile 与参考身份不一致")
+            if as_suite(suite).digest() != attention_suite().digest():
+                raise BenchCaseError("attention 必须保留全部 8 条显式 case（含 strided 与 large）")
+            result.update(status="passed", reference_hash=spec.digest(),
+                          scope="H20 CUDA SDPA 参考；8 条有限 L2 case，不证明任意 S/D/mask",
+                          policy_hash=attention_suite().digest())
+            # 早返回：attention 不走下面那套"axis policy 必须与默认 policy 相等"的检查
+            # （那套只对二维生成器成立）。
+            return result
         elif reference_contract is not None:
             raise BenchCaseError("参考身份声明只能与其可信 v2 profile 一同使用")
         policy = default_policy(kernel_type, dtype, version)
@@ -194,7 +210,7 @@ def with_default_correctness(task):
                     and getattr(task.constraints.precision, "value", None) == "fp16"):
                 # attention 用显式套件 + 自己的受信任参考（不在 OPERATORS 的
                 # axis 生成器里 —— 那套只服务二维算子）。
-                from ..decide.reference_contract import PROFILE_ATTENTION
+                version = ATTENTION_PROFILE_VERSION
                 reference = registered_reference(PROFILE_ATTENTION).content_dict()
                 suite = attention_suite().content_dict()
             elif task.source.kernel_type == "layernorm" and getattr(task.constraints.precision, "value", None) == "fp16":

@@ -299,7 +299,35 @@ C3 补的是 **import 层**——它们绕过的是"调用点屏蔽"本身：
 静态审计在 AST 分支里先查 import 再查调用点；正则兜底也加了同名规则。
 实测：四种绕道各报 1 条违规，而合法的 `tl.dot` 写法 0 违规。
 
-## 16. 由此得到的两个结论
+## 16. C4：roofline 口径 B 落地（2026-11-07）
+
+两端用**同一组公式**，否则"实测带宽"与"算术强度"不是同一个量：
+
+| 量 | 公式 | 备注 |
+|---|---|---|
+| FLOPs | `4·B·H·S²·D`，causal 时 ×0.5 | 两个 GEMM；softmax 的 4·B·H·S² 不计 |
+| Bytes | `4·B·H·S·D·itemsize` | Q/K/V 各读一次 + O 写一次 |
+| AI | `S / itemsize`（causal 再减半） | S=1024 fp16 → 512 FLOP/byte，远高于脊点 ≈37 ⇒ compute-bound |
+
+`_roofline_analysis()` 对 attention 额外发布 `coarse_estimate: true` 与
+`model: "attention_coarse_v1"`；`reference_lower_bound` 保持 `false`，诊断走
+`audited_peak` 口径（余量算得出来，但注明是规格峰值）。
+
+同一步里 prepare 链路打通了三个既有缺口（都是"标量不是数组"这一族）：
+
+1. `declaration_check` 原先只认 `PROFILE_V2`，且 `reference_contract` 只能配 v2 →
+   加 attention profile 分支并**早返回**（它不走二维 axis policy 那套等值检查）；
+2. `validate_gate` 把算子名/atol 上限写死成 layernorm → 改为按 profile 查表
+   （attention 上限 3e-4，就是标定出来的那个数）；
+3. `contract.py` 的"参考/基线/精度一致"检查把 `correctness_profile` 写死成 `PROFILE_V2`
+   → 改成与参考自己的 profile 比对；基线名仍是 `pytorch_eager`（那是**速度**对照臂，
+   与正确性参考不是一回事）；
+4. `hitl_tools.prepare` 的 `inputs` 只认带 `.shape` 的值 → 标量单独报进 `scalars`。
+
+实测 `prepare` 现在能冻结 attention 契约：profile
+`builtin-attention-fp16-cuda-v1`、inputs `Q/K/V`、`scalars {causal: False}`、1 个 case。
+
+## 17. 由此得到的两个结论
 
 1. **容差不是充分条件。** 在随机 N(0,1) 输入下 scores 只有 ±4 量级，`exp` 不溢出，
    所以"漏掉 max 平移"在数值上无害 —— 它必须由**输入模式**抓：套件第 8 条
