@@ -68,9 +68,22 @@ _EXPERIMENTS = {
     'unknown': (),
 }
 
+#: 这些 `compute_used` 说明核**已经**在张量核上跑 —— 再建议"换 dtype"就是废话。
+_TENSOR_CORE_MARKERS = ('tensor_core', 'tensor-core', 'wgmma', 'mma')
+
 #: 绑定类型 → 用哪个利用率当达成率 (取不到就缺席, 不兜 0)
 _ATTAINMENT_KEY = {'compute_bound': 'gflops_utilization_pct',
                    'memory_bound': 'bandwidth_utilization_pct'}
+
+
+def _eligible_experiments(binding, roofline):
+    """去掉**证据已经满足**的轴: 建议一个已经做了的改动只会浪费一轮预算。"""
+    used = str(roofline.get('compute_used') or '').lower()
+    tensor_core = any(marker in used for marker in _TENSOR_CORE_MARKERS)
+    rows = [dict(row) for row in _EXPERIMENTS[binding]]
+    if tensor_core and binding == 'compute_bound':
+        rows = [row for row in rows if row['axis'] != 'precision_and_accumulation']
+    return rows[:MAX_EXPERIMENTS]
 
 
 def _result(status, **fields):
@@ -162,12 +175,20 @@ def diagnose_optimization(feedback):
                             remaining_pct=round(max(0.0, 100.0 - float(attainment)), 4),
                             note='remaining_pct is measured against a reference lower bound, '
                                  'so it under-states the real gap')
+        elif roofline.get('peak_trusted') is True:
+            # 分母是**核过口径的规格峰值** (不是实测峰值): 达成率可以读, 但它是规格推算,
+            # 剩下的那点空间里还有时钟/温度/占用率。H20 fp16 4096³ 实测就到过 89.3%,
+            # 这种读数下"再换配方"通常无收益, 所以余量必须报出来而不是说"不知道"。
+            headroom = dict(basis='audited_peak',
+                            remaining_pct=round(max(0.0, 100.0 - float(attainment)), 4),
+                            note='remaining_pct is against a spec-audited peak, not a measured '
+                                 'one; a small remainder usually means there is little to win')
         else:
             headroom = dict(basis='unverified', remaining_pct=None,
                             note='no reference lower bound on this reading: do not read the '
                                  'attainment as distance to the hardware peak')
 
-    experiments = [] if stop is not None else [dict(row) for row in _EXPERIMENTS[binding]][:MAX_EXPERIMENTS]
+    experiments = [] if stop is not None else _eligible_experiments(binding, roofline)
     out = _result('stop_at_ceiling' if stop is not None else 'diagnosed',
                   basis=basis, bottleneck=dict(binding=binding, evidence=evidence,
                                                attainment_key=_ATTAINMENT_KEY.get(binding),

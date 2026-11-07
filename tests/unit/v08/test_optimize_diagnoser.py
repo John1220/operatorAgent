@@ -30,8 +30,8 @@ def test_compute_bound_reading_yields_cited_experiments_and_headroom():
     assert result['bottleneck']['evidence'] == dict(launch_dominance=0.07, launch_floor_us=18.69,
                                                     bound_type='compute',
                                                     compute_used='fp16_tensor_core')
-    assert [row['axis'] for row in result['experiments']] == [
-        'precision_and_accumulation', 'tiling', 'pipelining']
+    # 这份读数的 compute_used 是 fp16_tensor_core ⇒ "换 dtype" 已经满足, 不该出现
+    assert [row['axis'] for row in result['experiments']] == ['tiling', 'pipelining']
     assert result['decision_band_pct'] == 0.1
     assert result['headroom']['remaining_pct'] == 38.8
     assert result['headroom']['basis'] == 'reference_lower_bound'
@@ -91,6 +91,28 @@ def test_headroom_is_not_claimed_when_the_denominator_is_unverified():
         roofline=dict(bound_type='compute', reference_lower_bound=False, peak_trusted=False))))
     assert result['headroom']['basis'] == 'unverified'
     assert result['headroom']['remaining_pct'] is None
+
+
+def test_a_real_h20_receipt_at_the_audited_peak_stops_recommending_dtype_work():
+    """真机回执 (2026-11-07, H20, fp16 4096³, 128×128×64 stride-aware) 的形状。"""
+    result = diagnose_optimization(envelope(perf(
+        speedup_vs_baseline=1.0039, median_time_ms=1.040016, baseline_time_ms=1.044096,
+        gflops_utilization_pct=89.3, bandwidth_utilization_pct=2.4,
+        launch_dominance=0.0191, launch_floor_us=20.24,
+        dispersion_iqr_over_median=0.0016, binding_attainment_pct=89.3,
+        roofline=dict(bound_type='compute', compute_used='fp16_tensor_core',
+                      reference_lower_bound=False, peak_trusted=True,
+                      hw_peak_gflops=148000.0, hw_peak_bandwidth_gbs=4000.0))))
+    assert result['status'] == 'diagnosed'
+    assert result['bottleneck']['binding'] == 'compute_bound'
+    assert 'precision_and_accumulation' not in [row['axis'] for row in result['experiments']]
+    # 分母是核过的规格峰值: 余量要报出来 (10.7%), 并说明它不是实测峰值
+    assert result['headroom']['basis'] == 'audited_peak'
+    assert result['headroom']['remaining_pct'] == 10.7
+    assert 'spec-audited peak' in result['headroom']['note']
+    # 没有参考下界 ⇒ 仍然不许说"贴着参考天花板"
+    assert result['stop'] is None
+    assert result['decision_band_pct'] == 0.1
 
 
 def test_unknown_binding_is_unknown_not_a_guess():
