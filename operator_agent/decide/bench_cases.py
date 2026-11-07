@@ -29,6 +29,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional, Tuple
 
@@ -75,6 +76,36 @@ def case_key(inputs: Any) -> str:
             shape = ()
         parts.append(f"{name}=" + ("x".join(str(d) for d in shape) if shape else "?"))
     return "|".join(parts)
+
+
+#: 标量参数的合法类型。**只收标量**：容器会被 JSON 往返改形状，而"传过去的和评的不是
+#: 同一份"正是这一层要杜绝的。`bool` 在 Python 里是 `int` 的子类，所以先判 bool。
+_SCALAR_TYPES = (bool, int, float, str)
+MAX_SCALARS = 8
+MAX_SCALAR_STRING = 256
+
+
+def _scalar_errors(scalars, tensor_names=()) -> list:
+    errs = []
+    if not isinstance(scalars, dict):
+        return [f"case.scalars 必须是 dict, 实际 {type(scalars).__name__}"]
+    if len(scalars) > MAX_SCALARS:
+        errs.append(f"case.scalars 最多 {MAX_SCALARS} 个, 实际 {len(scalars)}")
+    for key, value in scalars.items():
+        if not isinstance(key, str) or not key.strip() or not key.isidentifier():
+            errs.append(f"scalar 名必须是合法标识符, 实际 {key!r}")
+            continue
+        if key in tensor_names:
+            errs.append(f"scalar {key!r} 与张量同名")
+        if isinstance(value, bool):
+            continue
+        if not isinstance(value, _SCALAR_TYPES):
+            errs.append(f"scalar {key!r} 只能是 bool/int/float/str, 实际 {type(value).__name__}")
+        elif isinstance(value, float) and not math.isfinite(value):
+            errs.append(f"scalar {key!r} 不是有限浮点: {value!r}")
+        elif isinstance(value, str) and len(value) > MAX_SCALAR_STRING:
+            errs.append(f"scalar {key!r} 字符串超过 {MAX_SCALAR_STRING} 字符")
+    return errs
 
 
 @dataclass(frozen=True)
@@ -130,6 +161,11 @@ class BenchmarkCase:
     name: str = ""
     tensors: tuple = ()            # (TensorSpec, ...)
     seed: int = 0
+    #: **按值直传的标量参数**（causal / eps / scale 这类）。它们不参与 seed 抽样 ——
+    #: 走物化那条路会把真值换成随机整数（2026-10-01 真机踩过，见 site 里那次
+    #: `repeats=8` 变成 0）。空字典 = 这条 case 没有标量参数，**且与老 case 的
+    #: 哈希逐位一致**（序列化时非空才写这个键）。
+    scalars: dict = field(default_factory=dict)
 
     def validate(self) -> list:
         errs = []
@@ -146,6 +182,8 @@ class BenchmarkCase:
             seen.add(t.name)
         if not isinstance(self.seed, int) or isinstance(self.seed, bool) or self.seed < 0:
             errs.append(f"case.seed 必须是非负 int, 实际 {self.seed!r}")
+        errs += _scalar_errors(self.scalars, {t.name for t in self.tensors
+                                              if isinstance(t, TensorSpec)})
         return errs
 
     def key(self) -> str:
@@ -159,9 +197,13 @@ class BenchmarkCase:
         两个张量 ≈ 90 MB 文本，实测链路要 570 s，见评估文档 §9.8.1）。
         """
         from ..decide.remote_input_fidelity import SEED_PROTOCOL
-        return {"protocol": SEED_PROTOCOL, "seed": int(self.seed),
+        spec = {"protocol": SEED_PROTOCOL, "seed": int(self.seed),
                 "tensors": [{"name": t.name, "shape": list(t.shape), "dtype": t.dtype}
                             for t in self.tensors]}
+        if self.scalars:
+            # 标量原样过线, 不参与抽样 —— 这是它存在的全部理由。
+            spec["scalars"] = {key: self.scalars[key] for key in sorted(self.scalars)}
+        return spec
 
     def materialize(self) -> dict:
         """按声明造出这一组输入。**确定性**：同一份声明（含 seed）任何时候都是同一组数组。
@@ -192,14 +234,20 @@ class BenchmarkCase:
         * **声明顺序不进 hash**: 张量按名字排序 ⇒ 同一组输入无论谁怎么写都是同一个 hash
           （内容哈希的第一条要求: 同内容两份拷贝必须同哈希）。
         """
-        return {"seed": int(self.seed),
+        body = {"seed": int(self.seed),
                 "tensors": [t.to_dict() for t in
                             sorted(self.tensors, key=lambda t: t.name)]}
+        if self.scalars:
+            body["scalars"] = {key: self.scalars[key] for key in sorted(self.scalars)}
+        return body
 
     def to_dict(self) -> dict:
         """落盘/传输的形状（**含**审计名 —— 产物里要能人读，`load_dict` 再读回来）"""
-        return {"name": self.name, "seed": int(self.seed),
+        body = {"name": self.name, "seed": int(self.seed),
                 "tensors": [t.to_dict() for t in self.tensors]}
+        if self.scalars:
+            body["scalars"] = {key: self.scalars[key] for key in sorted(self.scalars)}
+        return body
 
     @staticmethod
     def from_dict(payload: Any) -> "BenchmarkCase":
@@ -212,9 +260,15 @@ class BenchmarkCase:
             seed = int(payload.get("seed") or 0)
         except (TypeError, ValueError) as exc:
             raise BenchCaseError(f"case.seed 读不出来: {payload.get('seed')!r}") from exc
+        scalars = payload.get("scalars")
+        if scalars is None:
+            scalars = {}
+        elif not isinstance(scalars, Mapping):
+            raise BenchCaseError(
+                f"case.scalars 必须是映射, 实际 {type(scalars).__name__}")
         case = BenchmarkCase(name=str(payload.get("name") or ""),
                              tensors=tuple(TensorSpec.from_dict(t) for t in tensors),
-                             seed=seed)
+                             seed=seed, scalars=dict(scalars))
         errs = case.validate()
         if errs:
             raise BenchCaseError("case 声明不可判定: " + "; ".join(errs))

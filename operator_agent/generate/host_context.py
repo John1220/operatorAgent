@@ -120,10 +120,18 @@ def _performance_projection(level, metrics, fallback_validity=None):
 def _case_metadata(case, *, layout):
     # TensorSpec has no observed stride/offset. Do not turn a known shape or a
     # declared layout into a claim that runtime inputs have been read back.
-    return {tensor.name: dict(shape=list(tensor.shape), dtype=_DTYPES[tensor.dtype],
-                layout=layout, strides=None, offset=None,
-                layout_evidence='declared_not_runtime_observed')
+    rows = {tensor.name: dict(shape=list(tensor.shape), dtype=_DTYPES[tensor.dtype],
+                 layout=layout, strides=None, offset=None,
+                 layout_evidence='declared_not_runtime_observed')
             for tensor in sorted(case.tensors, key=lambda tensor: tensor.name)}
+    # 按值直传的标量（causal / eps / scale）也进 ABI：candidate 的 wrapper 必须收它们，
+    # 而它们**不是**从 seed 抽样出来的，所以单独标出出处，别和"声明了但没回读"混为一谈。
+    for name in sorted(getattr(case, 'scalars', None) or {}):
+        value = case.scalars[name]
+        rows[name] = dict(kind='scalar_by_value', py_type=type(value).__name__, value=value,
+                          layout='inline', strides=None, offset=None,
+                          evidence='frozen_contract_passed_by_value_not_sampled')
+    return rows
 
 
 def _materials(manager, phase, dsl):

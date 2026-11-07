@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import math
 import struct
 
 import numpy as np
@@ -247,6 +248,19 @@ def materialize_seed_inputs(spec):
     tensors = spec.get("tensors")
     if not isinstance(tensors, list) or not tensors:
         raise InputFidelityError("tensors 不能为空")
+    scalars = spec.get("scalars", {})
+    if scalars is not None:
+        if not isinstance(scalars, dict):
+            raise InputFidelityError("scalars 必须是对象")
+        for key, value in scalars.items():
+            if not isinstance(key, str) or not key:
+                raise InputFidelityError("scalar 缺 name")
+            if type(value) is bool or type(value) in (int, float, str):
+                if type(value) is float and not math.isfinite(value):
+                    raise InputFidelityError(f"scalar {key!r} 不是有限浮点")
+                continue
+            raise InputFidelityError(
+                f"scalar {key!r} 只能是 bool/int/float/str, 实际 {type(value).__name__}")
     rng = np.random.default_rng(seed)
     out = {}
     for t in tensors:
@@ -262,6 +276,11 @@ def materialize_seed_inputs(spec):
             out[name] = rng.standard_normal(tuple(shape)).astype(dt)
         else:
             out[name] = rng.integers(1, 8, size=tuple(shape)).astype(dt)
+    # 标量在**抽样之后**合并: 它们不消耗 rng, 于是"同一 seed 的数组"不因加了标量而变值。
+    for key in sorted(scalars or {}):
+        if key in out:
+            raise InputFidelityError(f"scalar {key!r} 与张量同名")
+        out[key] = scalars[key]
     return out
 
 
@@ -269,7 +288,14 @@ def seed_input_digest(values):
     """输入内容的规范摘要（名字 + dtype + shape + 连续字节），跨机器可复算。"""
     h = hashlib.sha256()
     for name in sorted(values):
-        arr = np.ascontiguousarray(values[name])
+        value = values[name]
+        if isinstance(value, np.ndarray) is False:
+            # 标量按值进摘要（"带类型的字面量"），与数组那条分支互不干扰。
+            h.update(name.encode("utf-8")); h.update(b"\0scalar\0")
+            h.update(type(value).__name__.encode("ascii")); h.update(b"\0")
+            h.update(repr(value).encode("utf-8")); h.update(b"\0")
+            continue
+        arr = np.ascontiguousarray(value)
         h.update(name.encode("utf-8"))
         h.update(b"\0")
         h.update(arr.dtype.str.encode("ascii"))
