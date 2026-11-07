@@ -23,7 +23,8 @@
         --reason "门槛在 ±3% 刀刃上" --minutes-band 5-15
     python -m operator_agent ledger-report --run-dir "$op_workspace/run"
 
-子命令：capabilities / prepare / preflight / verify / run / repair / status / cancel / ledger-{new,fill,report}。
+子命令：capabilities / prepare / preflight / verify / run / repair / status / cancel /
+usage-reconcile / ledger-{new,fill,report}。
 
 与 `benchmarks/demos/demo_hitl_chain.py` 的关系：那个演示给人看；这个 CLI 给程序调。
 """
@@ -36,7 +37,7 @@ import sys
 from pathlib import Path
 
 from ..app.hitl_tools import (CANDIDATE_ORIGINS, ToolError, autonomous_status, cancel_task, capabilities,
-                         noise_preflight, prepare, run_autonomous)
+                         noise_preflight, prepare, reconcile_usage, run_autonomous)
 from ..core import human_ledger
 from ..core.human_ledger import LedgerError
 
@@ -64,6 +65,14 @@ def _parser() -> argparse.ArgumentParser:
     pf.add_argument("--timeout", type=int, default=300)
     pf.add_argument("--persistent", action="store_true")
     pf.add_argument("--json-out", help="同时写一份 JSON 到文件")
+
+    rec = sub.add_parser("usage-reconcile",
+                         help="对账两臂的模型计量：B 读插件账本，A 读声明的 arm log")
+    rec.add_argument("--run-dir", required=True,
+                     help="B 臂的 run 目录（含 host-task-policy.json 与 host-model-budget.json）")
+    rec.add_argument("--a", required=True, dest="arm_a_path",
+                     help="A 臂的 arm log（JSON；契约见 docs/testing/v08-arm-metering.md）")
+    rec.add_argument("--json-out", help="同时写一份 JSON 到文件")
 
     pre = sub.add_parser("prepare", help="把一份声明冻结成可复算的回合")
     pre.add_argument("--request", help="自然语言请求")
@@ -278,6 +287,8 @@ def main(argv=None) -> int:
                                       host=args.host, port=args.port, user=args.user,
                                       key_path=args.key_path, work_dir=args.work_dir,
                                       timeout=args.timeout, persistent=args.persistent)
+        elif args.action == "usage-reconcile":
+            payload = reconcile_usage(args.run_dir, args.arm_a_path)
         elif args.action == "prepare":
             payload = prepare(_declaration_from_args(args), args.run_dir)
         elif args.action == "run":

@@ -893,6 +893,37 @@ def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None,
     return receipt
 
 
+def reconcile_usage(run_dir, arm_a_path) -> dict:
+    """对账两臂的模型计量: B 读插件账本, A 读声明的 arm log。
+
+    这里只做**读数与判定**, 不推断费用、不把缺失计数当 0、也不因为两边数字接近就
+    升级成「同口径」。`sampling_comparability` 要求采样身份逐项**已记录且相等**,
+    未记录的字段会以 `unrecorded_sampling` 点名。
+    """
+    from ..decide.arm_metering import (MeteringError, compare, normalize_arm_document,
+                                       normalize_host_ledger)
+    run = Path(run_dir)
+    policy_path, ledger_path = run/'host-task-policy.json', run/'host-model-budget.json'
+    arm_path = Path(arm_a_path)
+    for path in (policy_path, ledger_path, arm_path):
+        if not path.is_file():
+            raise ToolError('usage_input', f'缺少对账输入: {path}')
+    try:
+        policy = json.loads(policy_path.read_text(encoding='utf-8'))
+        state = json.loads(ledger_path.read_text(encoding='utf-8'))
+        document = json.loads(arm_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ToolError('usage_input', f'对账输入读不出来: {error}') from error
+    try:
+        receipt = compare(normalize_arm_document(document), normalize_host_ledger(state, policy))
+    except MeteringError as error:
+        raise ToolError(error.code, error.detail) from error
+    receipt['inputs'] = dict(run_dir=str(run), policy=str(policy_path),
+                             ledger=str(ledger_path), arm_a=str(arm_path))
+    receipt['ok'] = True
+    return receipt
+
+
 def capabilities() -> dict:
     """不跑活、不联网：只回答「这台机器上这个壳能做什么」。
 
