@@ -12,7 +12,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { formatDoctor, locate, PAIRED_PYTHON, EXPECTED_TOOL_VERSION } from "../index.mjs";
-import { patchText, entries, BEGIN, END } from "../bin/setup.mjs";
+import { patchText, entries, entriesUvx, parseArgs, BEGIN, END } from "../bin/setup.mjs";
 
 const healthy = () => ({
   pluginVersion: "0.2.3", command: "operator-agent", cliFound: true, cliPath: "/opt/venv/bin/operator-agent",
@@ -46,7 +46,7 @@ test("contract mismatch is a failure, not a warning", () => {
   facts.capabilities.tool_version = 11;
   const text = formatDoctor(facts);
   assert.match(text, /工具契约 11 ≠ 期望 12/);
-  assert.match(text, /pip install --upgrade operator-agent==0\.7\.2/);
+  assert.match(text, /pip install --upgrade dsh-operator-agent==0\.7\.2/);
 });
 
 test("unset workflow env is informational, because the patch injects it", () => {
@@ -108,4 +108,18 @@ test("bin 通过符号链接调用时仍然执行（npm .bin 就是符号链接�
   const out = spawnSync(process.execPath, [link, "--help"], { encoding: "utf8" });
   assert.equal(out.status, 0);
   assert.match(out.stdout, /用法：dsh-operator-agent-setup/);
+});
+
+test("uvx 形态把版本钉死，并同时配置 MCP 与 /op 两条记录", () => {
+  const rows = entriesUvx("0.7.2", "/opt/homebrew/bin/uvx");
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0].config.args, ["--from", "dsh-operator-agent==0.7.2", "operator-agent-mcp"]);
+  assert.deepEqual(rows[1].config.args, ["--from", "dsh-operator-agent==0.7.2", "operator-agent"]);
+  assert.equal(rows[0].config.env.OPERATOR_AGENT_WORKFLOW, "host");
+  assert.equal(rows[1].config.hostModelBudget && Object.keys(rows[1].config.hostModelBudget).length, 0);
+});
+
+test("uvx 与 --python/--wheel 互斥", () => {
+  assert.throws(() => parseArgs(["--runtime", "uvx", "--python", "/x/python"]), /不能同时使用/);
+  assert.throws(() => parseArgs(["--runtime", "docker"]), /path 或 uvx/);
 });

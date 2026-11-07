@@ -27,6 +27,9 @@ import { fileURLToPath } from "node:url";
 /** 本插件配套的 Python 版本；与 package.json 的 version 一起决定安装目录。 */
 export const PYTHON_VERSION = "0.7.2";
 
+/** PyPI 上的分布名（import 名仍是 operator_agent，命令名仍是 operator-agent / operator-agent-mcp）。 */
+export const DIST_NAME = "dsh-operator-agent";
+
 /** host 模式暴露的七个工具。少了任何一个都说明 Python 侧不是这一版。 */
 export const TOOLS = [
   "operator_cancel", "operator_capabilities", "operator_context", "operator_prepare",
@@ -40,6 +43,7 @@ const USAGE = `用法：dsh-operator-agent-setup [选项]
 
   --wheel <文件>        用本地 wheel 建 venv 并安装（与 --python 二选一）
   --python <可执行文件>  已有 Python 环境；跳过安装，只做校验与配置
+  --runtime uvx         不建 venv：配置改成 uvx --from dsh-operator-agent==版本（需本机有 uv/uvx）
   --version <版本>      Python 版本目录名（默认 ${PYTHON_VERSION}）
   --profile <名字>      目标 profile（默认 desktop）
   --dsh-home <目录>     DSH_HOME（默认 $DSH_HOME 或 ~/.dsh）
@@ -50,7 +54,7 @@ const USAGE = `用法：dsh-operator-agent-setup [选项]
 退出码：0 成功；1 参数或环境问题；2 写入后自检失败（已自动还原原 patch）。`;
 
 export function parseArgs(argv) {
-  const out = { wheel: "", python: "", version: PYTHON_VERSION, profile: "desktop", dshHome: "", dryRun: false, configureOnly: false, help: false };
+  const out = { wheel: "", python: "", runtime: "path", version: PYTHON_VERSION, profile: "desktop", dshHome: "", dryRun: false, configureOnly: false, help: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     const next = () => {
@@ -62,6 +66,7 @@ export function parseArgs(argv) {
     if (arg === "--help" || arg === "-h") out.help = true;
     else if (arg === "--wheel") out.wheel = resolve(next());
     else if (arg === "--python") out.python = resolve(next());
+    else if (arg === "--runtime") out.runtime = next();
     else if (arg === "--version") out.version = next();
     else if (arg === "--profile") out.profile = next();
     else if (arg === "--dsh-home") out.dshHome = resolve(next());
@@ -70,6 +75,10 @@ export function parseArgs(argv) {
     else throw new Error(`不认识的参数：${arg}`);
   }
   if (out.wheel && out.python) throw new Error("--wheel 与 --python 只能给一个：前者建环境，后者用现成的");
+  if (!["path", "uvx"].includes(out.runtime)) throw new Error("--runtime 只支持 path 或 uvx");
+  if (out.runtime === "uvx" && (out.wheel || out.python || out.configureOnly)) {
+    throw new Error("--runtime uvx 与 --wheel/--python/--configure-only 不能同时使用");
+  }
   return out;
 }
 
@@ -105,6 +114,21 @@ export function patchText(original, entries) {
   }
   const block = entries.map((entry) => `- ${JSON.stringify(entry)}`).join("\n");
   return `${text.replace(/\s+$/, "")}\n\n${BEGIN}\n${block}\n${END}\n`;
+}
+
+/**
+ * uvx 形态：不建 venv，直接让 uv 按版本解析 Python 包。
+ * 版本**必须钉死**（`dsh-operator-agent==0.7.2`），否则插件升级后可能拉到不配对的判定层。
+ */
+export function entriesUvx(version = PYTHON_VERSION, uvx = "uvx") {
+  const from = ["--from", `${DIST_NAME}==${version}`];
+  return [
+    { id: "mcp-operator", disabled: false, config: {
+      serverName: "operator", transport: "stdio", command: uvx, args: [...from, "operator-agent-mcp"],
+      toolCallTimeoutMs: 3600000, failOnStartupError: true, env: { OPERATOR_AGENT_WORKFLOW: "host" } } },
+    { id: "operator-tools", disabled: false, config: {
+      command: uvx, args: [...from, "operator-agent"], timeoutMs: 60000, hostModelBudget: {} } },
+  ];
 }
 
 /** 两条覆盖记录：MCP server 指向 venv 里的可执行文件，/op 命令指向同一个 venv。 */
@@ -157,6 +181,34 @@ function receiptDir(dshHome) {
   return join(dshHome, "operator-install-receipts", `setup-${stamp}`);
 }
 
+function locateUvx() {
+  const found = run([process.platform === "win32" ? "where" : "sh", "-c", "command -v uvx"], { encoding: "utf8" });
+  const path = String(found.stdout || "").trim().split(/\r?\n/).filter(Boolean)[0];
+  return path && existsSync(path) ? path : null;
+}
+
+/** 写 profile：备份 → 回执 → 原子替换 → 读回自检。两种 runtime 共用。 */
+function writeProfile({ patch, dshHome, next, python, profile, runtime }) {
+  const receipt = receiptDir(dshHome);
+  mkdirSync(receipt, { recursive: true, mode: 0o700 });
+  if (existsSync(patch)) copyFileSync(patch, join(receipt, "cordis.patch.yml.bak"));
+  writeFileSync(join(receipt, "receipt.json"),
+    `${JSON.stringify({ runtime, python, profile, patch, dry_run: false }, null, 2)}\n`, { mode: 0o600 });
+
+  const temp = `${patch}.tmp-${process.pid}`;
+  mkdirSync(dirname(patch), { recursive: true });
+  writeFileSync(temp, next, { mode: 0o600 });
+  renameSync(temp, patch);
+  process.stdout.write(`✓ 已写入 ${patch}\n  备份与回执：${receipt}\n`);
+
+  const written = readFileSync(patch, "utf8");
+  for (const marker of [BEGIN, END, "mcp-operator", "operator-tools"]) {
+    if (!written.includes(marker)) throw new Error(`写入后自检失败：缺少 ${marker}`);
+  }
+  process.stdout.write("✓ 自检通过。重开 DSH，在插件页确认两个组件运行中，然后输入 /op doctor\n");
+  process.stdout.write("  注意：插件包本身仍需通过 DSH 的插件页（或 dsh plugin add）安装；本命令只负责运行时与配置。\n");
+}
+
 function main(argv) {
   const options = parseArgs(argv);
   if (options.help) { process.stdout.write(`${USAGE}\n`); return 0; }
@@ -164,6 +216,19 @@ function main(argv) {
   const dshHome = options.dshHome || process.env.DSH_HOME || join(homedir(), ".dsh");
   const patch = join(dshHome, "profiles", options.profile, "cordis.patch.yml");
   let python = options.python;
+
+  if (options.runtime === "uvx") {
+    const uvx = locateUvx();
+    if (!uvx) {
+      throw new Error("找不到 uvx：先安装 uv（https://docs.astral.sh/uv/），或改用 --python/--wheel 形态");
+    }
+    process.stdout.write(`✓ 使用 uvx：${uvx}（${DIST_NAME}==${options.version}）\n`);
+    const current = existsSync(patch) ? readFileSync(patch, "utf8") : "";
+    const next = patchText(current, entriesUvx(options.version, uvx));
+    if (options.dryRun) { process.stdout.write(`· 将写入 ${patch}：\n${next}\n`); return 0; }
+    writeProfile({ patch, dshHome, next, python: null, profile: options.profile, runtime: "uvx" });
+    return 0;
+  }
 
   if (!options.configureOnly) {
     if (options.python) {
@@ -202,24 +267,7 @@ function main(argv) {
     return 0;
   }
 
-  const receipt = receiptDir(dshHome);
-  mkdirSync(receipt, { recursive: true, mode: 0o700 });
-  if (existsSync(patch)) copyFileSync(patch, join(receipt, "cordis.patch.yml.bak"));
-  writeFileSync(join(receipt, "receipt.json"), `${JSON.stringify({ python, profile: options.profile, patch, dry_run: false }, null, 2)}\n`, { mode: 0o600 });
-
-  const temp = `${patch}.tmp-${process.pid}`;
-  mkdirSync(dirname(patch), { recursive: true });
-  writeFileSync(temp, next, { mode: 0o600 });
-  renameSync(temp, patch);
-  process.stdout.write(`✓ 已写入 ${patch}\n  备份与回执：${receipt}\n`);
-
-  // 写后自检：把自己的两条记录读回来，确认没有把别人的配置冲掉。
-  const written = readFileSync(patch, "utf8");
-  for (const marker of [BEGIN, END, "mcp-operator", "operator-tools"]) {
-    if (!written.includes(marker)) throw new Error(`写入后自检失败：缺少 ${marker}`);
-  }
-  process.stdout.write("✓ 自检通过。重开 DSH，在插件页确认两个组件运行中，然后输入 /op doctor\n");
-  process.stdout.write("  注意：插件包本身仍需通过 DSH 的插件页（或 dsh plugin add）安装；本命令只负责运行时与配置。\n");
+  writeProfile({ patch, dshHome, next, python, profile: options.profile, runtime: "path" });
   return 0;
 }
 

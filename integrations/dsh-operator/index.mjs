@@ -233,7 +233,7 @@ export function formatDoctor(facts) {
       const toolVersion = cap.toolVersion ?? cap.tool_version;
       if (toolVersion === EXPECTED_TOOL_VERSION) ok(`工具契约：${toolVersion}`);
       else bad(`工具契约 ${toolVersion ?? "?"} ≠ 期望 ${EXPECTED_TOOL_VERSION}`,
-               `pip install --upgrade operator-agent==${PAIRED_PYTHON}（插件与判定层版本必须配对）`);
+               `pip install --upgrade dsh-operator-agent==${PAIRED_PYTHON}（插件与判定层版本必须配对）`);
       if (cap.version === PAIRED_PYTHON) ok(`判定层：${cap.version}`);
       else bad(`判定层 ${cap.version || "?"} ≠ 配对版本 ${PAIRED_PYTHON}`,
                `pip install --upgrade operator-agent==${PAIRED_PYTHON}`);

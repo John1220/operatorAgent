@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "operator-agent"
+name = "dsh-operator-agent"
 version = "0.7.2"
 description = "无人值守 GPU 算子开发 agent：设计/生成/验证/修复 Triton 核，并给出可审计的判定"
 readme = "README.md"

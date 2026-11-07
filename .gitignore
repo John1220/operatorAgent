@@ -63,3 +63,6 @@ config.yaml
 # 光写这里不够 —— 布局守卫扫的是 os.listdir(根目录), 所以必须同时进
 # tests/hygiene/test_repo_layout.py 的 ALLOWED_ROOT「被 .gitignore 覆盖的运行期目录」那一组。
 /.workbuddy/
+
+# 账号恢复码等本地凭据文件，永不入库
+PyPI-Recovery-Codes-*

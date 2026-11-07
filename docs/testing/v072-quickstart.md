@@ -4,6 +4,17 @@
 
 ## 1. 安装并核对版本
 
+正式版已发布到 PyPI，分布名 **`dsh-operator-agent`**（import 名仍是 `operator_agent`，命令仍是
+`operator-agent` / `operator-agent-mcp`）：
+
+```bash
+pip install dsh-operator-agent==0.7.2
+# 或连 venv 都不要（需要 uv）：
+uvx --from dsh-operator-agent==0.7.2 operator-agent-mcp
+```
+
+下面是原有的本地工件安装方式（隔离 venv，适合固定版本与回退）：
+
 本机正式版目标目录为 `~/.local/share/operator-agent/v0.7.2/`。安装完成后，Python 3.12 环境应提供：
 
 ```text

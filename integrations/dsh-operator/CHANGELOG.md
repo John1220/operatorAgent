@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.5
+
+新增 **uvx 安装形态**（配合 `operator-agent` 上架 PyPI）：`dsh-operator-agent-setup --runtime uvx`
+不再建 venv，直接把 profile 的两条记录写成 `uvx --from dsh-operator-agent==0.7.2 …`，版本钉死避免
+插件与判定层错配。要求本机有 `uv`；没有时助手会明确报错并提示改用 `--python/--wheel` 形态。
+默认仍是路径形态，不影响已有安装。新增 uvx 相关用例 2 项。
+
 ## 0.2.4
 
 修 `0.2.3` 的入口 bug：`bin/setup.mjs` 用路径字符串判断"是否被当作脚本执行"，而 npm 安装后的

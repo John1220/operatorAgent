@@ -53,6 +53,16 @@ npx dsh-operator-agent-setup --python "$HOME/.local/share/operator-agent/v0.7.2/
 
 它会起一次真实 MCP 握手核对七个 host 工具，写前备份原 `cordis.patch.yml` 并留回执，重复执行幂等；加 `--dry-run` 只预览。**插件包本身仍要在 GUI 安装**，助手不碰 Desktop profile 的安装锁。
 
+本机装了 [uv](https://docs.astral.sh/uv/) 的话，也可以完全不建 venv——让 uvx 按钉死的版本解析 Python 包：
+
+```bash
+npx dsh-operator-agent-setup --runtime uvx
+```
+
+它把 profile 写成 `uvx --from dsh-operator-agent==0.7.2 operator-agent-mcp`（以及同版本的 `/op` CLI）。
+首次启动会下载 wheel，之后走 uv 缓存；版本与插件配对，不会漂移。没有 uv 时助手会直接报错，
+退回 `--python`/`--wheel` 形态即可。
+
 **Desktop 使用 GUI 安装插件**：在 DSH 的 **插件 → 添加插件 → 安装第三方插件** 输入 `/absolute/path/operator-agent/v0.7.2/artifacts/dsh-operator-agent-0.2.2.tgz`，请从本机正式目录复制实际绝对路径替换占位符（GUI 不展开 `~` 或 `$HOME`）。安装后启用，再运行配置助手：
 
 ```bash
