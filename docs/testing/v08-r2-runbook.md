@@ -7,7 +7,7 @@
 | | 臂 B（对照） | 臂 C（增量） |
 |---|---|---|
 | DSH profile | `desktop`（日常那个） | `v08-arm-c`（新建，由 desktop 复制） |
-| MCP 入口 | `~/.local/share/operator-agent/v0.7.2/venv/bin/operator-agent-mcp` | `/Users/zh/op-agent-delivery/v08-venv/bin/operator-agent-mcp` |
+| MCP 入口 | `~/.local/share/operator-agent/v0.7.2/venv/bin/operator-agent-mcp` | `$HOME/op-agent-delivery/v08-venv/bin/operator-agent-mcp` |
 | 源码 | tag `v0.7.2`（wheel 装进 site-packages） | 分支 `codex/v0.8`（worktree 可编辑安装） |
 | `TOOL_VERSION` | 12 | 12（工具面相同 —— 两臂可比的前提） |
 | 有 `phase=optimize` 的瓶颈诊断 | 否 | 是 |
@@ -16,7 +16,7 @@
 
 ```bash
 /tmp $ ~/.local/share/operator-agent/v0.7.2/venv/bin/operator-agent capabilities   # 工具契约 12
-/tmp $ /Users/zh/op-agent-delivery/v08-venv/bin/operator-agent capabilities       # 工具契约 12
+/tmp $ $HOME/op-agent-delivery/v08-venv/bin/operator-agent capabilities       # 工具契约 12
 ```
 
 **切换**：DSH 的 profile 选择器 → `v08-arm-c`，重启会话。当前这个会话跑的是臂 B。
@@ -28,7 +28,7 @@
 从分支 venv 跑，与两臂无关，避免把门的实现混进某一臂：
 
 ```bash
-/Users/zh/op-agent-delivery/v08-venv/bin/operator-agent preflight \
+$HOME/op-agent-delivery/v08-venv/bin/operator-agent preflight \
     --backend ssh --host h20 --shape 4096,4096,4096 --reps 5 --repeat 8 \
     --planned-effect-pct 2.5 --json-out <evidence>/pair-N/gate.json
 ```

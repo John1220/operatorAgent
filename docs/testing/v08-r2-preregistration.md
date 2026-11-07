@@ -78,8 +78,8 @@ r2_plan.freeze(dict(pairs=2, max_model_calls=12, max_output_tokens_per_call=8192
 
 | | 臂 B | 臂 C |
 |---|---|---|
-| 源码 | `git worktree` @ tag `v0.7.2`（`/Users/zh/op-agent-delivery/v072-arm-b`） | 当前分支 `codex/v0.8` 工作树 |
-| Python | `/Users/zh/op-agent-delivery/v072-venv/bin/operator-agent*` | `/Users/zh/op-agent-delivery/v08-venv/bin/operator-agent*` |
+| 源码 | `git worktree` @ tag `v0.7.2`（`$HOME/op-agent-delivery/v072-arm-b`） | 当前分支 `codex/v0.8` 工作树 |
+| Python | `$HOME/op-agent-delivery/v072-venv/bin/operator-agent*` | `$HOME/op-agent-delivery/v08-venv/bin/operator-agent*` |
 | `TOOL_VERSION` | 12 | **12**（工具面相同，这是两臂可比的前提） |
 | `decide.noise_preflight` | 无 | 有 |
 | `generate.optimize_diagnoser` | 无 | 有 |
