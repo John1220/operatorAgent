@@ -22,7 +22,7 @@ from ..decide.anticheat import static_audit
 from ..core.contract import case_key
 from ..decide.correctness import as_suite, verdict_of
 from ..decide.correctness_boundaries import has_boundary_policy, lint_coverage
-from ..decide.correctness_profiles import profile_check
+from ..decide.correctness_profiles import expected_output_elements, profile_check
 from ..decide.reference_contract import as_reference, validate_receipt
 from ..decide.bench_cases import BenchCaseError
 from ..decide.input_fidelity import (InputFidelityError, MAX_SEED_STORAGE_BYTES,
@@ -79,6 +79,7 @@ from ..execute.exec_guard import GuardRefusal
 #:   * §21.3 的「相关 profiler 指标」（`agent_runtime` 的上下文里给模型看的那一段）。
 COMPILE_FACT_KEYS: tuple = ("num_warps", "num_stages", "n_regs", "n_spills",
                             "n_max_threads", "shared_bytes_per_cta")
+IEEE_FP32_BASELINE = "pytorch_eager_fp32_ieee"
 
 
 #: 「在这台**执行设备**上, torch 高层 API 是激活算力的正当路径」—— 反作弊静态审计
@@ -265,7 +266,7 @@ def failure_pair(err) -> tuple[str, str]:
     return (lines[0] if lines else "无错误详情"), text
 
 
-def baseline_plan(kernel_type: str, precision: str) -> list:
+def baseline_plan(kernel_type: str, precision: str, *, ieee_fp32: bool = False) -> list:
     """下发给远端的基线**有序偏好**。
 
     为什么以名单而不是结论的形式下发: 选谁当基线是公平性策略 (fp16 候选就该比 cuBLAS
@@ -278,6 +279,8 @@ def baseline_plan(kernel_type: str, precision: str) -> list:
     k = (kernel_type or "").lower()
     is_matmul = "matmul" in k or "gemm" in k
     is_fp16 = (precision or "").lower() == "fp16"
+    if is_matmul and ieee_fp32 and (precision or "").lower() == "fp32":
+        return [IEEE_FP32_BASELINE]
     if is_matmul and is_fp16:
         return ["pytorch_eager_fp16", "pytorch_eager_tf32", "pytorch_eager", "torch_compile"]
     if is_matmul:
@@ -788,6 +791,17 @@ class Verifier:
         if task is not None and task.constraints.correctness_profile is not None:
             primary.metrics["correctness"]["profile"] = profile_check(task)
         problems = [f"{r['case_id']}: {r['reason']}" for r in rows if r["verdict"] != "passed"]
+        # 「挂了 12 条里的 1 条」和「挂了 1 条、但它正好是唯一的 strided」是两回事：
+        # 后者直接指向"核假设了连续布局"，而这条线索埋在 case_id 里没人念得出来。
+        # 2026-11-09 softmax 两臂都挂在这上面（主用例过、唯一 strided case 挂）。
+        _failed = [r for r in rows if r["verdict"] != "passed" and r.get("layout")]
+        _passed = [r for r in rows if r["verdict"] == "passed" and r.get("layout")]
+        _failing_layouts = {r["layout"] for r in _failed}
+        if _failed and _passed and len(_failing_layouts) == 1:
+            _only = _failing_layouts.pop()
+            primary.metrics.setdefault("correctness", {})["failing_layouts"] = [_only]
+            primary.message += (f" (失败全部落在 layout={_only}: "
+                                f"核可能假设了连续布局 —— 运行时 stride 必须独立读取)")
         if state != "passed":
             primary.metrics["correctness"]["reason"] = (
                 "; ".join(problems) if primary_passed else primary.message)
@@ -1099,15 +1113,24 @@ class Verifier:
                     validate_receipt(task.constraints.reference_contract, remote_verify.get("reference_receipt"))
                     if remote_verify.get("success") and remote_verify.get("output_dtype") != "torch.float16":
                         raise ValueError("fp16 输出精度回读证据缺失")
+                    spec = as_reference(task.constraints.reference_contract)
                     if "max_error" in remote_verify:
-                        spec = as_reference(task.constraints.reference_contract)
                         if (remote_verify.get("atol"), remote_verify.get("rtol"),
                                 remote_verify.get("required_matched_ratio")) != (max_allowed, spec.rtol, spec.required_matched_ratio):
                             raise ValueError("执行侧数值门与冻结契约不一致")
                     if remote_verify.get("success") is True:
+                        # 比对元素数必须等于**参考输出**的元素数。旧写法取 `inputs["X"].size`
+                        # —— 那只对"输出与唯一输入同形"的族成立（layernorm 就是），
+                        # attention 的输入是 Q/K/V、没有 `X` 键，走到成功分支直接 KeyError。
+                        # 有本地参考输出就用它；没有（生产路径 expected_output 恒为 None，
+                        # 比对全在远端做）则问 profile 要"这个族的输出有多大"。
+                        expected_elements = (
+                            int(np.size(expected_output)) if expected_output is not None
+                            else expected_output_elements(spec, inputs))
                         if ("max_error" not in remote_verify or remote_verify.get("coverage") != 1.0
                                 or type(remote_verify.get("compared_elements")) is not int
-                                or remote_verify["compared_elements"] != inputs["X"].size
+                                or expected_elements is None
+                                or remote_verify["compared_elements"] != expected_elements
                                 or remote_verify.get("reference_nonfinite") != 0
                                 or remote_verify.get("matched_ratio") != 1.0
                                 or remote_verify.get("bad_elements") != 0
@@ -1163,9 +1186,20 @@ class Verifier:
                     # 形态与本地的 message 一样要进 message (Fixer / 失败语料读它),
                     # 远端老版本不带这个键 ⇒ 如实说"未能确立", 不假装没有形态这回事。
                     _shape = remote_verify.get("error_shape")
+                    # 「差多少」不够用：`matched_ratio=0.017` + `first_bad@0` 这种组合
+                    # 直接指向"整体规模/布局错"，而只报一句"误差 3.99"会被读成"精度不够"。
+                    # 2026-11-09 C 臂 attention 就卡在这里：它拿到的信息不足以判断方向。
+                    _extra = []
+                    _ratio = remote_verify.get("matched_ratio")
+                    if isinstance(_ratio, (int, float)):
+                        _extra.append(f"matched_ratio={_ratio:.4f}")
+                    _first = remote_verify.get("first_bad_index")
+                    if isinstance(_first, int):
+                        _extra.append(f"first_bad@{_first}")
                     return VerificationResult(
                         level=VerificationLevel.L2_FUNCTION, passed=False,
                         message=(f"远程功能验证失败: 误差 {remote_verify['max_error']:.2e}"
+                                 + (f" ({', '.join(_extra)})" if _extra else '')
                                  + (f", 形态={_shape}" if _shape else
                                     ", 形态未能确立")),
                         error_log=remote_verify.get("error", ""),
@@ -1605,16 +1639,24 @@ class Verifier:
             return fixture, fixture
         if Cap.SAME_DEVICE_BASELINE in self._caps:
             seed_spec = self._seed_spec_for(task, inputs)
+            reference_source = task.source.reference_source or ""
+            # The built-in frozen FP32 contract disallows TF32. Select the
+            # strict baseline on the NVIDIA runner without changing XPU or custom references.
+            priority = (["pytorch_eager"] if task.constraints.reference_contract is not None else
+                        baseline_plan(task.source.kernel_type, task.constraints.precision.value,
+                                      ieee_fp32=Cap.GPU_PINNING in self._caps and not reference_source))
             remote_bench = self.backend.benchmark_with_baselines(
                 kernel_code, inputs, task.source.kernel_type,
                 precision=task.constraints.precision.value,
-                baseline_priority=(["pytorch_eager"] if task.constraints.reference_contract is not None else
-                                   baseline_plan(task.source.kernel_type, task.constraints.precision.value)),
-                reference_source=task.source.reference_source or "",
+                baseline_priority=priority,
+                reference_source=reference_source,
                 **({"input_seed": seed_spec} if seed_spec is not None else {}),
                 **({"reference_contract": as_reference(task.constraints.reference_contract).content_dict()}
                    if task.constraints.reference_contract is not None else {}),
             )
+            if (priority == [IEEE_FP32_BASELINE] and isinstance(remote_bench, dict)
+                    and remote_bench.get("success") and remote_bench.get("baseline_selected") != IEEE_FP32_BASELINE):
+                remote_bench = dict(success=False, error="Required IEEE FP32 baseline was not measured")
             if task.constraints.reference_contract is not None:
                 try:
                     if not isinstance(remote_bench, dict):
@@ -1792,6 +1834,7 @@ class Verifier:
         roofline = self._roofline_analysis(
             task=task, bench_inputs=bench_inputs,
             actual_gflops=actual_gflops, actual_bandwidth_gbs=bandwidth,
+            compute_path=bench.get("fp32_compute_path"),
         )
         bound = roofline["bound_type"]  # 替代原有的名字匹配 bound
 
@@ -1924,6 +1967,8 @@ class Verifier:
                     display_name = "cuBLAS(FP16)"
                 elif baseline_name == "pytorch_eager_tf32" and is_matmul:
                     display_name = "cuBLAS(TF32)"
+                elif baseline_name == IEEE_FP32_BASELINE:
+                    display_name = "cuBLAS(IEEE FP32)"
                 elif baseline_name == "pytorch_eager" and is_matmul and bench.get("device", "").startswith("cuda"):
                     display_name = "cuBLAS(FP32)"
                 elif baseline_name == "pytorch_eager" and bench.get("device", "").startswith("cuda"):
@@ -2703,7 +2748,8 @@ class Verifier:
         return None, None
 
     def _roofline_analysis(self, task: TaskSchema, bench_inputs: dict,
-                           actual_gflops: float, actual_bandwidth_gbs: float) -> dict:
+                           actual_gflops: float, actual_bandwidth_gbs: float,
+                           compute_path=None) -> dict:
         """
         Roofline 模型分析:
         - 计算算数强度 (AI = FLOPs / Bytes)
@@ -2717,7 +2763,7 @@ class Verifier:
 
         # 根据精度 + 硬件选择计算峰值:
         # - FP16/BF16: Tensor Core 峰值
-        # - FP32 + CUDA matmul + Ampere+: Triton tl.dot 默认用 TF32 Tensor Core
+        # - FP32 CUDA matmul: use the measured candidate's compiled instruction evidence
         # - 其他: FP32 CUDA Core 峰值
         precision = task.constraints.precision
         compute_used = "fp32_cuda_core"
@@ -2727,18 +2773,17 @@ class Verifier:
         elif precision in (Precision.BF16,):
             hw_peak_gflops = peak.get("bf16_tflops", hw_peak_gflops / 1000) * 1000
             compute_used = "bf16_tensor_core"
-        else:
-            # FP32: 检查是否为 CUDA matmul 且硬件支持 TF32 (Ampere+)
+        elif precision == Precision.FP32:
             kt = (task.source.kernel_type or "").lower()
             is_matmul = "matmul" in kt or "gemm" in kt
             device = str(peak.get("device", "")).lower()
-            cc = str(peak.get("compute_capability", ""))
-            is_cuda = "cuda" in device
-            has_tf32 = (is_cuda and cc and cc.startswith(("8.", "9.")) and
-                        peak.get("tf32_tflops", 0) > 0)
-            if is_matmul and is_cuda and has_tf32:
-                hw_peak_gflops = peak.get("tf32_tflops", hw_peak_gflops / 1000) * 1000
-                compute_used = "tf32_tensor_core"
+            if is_matmul and "cuda" in device:
+                if compute_path == "tf32_tensor_core":
+                    hw_peak_gflops = peak.get("tf32_tflops", 0) * 1000
+                    compute_used = compute_path
+                elif compute_path != "fp32_cuda_core":
+                    hw_peak_gflops = 0.0
+                    compute_used = "unknown"
 
         # §13.5: 这个精度的分母**实测过**没有 —— 只有这一位能让天花板出口开
         # (`measurement.reference_ceiling_reached` 只认 `reference_lower_bound`)。键必须与上面选分母
@@ -2773,12 +2818,16 @@ class Verifier:
         # 回退到算子类别，避免 ``0 / 0 -> memory`` 的偶然误判。
         roofline_bound = ("compute" if ai >= ridge_point else "memory") if ridge_point > 0 else "unknown"
 
-        gflops_util = (actual_gflops / hw_peak_gflops * 100) if hw_peak_gflops > 0 else 0.0
+        gflops_util = None if compute_used == "unknown" else 0.0
+        if hw_peak_gflops > 0:
+            gflops_util = round(actual_gflops / hw_peak_gflops * 100, 1)
         bw_util = (actual_bandwidth_gbs / hw_peak_bandwidth * 100) if hw_peak_bandwidth > 0 else 0.0
 
         # 综合 bound 类型: 结合算子名启发式 + Roofline 计算结果
         name_bound = self._bound_type(task.source.kernel_type)
-        if roofline_bound == "unknown":
+        if compute_used == "unknown":
+            bound_type = "unknown"
+        elif roofline_bound == "unknown":
             bound_type = name_bound
         elif name_bound == "compute" and roofline_bound == "memory":
             # 名字说是 compute-bound 但 Roofline 显示 memory-bound: 小矩阵场景
@@ -2798,6 +2847,8 @@ class Verifier:
             "flops": (round(_ai_inputs["flops"], 1) if _ai_inputs.get("flops") else None),
             "hw_peak_bandwidth_gbs": round(hw_peak_bandwidth, 1),
             "compute_used": compute_used,
+            **({"compute_path_evidence": "triton_ptx"} if compute_path is not None and
+               compute_path == compute_used else {}),
             "arithmetic_intensity": round(ai, 4),
             "ridge_point": round(ridge_point, 2),
             "roofline_bound": roofline_bound,
@@ -2807,7 +2858,7 @@ class Verifier:
             **({"coarse_estimate": True, "model": "attention_coarse_v1"}
                if "attention" in (task.source.kernel_type or "").lower() else {}),
             "bound_type": bound_type,  # 综合判定 (roofline + 启发式)
-            "gflops_utilization_pct": round(gflops_util, 1),
+            "gflops_utilization_pct": gflops_util,
             "bandwidth_utilization_pct": round(bw_util, 1),
             "hw_name": peak.get("name", "unknown"),
             "hw_compute_capability": peak.get("compute_capability", "unknown"),
@@ -2815,7 +2866,7 @@ class Verifier:
             # 分母的出处跟着分母走。缺口 3 的病根不是某个数字错, 而是**用这个数字的人
             # 看不出它有多可信**: 138.2 和 1979 在日志里长得一模一样。
             "peak_source": peak.get("peak_source", ""),
-            "peak_trusted": peak.get("peak_trusted", False),
+            "peak_trusted": peak.get("peak_trusted", False) and compute_used != "unknown",
             # 天花板出口判停**只认这一个位** (设计 §13.5)。发布出去是必要的: 它不在这里,
             # 下游拿到的是一份「核过口径」的记录, 而「实测过没有」这件事实就丢了 ——
             # 与 I45/I46/I48 同族的「算了一处、判在另一处」。
@@ -2848,7 +2899,8 @@ class Verifier:
             spec_tflops=spec,
             method=("L3 基线臂 (同机/同形状/同精度的已知好参考核): flops / baseline_ms"),
             flops=roofline.get("flops"),
-            baseline_ms=metrics.get("baseline_time_ms"),
+            baseline_ms=(None if metrics.get("baseline_type") == IEEE_FP32_BASELINE and peak_key != "fp32"
+                         else metrics.get("baseline_time_ms")),
         )
         decision = probe_peak(sample)
         metrics["peak_probe"] = decision.as_dict()

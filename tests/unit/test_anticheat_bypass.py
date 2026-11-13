@@ -44,6 +44,41 @@ CAUGHT_BOTH_DSL = {
         "def kernel(X,w,b):\n    import torch\n"
         "    return torch.nn.LayerNorm(X.shape[-1]).to(X.device)(X)\n"
     ),
+    # torch.ops 是**通用**后门, 不只 attention: 实测 mm / matmul / _softmax /
+    # scaled_dot_product_attention 都能经它绕过按函数名替换的运行时屏蔽。
+    "torch.ops.aten.mm.default": (
+        "def kernel(A,B):\n    import torch\n    return torch.ops.aten.mm.default(A,B)\n"
+    ),
+    "torch.ops.aten.scaled_dot_product_attention.default": (
+        "def kernel(Q,K,V,causal=False):\n    import torch\n"
+        "    return torch.ops.aten.scaled_dot_product_attention.default(Q,K,V,None,0.0,causal)\n"
+    ),
+    "from torch.ops import aten": (
+        "def kernel(A,B):\n    from torch.ops import aten\n    return aten.mm.default(A,B)\n"
+    ),
+    "from torch.ops.aten import mm": (
+        "def kernel(A,B):\n    from torch.ops.aten import mm\n    return mm.default(A,B)\n"
+    ),
+    "getattr(torch,'ops') 当属性链底座": (
+        "def kernel(A,B):\n    import torch\n"
+        "    return getattr(torch,'ops').aten.mm.default(A,B)\n"
+    ),
+    "模块加载时保存原生算子": (
+        "import torch as t\nmm = t.ops.aten.mm.default\n"
+        "def kernel(A,B):\n    return mm(A,B)\n"
+    ),
+    "模块加载时用 getattr 保存原生算子": (
+        "import torch\nmm = getattr(torch, 'o' + 'ps').aten.mm.default\n"
+        "def kernel(A,B):\n    return mm(A,B)\n"
+    ),
+    "从 torch 直接导入 ops 再保存算子": (
+        "from torch import ops as native\nmm = native.aten.mm.default\n"
+        "def kernel(A,B):\n    return mm(A,B)\n"
+    ),
+    "同时导入 torch 子模块后保存原生算子": (
+        "import torch.nn.functional\nmm = torch.ops.aten.mm.default\n"
+        "def kernel(A,B):\n    return mm(A,B)\n"
+    ),
 }
 
 # ─── 仅 GPU DSL 下必须拦下 ───────────────────────────────────
@@ -612,6 +647,80 @@ class TestShieldIsActuallyDeployed(unittest.TestCase):
 
         deployed = Path(__file__).resolve().parents[2] / "operator_agent" / "decide" / "anticheat.py"
         self.assertEqual(deployed.resolve(), Path(anticheat.__file__).resolve())
+
+
+try:
+    import torch as _torch
+except ImportError:
+    _torch = None
+
+
+@unittest.skipIf(_torch is None, "torch 未安装, 运行时屏蔽无从验证")
+class TestTorchOpsBackdoorIsShieldedAtRuntime(unittest.TestCase):
+    """静态侧拦 import 与调用路径; 运行时侧拦**调用期**的 torch.ops 属性访问。
+
+    分工是有意的: 生产里 _load_module 在进盾之前就跑完了, 导入期捕获的名字盾追不回来,
+    那一半由 CAUGHT_BOTH_DSL 里的 import 形态钉住。这里断言盾真的拦得住、真的会复原、
+    且不误杀合法 wrapper —— 三者缺一, "收紧了" 就只是一句主张。
+    """
+
+    ATTACKS = {
+        "sdpa": ("def kernel(Q,K,V,causal=False):\n"
+                 "    return torch.ops.aten.scaled_dot_product_attention.default(Q,K,V,None,0.0,causal)\n",
+                 "attn"),
+        "mm": ("def kernel(A,B):\n    return torch.ops.aten.mm.default(A,B)\n", "mm"),
+        "matmul": ("def kernel(A,B):\n    return torch.ops.aten.matmul.default(A,B)\n", "mm"),
+        "_softmax": ("def kernel(X):\n    return torch.ops.aten._softmax.default(X,-1,False)\n",
+                     "softmax"),
+        "getattr 当底座": ("def kernel(A,B):\n"
+                          "    return getattr(torch,'ops').aten.mm.default(A,B)\n", "mm"),
+    }
+
+    def _args(self, kind):
+        if kind == "attn":
+            q = _torch.randn(1, 2, 8, 4)
+            return (q, q, q, False)
+        if kind == "softmax":
+            return (_torch.randn(8, 16),)
+        a = _torch.randn(16, 16)
+        return (a, a)
+
+    def test_every_call_time_form_raises_and_records_the_fallback(self):
+        from operator_agent.decide.anticheat import (CheatDetectedError, lib_fallback_from_error,
+                                                     shield_torch, take_lib_fallback)
+        for name, (code, kind) in self.ATTACKS.items():
+            with self.subTest(case=name):
+                ns = {"torch": _torch}
+                exec(code, ns)
+                take_lib_fallback()
+                with self.assertRaises(CheatDetectedError) as caught:
+                    with shield_torch():
+                        ns["kernel"](*self._args(kind))
+                hit = take_lib_fallback()
+                self.assertTrue(hit, "拦到了却没留下 lib_fallback 痕迹")
+                # 远端只回一句错误文本: 生产者与解析器必须认出同一个符号
+                self.assertEqual(lib_fallback_from_error(str(caught.exception)), hit)
+
+    def test_the_namespace_is_restored_on_exit(self):
+        from operator_agent.decide.anticheat import shield_torch
+        real = _torch.ops
+        with shield_torch():
+            self.assertIsNot(_torch.ops, real)
+        self.assertIs(_torch.ops, real)
+        a = _torch.randn(8, 8)
+        self.assertEqual(tuple(_torch.ops.aten.mm.default(a, a).shape), (8, 8))
+
+    def test_legit_wrapper_operations_are_not_false_positives(self):
+        from operator_agent.decide.anticheat import shield_torch
+        with shield_torch():
+            x = _torch.randn(4, 8)
+            self.assertEqual(tuple(_torch.empty_like(x).shape), (4, 8))
+            self.assertEqual(tuple(_torch.zeros(4, 8).shape), (4, 8))
+            self.assertEqual(tuple(x.view(32).shape), (32,))
+            self.assertEqual(tuple(x.t().contiguous().shape), (8, 4))
+            self.assertEqual(tuple(_torch.cat([x, x]).shape), (8, 8))
+            self.assertEqual(tuple(x.to(_torch.float32).shape), (4, 8))
+            self.assertEqual(tuple(x.clone().shape), (4, 8))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 # R2 预登记：v0.7.2 对 v0.8 的增量对照
 
-2026-11-07 · v0.8 · 计划编号 `operator-v08-increment-r2`
+2026-11-07 · v0.8 · FP16 计划 `operator-v08-increment-r2` 与 FP32 计划
+`operator-v08-increment-r2-fp32-v2`。当前执行步骤见 [R2 跑法](v08-r2-runbook.md)。
 
 本文件是**跑之前**冻结的判定规则，配合 [r2_plan.py](../../benchmarks/experiments/v08/r2_plan.py) 使用。
 R2 回答的是 [v08-preparation §2](../design/v08-preparation.md#L23) 表格第二行那个问题：
@@ -13,13 +14,13 @@ R2 回答的是 [v08-preparation §2](../design/v08-preparation.md#L23) 表格�
 | 项 | 冻结值 | 依据 |
 |---|---|---|
 | 两臂 | B = v0.7.2 封版工件；C = 同宿主 + 启用 `operator_context(phase=optimize)` | 只差 optimize 阶段，比的是增量不是工作流 |
-| 任务 | `matmul-4096`：fp16 4096×4096×4096，triton | 唯一在本窗口可判的 shape（3× 带宽 0.203%） |
-| 噪声门 | `preflight --shape 4096,4096,4096 --reps 5 --repeat 8 --planned-effect-pct 2.5`，`action != "start"` 就不启动 | 上一轮 74 分钟、195 次调用换来零个 valid 终评 |
-| 最小可检效应 | **2.5%** | 0.203% 的 12.3 倍；容忍窗口恶化 10 倍仍可判 |
+| 任务 | FP16 `matmul-4096` 与 FP32 `matmul-4096-fp32` 各自登记，均为 Triton 4096³ | FP32 试测余量更大，见 [候选余量](../status/v08/candidate-headroom-20261107.md) |
+| 噪声门 | 两份计划各自指定目标精度的 CUDA event 探针。每对开跑前重测 | FP16 初测带宽 0.203%，FP32 初测 0.10% |
+| 最小可检效应 | **2.5%** | 分别为初测带宽的 12.3 倍和 25 倍 |
 | 主指标 | 终稿加速比的**配对差值**，仅限终评 L3 为 `valid` 的配对 | `degraded` 读数只作观测 |
 | 系列停止 | 连续 **2** 对没有 `valid` ⇒ 记 `unknown`，不启动第三对 | 两对都不可判是系统性窗口问题 |
-| 终评预留 | 每对 1 次独立终评，同源码哈希 | 不允许把终评预算挪去探索 |
-| 预算 | **未填**（`pairs` / 调用 / 输出 / 验证 / 墙钟 / GPU 分钟） | 必须由人填；填不全不许冻结 |
+| 终评预留 | 每对两臂各做一次独立终评，各自绑定终稿源码哈希 | 验证预算里保留终评额度 |
+| 预算 | 已冻结。每系列 2 对，宿主的每臂预算见 [R2 跑法](v08-r2-runbook.md) | 新计划须填全预算后冻结 |
 
 ## 2. 两个容易混的数字
 
@@ -45,6 +46,10 @@ r2_plan.freeze(dict(pairs=2, max_model_calls=12, max_output_tokens_per_call=8192
 写盘用 `open('x')`：**不允许覆盖**已冻结的计划。要改判据只能新开计划、新编号，
 和 [v0.7.2 的"不得原位改判据"](../../docs/status/v072-todo.md) 同一条纪律。
 
+`freeze(..., task_id=...)` 选计划：缺省 `matmul-4096`（fp16，编号 `operator-v08-increment-r2`），
+`matmul-4096-fp32` 给 fp32（编号 `operator-v08-increment-r2-fp32-v2`）。门控与可判性随
+`task_id` 取该任务自己那次探针的读数，不由另一个精度继承。
+
 ## 4. 它禁止什么
 
 `validate()` 对以下情况直接拒绝：
@@ -54,13 +59,22 @@ r2_plan.freeze(dict(pairs=2, max_model_calls=12, max_output_tokens_per_call=8192
 - 冻结时预算有空项；
 - 最小可检效应没有越过 `窗口带宽 × 10`；
 - 系列停止规则不是"连续 2 对无 valid"；
-- 内容与 `hash` 不符（改一个数就会被发现）。
+- 内容与 `hash` 不符（改一个数就会被发现）；
+- 门控命令探的 dtype 与任务声明的 `precision` 不一致（`--dtype` 缺省即 fp16，
+  "命令里没写"不等于"跟着任务走"）；
+- `detectability.measured_band_pct` 与 `measurement_gate.observed_band_pct` 不相等
+  （同一个带宽存了两份，重新冻结时只改一份就会自相矛盾）；
+- 计划编号在 `WITHDRAWN_PLAN_IDS` 里（指名拒绝并给出撤回理由，而不是落进"编号不认识"那条通用消息）。
+
+后三条是 2026-11-07 审查补的：fp32 首版计划登记了 fp32 任务，却配一条探 fp16 的门控命令、
+沿用 fp16 的 0.203% 带宽，而当时的校验器全部放行。门控与可判性现在**按任务取值**
+（`PROBES`），每个任务的 command / channel / band / window 都来自它自己那次探针回执。
 
 ## 5. 每对怎么跑
 
 1. **门**：`preflight` 落 `hold` ⇒ 这一对不启动，不计失败、不消耗模型/验证预算，等下一个窗口。
 2. **两臂**：同宿主、同模型、同冻结预算；顺序交替（B→C、C→B），避免把漂移算到某一臂头上。
-3. **终评**：每对跑一次独立终评，绑定提交源码的哈希；L2 不全过或 L3 非 `valid`，这一对记为不可判。
+3. **终评**：两臂各跑一次独立终评，绑定各自提交源码的哈希。任一臂 L2 不全过或 L3 非 `valid`，这一对记为不可判。
 4. **停**：连续 2 对不可判 ⇒ 记 `unknown` 收工。
 
 ## 6. 这条系列不能得出的结论
@@ -84,13 +98,17 @@ r2_plan.freeze(dict(pairs=2, max_model_calls=12, max_output_tokens_per_call=8192
 | `decide.noise_preflight` | 无 | 有 |
 | `generate.optimize_diagnoser` | 无 | 有 |
 
-⚠️ **当前 desktop profile 的 `mcp-operator` 跑的是 `v07-venv` 里 site-packages 的 `0.7.0rc1`**
-（见 `~/.dsh/profiles/desktop/cordis.patch.yml:130`），既不是 B 也不是 C。R2 必须在
-分别指向上面两个 venv 的会话里跑，不能在当前会话里跑。
+实际 DSH profile 的入口与启动前核对项见 [R2 跑法](v08-r2-runbook.md#1-环境)。以会话实际
+生效的 MCP 入口为准，`desktop` 的 patch 里有旧入口和后写生效的 v0.7.2 入口。
 
 ## 8. 现状
 
-- 计划模板与校验器已完成（[r2_plan.py](../../benchmarks/experiments/v08/r2_plan.py)），7 个用例钉住上述规则。
-- **尚缺**：预算数字（需人填）、实验宿主（`--host`）、以及 R2 的第一对被真实执行。
+- 计划模板与校验器已完成（[r2_plan.py](../../benchmarks/experiments/v08/r2_plan.py)），13 个用例钉住上述规则。
+- FP16 已完成一对流程试跑。FP32 首版在派发前撤回，v2 已冻结，待首对原生会话。
+- **attention 计划 `operator-v08-increment-r2-attention-v2` 已冻结**（hash `756f17d44e148788…`），
+  任务 `attention-prefill-4096`、门控通道 `attention-1x16x4096x128-fp16-nocausal-cuda-event`、带宽 `0.1%`；
+  登记的是 nocausal 主用例（`prepare` 目前没有 causal 输入）。
+  **v1（S=1024）已按名字撤回**：那个核只有 96 µs、launch 地板占 17.3% ⇒ 每次配对结构性不可判。
+  见 [A3](../status/v08/a3-attention-r2-preregistration-20261108.md)。
 - 噪声门的实现见 [v08-noise-preflight.md](v08-noise-preflight.md)；本窗口实测见
   [真机回执记录](../status/v08/real-receipt-20261107.md)。

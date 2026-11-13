@@ -116,6 +116,19 @@ def lib_fallback_metrics(violations: Optional[list] = None, *,
 
 # ─── 禁用清单 (static_audit 与 shield_torch 共用同一份, 避免两处漂移) ───
 
+#: 公开的规则文本 —— 给宿主看的**唯一一份**（`host_context.rules` 与实验臂的 prompt 都用它）。
+#: 2026-11-09：两臂都没被告知这条，裸臂直接调 `torch.softmax` 交了主用例误差 1.91e-06
+#: 的"正确"结果，然后被判反作弊。规则不说清楚，量出来的就不是能力。
+ANTICHEAT_POLICY = (
+    "禁止用仓库/框架里的**原生实现**顶替算子本体：不得调用 torch / torch.nn.functional / "
+    "numpy 中与被测算子同名的实现（如 torch.softmax、torch.matmul、F.scaled_dot_product_attention、"
+    "np.dot 等），也不得 import flash_attn、xformers 或 torch.nn.attention / torch.ops 系列。"
+    "允许使用语言与张量基础设施：torch.empty/zeros、张量 .shape/.stride()、torch.cuda 查询、"
+    "tl.load/tl.store、数学函数（exp/log/max/sum 等逐元素或归约）。"
+    "算子本体必须由你自己写的 Triton/CUDA 代码完成。"
+)
+
+
 _BLOCKED_TORCH_FUNCS = frozenset({
     "matmul", "mm", "bmm", "baddbmm", "addmm", "einsum",
     "softmax", "log_softmax",
@@ -135,9 +148,11 @@ _BLOCKED_NUMPY_FUNCS = frozenset({"matmul", "dot", "einsum", "vdot", "tensordot"
 
 # attention 这条线的绕道入口: 它们要么是原生 SDPA 的包装, 要么能绕过调用点屏蔽。
 # 按**模块**判而不是按函数名 —— `flash_attn.flash_attn_func` 这类名字在别处没有,
-# 但 `torch.ops.aten.*` 是通用后门, 任何算子都可能被它绕过去。
+# 但 `torch.ops` 是通用后门: 任何算子都能经 `torch.ops.aten.<op>.default(...)` 绕过去
+# (实测 mm / matmul / _softmax / scaled_dot_product_attention 全部绕过按函数名的屏蔽),
+# 所以拦到命名空间根, 不只拦 aten。
 _BLOCKED_IMPORT_ROOTS = frozenset({"flash_attn", "xformers"})
-_BLOCKED_MODULE_PATHS = ("torch.nn.attention", "torch._scaled_dot_product", "torch.ops.aten")
+_BLOCKED_MODULE_PATHS = ("torch.nn.attention", "torch._scaled_dot_product", "torch.ops")
 
 
 def _import_violations(tree) -> list:
@@ -149,6 +164,8 @@ def _import_violations(tree) -> list:
             names = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom) and node.module:
             names = [node.module]
+            if node.module == "torch" and any(alias.name == "ops" for alias in node.names):
+                names.append("torch.ops")
         for name in names:
             root = name.split(".")[0]
             if root in _BLOCKED_IMPORT_ROOTS or any(
@@ -173,14 +190,15 @@ _KNOWN_MODULE_ROOTS = frozenset({"torch", "numpy", "triton"})
 # ─── 正则规则 (仅作 AST 解析失败时的兜底，见 static_audit) ──────────
 
 _IMPORT_RULES = ("禁用的原生实现 import", (
-    r"\bimport\s+(?:flash_attn|xformers)\b",
-    r"\bfrom\s+(?:flash_attn|xformers|torch\.nn\.attention|torch\._scaled_dot_product|torch\.ops\.aten)\b",
+    r"\bimport\s+(?:flash_attn|xformers|torch\.ops)\b",
+    r"\bfrom\s+(?:flash_attn|xformers|torch\.nn\.attention|torch\._scaled_dot_product|torch\.ops)\b",
 ))
 
 _TORCH_COMPUTE = (
     r"\btorch\s*\.\s*(?:" + "|".join(sorted(_BLOCKED_TORCH_FUNCS)) + r")\s*\("
 )
 _TORCH_FUNCTIONAL = r"\btorch\s*\.\s*nn\s*\.\s*functional\b"
+_TORCH_OPS = r"\btorch\s*\.\s*ops\s*\."
 _F_COMPUTE = (
     r"\bF\s*\.\s*(?:" + "|".join(sorted(_BLOCKED_FUNCTIONAL_FUNCS)) + r")\s*\("
 )
@@ -188,7 +206,7 @@ _NUMPY_COMPUTE = (
     r"\b(?:np|numpy)\s*\.\s*(?:" + "|".join(sorted(_BLOCKED_NUMPY_FUNCS)) + r")\s*\("
 )
 
-_TORCH_RULES = ("torch 原生算子", [_TORCH_COMPUTE, _TORCH_FUNCTIONAL, _F_COMPUTE])
+_TORCH_RULES = ("torch 原生算子", [_TORCH_COMPUTE, _TORCH_FUNCTIONAL, _TORCH_OPS, _F_COMPUTE])
 _NUMPY_RULES = ("NumPy 原生算子", [_NUMPY_COMPUTE])
 
 _GPU_DSL_RULES = [_TORCH_RULES, _NUMPY_RULES]    # 真正 GPU DSL: 两者都不允许
@@ -289,7 +307,8 @@ class _AuditVisitor(ast.NodeVisitor):
             for a in node.names:
                 # `import torch.nn.functional as F` -> F = torch.nn.functional
                 # `import torch`                  -> torch = torch
-                self.aliases[a.asname or a.name.split(".")[0]] = a.name
+                root = a.name.split(".")[0]
+                self.aliases[a.asname or root] = a.name if a.asname else root
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node):
@@ -308,7 +327,9 @@ class _AuditVisitor(ast.NodeVisitor):
         if isinstance(node, ast.Attribute):
             base = self._resolve(node.value)
             return f"{base}.{node.attr}" if base else None
-        return None
+        # getattr(torch, "ops").aten.mm.default —— getattr 结果是属性链的**底座**,
+        # 不是被调函数本身; 不在这里折叠就整条链都解析不出, 于是静默放行。
+        return self._fold_getattr(node)
 
     def _fold_getattr(self, node) -> Optional[str]:
         """getattr(torch, "mat" + "mul") -> "torch.matmul"; 折叠不了返回 None"""
@@ -320,6 +341,13 @@ class _AuditVisitor(ast.NodeVisitor):
 
     def _report(self, node, what: str):
         self.violations.append(f"第 {node.lineno} 行: 检测到 {what}")
+
+    def visit_Attribute(self, node):
+        # A candidate can save an operator while its module is loading, before
+        # shield_torch is active. Block access to the namespace itself.
+        if node.attr == "ops" and not self._skipped(node) and self._resolve(node) == "torch.ops":
+            self._report(node, "torch.ops 原生算子入口")
+        self.generic_visit(node)
 
     def _path_violation(self, path: str) -> Optional[str]:
         """按解析后的点号路径判违规; 返回违规描述或 None"""
@@ -348,6 +376,8 @@ class _AuditVisitor(ast.NodeVisitor):
             self.generic_visit(node)
             return
 
+        if self._fold_getattr(node) == "torch.ops":
+            self._report(node, "torch.ops 原生算子入口 (经 getattr 常量折叠还原)")
         func = node.func
 
         # getattr(torch, "mat" + "mul")(A, B) —— 常量折叠后按普通路径判
@@ -541,6 +571,17 @@ def _make_blocked(qualified_name: str):
     return _blocked
 
 
+def _make_blocked_namespace(qualified_name: str):
+    """整个命名空间的桩。`torch.ops.aten.mm.default(A, B)` 的绕道发生在**取命名空间**
+    那一步, 按函数名替换 torch.mm 永远看不到它, 所以要在 `torch.ops` 这一级就拦。
+    文案仍走 _runtime_cheat_message: lib_fallback_from_error 只认那一个格式。"""
+    class _BlockedNamespace:
+        def __getattr__(self, name):
+            _record_lib_fallback(f"{qualified_name}.{name}")
+            raise CheatDetectedError(_runtime_cheat_message(f"{qualified_name}.{name}"))
+    return _BlockedNamespace()
+
+
 @contextmanager
 def shield_torch(vendor_torch_ok: bool = False):
     """
@@ -595,6 +636,14 @@ def shield_torch(vendor_torch_ok: bool = False):
             if hasattr(module, attr):
                 originals.append((module, attr, getattr(module, attr)))
                 setattr(module, attr, _make_blocked(f"{mod_name}.{attr}"))
+    # 与静态侧同一条定义: torch.ops 整个命名空间在屏蔽期内不可访问。
+    # 覆盖的是**调用期**的属性访问; 生产里 _load_module 在进盾之前就跑完了, 所以
+    # `from torch.ops import aten` 这种导入期捕获由静态侧拦 (_BLOCKED_MODULE_PATHS)。
+    # 标定过 15 种合法 wrapper 用法 (empty/zeros/empty_like/arange/tensor/cat/stack/
+    # contiguous/view/reshape/to/copy_/clone/transpose/cuda.is_available) 零误杀。
+    if hasattr(torch, "ops"):
+        originals.append((torch, "ops", torch.ops))
+        setattr(torch, "ops", _make_blocked_namespace("torch.ops"))
     try:
         yield
     finally:

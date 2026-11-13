@@ -57,11 +57,13 @@ def _parser() -> argparse.ArgumentParser:
                     help="每个 episode 内采样几次（--shape 时有效，默认 8）")
     pf.add_argument("--dtype", default="fp16", choices=["fp16", "fp32"],
                     help="--shape 时探针的 dtype（默认 fp16）")
-    pf.add_argument("--op", default="matmul", choices=["matmul", "layernorm"],
-                    help="--shape 时的探针算子（默认 matmul；layernorm 用 M,N）")
+    pf.add_argument("--op", default="matmul", choices=["matmul", "layernorm", "attention"],
+                    help="--shape 时的探针算子（默认 matmul；layernorm 用 M,N；attention 用 B,H,S,D）")
+    pf.add_argument("--causal", action="store_true",
+                    help="attention 探针用因果 mask（默认全注意力）")
     pf.add_argument("--shape", default=None,
-                    help="M,N,K：用目标尺寸的 triton matmul 探针（仅 backend=ssh），"
-                         "走与候选核同一条 CUDA event 通道")
+                    help="M,N,K（matmul）/ B,H,S,D（attention）：用目标尺寸的 triton 探针"
+                         "（仅 backend=ssh），走与候选核同一条 CUDA event 通道")
     pf.add_argument("--planned-effect-pct", type=float, default=None,
                     help="你打算判别的效应（百分点，如 5 表示 5%%）；给了才能回答"
                          "「这次配对看不看得出这么大」")
@@ -76,11 +78,14 @@ def _parser() -> argparse.ArgumentParser:
     pf.add_argument("--json-out", help="同时写一份 JSON 到文件")
 
     rec = sub.add_parser("usage-reconcile",
-                         help="对账两臂的模型计量：B 读插件账本，A 读声明的 arm log")
+                         help="对账两臂的模型计量：插件侧读账本，另一侧读声明的 arm log")
     rec.add_argument("--run-dir", required=True,
-                     help="B 臂的 run 目录（含 host-task-policy.json 与 host-model-budget.json）")
+                     help="插件侧臂的 run 目录（含 host-task-policy.json 与 host-model-budget.json）")
     rec.add_argument("--a", required=True, dest="arm_a_path",
-                     help="A 臂的 arm log（JSON；契约见 docs/testing/v08-arm-metering.md）")
+                     help="另一臂的 arm log（JSON；契约见 docs/testing/v08-arm-metering.md）")
+    rec.add_argument("--plugin-arm", default='B',
+                     help="插件侧账本属于哪个臂（默认 B；A/C 工作流轮用 C）。只改回执里的臂名，"
+                          "不改任何判据")
     rec.add_argument("--json-out", help="同时写一份 JSON 到文件")
 
     pre = sub.add_parser("prepare", help="把一份声明冻结成可复算的回合")
@@ -296,11 +301,13 @@ def main(argv=None) -> int:
             payload = noise_preflight(backend=args.backend, reps=args.reps,
                                       planned_effect_pct=args.planned_effect_pct,
                                       shape=shape, op=args.op, dtype=args.dtype, repeat=args.repeat,
+                                      causal=args.causal,
                                       host=args.host, port=args.port, user=args.user,
                                       key_path=args.key_path, work_dir=args.work_dir,
                                       timeout=args.timeout, persistent=args.persistent)
         elif args.action == "usage-reconcile":
-            payload = reconcile_usage(args.run_dir, args.arm_a_path)
+            payload = reconcile_usage(args.run_dir, args.arm_a_path,
+                                      plugin_arm=args.plugin_arm)
         elif args.action == "prepare":
             payload = prepare(_declaration_from_args(args), args.run_dir)
         elif args.action == "run":

@@ -162,3 +162,53 @@ def test_cli_reports_a_missing_input_instead_of_an_empty_receipt(tmp_path):
     assert code == 2
     payload = json.loads(buf.getvalue())
     assert payload['ok'] is False and payload['error'] == 'usage_input'
+
+# ---------------------------------------------------------------------------
+# P0-2（2026-11-08）：插件侧臂名必须可参数化，默认仍是 B
+# ---------------------------------------------------------------------------
+
+def test_the_plugin_arm_label_is_a_parameter_not_a_literal():
+    """原来 `_finish('B', …)` 写死，A/C 工作流轮里 C 的预算会被记在 B 名下 ——
+    两个臂名在回执里根本读不出来。默认仍是 B：既有 B/C 回执逐字不变。"""
+    state = ledger([record(1)])
+    default = normalize_host_ledger(state)
+    assert default['arm'] == 'B'
+    as_c = normalize_host_ledger(state, arm='C')
+    assert as_c['arm'] == 'C'
+    # 除标签外**一个字节都不许变**
+    strip = lambda row: {k: v for k, v in row.items() if k != 'arm'}
+    assert json.dumps(strip(default), sort_keys=True) == json.dumps(strip(as_c), sort_keys=True)
+
+
+def test_an_empty_or_non_string_arm_label_is_refused():
+    for bad in ('', '   ', 3, None):
+        with pytest.raises(MeteringError) as caught:
+            normalize_host_ledger(ledger([record(1)]), arm=bad)
+        assert caught.value.code == 'metering_input'
+
+
+def test_reconcile_reads_both_arm_names_in_one_receipt(tmp_path):
+    from operator_agent.app.hitl_tools import reconcile_usage
+
+    run = tmp_path / 'plugin-arm'
+    run.mkdir()
+    (run / 'host-model-budget.json').write_text(json.dumps(ledger([record(1)])))
+    (run / 'host-task-policy.json').write_text(
+        json.dumps(dict(limits=dict(max_model_calls=30, max_output_tokens_per_call=64,
+                                    wall_clock_s=600))))
+    arm_log = tmp_path / 'arm-a.json'
+    arm_log.write_text(json.dumps(arm_document([dict(status='answered',
+                                                     usage=dict(inputTokens=10,
+                                                                outputTokens=20,
+                                                                totalTokens=30),
+                                                     **{k: v for k, v in SAMPLING.items()
+                                                        if k in ('provider', 'model')})],
+                                              budget=dict(max_calls=30,
+                                                          max_output_tokens_per_call=64,
+                                                          wall_clock_s=600))))
+
+    default = reconcile_usage(run, arm_log)
+    assert sorted(default['arms']) == ['A', 'B']          # 既有 B/C 口径不变
+    renamed = reconcile_usage(run, arm_log, plugin_arm='C')
+    assert sorted(renamed['arms']) == ['A', 'C']          # A/C 轮能读出两个臂名
+    assert renamed['arms']['C']['dispatches'] == 1

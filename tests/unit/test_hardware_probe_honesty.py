@@ -81,6 +81,10 @@ def _remote(fail_on=None, calls=None):
             return "/usr/bin/python3\n"
         if "import sys;print" in cmd:
             return "3.10\n"
+        if "torch.__version__" in cmd:
+            # 部署现在会回读 torch 版本并与 pin 比对（2026-11-08：不比对就会被
+            # `uv add torch` 装到最新 patch，参考身份门随即 fail closed）。
+            return "2.14.0+cu130\n"
         return ""
     return fake
 
@@ -282,7 +286,11 @@ class TestEnvironmentSetupReportsFailures(unittest.TestCase):
         with mock.patch.object(ex, "_ssh_exec", side_effect=_remote(None, calls)):
             self.assertTrue(ex._setup_uv_env())
         self.assertTrue(ex._uv_setup)
-        for needle in ("uv add numpy torch triton", ".python-version", "uv init"):
+        # 安装命令必须**带版本**：原来这里断言的是 `uv add numpy torch triton`，
+        # 而正是那条无约束命令在 2026-11-08 把远端的 2.14.0 升成 2.14.1，
+        # 参考身份门随即 fail closed。断言跟着事实改，不是跟着旧代码改。
+        for needle in ("uv add numpy torch==2.14.0 triton", ".python-version", "uv init",
+                       "torch.__version__"):
             self.assertTrue(any(needle in c for c in calls), f"{needle} 这一步根本没被执行")
 
 

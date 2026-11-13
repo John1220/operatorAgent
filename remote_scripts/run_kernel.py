@@ -23,6 +23,7 @@ import sys
 import json
 import time
 import os
+import re
 import uuid
 import subprocess
 import numpy as np
@@ -48,10 +49,12 @@ except ImportError:          # 仓库内直接运行: 走包路径 (2026-10-31 �
 
 import gpu_claim  # 同目录 (部署后 = 工作目录; 仓库内 = remote_scripts/)
 try:
-    from reference_contract import ReferenceIdentityError, execution_receipt, validate_gate
+    from reference_contract import (ReferenceIdentityError, execution_receipt, registered_atol,
+                                    validate_gate)
     from builtin_layernorm import native_layernorm
 except ImportError:
-    from operator_agent.decide.reference_contract import ReferenceIdentityError, execution_receipt, validate_gate
+    from operator_agent.decide.reference_contract import (ReferenceIdentityError, execution_receipt,
+                                                          registered_atol, validate_gate)
     from operator_agent.decide.builtin_layernorm import native_layernorm
 
 
@@ -685,9 +688,15 @@ def run_verify(code: str, inputs: dict, kernel_type: str, max_error: float,
             execution_phase = None
         if reference_contract is not None:
             evidence["reference_receipt"] = execution_receipt(reference_contract)
+            # 设备从**实际输入张量**推导, 不认某个输入名: layernorm 只有 X, attention 是
+            # Q/K/V + 按值直传的 causal 标量, 硬取 "X" 会 KeyError 并把一个正确候选判成失败。
+            # 也不能直接比上面那个 `device`: 它是 torch.device("cuda") (index=None), 而
+            # 张量回来的是 cuda:0, 两者 != —— 那会在真机上把每个候选都判否。
+            input_devices = {v.device for v in candidate_inputs.values()
+                             if isinstance(v, torch.Tensor)}
             if (not isinstance(actual, torch.Tensor) or actual.dtype != torch.float16
-                    or actual.device != candidate_inputs["X"].device):
-                reason = "v2 候选必须返回同一 CUDA 设备的 fp16 输出"
+                    or actual.device not in input_devices):
+                reason = "受信任参考候选必须返回与输入张量同一设备的 fp16 输出"
                 return dict(success=False, error=reason, candidate_semantics_error=reason,
                             output_dtype=str(getattr(actual, "dtype", "unknown")), **evidence)
             evidence["output_dtype"] = str(actual.dtype)
@@ -1103,7 +1112,7 @@ def _bench_callable(fn, warmup: int, repeat: int, device_is_cuda: bool) -> dict:
 
 
 def _baseline_specs(reference, cand_inputs: dict, is_cuda: bool,
-                    is_matmul: bool, is_fp16: bool) -> dict:
+                    is_matmul: bool, is_fp16: bool, *, ieee_fp32: bool = False) -> dict:
     """基线**构造器**表: 名字 -> () -> (可调用, 善后函数或 None)。
 
     构造器只做「建张量 / 包 lambda / torch.compile / 打开 allow_tf32」, 不计时。
@@ -1117,6 +1126,20 @@ def _baseline_specs(reference, cand_inputs: dict, is_cuda: bool,
     # 认出可用的名字。写成 dict 字面量会让守卫看不见其中一个, 名单飘了也无人报警。
     specs = {}
     specs["pytorch_eager"] = lambda: (reference, None)
+
+    if ieee_fp32 and is_cuda and is_matmul and not is_fp16:
+        def build_ieee_fp32():
+            if os.environ.get("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE") == "1":
+                raise RuntimeError("cuBLAS TF32 is forced by the environment")
+            matmul = torch.backends.cuda.matmul
+            if hasattr(matmul, "fp32_precision"):
+                original = matmul.fp32_precision
+                matmul.fp32_precision = "ieee"
+                return reference, lambda: setattr(matmul, "fp32_precision", original)
+            original = torch.get_float32_matmul_precision()
+            torch.set_float32_matmul_precision("highest")
+            return reference, lambda: torch.set_float32_matmul_precision(original)
+        specs["pytorch_eager_fp32_ieee"] = build_ieee_fp32
 
     # FP16 任务要拿 cuBLAS FP16 当基线, 否则是拿 fp16 候选比 fp32 参考
     if is_cuda and is_matmul and is_fp16:
@@ -1370,7 +1393,10 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
     try:
         import torch
         if reference_contract is not None:
-            validate_gate(reference_contract, precision, 1e-5, reference_source, kernel_type)
+            # L3 只计时、不做数值比较: 这里查的是 profile/算子/精度身份, atol 槽填注册值。
+            # 原来写死 1e-5 —— 那是 layernorm 的标定值, 对 attention 是错的绑。
+            validate_gate(reference_contract, precision, registered_atol(reference_contract),
+                          reference_source, kernel_type)
             evidence["reference_receipt"] = execution_receipt(reference_contract)
             if inputs.get("protocol") != JSON_PROTOCOL or baseline_priority not in (None, [], ["pytorch_eager"]):
                 raise ReferenceIdentityError("v2 exact inputs / fixed eager baseline required; fallback forbidden")
@@ -1408,11 +1434,14 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
         # 就定下来** (D3, docs/research/20 第三节)。旧写法对 layernorm 要测 eager +
         # torch_compile 两份、对 fp16 matmul 要测三份, 而 verifier 永远只用其中一份 ——
         # 白烧 2~3 倍 L3 的 GPU 时间, 而且测得越久, 撞上邻居插队的窗口越长。
-        specs = _baseline_specs(reference, candidate_inputs, is_cuda, is_matmul, is_fp16)
+        ieee_fp32 = baseline_priority == ["pytorch_eager_fp32_ieee"]
+        specs = _baseline_specs(reference, candidate_inputs, is_cuda, is_matmul, is_fp16,
+                                ieee_fp32=ieee_fp32)
         if reference_contract is not None:
             specs = {"pytorch_eager": specs["pytorch_eager"]}
         order = [n for n in (baseline_priority or []) if n in specs]
-        order += [n for n in specs if n not in order]
+        if not ieee_fp32:
+            order += [n for n in specs if n not in order]
         chosen, attempts = None, []
         for name in order:
             fn, cleanup = None, None
@@ -1440,14 +1469,14 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
 
         # 两臂按块交错计时。候选臂全程在 shield_torch 内 (每一次执行都是), 基线臂不在
         # —— 基线本身就是 torch 原生算子, 套进 shield 会立刻抛 CheatDetectedError。
-        timing_identity = None
-        if is_cuda:
-            try:
-                from cuda_calibration import ruler_identity, CHANNEL, digest
-            except ImportError:
-                from operator_agent.decide.cuda_calibration import ruler_identity, CHANNEL, digest
-            timing_identity = ruler_identity(sys.modules[__name__])
         try:
+            timing_identity = None
+            if is_cuda:
+                try:
+                    from cuda_calibration import ruler_identity, CHANNEL, digest
+                except ImportError:
+                    from operator_agent.decide.cuda_calibration import ruler_identity, CHANNEL, digest
+                timing_identity = ruler_identity(sys.modules[__name__])
             candidate_stats, base_stats, paired = _bench_pair_interleaved(
                 candidate, base_fn, warmup, repeat, is_cuda)
         finally:
@@ -1455,6 +1484,10 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
                 base_cleanup()
         if reference_contract is not None:
             evidence["reference_receipt"] = execution_receipt(reference_contract)
+        if is_cuda and is_matmul and (precision or "").lower() == "fp32":
+            path = _triton_fp32_compute_path(module)
+            if path is not None:
+                evidence["fp32_compute_path"] = path
         if timing_identity is not None:
             evidence["timing_receipt"] = dict(channel=CHANNEL,
                 calibration_identity=timing_identity, identity_hash=digest(timing_identity),
@@ -1476,6 +1509,39 @@ def run_benchmark_with_baselines(code: str, inputs: dict, kernel_type: str,
         return {"success": False, "error": f"Remote benchmark error: {type(e).__name__}: {e}"}
 
 
+def _triton_compiled_kernels(module):
+    try:
+        from triton.runtime.jit import JITFunction
+    except Exception:
+        return
+    for obj in vars(module).values():
+        if not isinstance(obj, JITFunction):
+            continue
+        for entry in (getattr(obj, "device_caches", None) or {}).values():
+            cache = entry[0] if isinstance(entry, tuple) else entry
+            if hasattr(cache, "values"):
+                yield from cache.values()
+
+
+def _triton_fp32_compute_path(module):
+    """Identify the instruction family only when one compiled kernel backs the wrapper."""
+    kernels = list(_triton_compiled_kernels(module))
+    if len(kernels) != 1:
+        return None
+    asm = getattr(kernels[0], "asm", None)
+    ptx = asm.get("ptx") if isinstance(asm, dict) else None
+    if not isinstance(ptx, str):
+        return None
+    ops = re.findall(r"(?m)^\s*(?:@!?%\w+\s+)?((?:fma|mad|mma|wgmma\.mma_async)\.[\w.]+)\s", ptx)
+    mma = [op for op in ops if op.startswith(("mma.", "wgmma."))]
+    fp32_fma = any(op.startswith(("fma.", "mad.")) and op.endswith(".f32") for op in ops)
+    if fp32_fma and not mma:
+        return "fp32_cuda_core"
+    if mma and not fp32_fma and all("tf32" in op.split(".") for op in mma):
+        return "tf32_tensor_core"
+    return None
+
+
 def _triton_compile_metadata(module) -> dict:
     """从**编译产物**取「关于被测量那份码」的事实 (§10.3 条件 2 的真源)
 
@@ -1492,36 +1558,21 @@ def _triton_compile_metadata(module) -> dict:
     三态纪律: 取不到就**不发布这个键** —— 缺失既不等于 0, 也不等于「没有上限」。
     """
     out = {}
-    try:
-        from triton.runtime.jit import JITFunction
-    except Exception:
+    ck = next(_triton_compiled_kernels(module), None)
+    if ck is None:
         return out
-    for obj in list(vars(module).values()):
-        if not isinstance(obj, JITFunction):
-            continue
-        caches = getattr(obj, "device_caches", None) or {}
-        for entry in caches.values():
-            cache = entry[0] if isinstance(entry, tuple) else entry
-            try:
-                kernels = list(cache.values())
-            except Exception:
-                continue
-            for ck in kernels:
-                md = getattr(ck, "metadata", None)
-                if md is not None:
-                    for src, dst in (("num_warps", "num_warps"),
-                                     ("num_stages", "num_stages"),
-                                     ("shared", "shared_bytes_per_cta")):
-                        value = getattr(md, src, None)
-                        if isinstance(value, int) and not isinstance(value, bool):
-                            out[dst] = value
-                for src in ("n_regs", "n_spills", "n_max_threads"):
-                    value = getattr(ck, src, None)
-                    if isinstance(value, int) and not isinstance(value, bool):
-                        out[src] = value
-                if out:
-                    out["compile_metadata_from"] = type(ck).__name__
-                return out
+    md = getattr(ck, "metadata", None)
+    for src, dst in (("num_warps", "num_warps"), ("num_stages", "num_stages"),
+                     ("shared", "shared_bytes_per_cta")):
+        value = getattr(md, src, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[dst] = value
+    for src in ("n_regs", "n_spills", "n_max_threads"):
+        value = getattr(ck, src, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[src] = value
+    if out:
+        out["compile_metadata_from"] = type(ck).__name__
     return out
 
 
@@ -1860,7 +1911,8 @@ def run_action(payload: dict) -> dict:
                     raise ReferenceIdentityError("v2 requires same-device frozen baseline")
                 if action == "benchmark_with_baselines":
                     validate_gate(payload.get("reference_contract"), payload.get("precision", ""),
-                                  1e-5, payload.get("reference_source", ""), payload.get("kernel_type", ""))
+                                  registered_atol(payload.get("reference_contract")),
+                                  payload.get("reference_source", ""), payload.get("kernel_type", ""))
                     execution_receipt(payload.get("reference_contract"))
             except ReferenceIdentityError as exc:
                 return dict(success=False, error=str(exc), reference_error=str(exc), reference_identity_unknown=True)

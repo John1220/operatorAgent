@@ -242,8 +242,12 @@ def _required_caps(declaration: dict) -> tuple:
 
 def build_task(declaration: dict) -> TaskSchema:
     """声明 → TaskSchema。**纯函数**：同一份声明任何时候都得到同一份判据。"""
+    from ..decide.correctness_profiles import AttentionScopeError
     _check_keys(declaration)
-    parsed, _ = _quiet(IntentParser().parse, declaration["request"])   # 规则分支，零 LLM
+    try:
+        parsed, _ = _quiet(IntentParser().parse, declaration["request"])   # 规则分支，零 LLM
+    except AttentionScopeError as error:
+        raise ToolError("attention_scope", str(error)) from error
     precision = declaration.get("precision")
     constraints = replace(
         parsed.constraints,
@@ -267,7 +271,11 @@ def build_task(declaration: dict) -> TaskSchema:
     from ..decide.correctness_profiles import with_default_correctness
     constraints = replace(constraints, correctness_profile=None, correctness_suite=None,
                           reference_contract=None)
-    return with_default_correctness(replace(parsed, source=source, target=target, constraints=constraints))
+    try:
+        return with_default_correctness(replace(parsed, source=source, target=target,
+                                                constraints=constraints))
+    except AttentionScopeError as error:
+        raise ToolError("attention_scope", str(error)) from error
 
 
 def _case_summary(case) -> dict:
@@ -421,6 +429,7 @@ def _conflict(route: Route, eligibility: Optional[dict], validity: Optional[str]
 # ── 动作 1: prepare ──────────────────────────────────────────────────────
 def prepare(declaration: dict, run_dir: str | Path, *, now: Optional[float] = None,
             host_budget: Optional[dict] = None) -> dict:
+    from ..decide.correctness_profiles import AttentionScopeError
     from ..execute.host_task_budget import (HostTaskBudget, HostTaskBudgetError,
         HostTaskLimits, host_task_enabled, initialize_host_task)
     run = Path(run_dir)
@@ -450,6 +459,8 @@ def prepare(declaration: dict, run_dir: str | Path, *, now: Optional[float] = No
             return result
     except HostTaskBudgetError as error:
         raise ToolError(error.code, error.detail) from error
+    except AttentionScopeError as error:
+        raise ToolError('attention_scope', str(error)) from error
     except (TypeError, ValueError) as error:
         if isinstance(error, ToolError):
             raise
@@ -867,8 +878,32 @@ def bench(run_dir: str | Path, candidates: list, *, backend: str = "mock",
 
 
 # ── 动作 0（只读）: capabilities ─────────────────────────────────────────
+def _shape_probe_plan(op, dims, dtype, causal=False):
+    """(输入占位, 通道标签) —— 让"探哪条通道"只有一处决定。
+
+    标签进回执的 `channel`, 而预登记（R2）按 channel 绑定门控读数: 所以标签必须
+    同时说清算子、尺寸、精度与 mask 形态, 否则 matmul 的带宽会被读成 attention 的。
+    """
+    import numpy as np
+    element = np.float16 if dtype == 'fp16' else np.float32
+    if op == 'layernorm':
+        m, n = dims
+        return {"X": np.empty((m, n), dtype=element)}, f'layernorm-{m}x{n}-{dtype}'
+    if op == 'attention':
+        b, h, s, d = dims
+        inputs = {"Q": np.empty((b, h, s, d), dtype=element),
+                  "K": np.empty((b, h, s, d), dtype=element),
+                  "V": np.empty((b, h, s, d), dtype=element),
+                  "causal": bool(causal)}
+        mask = 'causal' if causal else 'nocausal'
+        return inputs, f'attention-{b}x{h}x{s}x{d}-{dtype}-{mask}'
+    m, n, k = dims
+    return ({"A": np.empty((m, k), dtype=element), "B": np.empty((k, n), dtype=element)},
+            f'matmul-{m}x{n}x{k}-{dtype}')
+
+
 def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=None,
-                    op='matmul', dtype='fp16', repeat=8,
+                    op='matmul', dtype='fp16', repeat=8, causal=False,
                     host=None, port=None, user=None, key_path=None, work_dir=None,
                     timeout=300, persistent=False) -> dict:
     """一条命令回答: 这个窗口现在能不能给出可判的性能读数。
@@ -876,7 +911,7 @@ def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=N
     只量**这台机器围绕一个参照核的重复散布**, 不判任何候选、不发任何信用。回执里的
     `action` 三个值: start / hold / refuse —— hold 是「窗口太吵」而不是「候选不行」。
 
-    `shape=[M,N,K]` 给出时改用**目标尺寸的 triton matmul** 探针, 走远端 CUDA event
+    `shape=[M,N,K]`（matmul）/ `[B,H,S,D]`（attention）给出时改用**目标尺寸的 triton** 探针, 走远端 CUDA event
     通道 (与候选核同一条计时路径)。不给则用小参照核, 那只覆盖计时通道本身 ——
     真机实测: 24×24 参照核在 SSH 上落在远端 `perf_counter` 分支, 量的是主机 CPU。
     """
@@ -885,13 +920,35 @@ def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=N
     if type(reps) is not int or reps < MIN_REPS:
         raise ToolError("bad_reps", f"reps 必须是 >= {MIN_REPS} 的整数（当前 {reps!r}）")
     dims = None
+    if op == 'attention' and dtype != 'fp16':
+        # attention 目前只有 fp16 profile（`builtin-attention-fp16-cuda-v1`）。
+        # 探针可以量别的精度，但那会给出"这个窗口对这个算子可判"的印象，
+        # 而那个算子今天根本判不了 —— 直接拒绝，比事后解释便宜。
+        raise ToolError("preflight_dtype",
+                        f"attention 探针只支持 fp16（当前 {dtype!r}）")
     if shape is not None:
-        want = 2 if op == 'layernorm' else 3
-        if (not isinstance(shape, (list, tuple)) or len(shape) != want
-                or any(type(value) is not int or not 16 <= value <= 65536 for value in shape)):
+        want = {'layernorm': 2, 'attention': 4}.get(op, 3)
+        if not isinstance(shape, (list, tuple)) or len(shape) != want:
             raise ToolError("bad_shape",
-                            f"shape 必须是 {want} 个 [16, 65536] 的整数 ("
-                            f"{'M,N' if want == 2 else 'M,N,K'}), 当前 {shape!r}")
+                            f"shape 必须是 {want} 个整数 ("
+                            f"{ {2: 'M,N', 4: 'B,H,S,D'}.get(want, 'M,N,K') }), 当前 {shape!r}")
+        if any(type(value) is not int for value in shape):
+            raise ToolError("bad_shape", f"shape 必须全是整数, 当前 {shape!r}")
+        if op == 'attention':
+            # 逐位给界: B=1、H=16 是 Scope A 的**正常**取值, 用 matmul 那条
+            # [16, 65536] 会把它们判非法（第一次跑就被自己的校验拦住了）。
+            b, h, s, d = shape
+            if not (1 <= b <= 4096 and 1 <= h <= 4096 and 16 <= s <= 8192):
+                raise ToolError("bad_shape",
+                                f"attention 探针要求 1<=B<=4096, 1<=H<=4096, 16<=S<=8192"
+                                f"（S² 的工作量: S=8192 已是被测任务的 4 倍), 当前 {shape!r}")
+            if not (16 <= d <= 256 and d & (d - 1) == 0):
+                # 探针用 tl.arange(0, D) 与 (BLOCK_M, D) 的累加器: D 必须是 2 的幂。
+                raise ToolError("bad_shape",
+                                f"attention 探针的 D 必须是 [16, 256] 内的 2 的幂, 当前 {d!r}")
+        elif any(not 16 <= value <= 65536 for value in shape):
+            raise ToolError("bad_shape",
+                            f"shape 必须是 {want} 个 [16, 65536] 的整数, 当前 {shape!r}")
         dims = list(shape)
         if backend != "ssh":
             # 其它后端的计时不是这张卡的; 尺寸一上 4096 纯 Python 也跑不动。
@@ -909,18 +966,9 @@ def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=N
         notes.append("small reference kernel: this exercises the timing channel, not the GPU; "
                      "pass shape=[M,N,K] to probe a real workload size")
     else:
-        import numpy as np
         # 本地只占位拿 shape/dtype: SSH 侧按 spec 在远端生成数据, 不传几十 MB。
-        element = np.float16 if dtype == 'fp16' else np.float32
-        if op == 'layernorm':
-            m, n = dims
-            inputs = {"X": np.empty((m, n), dtype=element)}
-            label = f'layernorm-{m}x{n}-{dtype}'
-        else:
-            m, n, k = dims
-            inputs = {"A": np.empty((m, k), dtype=element),
-                      "B": np.empty((k, n), dtype=element)}
-            label = f'matmul-{m}x{n}x{k}-{dtype}'
+        # 标量（`causal`）走 `_serialize_inputs` 的 scalars 通道按值直传。
+        inputs, label = _shape_probe_plan(op, dims, dtype, causal)
         # 每个 episode 内部采 `repeat` 个样本, 再用**各 episode 的中位**算跨轮散布:
         # 与 L3 的做法一致 (真机一次 L3 是 30~46 样本)。reps=5 且每个 episode 只采
         # 1 个样本时, iqr 只是 5 个点上的顺序统计量, 会把手抖放大成 6% 的判决带宽
@@ -943,7 +991,7 @@ def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=N
     return receipt
 
 
-def reconcile_usage(run_dir, arm_a_path) -> dict:
+def reconcile_usage(run_dir, arm_a_path, *, plugin_arm='B') -> dict:
     """对账两臂的模型计量: B 读插件账本, A 读声明的 arm log。
 
     这里只做**读数与判定**, 不推断费用、不把缺失计数当 0、也不因为两边数字接近就
@@ -965,7 +1013,8 @@ def reconcile_usage(run_dir, arm_a_path) -> dict:
     except (OSError, json.JSONDecodeError) as error:
         raise ToolError('usage_input', f'对账输入读不出来: {error}') from error
     try:
-        receipt = compare(normalize_arm_document(document), normalize_host_ledger(state, policy))
+        receipt = compare(normalize_arm_document(document),
+                          normalize_host_ledger(state, policy, arm=plugin_arm))
     except MeteringError as error:
         raise ToolError(error.code, error.detail) from error
     receipt['inputs'] = dict(run_dir=str(run), policy=str(policy_path),
@@ -981,8 +1030,9 @@ def capabilities() -> dict:
     场景里变成一次真实的网络动作，而调用方只是想知道「能不能」。
     """
     from .. import __version__
-    from ..decide.correctness_profiles import OPERATORS, PROFILE_VERSION
     from ..decide.bench_cases import known_layouts
+    from ..decide.correctness_profiles import (ATTENTION_FAMILY, OPERATORS,
+                                               PROFILE_VERSION)
 
     def _spec(name: str) -> bool:
         try:
@@ -1017,8 +1067,13 @@ def capabilities() -> dict:
             "nvidia_smi": bool(shutil.which("nvidia-smi")),
         },
         "kernel_types_with_input_layout": list(known_layouts()),
+        # `operators` 是**二维 axis 生成器**的词表，不是支持清单。别把两者混读：
+        # 2026-11-08 一次会话开场看到这里只有四个算子，就以为 attention 不支持，
+        # 而它当时已经有 profile、参考、8 条 case 与一套 L2/L3 判定。
         "correctness_profiles": {"version": PROFILE_VERSION,
-                                 "operators": list(OPERATORS)},
+                                 "operators": list(OPERATORS),
+                                 "operators_scope": "二维 axis 生成器覆盖的算子；不是支持清单",
+                                 "families": {"attention": dict(ATTENTION_FAMILY)}},
         "notes": [
             "capabilities 不做网络探测（含 SSH）",
             "backend=ssh 需要显式 host；本层不提供 auto 降级（「以为在真机上、其实在控制机」是这里最贵的误读）",

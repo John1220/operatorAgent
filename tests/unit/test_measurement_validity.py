@@ -22,6 +22,8 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -38,6 +40,7 @@ from operator_agent.core.schemas import (
     ConstraintSpec, Precision, SourceSpec, TargetSpec, TaskComplexity, TaskSchema,
     TaskType,
 )
+from operator_agent.core.backend_caps import Cap
 from operator_agent.decide.verifier import Verifier, baseline_plan
 from tests.backend_fakes import fake_backend
 
@@ -253,6 +256,48 @@ class TestBaselinePlan(unittest.TestCase):
         self.assertNotIn("pytorch_eager_fp16", plan,
                          "fp32 任务里出现 fp16 基线 = 拿候选的精度不当挡箭牌")
 
+    def test_builtin_fp32_cuda_task_requires_ieee_baseline(self):
+        seen = {}
+        def bench(*args, **options):
+            seen.update(options)
+            return {"success": True, "baseline_selected": "pytorch_eager_tf32"}
+
+        backend = fake_backend(caps=(Cap.GPU_PINNING,), benchmark_with_baselines=bench)
+        result, _ = Verifier(backend)._bench_case("", {}, _task())
+        self.assertEqual(["pytorch_eager_fp32_ieee"], seen["baseline_priority"])
+        self.assertFalse(result["success"])
+        self.assertIn("IEEE FP32", result["error"])
+
+    def test_runner_sets_and_restores_ieee_precision(self):
+        from remote_scripts import run_kernel
+
+        matmul = SimpleNamespace(fp32_precision="tf32")
+        torch = SimpleNamespace(backends=SimpleNamespace(cuda=SimpleNamespace(matmul=matmul)))
+        with patch.dict(sys.modules, {"torch": torch}), patch.dict(run_kernel.os.environ, {}):
+            run_kernel.os.environ.pop("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", None)
+            specs = run_kernel._baseline_specs(lambda: matmul.fp32_precision, {}, True, True,
+                                               False, ieee_fp32=True)
+            fn, cleanup = specs["pytorch_eager_fp32_ieee"]()
+            try:
+                self.assertEqual("ieee", fn())
+            finally:
+                cleanup()
+            self.assertEqual("tf32", matmul.fp32_precision)
+            run_kernel.os.environ["TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"] = "1"
+            with self.assertRaisesRegex(RuntimeError, "forced"):
+                specs["pytorch_eager_fp32_ieee"]()
+
+    def test_runner_distinguishes_fp32_fma_from_tf32_mma_ptx(self):
+        from remote_scripts import run_kernel
+
+        fma = "\tfma.rn.f32 %f1, %f2, %f3, %f4;\n"
+        mma = "\tmma.sync.aligned.m16n8k4.row.col.f32.tf32.tf32.f32 %f1, %r2;\n"
+        for ptx, expected in ((fma, "fp32_cuda_core"), (mma, "tf32_tensor_core"),
+                              (fma + mma, None), ("// " + mma.lstrip(), None)):
+            with self.subTest(ptx=ptx), patch.object(run_kernel, "_triton_compiled_kernels",
+                                                     return_value=iter([SimpleNamespace(asm={"ptx": ptx})])):
+                self.assertEqual(expected, run_kernel._triton_fp32_compute_path(None))
+
     def test_gemm_counts_as_matmul(self):
         self.assertEqual(baseline_plan("matmul", "fp32"), baseline_plan("gemm", "fp32"))
 
@@ -272,7 +317,7 @@ class TestBaselinePlan(unittest.TestCase):
         self.assertTrue(specs, f"没从 runner 里认出任何基线名: {specs}")
         for kernel_type, prec in (("matmul", "fp16"), ("matmul", "fp32"),
                                   ("layernorm", "fp16"), ("softmax", "bf16")):
-            plan = baseline_plan(kernel_type, prec)
+            plan = baseline_plan(kernel_type, prec) + baseline_plan(kernel_type, prec, ieee_fp32=True)
             unknown = [n for n in plan if n not in specs]
             self.assertEqual([], unknown,
                              f"{kernel_type}/{prec} 的名单里有远端建不出的基线: {unknown}")

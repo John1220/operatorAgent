@@ -182,3 +182,86 @@ def test_an_unknown_dtype_is_refused_by_the_parser():
             cli_main(['preflight', '--backend', 'ssh', '--reps', '3',
                       '--shape', '4096,4096,4096', '--dtype', 'bf16'])
     assert raised.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# A2 (2026-11-08): attention 也需要自己的窗口门
+# ---------------------------------------------------------------------------
+
+def test_the_attention_probe_is_a_fused_kernel_with_a_scalar_mask():
+    from operator_agent.decide.anticheat import static_audit
+    from operator_agent.decide.noise_preflight import probe_source
+
+    source = probe_source('attention')
+    assert '@triton.jit' in source and 'def kernel(Q, K, V, causal):' in source
+    assert 'causal: tl.constexpr' in source          # 掩码是编译期常量，不是随机值
+    assert 'torch.cuda' not in source
+    assert static_audit(source) == []                # 探针自己不能把反作弊盾撞红
+    assert probe_source('attention') == source       # 逐字稳定
+
+
+def test_the_probe_channel_names_the_operator_and_the_mask():
+    """通道名进回执，而预登记按通道绑定门控读数 —— 不能拿 matmul 的读数目当 attention 的。"""
+    from operator_agent.app.hitl_tools import _shape_probe_plan
+
+    _, matmul = _shape_probe_plan('matmul', [4096, 4096, 4096], 'fp32')
+    _, layer = _shape_probe_plan('layernorm', [16384, 6144], 'fp16')
+    assert matmul == 'matmul-4096x4096x4096-fp32'    # 既有通道名逐字不变（R2 已冻结）
+    assert layer == 'layernorm-16384x6144-fp16'
+    inputs, causal = _shape_probe_plan('attention', [1, 16, 1024, 128], 'fp16', causal=True)
+    assert causal == 'attention-1x16x1024x128-fp16-causal'
+    assert inputs['causal'] is True and sorted(inputs) == ['K', 'Q', 'V', 'causal']
+    assert inputs['Q'].shape == (1, 16, 1024, 128)
+
+
+def test_attention_probe_refuses_a_shape_or_dtype_it_cannot_stand_behind():
+    import contextlib
+    import io
+    import json
+
+    from operator_agent.app.cli import main as cli_main
+
+    def run(argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cli_main(argv)
+        return code, json.loads(buf.getvalue())
+
+    code, payload = run(['preflight', '--backend', 'ssh', '--reps', '3',
+                         '--op', 'attention', '--shape', '1,16,1024'])
+    assert code == 2 and payload['error'] == 'bad_shape'      # 必须是 B,H,S,D
+
+    code, payload = run(['preflight', '--backend', 'ssh', '--reps', '3',
+                         '--op', 'attention', '--shape', '1,16,16384,128'])
+    assert code == 2 and payload['error'] == 'bad_shape'      # S 上限 8192
+
+    code, payload = run(['preflight', '--backend', 'ssh', '--reps', '3', '--dtype', 'fp32',
+                         '--op', 'attention', '--shape', '1,16,1024,128'])
+    assert code == 2 and payload['error'] == 'preflight_dtype'
+
+
+def test_scope_a_geometry_is_legal_for_the_attention_probe():
+    """B=1、H=16 是 Scope A 的正常取值 —— 第一次跑就是被 matmul 那条 [16,65536] 拦下的。"""
+    import contextlib
+    import io
+    import json
+
+    from operator_agent.app.cli import main as cli_main
+
+    # 只到形状校验为止: backend=local 会在下一道门（shape 探针只支持 ssh）被拒，
+    # 那说明形状已经通过了 —— 这正是本用例要的边界。
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = cli_main(['preflight', '--backend', 'local', '--reps', '3',
+                         '--op', 'attention', '--shape', '1,16,1024,128'])
+    assert code == 2
+    assert json.loads(buf.getvalue())['error'] == 'preflight_shape_backend'
+
+    for bad in ('1,16,1024,96',     # D 不是 2 的幂
+                '1,16,12288,128',   # S 超上限
+                '1,0,1024,128'):    # H=0
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = cli_main(['preflight', '--backend', 'local', '--reps', '3',
+                             '--op', 'attention', '--shape', bad])
+        assert code == 2 and json.loads(buf.getvalue())['error'] == 'bad_shape', bad

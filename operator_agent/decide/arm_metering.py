@@ -137,11 +137,18 @@ def _max(rows, key):
     return max(values) if values else None
 
 
-def normalize_host_ledger(state, policy=None):
-    """B arm: the plugin's durable ledger (``host-model-budget.json``).
+def normalize_host_ledger(state, policy=None, *, arm='B'):
+    """The plugin-side arm: its durable ledger (``host-model-budget.json``).
 
     ``reserved`` rows are in flight, not spent; an absent ``usage`` stays unknown.
+
+    ``arm`` 是**这一份账本属于哪个臂**的标签。原来写死成 ``'B'``，因为 R2 的两臂是
+    B（v0.7.2）/C（v0.8）；但 A/C 工作流轮的插件侧臂名是 ``C``，写死会让
+    ``usage-reconcile`` 把 C 的预算记在 B 名下——两个臂名在回执里根本读不出来。
+    默认仍是 ``'B'``：既有回执逐字不变（这条由测试与归档回执对拍）。
     """
+    if not isinstance(arm, str) or not arm.strip():
+        raise MeteringError('metering_input', f'invalid plugin arm label {arm!r}')
     if not isinstance(state, dict) or not isinstance(state.get('records'), list):
         raise MeteringError('metering_input', 'host ledger lacks a records list')
     records = [dict(row) for row in state['records']]
@@ -159,12 +166,12 @@ def normalize_host_ledger(state, policy=None):
                   max_output_tokens_per_call=limits.get('max_output_tokens_per_call'),
                   # 挂钟上限只在任务策略里 (ledger 只冻模型三项), 所以从这里取。
                   wall_clock_s=policy_limits.get('wall_clock_s'))
-    arm = _finish('B', 'plugin host-model ledger', 'host_pre_dispatch_reservations',
-                  budget, records, reserved_key='max_output_tokens_reserved')
+    normalized = _finish(arm.strip(), 'plugin host-model ledger', 'host_pre_dispatch_reservations',
+                         budget, records, reserved_key='max_output_tokens_reserved')
     # 预留下限就是这个请求的输出上限 (插件把它夹在 policy 之内), 所以它可以当作
     # `max_output_tokens` 这一项**已记录** —— 但仍然是「预留」不是「实际用量」。
-    arm['sampling']['max_output_tokens'] = _uniform(records, 'max_output_tokens_reserved')
-    return arm
+    normalized['sampling']['max_output_tokens'] = _uniform(records, 'max_output_tokens_reserved')
+    return normalized
 
 
 def normalize_arm_document(document):

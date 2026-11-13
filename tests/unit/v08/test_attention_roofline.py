@@ -44,7 +44,9 @@ def test_the_attention_gate_only_accepts_the_calibrated_absolute_tolerance():
                                                           registered_reference, validate_gate)
     spec = registered_reference(PROFILE_ATTENTION)
     assert validate_gate(spec.content_dict(), 'fp16', 3e-4, kernel_type='attention') == spec
-    for bad in (3e-3, 1e-3, 5e-4, 0.0):
+    # 1e-5 / 1e-4 是**过严**方向: 全局默认 1e-5 本是 layernorm 的标定值, attention 继承它
+    # 就比自己的标定严 30×, 实测把 max_abs=1.22e-4 的正确核判成 99.9608% 匹配。
+    for bad in (3e-3, 1e-3, 5e-4, 0.0, 1e-4, 1e-5):
         with pytest.raises(ReferenceIdentityError):
             validate_gate(spec.content_dict(), 'fp16', bad, kernel_type='attention')
     # 算子名/精度/外挂参考三者任一不符都拒绝
@@ -65,6 +67,8 @@ def test_prepare_freezes_an_attention_contract_with_scalars(tmp_path):
                            dsl='triton', precision='fp16'), run)
     assert payload['ok'] is True
     assert payload['correctness_profile'] == 'builtin-attention-fp16-cuda-v1'
+    # 容差必须跟着 profile 走, 不是继承 ConstraintSpec 的全局默认 1e-5（那是 layernorm 的）。
+    assert payload['judgement']['max_error'] == 3e-4
     assert sorted(payload['inputs']) == ['K', 'Q', 'V']
     assert payload['scalars'] == {'causal': False}
     assert len(payload['cases']) == 1 and len(payload['required_cases']) == 1

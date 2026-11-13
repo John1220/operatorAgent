@@ -136,6 +136,45 @@ def test_layout_materializer_really_perturbs_strides(layout):
         assert arrays["A"].strides[-1] == arrays["A"].itemsize * 2
 
 
+@pytest.mark.parametrize("pattern", ["random", "zeros", "large", "nan", "inf"])
+@pytest.mark.parametrize("layout", ["contiguous", "strided", "broadcast"])
+def test_pattern_and_layout_transform_tensors_but_never_scalars(pattern, layout):
+    """标量是按值直传的 case 身份, 不是数据域的一部分。
+
+    上面两条参数化测试用的 case() 不带标量, 所以从没走到这条路: attention 的 bool
+    `causal` 被当数组取 .ndim/.shape, 8 条里 3 条抛 AttributeError, 而 verifier 只捕
+    (BenchCaseError, ValueError, CapabilityMissing) ⇒ 整个 L2 中止。
+    这里同时钉住另一半: 张量必须**真的**被变换, 否则"整个循环都跳过"也能让这条绿。
+    """
+    scalars = {"flag": True, "count": 3, "scale": 0.125, "mode": "nearest"}
+    c = CorrectnessCase("scalar-passthrough",
+                        BenchmarkCase(name="x", tensors=(TensorSpec("X", (3, 8), "fp32"),),
+                                      seed=1, scalars=dict(scalars)),
+                        pattern=pattern, layout=layout)
+    arrays = c.materialize()
+    for key, value in scalars.items():
+        assert arrays[key] == value
+        assert type(arrays[key]) is type(value)
+    x = arrays["X"]
+    assert x.shape == (3, 8) and x.dtype == np.float32
+    if layout == "contiguous":
+        assert x.flags.c_contiguous
+    elif layout == "strided":
+        assert x.strides[-1] == x.itemsize * 2
+    else:
+        assert x.strides[-1] == 0
+    if pattern == "zeros":
+        assert not x.any()
+    elif pattern == "large":
+        assert (x == 100).all()
+    elif pattern == "nan":
+        assert np.isnan(x).all()
+    elif pattern == "inf":
+        assert np.isinf(x).all()
+    else:
+        assert np.unique(x).size > 1
+
+
 def test_correct_candidate_passes_all_values_shapes_and_dtypes():
     suite = CorrectnessSuite((
         case("tiny", m=1, n=1, k=1), case("tail"),

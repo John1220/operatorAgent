@@ -201,14 +201,28 @@ class TestTheReaderInTheVerifier(unittest.TestCase):
                                    get_hardware_info=lambda: dict(H20_INFO))
         return Verifier(fake)
 
-    def _roofline(self, v):
+    def _roofline(self, v, compute_path="tf32_tensor_core"):
         return v._roofline_analysis(task=_task(min_speedup=5.0), bench_inputs=_inputs(),
-                                    actual_gflops=1000.0, actual_bandwidth_gbs=100.0)
+                                    actual_gflops=1000.0, actual_bandwidth_gbs=100.0,
+                                    compute_path=compute_path)
+
+    def test_fp32_cuda_matmul_does_not_infer_tf32_from_device(self):
+        v = self._verifier()
+        unknown = self._roofline(v, None)
+        self.assertEqual("unknown", unknown["compute_used"])
+        self.assertEqual("unknown", unknown["bound_type"])
+        self.assertIsNone(unknown["gflops_utilization_pct"])
+        self.assertFalse(unknown["reference_lower_bound"])
+
+        ieee = self._roofline(v, "fp32_cuda_core")
+        self.assertEqual("fp32", ieee["peak_key"])
+        self.assertEqual("triton_ptx", ieee["compute_path_evidence"])
+        self.assertEqual(39500.0, ieee["hw_peak_gflops"])
 
     def test_the_denominator_switches_to_the_measured_value(self):
         v = self._verifier()
         r0 = self._roofline(v)
-        self.assertEqual("tf32", r0["peak_key"], "H20 + cuda + matmul ⇒ tf32 分母")
+        self.assertEqual("tf32", r0["peak_key"], "候选 PTX 的 TF32 路径使用 TF32 分母")
         self.assertIs(r0["reference_lower_bound"], False, "没实测过 ⇒ 出口的位是关的")
         self.assertAlmostEqual(74000.0, r0["hw_peak_gflops"], places=1)
 

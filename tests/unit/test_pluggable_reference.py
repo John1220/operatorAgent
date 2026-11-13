@@ -189,9 +189,24 @@ class TestRemotePayloadCarriesReferenceSource(unittest.TestCase):
         self.assertIn("_reference_torch(kernel_type", src)
 
     def test_verifier_passes_task_reference_into_remote_calls(self):
-        src = (REPO_ROOT / "operator_agent" / "decide" / "verifier.py").read_text(encoding="utf-8")
-        self.assertGreaterEqual(src.count("reference_source=task.source.reference_source"), 2,
-                                "L2/L3 至少两处远程调用都要带上 reference_source")
+        """L2/L3 两处远程调用都必须**按关键字**带 `reference_source`。
+
+        原来这条数的是字面量 `reference_source=task.source.reference_source` 出现两次
+        —— 2026-11-08 把其中一处改成局部变量（同一个值，语义没变）它就红了。
+        数源码里某个表达式的写法，测的是写法而不是行为；这里改成看 AST 的关键字，
+        只要调用点少传一次就会红，而换一种写法不会。
+        """
+        import ast
+        tree = ast.parse((REPO_ROOT / "operator_agent" / "decide" / "verifier.py")
+                         .read_text(encoding="utf-8"))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute)
+                 and node.func.attr in ("verify_function", "benchmark_with_baselines")]
+        self.assertGreaterEqual(len(calls), 2, "应至少有两处远程调用（L2 与 L3）")
+        for call in calls:
+            keywords = {keyword.arg for keyword in call.keywords}
+            self.assertIn("reference_source", keywords,
+                          f"{call.func.attr} 没有把 reference_source 传给远端")
 
 
 class TestRunnerContractStillCloses(unittest.TestCase):

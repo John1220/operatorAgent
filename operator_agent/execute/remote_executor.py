@@ -1077,14 +1077,43 @@ class SSHExecutor(Backend):
             print(f"  [SSHExecutor] 固定 .python-version 失败, 不继续装依赖: {e}")
             return False
 
+        # ── 依赖必须钉版本 ──
+        # 原来这里是 `uv add numpy torch triton`，没有约束: 每次新建/复用工作目录都会
+        # 装到当时最新的 patch。2026-11-08 在 H20 上就是这一步把 2.14.0 升成了 2.14.1,
+        # 参考身份门随即 fail closed, attention 与 layernorm v2 整条链停在 L2 之前。
+        # 版本号只能从 `core.runtime_pin` 读 —— 与 `reference_contract.PINNED_RUNTIME`
+        # 同一个真源, 部署侧不许自己记一份。
+        from ..core.runtime_pin import TORCH_VERSION, matches, torch_requirement
+        try:
+            requirement = torch_requirement()
+        except Exception as e:
+            print(f"  [SSHExecutor] 读不到运行时 pin, 不装依赖: {e}")
+            return False
         try:
             self._ssh_exec(
-                f"cd {self.work_dir} && ~/.local/bin/uv add numpy torch triton"
+                f"cd {self.work_dir} && ~/.local/bin/uv add numpy {requirement} triton"
             )
-            print(f"  [SSHExecutor] 依赖安装成功")
+            print(f"  [SSHExecutor] 依赖安装成功 ({requirement})")
         except Exception as e:
             print(f"  [SSHExecutor] 依赖安装失败: {e}")
             return False
+
+        # 装上不等于装对: 需求串是 `torch==2.14.0`, 身份门认的是 `2.14.0+cu130`。
+        # 中间还隔着镜像、wheel 构建与残留锁文件, 所以回读一次再放行 —— 宁可部署失败,
+        # 也不要让"以为环境就绪"变成三分钟后的一个 identity mismatch。
+        try:
+            observed = self._ssh_exec(
+                f"cd {self.work_dir} && .venv/bin/python -c "
+                f"'import torch; print(torch.__version__)'"
+            ).strip().splitlines()[-1].strip()
+        except Exception as e:
+            print(f"  [SSHExecutor] 回读 torch 版本失败: {e}")
+            return False
+        if not matches(observed):
+            print(f"  [SSHExecutor] 装到的 torch 不是受信版本: {observed!r} != "
+                  f"{TORCH_VERSION!r} —— 拒绝把环境标记为就绪")
+            return False
+        print(f"  [SSHExecutor] torch 版本已核对: {observed}")
 
         self._uv_setup = True
         print(f"  [SSHExecutor] uv 环境配置完成: {self.work_dir}")

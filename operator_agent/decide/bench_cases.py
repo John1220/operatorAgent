@@ -187,8 +187,18 @@ class BenchmarkCase:
         return errs
 
     def key(self) -> str:
-        """这条 case 的身份 —— 与 `case_key(inputs)` **同一个函数**（就地调它，不另写一份）"""
-        return case_key({t.name: t for t in self.tensors if isinstance(t, TensorSpec)})
+        """这条 case 的身份 —— 与 `case_key(inputs)` **同一个函数**（就地调它，不另写一份）
+
+        标量也要进这份映射：运行时那侧拿到的是 `materialize()` 的结果，里面**含**标量
+        （`causal=False` 这类按值直传的参数），于是 `case_key` 会给它渲染成 `causal=?`。
+        声明侧若只喂张量，同一条 case 就会得到两个不同的身份串 —— 契约的
+        `required_cases` 与 L3 账本的 key 对不上，workload 资格直接判 uninformative
+        （2026-11-08 C5 首次 L3 的现场）。渲染规则仍由 `case_key` 一家决定：没有 `.shape`
+        的值一律写 `?`，不在这里另发明一种编码。
+        """
+        declared = {t.name: t for t in self.tensors if isinstance(t, TensorSpec)}
+        declared.update(self.scalars or {})
+        return case_key(declared)
 
     def seed_spec(self) -> dict:
         """可以**过线**的那份描述：seed + 每个张量的名字/形状/dtype。

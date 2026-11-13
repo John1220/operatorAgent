@@ -31,7 +31,15 @@
 
 ## 对第二对的意义
 
-第二对改用 **matmul 4096³ fp32**，计划 `operator-v08-increment-r2-fp32`（hash `8d460f9454ad2531`），
+第二对改用 **matmul 4096³ fp32**，计划 `operator-v08-increment-r2-fp32-v2`（hash `99b575c17f0101e2`），
 预登记效应维持 2.5%（带宽 0.10% × 10 = 1.0%，2.5% 有 25 倍余量）。
+
+首版 `operator-v08-increment-r2-fp32`（hash `8d460f9454ad2531`）**已撤回**：它的门控继承了
+fp16 探针——命令缺 `--dtype fp32`（preflight 缺省探 fp16）、channel 与 0.203% 带宽都是 fp16
+那次的读数，而上面这行 0.10% / 25× 才是 fp32 探针的实测。当时 `validate()` 放行了它，因为
+门控没和任务绑定。撤回发生在任何一对开跑之前（`outcome` 仍为 null），所以不是事后改判据。
+现在门控与可判性**按任务取值**，校验器新增三条：门控 dtype 必须等于任务 precision、带宽的
+两份副本必须相等、已撤回编号指名拒绝。archived 的那份 JSON 原位保留不改，证据树里另存
+`preregister-fp32-v2.json`。
 
 证据：仓外 `output/v08-candidates-20261107/`（每候选一个 run 目录 + `gate-fp32.json`）。

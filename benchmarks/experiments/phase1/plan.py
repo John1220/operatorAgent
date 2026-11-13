@@ -25,11 +25,40 @@ def read(path):
     return json.loads(Path(path).read_text(encoding='utf-8'))
 
 
+def _json_safe(value, path='', found=None):
+    """把非有限浮点换成 None，并记下**哪些字段**被换过。
+
+    `allow_nan=False` 是对的（收据要是严格 JSON），但它在序列化**中途**抛错，
+    结果磁盘上留下半截文件 —— 2026-11-10 实测：一个输出 NaN 的候选，回执被截断在
+    `"max_error": ` 处，恰好是"最需要看"的那类失败失去了记录。所以先净化再写，
+    并把被净化的字段名列出来，不假装它原本就是 None。
+    """
+    import math
+
+    if found is None:
+        found = []
+    if isinstance(value, float) and not math.isfinite(value):
+        found.append(path or '<root>')
+        return None
+    if isinstance(value, dict):
+        return {key: _json_safe(item, f'{path}.{key}' if path else str(key), found)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item, f'{path}[{index}]', found) for index, item in enumerate(value)]
+    return value
+
+
 def write_once(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    found = []
+    safe = _json_safe(value, found=found)
+    if found:
+        # 只在真出现非有限值时加这个键：收据结构不因此漂移。
+        if isinstance(safe, dict):
+            safe['_nonfinite_fields'] = sorted(set(found))
     with path.open('x', encoding='utf-8') as stream:
-        json.dump(value, stream, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+        json.dump(safe, stream, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
         stream.write('\n')
 
 

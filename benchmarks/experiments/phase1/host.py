@@ -81,7 +81,7 @@ def stream_limits(config):
 
 
 @contextmanager
-def model_gateway(config,cell):
+def model_gateway(config,cell,*,arm_gate=None):
     model=config['model']
     max_response_bytes, max_chunks = stream_limits(config)
     transport=UpstreamTransport(model['base_url']+'/chat/completions',credential(model),
@@ -92,6 +92,12 @@ def model_gateway(config,cell):
         write_once(cell/'outer-requests'/('request-%04d.json'%index),request)
         counter[0]+=1
         return _observed_stream(transport,request,cell,index)
+    if arm_gate is not None:
+        # A 臂的预算硬门接在这里：每次真正发往上游之前先记账。默认 None ⇒ 既有
+        # A/B/C 驱动一行都没变（这条路径上"有没有被拦"只有一个事实来源）。
+        from benchmarks.experiments.v08.arm_gate import wrap as wrap_arm_gate
+        dispatch=wrap_arm_gate(dispatch,arm_gate,provider=(model.get('provider') or 'upstream'),
+            model=model['id'],default_output_tokens=config['budget'].get('max_output_tokens_per_call'))
     with GatewayServer(config['shared_ledger'],task_id=config['shared_task_id'],model=model['id'],
             participant='outer',adapter=dispatch,max_calls_limit=config['budget']['max_llm_calls'],
             max_response_bytes=max_response_bytes,max_chunks=max_chunks) as gateway:

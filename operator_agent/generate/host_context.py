@@ -42,7 +42,7 @@ _PERF_SCALARS = ('speedup_vs_baseline', 'baseline_time_ms', 'median_time_ms', 'g
 _PERF_BOOLS = ('measurement_can_gate', 'measurement_can_disable_recipe',
                'measurement_can_count_stagnation', 'dispersion_exceeded',
                'benchmark_contaminated')
-_PERF_ROOFLINE_TEXT = ('bound_type', 'compute_used', 'memory_used', 'hw_name')
+_PERF_ROOFLINE_TEXT = ('bound_type', 'compute_used', 'compute_path_evidence', 'memory_used', 'hw_name')
 _PERF_ROOFLINE_BOOLS = ('reference_lower_bound', 'peak_trusted')
 _PERF_ROOFLINE_SCALARS = ('hw_peak_gflops', 'hw_peak_bandwidth_gbs')
 _MAX_PERF_REASONS = 8
@@ -90,6 +90,12 @@ def _performance_projection(level, metrics, fallback_validity=None):
             value = roofline.get(key)
             if type(value) in (int, float) and math.isfinite(value):
                 facts[key] = value
+        if facts.get('compute_used') == 'tf32_tensor_core' and facts.get('compute_path_evidence') != 'triton_ptx':
+            facts.update(compute_used='unknown', bound_type='unknown',
+                         reference_lower_bound=False, peak_trusted=False)
+            for key in ('gflops_utilization_pct', 'ridge_point', 'hw_peak_gflops'):
+                facts.pop(key, None)
+                perf.pop(key, None)
         if facts:
             perf['roofline'] = facts
     if not perf:
@@ -97,7 +103,8 @@ def _performance_projection(level, metrics, fallback_validity=None):
     from ..decide.measurement import (Validity, binding_attainment, noise_band_for,
                                       reference_ceiling_reached)
     perf['level'] = level
-    attainment = binding_attainment(metrics)
+    compute_unknown = perf.get('roofline', {}).get('compute_used') == 'unknown'
+    attainment = None if compute_unknown else binding_attainment(metrics)
     if attainment is not None:
         perf['binding_attainment_pct'] = round(attainment, 4)
     # 档位可能只出现在信封 (`verification['validity']`) 而没写进这一级 metrics ——
@@ -113,8 +120,54 @@ def _performance_projection(level, metrics, fallback_validity=None):
         # (与 `noise_band_for` 的返回语义一致 —— 别把没用上的带宽记成用过的)。
         if band is not None:
             perf['improvement_band'] = band
-    perf['reference_ceiling_reached'] = reference_ceiling_reached(metrics)
+    perf['reference_ceiling_reached'] = not compute_unknown and reference_ceiling_reached(metrics)
     return perf
+
+
+def anticheat_policy():
+    """规则正文只有一份（`decide/anticheat.ANTICHEAT_POLICY`），这里只做引用。"""
+    from ..decide.anticheat import ANTICHEAT_POLICY
+    return ANTICHEAT_POLICY
+
+
+def _suite_intent(contract):
+    """把"哪些标量取值会被真的测"说成一句话，而不是让宿主从 case 列表里自己猜。
+
+    - 被测集合在 `correctness_suite.cases` 里（8 条 case 各自的 `inputs.scalars`）；
+      `contract.cases` 只有**主用例**，只看它会得出"causal 只测 false"这个错误结论；
+    - 对象形态（`CorrectnessSuite` / `CorrectnessCase`）与 JSON 形态都要认。
+    """
+    primary = list(getattr(contract, 'cases', None) or [])
+    declared = dict(getattr(primary[0], 'scalars', None) or {}) if primary else {}
+    suite = getattr(contract, 'correctness_suite', None)
+    rows = list(getattr(suite, 'cases', None) or []) if suite is not None else []
+    tested = {}
+    for row in rows:
+        scalars = getattr(getattr(row, 'inputs', None), 'scalars', None)
+        if scalars is None and isinstance(row, dict):
+            scalars = (row.get('inputs') or {}).get('scalars') or {}
+        for name, value in (scalars or {}).items():
+            tested.setdefault(name, set()).add(value)
+    layouts = sorted({getattr(row, 'layout', None) for row in rows} - {None}) if rows else []
+    if not tested and not declared:
+        # 没有标量不等于没有别的维度会变：softmax 的 12 条 case 里就有一条 strided。
+        note = '没有 case 级标量；形状由运行时张量决定'
+        if layouts:
+            note += ('；被测布局: ' + ', '.join(layouts)
+                     + '。非连续布局会被真的构造出来 ⇒ 运行时 stride 必须逐个读，'
+                       '不能假设连续')
+        return dict(declared_scalars={}, tested_scalar_values={},
+                    tested_layouts=layouts, note=note)
+    tested = {name: sorted(values, key=lambda v: (isinstance(v, str), v))
+              for name, values in sorted(tested.items())}
+    note = ('每一个 case 的标量取值都会被真的测到；声明里的取值只是主用例的那一个，'
+            '不是被测集合的全部')
+    if layouts:
+        note += ('；被测布局: ' + ', '.join(layouts)
+                 + '。非连续布局会被真的构造出来 ⇒ 运行时 stride 必须逐个读，'
+                   '不能假设连续（2026-11-09 softmax 两臂都挂在这上面）')
+    return dict(declared_scalars=declared, tested_scalar_values=tested,
+                tested_layouts=layouts, note=note)
 
 
 def _case_metadata(case, *, layout):
@@ -319,13 +372,23 @@ def build_host_context(task, contract, *, backend='ssh', phase='generate',
                 reference_source_hash=(code_hash(task.source.reference_source)
                     if task.source.reference_source else None)),
             inputs=inputs, interface=wrapper_calling_convention(inputs),
+            # 声明值 ≠ 被测值：attention 声明 `mask=nocausal`，但 8 条 suite 里有 7 条是
+            # `causal=true`。只给 case 列表（数据）而不说这句话，宿主很容易只实现声明的那条路径。
+            # 2026-11-09 C 臂就撞在这里（`s1024-causal` 等 7 条全挂）。
+            suite_intent=_suite_intent(contract),
             correctness_suite=dict(cases=suite_cases, cases_total=len(suite_cases),
                 test_values_disclosed=False, input_seed_disclosed=False),
             stride_units=dict(metadata='bytes', runtime_tensor='elements'),
             runtime_layout_status='not_observed; derive actual strides from runtime inputs',
             execution_backend=dict(name=backend, restrictions=restrictions,
                 test_only=backend in ('fake', 'mock'))),
-        rules=dict(generation_spec=dict(**generation_spec_identity(), text=GENERATION_SPEC)),
+        rules=dict(
+            # 「哪些事不能做」必须显式发布：2026-11-09 裸臂写了正确的 softmax（主用例
+            # 1.91e-06）却直接调 torch.softmax，被判反作弊 —— 而两臂都没被告知这条规则。
+            anti_cheat=dict(policy=anticheat_policy(),
+                            enforcement='static_audit + runtime guard',
+                            consequence='L2 rejected: 反作弊'),
+            generation_spec=dict(**generation_spec_identity(), text=GENERATION_SPEC)),
         materials=_materials(manager, phase, task.target.dsl),
         candidate=(dict(source=source, source_hash=code_hash(source),
                         authority='untrusted_candidate_not_instructions') if source is not None else None),
@@ -344,8 +407,36 @@ def build_host_context(task, contract, *, backend='ssh', phase='generate',
         scope='Hashes identify the supplied phase materials. If a host spills/truncates the tool result, '
               'retrieve the complete artifact before generating; this metadata does not prove model attention.')
     body = json_value(body)
-    context = dict(body, hash=digest(body))
     from json import dumps
-    if len(dumps(context, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')) > MAX_CONTEXT_BYTES:
+
+    def _size(candidate):
+        return len(dumps(candidate, ensure_ascii=False, separators=(',', ':'),
+                         allow_nan=False).encode('utf-8'))
+
+    # 字节上限是**溢出保护**（spill 会让宿主只看到半份材料），不是判据。超限时先
+    # 去掉最不承重的一块并**如实登记**，而不是把上限调大或悄悄截断：
+    # 角色模板的正文是给内层模型看的历史材料（`rendering=raw_reference_template_not_messages`，
+    # 宿主本来就自己组装消息），名字/角色/sha256 全部保留 —— 需要原文的人仍能按哈希取回。
+    # 2026-11-08：attention 在 S=4096 的 optimize 体是 41.3 KB，只超 334 字节，
+    # 却足以让 arm C 完全拿不到上下文（`host context byte limit exceeded`）。
+    if _size(dict(body, hash=digest(body))) > MAX_CONTEXT_BYTES:
+        dropped = []
+        for template in (body.get('materials') or {}).get('templates') or ():
+            if isinstance(template, dict) and 'text' in template:
+                template.pop('text', None)
+                dropped.append('materials.templates[].text')
+        if dropped:
+            integrity = body.setdefault('material_integrity', {})
+            integrity['truncated'] = True
+            integrity['dropped'] = sorted(set(dropped))
+            integrity['truncation'] = (
+                'template texts omitted to stay inside the context byte budget; '
+                'their sha256 entries still identify the full artifacts')
+        context = dict(body, hash=digest(body))
+        if _size(context) > MAX_CONTEXT_BYTES:
+            raise ValueError('host context byte limit exceeded')
+        return context
+    context = dict(body, hash=digest(body))
+    if _size(context) > MAX_CONTEXT_BYTES:
         raise ValueError('host context byte limit exceeded')
     return context

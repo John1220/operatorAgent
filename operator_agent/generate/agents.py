@@ -841,7 +841,18 @@ class SearchAgent:
         _NONE = "无可用读数"
 
         def _num(value, fmt="{:.2f}"):
-            return _NONE if refused else fmt.format(value)
+            # 三种"没有读数"必须分开处理，但都不能印成一个数：
+            #   refused  —— 上游说这一轮没有调参资格（结构先验，整份 perf_data 无数字）；
+            #   None     —— 这一格**算不出来**。例如候选的计算路径未确立时
+            #               `gflops_utilization_pct` 就是 None（verifier 不再拿设备
+            #               支持的精度冒充候选实际用的精度）。它不等于 0：0 是
+            #               "测到了 0"，而 0.0% 会直接读成"这个核一点算力没用上"。
+            # 2026-11-08 的真机后果：None 进 `str.format` 抛 TypeError，被上层吞成
+            # "LLM 优化失败 ⇒ 回退规则优化" —— 结构搜索静默消失，而日志看起来只是
+            # 一句回退。所以这里必须显式判 None。
+            if refused or value is None:
+                return _NONE
+            return fmt.format(value)
 
         speedup = perf_data.get("speedup", 0)
         target_speedup = perf_data.get("target_speedup", 1.0)
@@ -891,8 +902,11 @@ class SearchAgent:
             current_gflops=_num(perf_data.get("gflops", 0)),
             memory_bandwidth_gbs=_num(perf_data.get("memory_bandwidth_gbs", 0)),
             # ---- Roofline 数据 ----
-            hw_peak_gflops=_num(hw_peak_gflops, "{:.1f}"),
-            hw_peak_bandwidth_gbs=_num(hw_peak_bandwidth, "{:.1f}"),
+            # 峰值用 0 表示「不知道」（verifier 的既有约定，见 shared_mem_per_sm_kb 的注释）：
+            # 一个 0 TFLOPS 的峰值不存在，所以这里把 0 如实印成「无可用读数」，
+            # 而不是让模型把 "0.0" 读成"这个卡没有算力"。
+            hw_peak_gflops=_num(hw_peak_gflops or None, "{:.1f}"),
+            hw_peak_bandwidth_gbs=_num(hw_peak_bandwidth or None, "{:.1f}"),
             gflops_utilization_pct=_num(gflops_util, "{:.1f}%"),
             bandwidth_utilization_pct=_num(bw_util, "{:.1f}%"),
             arithmetic_intensity=_num(ai, "{:.4f}"),

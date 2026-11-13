@@ -6,6 +6,7 @@ Native accumulation is implementation-pinned, NOT inferred from output dtype.
 """
 from dataclasses import asdict, dataclass, fields
 import hashlib
+
 import inspect
 import json
 from pathlib import Path
@@ -19,6 +20,10 @@ PROFILE_ATTENTION = "builtin-attention-fp16-cuda-v1"
 # Filled from isolated read-only attestation, never discovered/accepted from a
 # candidate or auto-updated after a numerical failure.
 PINNED_RUNTIME = dict(
+    # 版本串的真源在 `core.runtime_pin.TORCH_VERSION`（部署模板 execute 层读它，
+    # 而 execute 不能 import decide）。这里**不能** import: 本文件在远端是被当成
+    # 顶层模块平铺加载的（scp 到 work_dir 根），任何 `from ..` 都会 ImportError，
+    # 身份回执随之变空。两份字面量由 tests/unit/v08/test_deploy_runtime_pin.py 钉住。
     torch_version="2.14.0+cu130", torch_git="08187d9e0fba026dc8217405802ab5381dc88d90", cuda_runtime="13.0",
     device="cuda:0", device_name="NVIDIA H20", compute_capability="9.0",
     driver_version="580.105.08",
@@ -263,24 +268,50 @@ def execution_receipt(raw):
         raise ReferenceIdentityError("reference identity probe unavailable: " + type(exc).__name__) from exc
 
 
-#: 每个 profile 允许的绝对容差上限。数字来自标定，不是随手写的：
+#: 每个 profile **标定的绝对容差本身**，不是上限。数字来自标定，不是随手写的：
 #: layernorm 1e-5（既有 v2 标定），attention 3e-4（2026-11-07 H20 网格：
 #: 好实现全过、错缩放与 causal 差一位被判否）。
-MAX_ATOL = {'builtin-layernorm-fp16-cuda-v2': 1e-5,
-            'builtin-attention-fp16-cuda-v1': 3e-4}
+#:
+#: 为什么必须按相等绑定而不是只当天花板：`ConstraintSpec.max_error` 的全局默认是
+#: 1e-5，那恰好是 **layernorm** 的标定值。只查 `<= ceiling` 时，attention 会静默继承
+#: 一个比自己的标定严 30× 的阈值（实测把 max_abs=1.22e-4 的正确核判成 99.9608% 匹配），
+#: 而调用方无权纠正 —— max_error/atol/rtol 都在 hitl_tools.FORBIDDEN_KEYS 里。
+#: layernorm 的默认正好等于自己的标定值，所以这个洞只在 attention 上显形。
+REGISTERED_ATOL = {'builtin-layernorm-fp16-cuda-v2': 1e-5,
+                   'builtin-attention-fp16-cuda-v1': 3e-4}
 _PROFILE_OPERATOR = {'builtin-layernorm-fp16-cuda-v2': 'layernorm',
                      'builtin-attention-fp16-cuda-v1': 'attention'}
+
+
+def registered_atol(raw):
+    """按 profile 取标定的绝对容差。
+
+    给 **不做数值比较** 的调用点用（L3 计时、dispatch 前置门）：那里查的是
+    profile/算子/精度身份，atol 槽该填注册值，而不是写死某一个 profile 的数。
+    带任务容差的调用点（契约冻结、profile_check、L2 run_verify）必须自己传进来，
+    由 validate_gate 判相等。
+    """
+    profile = as_reference(raw).profile
+    try:
+        return REGISTERED_ATOL[profile]
+    except KeyError:
+        raise ReferenceIdentityError(
+            f"no registered absolute tolerance for profile {profile!r}") from None
 
 
 def validate_gate(raw, precision, max_error, reference_source="", kernel_type="layernorm"):
     spec = as_reference(raw)
     expected_operator = _PROFILE_OPERATOR.get(spec.profile)
-    ceiling = MAX_ATOL.get(spec.profile)
-    if expected_operator is None or ceiling is None:
+    registered = REGISTERED_ATOL.get(spec.profile)
+    if expected_operator is None or registered is None:
         raise ReferenceIdentityError("unknown reference profile for the numerical gate")
     if (precision != "fp16" or kernel_type != expected_operator or reference_source
-            or type(max_error) not in (int, float) or not 0 < max_error <= ceiling):
+            or type(max_error) not in (int, float)):
         raise ReferenceIdentityError("operator/dtype/source/tolerance mismatch")
+    if max_error != registered:
+        raise ReferenceIdentityError(
+            f"absolute tolerance {max_error} is not the value calibrated for {spec.profile} "
+            f"({registered}); 容差按 profile 绑定，不接受全局默认漏过来的值")
     if __package__:
         from ..core import tolerance
     else:

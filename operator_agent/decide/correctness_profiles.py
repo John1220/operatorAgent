@@ -5,11 +5,13 @@ operator families. Unsupported declarations remain unknown before any execution.
 """
 from dataclasses import replace
 
+import numpy as np
+
 from ..decide.bench_cases import BenchCaseError
 from ..decide.correctness import as_suite, CorrectnessCase, CorrectnessSuite
 from ..decide.bench_cases import BenchmarkCase, TensorSpec
 from ..decide.reference_contract import (PROFILE_ATTENTION, PROFILE_V2, as_reference,
-                                         registered_reference, validate_gate)
+                                         registered_reference, validate_gate, REGISTERED_ATOL)
 #: attention 的 correctness profile 与它的参考 profile 是**同一个字符串** ——
 #: 与 layernorm（PROFILE_V2 同时充当两者）保持同一种写法，免得两份名字各自漂。
 ATTENTION_PROFILE_VERSION = PROFILE_ATTENTION
@@ -34,6 +36,60 @@ ATTENTION_CASES = (
     ("s1024-causal-zeros", (1, 16, 1024, 128), True, "zeros", "contiguous"),
     ("s1024-causal-large", (1, 16, 1024, 128), True, "large", "contiguous"),
 )
+
+
+#: Scope A 的**几何边界**。它不是"建议"，是这套 profile 唯一标定过的范围：
+#: 参考实现（SDPA）、8 条 case 与容差（3e-4）都在这个范围里量出来的。越界不是"没测过"，
+#: 是"用一份标定去判另一件事"——所以入口直接拒绝，不静默补齐（与 attention + fp32
+#: 那条拒绝同一条纪律）。
+ATTENTION_SCOPE = dict(batch=1, heads=16, head_dim=128, sequence_lengths=(1024, 2048, 4096))
+
+#: 能力出口（`capabilities()`）用的族清单：说清**支持什么**、**排除什么**。
+#: `OPERATORS` 是二维 axis 生成器的词表，不是支持清单 —— 两者混用会让调用方
+#: 以为 attention 不支持（2026-11-08 一次会话开场就这么误读了）。
+ATTENTION_FAMILY = dict(
+    profile=PROFILE_ATTENTION,
+    dtype=["fp16"],
+    shape="(B,H,S,D)",
+    scope=("prefill MHA: B=1, H_q=H_kv=16, D=128, S in {1024,2048,4096}; "
+           "causal 由标量按值直传"),
+    excluded=["decode (S_q=1) — 结构上不可测",
+              "GQA / MQA", "D != 128", "bf16 / fp8",
+              "sliding window", "additive bias", "paged KV",
+              "非 2 的幂的 S 作为**声明**形状（只在派生 case 里出现）"],
+    correctness_cases=8,
+    performance="只测主用例；roofline 是粗估模型 attention_coarse_v1，reference_lower_bound=false",
+    gate="preflight --op attention --shape B,H,S,D [--causal]",
+)
+
+
+class AttentionScopeError(ValueError):
+    """attention 声明越出 Scope A：明确拒绝，不猜语义、不静默降级。"""
+
+
+def attention_scope_problem(shapes):
+    """声明的形状是否落在 Scope A 里；返回可读的问题串，没问题返回 None。"""
+    problems = []
+    for shape in shapes or ():
+        try:
+            values = [int(value) for value in shape]
+        except (TypeError, ValueError):
+            problems.append(f"attention 的形状必须是整数元组，收到 {shape!r}")
+            continue
+        if len(values) != 4:
+            problems.append(f"attention 的形状必须是 (B,H,S,D)，收到 {tuple(values)}")
+            continue
+        batch, heads, seq, dim = values
+        if batch != ATTENTION_SCOPE["batch"]:
+            problems.append(f"batch 只支持 {ATTENTION_SCOPE['batch']}，收到 B={batch}")
+        if heads != ATTENTION_SCOPE["heads"]:
+            problems.append(f"只支持 MHA H_q=H_kv={ATTENTION_SCOPE['heads']}，收到 H={heads}")
+        if dim != ATTENTION_SCOPE["head_dim"]:
+            problems.append(f"head 维只支持 {ATTENTION_SCOPE['head_dim']}，收到 D={dim}")
+        if seq not in ATTENTION_SCOPE["sequence_lengths"]:
+            problems.append(f"S 只支持 {list(ATTENTION_SCOPE['sequence_lengths'])}，收到 S={seq}"
+                            "（其它规模的核没有被这套参考与容差标定过）")
+    return "; ".join(dict.fromkeys(problems)) or None
 
 
 def attention_suite(seed=23):
@@ -101,6 +157,26 @@ def v2_suite():
             extra.append(CorrectnessCase(f"v2-{pattern}-{layout}", BenchmarkCase(
                 tensors=(TensorSpec("X", (8, 33), "fp16"),), seed=17), pattern, layout))
     return as_suite(CorrectnessSuite(base.cases + tuple(extra), coverage_policy=policy))
+
+
+def expected_output_elements(spec, inputs):
+    """这个受信任 profile 的**输出元素数**：由 profile 拥有，不靠输入键名猜。
+
+    远端回报的 `compared_elements` 是"参考比对了多少个元素"，控制端要核它就必须
+    知道**输出**有多大。旧写法取 `inputs["X"].size`，那只对"输出与唯一输入同形"的族
+    成立（layernorm 恰好如此）；attention 的输入是 Q/K/V、输出与 Q 同形，没有 `X`。
+    未知 profile 返回 `None` —— 由调用方判 unknown，不兜默认。
+    """
+    profile = getattr(spec, "profile", None)
+    if profile == PROFILE_V2:
+        only = inputs.get("X")
+    elif profile == PROFILE_ATTENTION:
+        only = inputs.get("Q")
+    else:
+        return None
+    if only is None or not hasattr(only, "size"):
+        return None
+    return int(np.size(only))
 
 
 def declaration_check(kernel_type, dtype, version, suite, reference_contract=None):
@@ -223,6 +299,14 @@ def with_default_correctness(task):
         try:
             if (task.source.kernel_type == "attention"
                     and getattr(task.constraints.precision, "value", None) == "fp16"):
+                # 先判几何再挂 profile：挂上一份"标定过"的参考去判没标定过的形状，
+                # 是这一层最容易犯的错（2026-11-08 实测 S=3072 / B=8H=8D=64 都能静默冻结）。
+                problem = attention_scope_problem(getattr(task.constraints, "shapes", ()) or ())
+                if problem is not None:
+                    raise AttentionScopeError(
+                        f"attention 声明超出 Scope A：{problem}。"
+                        "要么换到受支持的形状，要么先为它标定参考与容差（新 profile），"
+                        "不能借用现有 profile 的判据")
                 # attention 用显式套件 + 自己的受信任参考（不在 OPERATORS 的
                 # axis 生成器里 —— 那套只服务二维算子）。
                 version = ATTENTION_PROFILE_VERSION
@@ -237,5 +321,11 @@ def with_default_correctness(task):
                     getattr(task.constraints.precision, "value", None)).content_dict()}
         except BenchCaseError:
             pass  # The requirement marker is consumed as unknown, not success.
-    return replace(task, constraints=replace(task.constraints,
-                   correctness_profile=version, correctness_suite=suite, reference_contract=reference))
+    constraints = replace(task.constraints, correctness_profile=version,
+                          correctness_suite=suite, reference_contract=reference)
+    if reference is not None:
+        # 容差与参考身份同源：挂哪个 profile 就用哪个 profile 标定的 atol。全局默认
+        # 1e-5 是 layernorm 的标定值，attention 标定的是 3e-4 —— 不在这里绑定，就会有个
+        # 严 30× 的阈值静默漏下去，而调用方无权纠正（hitl_tools.FORBIDDEN_KEYS）。
+        constraints = replace(constraints, max_error=REGISTERED_ATOL[version])
+    return replace(task, constraints=constraints)

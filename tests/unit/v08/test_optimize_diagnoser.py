@@ -1,6 +1,7 @@
 """The optimize diagnosis is deterministic, cited, and refuses to invent headroom."""
 import copy
 
+from operator_agent.generate import optimize_diagnoser
 from operator_agent.generate.optimize_diagnoser import SCHEMA, diagnose_optimization
 
 
@@ -36,6 +37,30 @@ def test_compute_bound_reading_yields_cited_experiments_and_headroom():
     assert result['headroom']['remaining_pct'] == 38.8
     assert result['headroom']['basis'] == 'reference_lower_bound'
     assert result['stop'] is None
+
+
+def test_legacy_tf32_inference_cannot_justify_headroom_or_ceiling():
+    result = diagnose_optimization(envelope(perf(
+        roofline=dict(bound_type='compute', compute_used='tf32_tensor_core',
+                      peak_trusted=True, reference_lower_bound=True),
+        reference_ceiling_reached=True)))
+    assert result['bottleneck']['binding'] == 'unknown'
+    assert result['headroom'] is None
+    assert result['experiments'] == []
+    assert result['stop'] is None
+
+
+def test_legacy_tf32_inference_is_withheld_from_host_performance_facts():
+    from operator_agent.generate.host_context import _performance_projection
+
+    projected = _performance_projection('L3', dict(
+        gflops_utilization_pct=99.0, bandwidth_utilization_pct=1.0,
+        roofline_analysis=dict(bound_type='compute', compute_used='tf32_tensor_core',
+                               peak_trusted=True, reference_lower_bound=True)))
+    assert projected['roofline']['compute_used'] == 'unknown'
+    assert 'gflops_utilization_pct' not in projected
+    assert 'binding_attainment_pct' not in projected
+    assert projected['reference_ceiling_reached'] is False
 
 
 def test_memory_bound_reading_aims_at_bandwidth_not_flops():
@@ -177,3 +202,35 @@ def test_optimize_context_carries_the_diagnosis_and_other_phases_do_not():
     repair = build_host_context(task, contract, backend='fake', phase='repair',
                                 source=code, verification=verification)
     assert 'optimization' not in repair
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-08：实验表是**维度菜单**，不是方向指令
+# ---------------------------------------------------------------------------
+
+def test_the_experiment_menu_names_dimensions_without_claiming_a_direction():
+    """原表写着 "raise per-program work … until SMEM or occupancy stops the growth"。
+
+    模型照做：attention D=128 上 BLOCK_M 64→128 是 +34.6%、BLOCK_N 64→128 是 +10.8%，
+    两次都更慢（累加器随 BLOCK_M 翻倍，4 warps 撑不住）。同一轮唯一有效的是
+    num_stages 2→3（−2.1%）。方向要读源码，属于宿主的判断，不属于这张表。
+    """
+    imperative = ('raise ', 'increase ', 'make ', 'use ', 'reduce ', 'lower ',
+                  'drop ', 'add ', 'switch ')
+    for binding, rows in optimize_diagnoser._EXPERIMENTS.items():
+        for row in rows:
+            change = row['change'].lower()
+            assert not any(change.startswith(verb) for verb in imperative), \
+                f"{binding}/{row['axis']} 又在给方向了: {row['change']!r}"
+            # 每一行都必须说清"看哪个读数动"，否则它不是可判的实验
+            assert row['expected_signal']
+
+
+def test_the_policy_says_the_list_is_a_menu_not_instructions():
+    policy = optimize_diagnoser.POLICY
+    assert 'MENU OF DIMENSIONS' in policy
+    assert 'not instructions' in policy
+    # 原有的边界不能因为改措辞而丢
+    assert 'caller-owned hypothesis' in policy
+    assert 'no correctness or performance credit' in policy
+    assert 'decision_band_pct' in policy

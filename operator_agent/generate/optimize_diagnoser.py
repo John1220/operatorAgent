@@ -27,41 +27,50 @@ POLICY = (
     'optimization is a caller-owned hypothesis derived only from the reading above; it '
     'grants no correctness or performance credit. Submit changed source to the '
     'verification tool and keep the frozen contract. Verify the change against '
-    'decision_band_pct: anything smaller is indistinguishable from noise in this tier.')
+    'decision_band_pct: anything smaller is indistinguishable from noise in this tier. '
+    'The experiment list is a MENU OF DIMENSIONS with expected signals, not instructions: '
+    'which way to turn each knob depends on the source (accumulator size, head dim, '
+    'occupancy), and a direction that looks obvious from the reading can be wrong.')
 
-#: 轴 → 具体实验。只写"改什么、为什么、该看哪个读数动", 不写代码。
+#: 轴 → 可动的维度。只写"能动哪一格、它换来什么、该看哪个读数动", **不写方向、不写代码**。
+#:
+#: 为什么去掉方向性祈使句(2026-11-08 真机): 原表在 compute_bound 下写的是
+#: "raise per-program work until SMEM or occupancy stops the growth"。模型照做,
+#: attention D=128 上 `BLOCK_M 64→128` 直接 +34.6%、`BLOCK_N 64→128` +10.8% ——
+#: 累加器随 BLOCK_M 翻倍, 4 warps 撑不住。同一轮里唯一有效的是 num_stages 2→3(-2.1%)。
+#: 方向属于"要读源码"的判断, 归宿主; 这张表只负责说清**有哪些维度、看什么信号**。
 _EXPERIMENTS = {
     'compute_bound': (
         dict(axis='precision_and_accumulation',
-             change='feed the inner product from tensor-core dtypes and keep the accumulator in fp32',
-             why='compute-bound: the tight axis is FLOP throughput, so dtype width buys the most',
+             change='numeric width of the inner product vs. the accumulator (declared inputs stay frozen)',
+             why='compute-bound readings are the ones where arithmetic width can matter at all',
              expected_signal='gflops_utilization_pct rises while max_error stays inside tolerance'),
         dict(axis='tiling',
-             change='raise per-program work (BM/BN/BK) until SMEM or occupancy stops the growth',
-             why='larger tiles raise arithmetic intensity and amortize each load',
-             expected_signal='binding_attainment_pct rises; watch for register spills in the compile receipt'),
+             change='tile shape (BM / BN / BK) at fixed arithmetic — either direction is a candidate',
+             why='tile shape trades arithmetic intensity against per-program registers, SMEM and occupancy',
+             expected_signal='binding_attainment_pct up AND no new spills; buying one and losing the other is a loss'),
         dict(axis='pipelining',
-             change='increase num_stages/num_warps to overlap loads with the MMA pipeline',
+             change='software pipeline depth (num_stages) and warp count around the current point',
              why='compute-bound kernels still stall when loads are not overlapped',
              expected_signal='median_time_ms falls without a change in gflops'),
     ),
     'memory_bound': (
         dict(axis='coalescing',
-             change='make the innermost per-thread access unit-stride; drop strided index arithmetic',
-             why='memory-bound: the tight axis is bandwidth, and uncoalesced lanes waste it',
+             change='access order and index arithmetic on the innermost lane (contiguous vs. strided reads)',
+             why='memory-bound: the tight axis is bandwidth, and wasted lanes show up here',
              expected_signal='bandwidth_utilization_pct rises; max_error unchanged'),
         dict(axis='vectorized_access',
-             change='use 128-bit vector loads/stores with an aligned base offset',
-             why='fewer, wider transactions per byte moved',
+             change='transaction width of each load/store (vectorized vs. scalar) and base alignment',
+             why='bytes per transaction is the lever a bandwidth-bound reading points at',
              expected_signal='effective bandwidth rises at the same working set'),
         dict(axis='dtype_width',
-             change='narrow the loaded dtype where the frozen tolerance allows; accumulate in fp32',
-             why='half the bytes moved is half the time on a bandwidth-bound kernel',
+             change='width of the dtype actually loaded (the frozen contract decides what is allowed)',
+             why='on a bandwidth-bound kernel, bytes moved is the first-order term',
              expected_signal='median_time_ms falls; re-check matched_ratio, not just max_error'),
     ),
     'launch_floor': (
         dict(axis='work_per_launch',
-             change='increase elements per program and remove tiny grids so dispatch cost is amortized',
+             change='elements per program (grid size against the dispatch floor)',
              why='the launch floor is a measurable share of the median, so it caps any speedup',
              expected_signal='median_time_ms falls toward the floor, not below it'),
     ),
@@ -110,7 +119,7 @@ def _binding_of(perf):
     bound = roofline.get('bound_type')
     if type(bound) is str:
         evidence['bound_type'] = bound
-    for key in ('compute_used', 'memory_used'):
+    for key in ('compute_used', 'compute_path_evidence', 'memory_used'):
         if type(roofline.get(key)) is str:
             evidence[key] = roofline[key]
     # `bound_type == 'unknown'` 是占位值 (缺分母), 不是判定 —— 照 unknown 处理。
@@ -157,6 +166,16 @@ def diagnose_optimization(feedback):
                        reason='No L3 performance reading is bound to this source. Run a '
                               'verification first; an absent reading is not headroom.')
 
+    roofline = perf.get('roofline') if isinstance(perf.get('roofline'), dict) else {}
+    # Older FP32 receipts inferred TF32 from the device. Keep their timing
+    # usable while withholding the unsupported compute diagnosis and ceiling.
+    if (roofline.get('compute_used') == 'unknown' or
+            (roofline.get('compute_used') == 'tf32_tensor_core'
+             and roofline.get('compute_path_evidence') != 'triton_ptx')):
+        roofline = dict(roofline, compute_used='unknown', bound_type='unknown')
+        perf = dict(perf, roofline=roofline, binding_attainment_pct=None,
+                    reference_ceiling_reached=False)
+
     validity = feedback.get('measurement_validity', perf.get('measurement_validity'))
     basis = dict(level=perf.get('level'),
                  validity=validity if validity in ('valid', 'degraded', 'uninformative') else 'unknown',
@@ -179,7 +198,6 @@ def diagnose_optimization(feedback):
 
     stop = None
     if perf.get('reference_ceiling_reached') is True:
-        roofline = perf.get('roofline') if isinstance(perf.get('roofline'), dict) else {}
         stop = dict(reason='reference_ceiling_reached',
                     evidence=dict(binding_attainment_pct=perf.get('binding_attainment_pct'),
                                   ceiling_pct=REFERENCE_CEILING_PCT,
@@ -187,7 +205,6 @@ def diagnose_optimization(feedback):
                     note='further recipes would only burn GPU and model budget')
 
     attainment = perf.get('binding_attainment_pct')
-    roofline = perf.get('roofline') if isinstance(perf.get('roofline'), dict) else {}
     headroom = None
     if type(attainment) in (int, float):
         if roofline.get('reference_lower_bound') is True:

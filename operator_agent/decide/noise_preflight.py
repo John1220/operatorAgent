@@ -97,13 +97,87 @@ def kernel(X):
 """
 
 
+#: 算力+带宽混合的探针: prefill attention（Scope A: MHA, D=128, fp16 in/out, fp32 累加）。
+#: 与 matmul 探针同一个理由存在 —— 它必须量**这张卡上目标尺寸的那个核**的散布，
+#: 而不是主机 CPU 的。为什么不能拿 matmul 探针代替: attention 的时延由两个 GEMM
+#: 夹一个 softmax 决定, 对 block/mask 的敏感度与 matmul 不同, 一个窗口在 matmul
+#: 上安静不代表它在 attention 上也可判（反之亦然）。
+ATTENTION_PROBE = """import triton
+import triton.language as tl
+import torch
+
+
+@triton.jit
+def _probe_attention(Q, K, V, O, S, H, causal: tl.constexpr,
+                     sqb, sqh, sqm, sqd, skb, skh, skn, skd,
+                     svb, svh, svn, svd, sob, soh, som, sod,
+                     D: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+    pid_m = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+    b = pid_bh // H
+    h = pid_bh % H
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, D)
+
+    q_ptrs = Q + b * sqb + h * sqh + offs_m[:, None] * sqm + offs_d[None, :] * sqd
+    q = tl.load(q_ptrs, mask=offs_m[:, None] < S, other=0.0)
+
+    m_i = tl.full((BLOCK_M,), float("-inf"), tl.float32)
+    l_i = tl.zeros((BLOCK_M,), tl.float32)
+    acc = tl.zeros((BLOCK_M, D), tl.float32)
+    scale = 1.0 / tl.sqrt(D * 1.0)
+
+    for start_n in range(0, S, BLOCK_N):
+        offs_n = start_n + tl.arange(0, BLOCK_N)
+        k_ptrs = K + b * skb + h * skh + offs_n[:, None] * skn + offs_d[None, :] * skd
+        v_ptrs = V + b * svb + h * svh + offs_n[:, None] * svn + offs_d[None, :] * svd
+        k = tl.load(k_ptrs, mask=offs_n[:, None] < S, other=0.0)
+        v = tl.load(v_ptrs, mask=offs_n[:, None] < S, other=0.0)
+
+        qk = tl.dot(q, tl.trans(k)) * scale
+        keep = offs_n[None, :] < S
+        if causal:
+            keep = keep & (offs_m[:, None] >= offs_n[None, :])
+        qk = tl.where(keep, qk, float("-inf"))
+
+        m_new = tl.maximum(m_i, tl.max(qk, 1))
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(qk - m_new[:, None])
+        l_i = l_i * alpha + tl.sum(p, 1)
+        acc = acc * alpha[:, None]
+        acc = tl.dot(p.to(tl.float16), v, acc)
+        m_i = m_new
+
+    acc = acc / l_i[:, None]
+    o_ptrs = O + b * sob + h * soh + offs_m[:, None] * som + offs_d[None, :] * sod
+    tl.store(o_ptrs, acc.to(O.dtype.element_ty), mask=offs_m[:, None] < S)
+
+
+def kernel(Q, K, V, causal):
+    B, H, S, D = Q.shape
+    O = torch.empty_like(Q)
+    grid = (triton.cdiv(S, 64), B * H)
+    _probe_attention[grid](
+        Q, K, V, O, S, H, 1 if causal else 0,
+        Q.stride(0), Q.stride(1), Q.stride(2), Q.stride(3),
+        K.stride(0), K.stride(1), K.stride(2), K.stride(3),
+        V.stride(0), V.stride(1), V.stride(2), V.stride(3),
+        O.stride(0), O.stride(1), O.stride(2), O.stride(3),
+        D=D, BLOCK_M=64, BLOCK_N=64, num_warps=4, num_stages=2)
+    return O
+"""
+
+
 def probe_source(op='matmul'):
     """The probe kernel for a shape-aware run. Inputs are generated on the far side."""
     if op == 'matmul':
         return MATMUL_PROBE
     if op == 'layernorm':
         return LAYERNORM_PROBE
-    raise ValueError(f'unsupported probe op {op!r}; use matmul or layernorm')
+    if op == 'attention':
+        return ATTENTION_PROBE
+    raise ValueError(f'unsupported probe op {op!r}; use matmul, layernorm or attention')
 
 
 def matmul_probe_source():

@@ -52,6 +52,12 @@ class CorrectnessCase:
             raise BenchCaseError("; ".join(errors))
         arrays = self.inputs.materialize()
         for name, value in arrays.items():
+            # pattern/layout 是**张量数据域**的变换。case 级标量 (attention 的 causal)
+            # 按值直传、是 case 身份的一部分: 对它做 np.full 或跨步取样会悄悄改掉声明的
+            # 语义，而 bool 连 .ndim/.shape 都没有 —— 那会抛 AttributeError，且不被
+            # verifier 的 (BenchCaseError, ValueError, CapabilityMissing) 捕获。
+            if not isinstance(value, np.ndarray):
+                continue
             if self.pattern != "random":
                 if self.pattern in ("nan", "inf") and value.dtype.kind != "f":
                     raise BenchCaseError("NaN/Inf 检查需要浮点输入")

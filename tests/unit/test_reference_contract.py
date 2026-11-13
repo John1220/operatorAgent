@@ -14,7 +14,7 @@ from operator_agent.core.contract import ContractError, freeze_from_task, load_d
 from operator_agent.decide.correctness import as_suite, credential
 from operator_agent.decide.correctness_profiles import PROFILE_VERSION, PROFILE_V2, profile_check, v2_suite
 from operator_agent.decide.reference_contract import (ReferenceIdentityError, as_reference, registered_reference,
-    check_observed, execution_receipt, validate_receipt, validate_gate, _file_hash)
+    check_observed, execution_receipt, validate_receipt, validate_gate, _file_hash, PROFILE_ATTENTION)
 from operator_agent.execute.remote_executor import SSHExecutor, RemoteExecutor
 from operator_agent.core.schemas import VerificationLevel as Level
 
@@ -233,9 +233,79 @@ def test_cpu_runner_refuses_before_loading_candidate(monkeypatch):
     runner._load_module.assert_not_called()
 
 
+def test_no_remote_gate_call_hardcodes_a_profiles_tolerance():
+    """L3 与 dispatch 两处曾把 `1e-5` 写死进 validate_gate —— 那是 layernorm 的标定值。
+
+    门改成按 profile 相等绑定后，写死会让 attention 直接 fail-closed；这守卫钉住
+    "不许再出现字面量"，因为那两处的 atol 槽该填 registered_atol(contract)。
+    """
+    import ast
+    path = Path(__file__).resolve().parents[2] / "remote_scripts" / "run_kernel.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    offenders = [node.lineno for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "validate_gate" and len(node.args) >= 3
+                 and isinstance(node.args[2], ast.Constant)
+                 and isinstance(node.args[2].value, (int, float))]
+    assert offenders == [], f"这些 validate_gate 调用把容差写死了: {offenders}"
+
+
 def test_v2_local_reference_is_never_an_oracle():
     with pytest.raises(ValueError, match="local/CPU"):
         Verifier(MockGPU())._build_reference_fn(task(), {"X": np.ones((8, 8), np.float16)})
+
+
+def _trusted_reference_case(kernel_type):
+    """两个受信任 profile 各自的输入名与签名 —— 它们**不一样**, 这正是被测的点。"""
+    if kernel_type == "attention":
+        inputs = {n: np.zeros((1, 2, 8, 4), np.float16) for n in ("Q", "K", "V")}
+        inputs["causal"] = False
+        return PROFILE_ATTENTION, 3e-4, inputs, "Q, K, V, causal=False", "Q"
+    return PROFILE_V2, 1e-5, {"X": np.zeros((8, 16), np.float16)}, "X", "X"
+
+
+def _verify_trusted(monkeypatch, profile, kernel_type, max_error, code, inputs):
+    from tests.unit.test_input_wire_format import _runner
+    runner = _runner()
+    # 只 stub 身份门 (它要真机库指纹, 本地不可能过)。被测的是它**之后**那步输出检查:
+    # C5 的身份漂移一修好, 这条路就是活入口, 不需要真的上机才能验。
+    monkeypatch.setattr(runner, "execution_receipt",
+                        lambda raw: {"status": "passed", "observed": "stub"})
+    return runner.run_verify(code, inputs, kernel_type, max_error, precision="fp16",
+                             reference_contract=registered_reference(profile).content_dict(),
+                             preloaded_inputs=inputs)
+
+
+@pytest.mark.parametrize("kernel_type", ["attention", "layernorm"])
+def test_output_device_check_reads_the_actual_inputs_not_a_hardcoded_name(kernel_type, monkeypatch):
+    """原来这一步硬取 candidate_inputs["X"].device。attention 只有 Q/K/V + causal 标量,
+    于是 KeyError 被外层吞成 `Remote verification error`, 把一个**正确**候选判成失败。
+    也不能改成比 run_verify 里那个 `device`: 它是 cuda (index=None), 张量回来是 cuda:0,
+    两者 !=, 那会在真机上判否每一个候选。所以只能从实际输入张量推导。"""
+    profile, max_error, inputs, signature, first = _trusted_reference_case(kernel_type)
+    code = f"import torch\ndef kernel({signature}):\n    return torch.zeros_like({first})\n"
+    result = _verify_trusted(monkeypatch, profile, kernel_type, max_error, code, inputs)
+    assert "KeyError" not in str(result.get("error", "")), result
+    assert not result.get("candidate_semantics_error"), result
+    assert result["output_dtype"] == "torch.float16"
+    if kernel_type == "attention":
+        # 全零输入下 SDPA 也是全零 ⇒ 这条路必须真能判通过, 不只是"没炸"。
+        # layernorm 的参考另有 CUDA-only 门, 本地到不了终判, 所以只断言设备门已放行。
+        assert result["success"], result
+
+
+@pytest.mark.parametrize("kernel_type", ["attention", "layernorm"])
+@pytest.mark.parametrize("wrong", ["other_device", "fp32"])
+def test_an_output_on_another_device_or_dtype_is_still_refused(kernel_type, wrong, monkeypatch):
+    """放宽输入名不等于放宽判据: 换设备 (meta) 与换精度 (fp32) 两个 profile 都必须仍被拒。"""
+    profile, max_error, inputs, signature, first = _trusted_reference_case(kernel_type)
+    body = (f"torch.empty({first}.shape, dtype=torch.float16, device='meta')"
+            if wrong == "other_device" else f"torch.zeros_like({first}, dtype=torch.float32)")
+    code = f"import torch\ndef kernel({signature}):\n    return {body}\n"
+    result = _verify_trusted(monkeypatch, profile, kernel_type, max_error, code, inputs)
+    assert not result["success"]
+    assert result["candidate_semantics_error"], result
+    assert "KeyError" not in str(result.get("error", "")), result
 
 
 @pytest.mark.parametrize("reply", [None, [], {"success": True}, {"success": False, "reference_error": "drift"}])

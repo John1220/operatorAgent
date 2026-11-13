@@ -1,9 +1,29 @@
-# attention 族：Scope A 设计（v0.8 提案，未实现）
+# attention 族：Scope A 设计与实现记录
 
-2026-11-07 · 设计文档 · 状态：**待评审，未动代码**
+2026-11-07 起 · 设计文档 · **状态：C1–C5 已实现并跑通（2026-11-08），R2 计划已冻结、未开跑**
+
+> 本文件前半（§1–§12）是**当时的设计**，一字未改；§13–§18 是实现与真机记录。
+> 结论与后续见 [C5 端到端](../../status/v08/c5-attention-e2e-20261108.md)、
+> [A1/A2](../../status/v08/a1-a2-deploy-pin-and-attention-gate-20261108.md)、
+> [A3](../../status/v08/a3-attention-r2-preregistration-20261108.md)。
 
 本文件回答一个问题：把 attention 变成**可被本仓判定**的算子族，需要定义什么、验证什么、边界在哪。
 它不承诺工期，也不承诺 attention 会带来性能收益——那要等 C1–C5 走完并由 R2 的规则去判。
+
+## 0. 与当前实现的对应（2026-11-08）
+
+| 设计条目 | 实现落点 | 状态 |
+|---|---|---|
+| §2 Scope A 几何 | `correctness_profiles.ATTENTION_SCOPE` + `attention_scope_problem()`；越界由 `prepare` 以 `attention_scope` 拒绝 | ✅ A5 |
+| §3 语义与 `causal` 标量 | `BenchmarkCase.scalars`、`seed_spec`、`_serialize_inputs.scalars` | ✅ C1 |
+| §4 布局与容量 | `_attention_case` 注册进 `_CASE_LAYOUTS`（4 维） | ✅ C1 |
+| §5 参考与容差 | `registered_reference(PROFILE_ATTENTION)`，`atol=3e-4`/`rtol=1e-2`，按 profile **相等绑定** | ✅ C2 |
+| §6 8 条显式 case | `ATTENTION_CASES` / `attention_suite()` | ✅ C3 |
+| §7 反作弊 | import 层 + `torch.ops` + 运行时 `shield_torch` | ✅ C3 |
+| §8 roofline 选项 B | `attention_coarse_v1`，`reference_lower_bound=false` | ✅ C4 |
+| §9 C5 | L1/L2（8 条）通过，L3 `degraded`、绑定轴 `compute` | ✅ C5 |
+| 支持清单与窗口门 | `capabilities().correctness_profiles.families.attention`；`preflight --op attention` | ✅ A2/A4 |
+| R2 登记 | `operator-v08-increment-r2-attention-v1`（已冻结） | ✅ A3 |
 
 ## 1. 为什么要它
 
@@ -263,6 +283,12 @@ attention 契约的语义字段：`epsilon=0.0`（没有 eps 归一化）、`nor
 | causal 差一位 | 0.4904 | 拒绝 |
 | **不做 max 平移** | **1.0000** | **未拦住** |
 
+> **绑定勘误（2026-11-08）**：这个 `3e-4` 标定出来后**并没有被真正应用**。注册表只把它当
+> 上限（`max_error <= ceiling`），而实际值来自 `ConstraintSpec.max_error` 的全局默认 `1e-5`
+> ——那恰好是 layernorm 的标定值。于是 attention 静默继承了一个严 30× 的阈值，C5 主用例
+> 因此判成 99.9608% 匹配。现已改为**按 profile 相等绑定**，并修掉 L3/dispatch 两处写死的
+> `1e-5`。定位、哈希溯源与推导见 [C5 §7](../../status/v08/c5-identity-blocker-20261107.md)。
+
 ## 15. C3：套件与反作弊（2026-11-07）
 
 ### 15.1 套件：8 条显式 case
@@ -298,6 +324,12 @@ C3 补的是 **import 层**——它们绕过的是"调用点屏蔽"本身：
 
 静态审计在 AST 分支里先查 import 再查调用点；正则兜底也加了同名规则。
 实测：四种绕道各报 1 条违规，而合法的 `tl.dot` 写法 0 违规。
+
+> **勘误（2026-11-07 审查）**：上面这张表把 `torch.ops.aten` 记成已覆盖，但当时只覆盖
+> `import torch.ops.aten as A` —— 该写法在 torch 2.x 上直接 `ModuleNotFoundError`，
+> 绿只证了"这条分支没人走"。真能执行的 `torch.ops.aten.<op>.default(...)` 与
+> `from torch.ops import aten` 都漏过，且 `mm` / `matmul` / `_softmax` 同样漏 ⇒ 是通用后门。
+> 已修，见 [审查后修掉的三处阻塞 §3](../../status/v08/review-fixes-20261107.md)。
 
 ## 16. C4：roofline 口径 B 落地（2026-11-07）
 

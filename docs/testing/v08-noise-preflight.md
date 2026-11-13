@@ -28,6 +28,18 @@ python -m operator_agent preflight --backend local --reps 5
 带宽而不是算力。**不能用 `F.layer_norm`**——远端反作弊盾会在基准期间拦下原生算子
 （`CheatDetectedError`），探针跑的就是候选那条通道，所以它也得自己实现。
 
+attention 任务用 `--op attention --shape B,H,S,D [--causal]`：探针是一个 flash-attention
+式的分块核（在线 softmax、fp32 累加、`causal` 走编译期常量），走同一条 CUDA event 通道。
+注意边界：只有 fp16、`1<=B<=4096`、`1<=H<=4096`、`16<=S<=8192`、D 为 `[16,256]` 内的 2 的幂；
+通道名带 mask 形态（`attention-1x16x1024x128-fp16-causal-cuda-event`），因为预登记按通道
+绑定门控读数，matmul 的带宽不能当 attention 的用。
+
+2026-11-08 H20 实测（GPU 3，`--causal --reps 5 --repeat 8 --planned-effect-pct 2.5`）：
+5 个 episode 中位 `0.09728 ms`、判决带宽 `0.1%`、`action=start`、`predicted_tier=valid`。
+同一窗口的 L3 候选中位是 `0.09648 ms` ⇒ 探针与真机 L3 相差 0.8%，这是"探针没量错"的
+判据（探针读数必须能被同窗口的 L3 复现）。回执：
+`output/v08-attention-20261108/c5/gate-attention-20261108.json`。
+
 `--repeat` 是每个 episode 内部的采样次数（默认 8）。先用 1 跑过一次：5 个单样本点上
 的 iqr 把 4096³ 的手抖放大成 2.02%（真实值 0.07%），判决带宽从 0.2% 虚高到 6.1%。
 
@@ -71,7 +83,10 @@ python -m operator_agent preflight --backend local --reps 5
 ## 4. 门槛与拒绝
 
 - `reps < 3` 直接拒绝（`bad_reps`，exit 2）：三样本以下的分位数没有意义。
-- `--shape` 不是三个 `[16, 65536]` 整数 ⇒ `bad_shape`；`--shape` 配非 ssh 后端 ⇒ `preflight_shape_backend`。
+- `--shape` 形状不对 ⇒ `bad_shape`（matmul 三个 `[16, 65536]`、layernorm 两个、attention 四个且逐位有界）；
+  `--shape` 配非 ssh 后端 ⇒ `preflight_shape_backend`。
+- `--op attention --dtype fp32` ⇒ `preflight_dtype`：attention 目前只有 fp16 profile，
+  量一个判不了的精度只会给出"这个窗口可判"的假印象。
 - 任何一次采样抛错或返回非有限/非正值 ⇒ `ok=false`、`action=refuse`：**缺读数不是 0 成本**。
 - `mock` / `fake` 后端的回执带 `test_only=true`：那是模拟或控制机 CPU 的计时，不构成真机窗口证据。
 

@@ -335,3 +335,50 @@ def test_band_falls_back_to_envelope_validity_when_the_reading_omits_it():
     perf = build_host_context(t, c, backend='fake', phase='optimize', source=CODE,
                               verification=v)['feedback']['performance']
     assert 'measurement_validity' not in perf and 'improvement_band' not in perf
+
+
+def test_suite_intent_names_every_tested_scalar_value():
+    """声明值 ≠ 被测值：attention 声明 `causal=False`，但 8 条 suite 里 7 条是 True。
+
+    2026-11-09 C 臂就撞在这里——只给 case 列表（数据）不够，要有句话说明"都会被测"。
+    """
+    from operator_agent.app.hitl_tools import build_task
+    from operator_agent.core.contract import freeze_from_task
+    from operator_agent.generate.host_context import _suite_intent
+
+    attention = dict(request='fp16 attention prefill 1x16x4096x128',
+                     shapes=[[1, 16, 4096, 128]], hardware='nvidia_gpu', dsl='triton',
+                     precision='fp16', min_speedup=1.0)
+    intent = _suite_intent(freeze_from_task(build_task(attention)))
+    assert intent['declared_scalars'] == {'causal': False}
+    assert intent['tested_scalar_values'] == {'causal': [False, True]}
+    assert '每一个 case' in intent['note']
+
+
+def test_suite_intent_names_tested_layouts_even_without_scalars():
+    """softmax 的 12 条 case 里唯一的 strided 就是两臂都挂的那一条。
+
+    没有标量不等于没有别的维度会变：核若假设连续布局，只有那条会挂，
+    而"挂了 1 条"听起来像噪声。
+    """
+    from operator_agent.app.hitl_tools import build_task
+    from operator_agent.core.contract import freeze_from_task
+    from operator_agent.generate.host_context import _suite_intent
+
+    softmax = dict(request='fp16 softmax 16384x6144', shapes=[[16384, 6144]],
+                   hardware='nvidia_gpu', dsl='triton', precision='fp16', min_speedup=1.0)
+    intent = _suite_intent(freeze_from_task(build_task(softmax)))
+    assert intent['tested_layouts'] == ['contiguous', 'strided']
+    assert 'stride 必须逐个读' in intent['note']
+
+
+def test_the_anti_cheat_rule_is_published_from_one_source():
+    """2026-11-09：裸臂写了正确的 softmax 却直接调 torch.softmax，被判反作弊。
+
+    规则不说清楚，量出来的就不是能力。正文只允许有一份。
+    """
+    from operator_agent.decide.anticheat import ANTICHEAT_POLICY
+    from operator_agent.generate.host_context import anticheat_policy
+
+    assert anticheat_policy() == ANTICHEAT_POLICY
+    assert 'torch.softmax' in ANTICHEAT_POLICY and '不得' in ANTICHEAT_POLICY

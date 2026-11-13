@@ -126,3 +126,16 @@ def test_attention_case_materializes_causal_by_value_not_by_seed():
     # 第二个 seed 也一样：标量不随 seed 变
     other = cases_from_shapes('attention', [((1, 2, 8, 4), 1.0)], dtype='fp16', seed=9)[0]
     assert other.materialize()['causal'] is False
+
+
+def test_the_case_identity_is_the_same_string_on_both_paths():
+    """声明侧的 `key()` 与运行时侧 `case_key(materialize())` 必须逐字相同。
+
+    C5 首次 L3（2026-11-08）就是这里分家：声明侧只喂张量得到
+    `K=…|Q=…|V=…`，运行时那侧带着按值直传的标量、得到 `…|causal=?`，
+    于是契约的 `required_cases` 与账本 key 对不上，workload 资格判 uninformative。
+    """
+    from operator_agent.decide.bench_cases import case_key
+    c = case(causal=True)
+    assert c.key() == case_key(c.materialize())
+    assert c.key().endswith('|causal=?')
