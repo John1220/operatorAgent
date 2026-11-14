@@ -129,6 +129,12 @@ A 每一格都顶到 20 次上限；C 交付用 3–9 次。**调用数差距（
 调用数与验证数来自盘上一一对应的记录（一次请求一份 `request-NNNN.json`、一次提交一份回执），
 墙钟由回执 `created_at` 与请求文件时间戳相减得来。**A/C 未交替运行**，墙钟只作辅助。
 
+**一处计量勘误（2026-11-13）**：v6r1-attention-C 失败格回执里 `model_dispatches=None`——
+早退路径（无提交通过 L2）当时绕过了计量，上表该格的 5 次是从盘上 5 份 `request-NNNN.json` 数的。
+冻结回执**不改**：轮哈希覆盖计量字段，改它会让 `reproduction-verdict.json` 引用的轮哈希失配
+（已用原时间戳 + metering 复算 round-1 哈希 `fa3eab80…` 一致，链完整）。活路径已修：
+两条早退（A/C）现在都过 `_counts()`，失败格也带 `measured` 计量与出处。
+
 ### 弱宿主（27B/xhigh）
 
 | 任务 | 臂 | 结果 | 调用 | 验证 | 到首个完整 L2 |
@@ -164,10 +170,14 @@ A 每一格都顶到 20 次上限；C 交付用 3–9 次。**调用数差距（
 
 ## 7. 限制（不能外推的部分）
 
-1. **单轮、单卡**：每格 n=1（attention 例外，n=3），不给显著性结论；
+1. **单卡、格内 n=1**：复现共 2 轮 × 3 任务，每格每轮 n=1（更早的 attention 探点重复过 3 次）；
+   判据是预登记的「每轮 ≥ +1 任务」这一最小可分辨单位，**不是统计显著性**，不给显著性结论；
 2. **模型换了三次**：deepseek-v4.1-flash、qwen3.8-2.4t、Qwen3.8-27B（额度与可用性所迫），
    跨轮数字不能混算；同一轮内采样身份已核对一致；
-3. **`formal_comparison_credit=false`**：`ac_compare` 硬编码，单轮观测不授予正式额度；
+3. **正式额度分两层**：`ac_compare` 的 `formal_comparison_credit` 恒 False——**单轮**观测不授予
+   正式额度；只有 `ac_aggregate` 在全部轮次 ≥ 最小可分辨单位时判 `reproduced`，才授予
+   `formal_gain_claim=formal_comparison_credit=true`。本轮结论在聚合层（范围见头条），
+   单轮回执里的 False 不与它矛盾；
 4. **性能未进比较**：交付的格子里 L3 有效性多为 `None`/`degraded`，所以本轮只谈"能不能交付"，
    不谈"快不快"；
 5. **softmax / tall-K 的 suite 覆盖面**仍是声明范围，未证明任意输入域；

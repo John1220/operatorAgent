@@ -7,7 +7,7 @@
 
 ## 1. 当前状态
 
-FP32 Matmul 的 IEEE 基线与计算路径判断已修复，并通过 H20 回归。修正后的分块复测和诊断开关首对已归档，插件整体收益仍待普通 DSH（A）与 v0.8 插件（C）的直接对照。
+FP32 Matmul 的 IEEE 基线与计算路径判断已修复，并通过 H20 回归。修正后的分块复测和诊断开关首对已归档。普通 DSH（A）对 v0.8 插件（C）的对照**已完成**：强模型两臂打平；弱宿主（27B/xhigh）预登记 2 轮复现判 `reproduced`（范围限一次生成可交付的任务，不含性能与开发人时），见本轮完整报告。
 
 **attention 族 C5 已于 2026-11-08 在 H20 跑通**：L1/L2（8 条 case 全过）通过，拿到第一份 L3 与绑定轴 `compute`，
 测量有效性 `degraded`（launch 地板 17.3%）。这条路径上暴露出并修掉了三处"身份门之后的缺陷"。见
@@ -95,11 +95,11 @@ FP32 Matmul 的 IEEE 基线与计算路径判断已修复，并通过 H20 回归
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| **普通 DSH（A）对 v0.8 插件（C）** | **待接线，尚未开跑** | A 臂待接同等的宿主预算硬门，两臂待接统一的独立终评。首对候选任务为已经校准的 FP32 Matmul 4096³。逐条待办与判读边界见 [A/C 工作流轮待办](ac-workflow-round-todo-20261108.md) |
+| **普通 DSH（A）对 v0.8 插件（C）** | **已完成：弱宿主 reproduced** | 预登记 2 轮 × 3 任务，每轮配对差 +1，聚合判 `reproduced`（范围：27B/xhigh、一次生成可交付的任务；不含性能/人时）；强模型打平。过程与判读边界见 [A/C 工作流轮待办](ac-workflow-round-todo-20261108.md) 与 [本轮报告](ac-workflow-round-report-20261110.md) |
 | **C5 attention 端到端** | **已跑通（`degraded`）** | 契约 `556b76336accdb41…`、候选 `90f83ca50d2e…`。主用例 max_abs `1.22e-04`、八条派生 case 全过；L3 候选中位 `0.09648 ms` vs 同卡 SDPA `0.08515 ms`（`0.8826×`），绑定轴 `compute`、达成率 60.2%。`degraded` 的成因是 launch 地板 17.3%（96 µs 核 + 20 µs 地板），**不是**候选错。要 `valid` 读数需要换 S=4096 主用例或更快的核，属 R2 取数。见 [C5 端到端](c5-attention-e2e-20261108.md) |
-| `sampling_comparability` | 未成立 | 现有试跑使用相同模型配置，账本仍缺 `temperature`、`n`、`enable_thinking` 的实际派发记录。 |
+| `sampling_comparability` | v6 两轮 established | 六字段（model/temperature/n/max_tokens/enable_thinking/reasoning_effort）从每格 `outer-requests/*.json` 逐字核对一致；早期试跑的缺口由 `ac_metering.sampling_identity()` 补上。 |
 
-默认 H20 runner 仍使用 Torch 2.14.1，走默认环境的受信任参考任务仍需解决执行身份漂移，包括 LayerNorm v2。
+默认 H20 runner 的 torch 漂移已由 A1 部署钉版本解决（`torch==2.14.0`，装完回读核对 `2.14.0+cu130`，漂了拒放行）；受信任参考任务在钉版本后通过身份门。
 
 ## 4. 下一步
 
@@ -108,16 +108,13 @@ FP32 Matmul 的 IEEE 基线与计算路径判断已修复，并通过 H20 回归
 1. **attention 的配对形式要重新登记**：现有计划按 "B=v0.7.2 / C=v0.8" 写，而 v0.7.2
    **准备不了 attention**（没有这个 profile）。可行形式是同一份 v0.8 开关 optimize 诊断
    （`OPERATOR_R2_DIAGNOSIS=off/on`，与 fp32 那次同构），需要新编号。
-2. **A 臂的 agent 本身还没跑过**；插件侧采样字段（契约 `12 → 13`）仍推迟，所以配对结论只能报观测。
+2. A 臂 agent 已在 A/C 工作流轮真跑过多轮；R2 attention 配对本身尚未登记。插件侧采样字段（契约 `12 → 13`）仍推迟，所以 R2 配对结论只能报观测。
 
-### 优先完成 A/C 首对准备
+### A/C 首对准备（已完成）
 
-逐条待办、完成判据与划出范围以 [A/C 工作流轮待办](ac-workflow-round-todo-20261108.md) 为准，
-下面三条是摘要，冲突时以那份为准。
-
-1. 给普通 DSH 接上与 C 相同的模型、验证和墙钟预算。用本地试跑核对两臂的预算执行、派发计量和独立终评是否都能生成回执。独立终评使用同一评测器和冻结契约，绑定各臂终稿的源码哈希。
-2. 接线核对通过后，冻结并运行第一对。复用 FP32 Matmul 4096³、相同 IEEE 起点和同精度基线。两臂用同一模型、同一块 H20，分别从独立会话串行运行。
-3. 主指标是预算内能否交出通过独立终评完整 L2 的终稿。性能只比较两臂均通过完整 L2 且 L3 测量均有效的配对，同时记录首次通过完整 L2 的耗时、模型派发和验证次数。首对跑通后再加入预先选定的修复任务。见 [收益验证准备](../../design/v08-preparation.md#2-两轮实验各比较什么)。
+首对与复现轮均已跑完：结论、成本读数与限制见 [本轮报告](ac-workflow-round-report-20261110.md)，
+逐条过程记录以 [A/C 工作流轮待办](ac-workflow-round-todo-20261108.md) 为准。
+后续轮次（修复型任务、更多任务族、中档模型探点）尚未登记。
 
 ### 其他待决定事项
 
@@ -131,7 +128,8 @@ FP32 Matmul 的 IEEE 基线与计算路径判断已修复，并通过 H20 回归
 ## 5. 文档索引
 
 **设计**：[v0.8 准备提案](../../design/v08-preparation.md)（原文照录）·
-[attention Scope A 设计](../../design/v08/attention-family.md)（含 C1–C4 实测）
+[attention Scope A 设计](../../design/v08/attention-family.md)（含 C1–C4 实测）·
+[任务族选型定案](../../design/v08/task-family-selection.md)（性能基线认 eager 组合，不认厂商库）
 
 **测试/操作**：[noise preflight](../../testing/v08-noise-preflight.md) ·
 [两臂计量对账](../../testing/v08-arm-metering.md) ·

@@ -257,5 +257,81 @@ class TestStdoutIsProtocolOnly(unittest.TestCase):
         self.assertIn("tools=['operator_prepare'", proc.stdout)
 
 
+class TestAsyncVerify(unittest.TestCase):
+    """wait=false：提交立即应答 invocation_id，终态由 operator_status 取回。
+
+    动机是实测缺陷类：分钟级 L2 对 MCP 客户端的工具超时（A/C 实验里 60s 客户端
+    超时对分钟级 attention L2）。分离式提交让请求不再挂着等执行。
+    """
+
+    DECL = dict(request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
+    CORRECT = 'import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n'
+
+    def _prepare(self):
+        run = Path(tempfile.mkdtemp(prefix="mcp-async-")) / "run"
+        replies = conversation([{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "operator_prepare",
+                       "arguments": dict(self.DECL, run_dir=str(run))}}])
+        body = json.loads(replies[0]["result"]["content"][0]["text"])
+        assert body["ok"], body
+        return run
+
+    def _submit(self, run, **extra):
+        return conversation([{"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "operator_verify", "arguments": dict(
+                run_dir=str(run), code=self.CORRECT, backend='fake',
+                stop_after='L2', **extra)}}])
+
+    def test_submit_returns_handle_and_status_carries_result(self):
+        run = self._prepare()
+        replies = self._submit(run, wait=False)
+        # 只有提交回执这一条响应：worker 完成时不许向同一 id 再发终态。
+        self.assertEqual(len(replies), 1)
+        handle = json.loads(replies[0]["result"]["content"][0]["text"])
+        self.assertTrue(handle["ok"])
+        self.assertTrue(handle["submitted"])
+        self.assertEqual(handle["phase"], "running")
+        self.assertRegex(handle["invocation_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(handle["poll_with"], "operator_status")
+        self.assertTrue(Path(handle["tool_call_dir"]).is_dir())
+
+        status_replies = conversation([{"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {"name": "operator_status", "arguments": {
+                "run_dir": str(run), "invocation_id": handle["invocation_id"]}}}])
+        status = json.loads(status_replies[0]["result"]["content"][0]["text"])
+        self.assertEqual(status["phase"], "done")
+        self.assertEqual(status["result"]["levels"], {"L1": True, "L2": True})
+        self.assertTrue(status["result"]["passed"])
+
+    def test_wait_default_still_returns_verdict_in_one_response(self):
+        run = self._prepare()
+        replies = self._submit(run)
+        self.assertEqual(len(replies), 1)
+        body = json.loads(replies[0]["result"]["content"][0]["text"])
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["levels"], {"L1": True, "L2": True})
+        self.assertNotIn("submitted", body)
+
+    def test_schema_advertises_wait_including_supervised_mode(self):
+        import os
+        from unittest import mock
+        tools = conversation([{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
+        verify = next(t for t in tools[0]["result"]["tools"]
+                      if t["name"] == "operator_verify")
+        self.assertEqual(verify["inputSchema"]["properties"]["wait"]["type"], "boolean")
+        supervised_env = {
+            'OPERATOR_AGENT_S5_DEV_URL': 'http://127.0.0.1:1/development/verify',
+            'OPERATOR_AGENT_S5_DEV_TOKEN': 'x',
+            'OPERATOR_AGENT_S5_DEV_CONTRACT': 'c' * 64,
+            'OPERATOR_AGENT_S5_DEV_BACKEND': 'mock',
+            'OPERATOR_AGENT_S5_DEV_TIMEOUT': '60',
+        }
+        with mock.patch.dict(os.environ, supervised_env):
+            tools = conversation([{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
+        verify = next(t for t in tools[0]["result"]["tools"]
+                      if t["name"] == "operator_verify")
+        self.assertIn("wait", verify["inputSchema"]["properties"])
+
+
 if __name__ == "__main__":
     unittest.main()

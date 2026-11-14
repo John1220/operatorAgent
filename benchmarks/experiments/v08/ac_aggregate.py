@@ -9,7 +9,7 @@
 
 进聚合的前置条件，缺一条就 `inconclusive`（不是 null，也不是 true）：
 
-* 计划必须是 v3 复现计划，且 `validate` 通过；
+* 计划必须带 `reproduction` 块（复现计划），且 `validate` 通过；
 * 轮数必须正好等于计划登记的 `rounds`（多跑的不许偷偷算进来）；
 * 每轮 `round_complete=true`、`sampling_comparability=established`。
 """

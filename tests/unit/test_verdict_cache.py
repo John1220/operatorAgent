@@ -1,0 +1,190 @@
+"""判定缓存：同身份回放、环境漂移拒配、L3/unknown/不完整/final 永不缓存。"""
+import json
+from pathlib import Path
+
+import pytest
+
+from operator_agent.app import hitl_tools as ht
+from operator_agent.core.run_contract import code_hash, protocol_identity
+from operator_agent.decide import verdict_cache
+
+DECL = dict(request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
+CORRECT = 'import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n'
+WRONG = 'import numpy as np\ndef kernel(X):\n    return X.copy()\n'
+
+
+def _prepared(tmp_path):
+    run = tmp_path / 'task'
+    ht.prepare(DECL, run)
+    return run
+
+
+def test_identical_resubmission_replays_with_new_evidence(tmp_path):
+    run = _prepared(tmp_path)
+    first = ht.verify(run, CORRECT, backend='mock', stop_after='L2')
+    assert first['levels']['L2'] is True
+    assert not first.get('cache_hit')
+    assert first['environment']
+
+    second = ht.verify(run, CORRECT, backend='mock', stop_after='L2',
+                       candidate_origin='inner_coder')
+    assert second['cache_hit'] is True
+    assert second['candidate_origin'] == 'inner_coder'
+    assert second['cached_from']['round'] == first['round']
+    assert second['cached_from']['evidence'] == first['evidence']
+    assert second['levels'] == first['levels']
+    assert second['passed'] is True
+    assert second['evidence'] != first['evidence']
+    assert second['round'] == first['round'] + 1
+    assert second['source_hash'] == code_hash(CORRECT)
+    # 回放目录自身完整：manifest、报告、源码都在，预算门能独立复核。
+    directory = Path(second['evidence']).parent
+    complete = json.loads((directory / 'complete.json').read_text())
+    assert complete['evidence_complete'] is True
+    assert complete['binding']['cached_from']['round'] == first['round']
+    assert (directory / 'candidate.py').read_text() == CORRECT
+    assert Path(second['report']).is_file()
+    # 回放报告记本次提交的归因，不照抄旧报告的来源。
+    assert 'inner_coder' in Path(second['report']).read_text()
+    full = json.loads(Path(second['evidence']).read_text())
+    assert full['cache_hit'] is True
+    assert full['verdicts'] == json.loads(Path(first['evidence']).read_text())['verdicts']
+
+
+def test_decisive_failure_is_also_cached(tmp_path):
+    run = _prepared(tmp_path)
+    first = ht.verify(run, WRONG, backend='mock', stop_after='L2')
+    assert first['levels']['L2'] is False
+    second = ht.verify(run, WRONG, backend='mock', stop_after='L2')
+    assert second['cache_hit'] is True
+    assert second['passed'] is False
+    assert second['levels'] == first['levels']
+
+
+def test_different_source_does_not_hit(tmp_path):
+    run = _prepared(tmp_path)
+    ht.verify(run, CORRECT, backend='mock', stop_after='L2')
+    other = ht.verify(run, WRONG, backend='mock', stop_after='L2')
+    assert not other.get('cache_hit')
+
+
+def test_l3_is_neither_cached_nor_served_from_cache(tmp_path):
+    run = _prepared(tmp_path)
+    first = ht.verify(run, CORRECT, backend='mock', stop_after='L3')
+    assert not first.get('cache_hit')
+    second = ht.verify(run, CORRECT, backend='mock', stop_after='L3')
+    assert not second.get('cache_hit')
+    # 已有的 L1/L2 判定也不许喂给 L3 请求（深度不同）。
+    third = ht.verify(run, CORRECT, backend='mock', stop_after='L2')
+    assert not third.get('cache_hit')
+
+
+def test_host_budget_counts_dispatches_and_final_never_replays(tmp_path):
+    run = tmp_path / 'host-task'
+    ht.prepare(DECL, run, host_budget=dict(max_verifications=4, wall_clock_s=60))
+    first = ht.verify(run, CORRECT, backend='mock', stop_after='L2')
+    second = ht.verify(run, CORRECT, backend='mock', stop_after='L2')
+    assert second['cache_hit'] is True
+    # 缓存省 GPU，不省派发：两次探索都登记，终评预留不动。
+    assert second['host_task']['remaining_exploration'] == 1
+    assert second['host_task']['records'][-1]['full_l2_passed'] is True
+    final = ht.verify(run, CORRECT, backend='mock', stop_after='L2',
+                      verification_purpose='final')
+    assert not final.get('cache_hit')
+    assert final['evidence'] != second['evidence']
+    assert final['host_task']['remaining_final'] == 0
+
+
+# ── lookup 单元层：手工证据目录，逐条拒配规则 ──────────────────────────────
+
+ENV = {'name': 'H20', 'device': 'cuda', 'compute_capability': '9.0',
+       'torch_version': '2.14.0+cu130', 'triton_version': '3.5.0',
+       'backend': 'SSHExecutor', 'driver_version': '580.105.08'}
+IMPL = protocol_identity()
+
+
+def _evidence(run, index, *, contract='c' * 64, source='s' * 64, stop_after='L2',
+              environment=None, implementation=None, ok=True, passed=True,
+              complete=True):
+    directory = run / f'verify-{index}'
+    directory.mkdir(parents=True)
+    binding = dict(tool_version='t', contract_hash=contract, source_hash=source,
+                   stop_after=stop_after,
+                   environment=ENV if environment is None else environment)
+    full = dict(ok=ok, evidence_complete=True, binding=binding,
+                implementation=IMPL if implementation is None else implementation,
+                levels={'L1': True, 'L2': passed},
+                verdicts=[dict(level='L1', passed=True, message='', metrics={}),
+                          dict(level='L2', passed=passed, message='', metrics={})],
+                source_hash=source, contract_hash=contract, created_at=1.0)
+    (directory / 'result.json').write_text(json.dumps(full))
+    if complete:
+        (directory / 'complete.json').write_text(json.dumps(
+            dict(evidence_complete=True, binding=binding)))
+    return directory
+
+
+def _lookup(run, **overrides):
+    kwargs = dict(contract_hash='c' * 64, source_hash='s' * 64, stop_after='L2',
+                  environment=ENV, implementation=IMPL)
+    kwargs.update(overrides)
+    return verdict_cache.lookup(run, **kwargs)
+
+
+def test_lookup_returns_latest_match(tmp_path):
+    _evidence(tmp_path, 1)
+    _evidence(tmp_path, 2)
+    hit = _lookup(tmp_path)
+    assert hit is not None and hit['round'] == 2
+
+
+def test_lookup_skips_newer_nonmatch(tmp_path):
+    _evidence(tmp_path, 1)
+    _evidence(tmp_path, 2, source='x' * 64)
+    hit = _lookup(tmp_path)
+    assert hit is not None and hit['round'] == 1
+
+
+def test_lookup_refuses_environment_drift(tmp_path):
+    _evidence(tmp_path, 1, environment=dict(ENV, driver_version='590.1'))
+    assert _lookup(tmp_path) is None
+
+
+def test_lookup_refuses_missing_environment(tmp_path):
+    _evidence(tmp_path, 1, environment={})
+    assert _lookup(tmp_path) is None
+    _evidence(tmp_path, 2)
+    assert _lookup(tmp_path, environment={}) is None
+
+
+def test_lookup_refuses_implementation_drift(tmp_path):
+    _evidence(tmp_path, 1, implementation=dict(IMPL, extra='0' * 64))
+    assert _lookup(tmp_path) is None
+
+
+def test_lookup_refuses_l3_and_unknown_and_incomplete(tmp_path):
+    _evidence(tmp_path, 1, stop_after='L3')
+    assert _lookup(tmp_path) is None
+    assert _lookup(tmp_path, stop_after='L3') is None
+    _evidence(tmp_path, 2, passed=None)
+    assert _lookup(tmp_path) is None
+    _evidence(tmp_path, 3, ok=False)
+    assert _lookup(tmp_path) is None
+    _evidence(tmp_path, 4, complete=False)
+    assert _lookup(tmp_path) is None
+
+
+def test_lookup_refuses_binding_mismatch_between_result_and_complete(tmp_path):
+    directory = _evidence(tmp_path, 1)
+    complete = json.loads((directory / 'complete.json').read_text())
+    complete['binding'] = dict(complete['binding'], extra='changed')
+    (directory / 'complete.json').write_text(json.dumps(complete))
+    assert _lookup(tmp_path) is None
+
+
+def test_lookup_refuses_l3_verdict_inside_l2_binding(tmp_path):
+    directory = _evidence(tmp_path, 1)
+    full = json.loads((directory / 'result.json').read_text())
+    full['verdicts'].append(dict(level='L3', passed=True, message='', metrics={}))
+    (directory / 'result.json').write_text(json.dumps(full))
+    assert _lookup(tmp_path) is None

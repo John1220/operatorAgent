@@ -331,9 +331,15 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
              selected=selected, verifications=state.get('verification_count')),
         ensure_ascii=False, indent=2), encoding='utf-8')
     if not selected:
+        from .ac_fixture import _counts
+        counted = _counts(root)
         return dict(task_id=task_id, arm=arm, state='crashed', final_receipt=None, source=None,
                     outcome='unknown', reason='no submission reached the supervisor',
-                    scripted_fixture=False, model_dispatches=None)
+                    scripted_fixture=False, model_dispatches=counted['dispatches'],
+                    verifications=counted['verifications'],
+                    metering=dict(dispatches=counted['dispatch_source'],
+                                  verifications='measured' if counted['verifications'] else None,
+                                  wall_clock=None))
     record = _finish_cell(task_id, arm, selected, root=root, declaration=declaration,
                           budget=budget, backend='ssh', dispatches=None, errors=[],
                           returncode=response.get('returncode'), connection=connection)
@@ -492,9 +498,15 @@ def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
              selected=selected, verifications=state.get('verification_count'),
              last=last), ensure_ascii=False, indent=2, default=str), encoding='utf-8')
     if not selected:
+        from .ac_fixture import _counts
+        counted = _counts(root)
         return dict(task_id=task_id, arm='C', state='completed', final_receipt=None, source=None,
                     outcome='failed', reason='no submission passed L2',
-                    scripted_fixture=False, last_receipt=last, model_dispatches=None)
+                    scripted_fixture=False, last_receipt=last, model_dispatches=counted['dispatches'],
+                    verifications=counted['verifications'],
+                    metering=dict(dispatches=counted['dispatch_source'],
+                                  verifications='measured' if counted['verifications'] else None,
+                                  wall_clock=None))
     record = _finish_cell(task_id, 'C', selected, root=root, declaration=declaration,
                           budget=budget, backend='ssh', dispatches=None, errors=[],
                           returncode=response.get('returncode'), connection=connection)

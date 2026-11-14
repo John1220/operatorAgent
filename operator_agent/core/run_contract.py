@@ -106,6 +106,7 @@ def protocol_identity():
         "operator_agent/generate/prompt_manager.py",
         "operator_agent/generate/fixer.py", "operator_agent/generate/repair_loop.py",
         "operator_agent/decide/tool_evidence.py", "operator_agent/app/hitl_tools.py",
+        "operator_agent/decide/verdict_cache.py",
         "operator_agent/core/report.py",
         "operator_agent/core/run_layout.py",
         "operator_agent/execute/task_cancellation.py", "operator_agent/app/tool_calls.py",

@@ -219,7 +219,9 @@ def _tool_definitions() -> list[dict]:
             "description": ("对一份候选内核源码做 L1/L2/L3 判定（不生成、不修复、不搜索），"
                             "返回正交事实 + 处方 + 资格五位 + 一份报告。"
                             "**route 与 eligibility 必须一起读**：两者冲突时 conflict.action 会是 "
-                            "hold_for_measurement，此时不要照着 route 走。"),
+                            "hold_for_measurement，此时不要照着 route 走。"
+                            "wait=false 异步提交：立即返回 invocation_id，验证在后台继续，"
+                            "用 operator_status 轮询终态判定、operator_cancel 取消。"),
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": False,
@@ -241,6 +243,8 @@ def _tool_definitions() -> list[dict]:
                     "work_dir": {"type": "string"},
                     "timeout": {"type": "integer", "default": 300},
                     "persistent": {"type": "boolean", "default": False},
+                    "wait": {"type": "boolean", "default": True,
+                             "description": "false = 异步提交：立即返回 invocation_id，operator_status 查终态"},
                     "target_gflops": {"type": "number"},
                 },
             },
@@ -341,7 +345,8 @@ def _tool_definitions() -> list[dict]:
         {
             "name": "operator_status",
             "description": ("查自主任务或指定 invocation 的 running/done/failed/cancelled/lost。"
-                            "仅前台工具目录且未指定实例时列出 tool_calls；lost 的清理状态未知。"),
+                            "仅前台工具目录且未指定实例时列出 tool_calls；lost 的清理状态未知。"
+                            "工具调用结束后 result 格带终态判定回包（异步 operator_verify 的取回口）。"),
             "inputSchema": {
                 "type": "object", "additionalProperties": False,
                 "required": ["run_dir"],
@@ -447,7 +452,7 @@ def _tool_definitions() -> list[dict]:
                     'share the same development quota; final evaluation is separate.')
                 schema = tool['inputSchema']
                 schema['properties'] = {k:v for k,v in schema['properties'].items()
-                    if k in ('run_dir', 'code', 'code_file', 'candidate_origin', 'backend', 'stop_after', 'timeout')}
+                    if k in ('run_dir', 'code', 'code_file', 'candidate_origin', 'backend', 'stop_after', 'timeout', 'wait')}
                 schema['properties']['backend'] = dict(type='string', enum=[conf['BACKEND']], default=conf['BACKEND'])
                 schema['properties']['stop_after'] = dict(type='string', enum=['L2'], default='L2')
                 schema['properties']['timeout'] = dict(type='integer', minimum=1, maximum=timeout, default=timeout)
@@ -583,6 +588,8 @@ def _call_tool(name: str, arguments: dict) -> dict:
         return _text_result(prepare(args, run_dir, host_budget=host_budget))
     if name == "operator_verify":
         args = dict(arguments or {})
+        # wait 只由 stdio server 的长工具提交层兑现；同步路径（worker/CLI）永远等待。
+        args.pop("wait", None)
         from ..execute.s5_verify_client import enabled
         if enabled():
             conf, _, _ = _supervised_configuration()
@@ -694,13 +701,25 @@ def serve(instream: TextIO, outstream: TextIO, *, log: Optional[TextIO] = None) 
             if identity in active:
                 done(_jsonrpc_err(msg_id, -32600, 'Request ID already active'))
                 return
+            arguments = dict(params.get('arguments') or {})
+            detach = arguments.pop('wait', True) is False
             try:
-                active[identity] = (ToolCall(params['name'], params.get('arguments') or {}),
-                                    msg_id, done)
+                call = ToolCall(params['name'], arguments)
             except (ToolError, OSError, ValueError) as exc:
                 body = exc.as_dict() if isinstance(exc, ToolError) else dict(
                     ok=False, error='tool_failed', detail=repr(exc))
                 done(_jsonrpc_ok(msg_id, _text_result(body, is_error=True)))
+                return
+            # 分离式调用：请求立即应答 invocation_id；worker 继续跑，终态落
+            # tool-calls/<id>/result.json，由 operator_status 取回。done=None
+            # 保证完成时不会向同一个请求 id 发第二条响应。
+            active[identity] = (call, msg_id, None if detach else done)
+            if detach:
+                done(_jsonrpc_ok(msg_id, _text_result(dict(
+                    ok=True, phase='running', submitted=True,
+                    invocation_id=call.invocation_id,
+                    tool_call_dir=str(call.directory),
+                    poll_with='operator_status', cancel_with='operator_cancel'))))
             return
         done(handle_message(message))
 
@@ -748,7 +767,8 @@ def serve(instream: TextIO, outstream: TextIO, *, log: Optional[TextIO] = None) 
                 response = call.poll()
                 if response is not None:
                     del active[identity]
-                    done(_jsonrpc_ok(msg_id, response))
+                    if done is not None:
+                        done(_jsonrpc_ok(msg_id, response))
     finally:
         try:
             for call, _, _ in active.values():

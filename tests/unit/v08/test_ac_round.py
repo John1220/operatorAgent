@@ -228,6 +228,73 @@ def test_counts_come_from_the_records_not_from_hand_tallying(tmp_path):
         'recomputed_from_receipt_and_request_timestamps')
 
 
+def test_failed_cell_early_return_still_meters_dispatches(tmp_path, monkeypatch):
+    """早退路径（无提交通过 L2）也必须带计量 —— v6r1-attention-C 曾在此漏计成 None。
+
+    只 mock 重外部件（headless 宿主/网关/监督服务/沙箱），`ht.prepare`、`_counts`、
+    verify-*.json 扫描都走真实代码，证明这条早退入口真的过计量。
+    """
+    import json as _json
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from benchmarks.experiments.phase1 import host as p1host, native as p1native
+    from benchmarks.experiments.s5 import s5_arm_env, s5_plugin_env
+    from benchmarks.experiments.v08 import ac_fixture, ac_live
+
+    class _FakeService:
+        def __init__(self, config, contract_hash):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def snapshot(self):
+            return dict(selected_source=None, verification_count=1)
+
+    @contextmanager
+    def _fake_gateway(config, cell_dir):
+        yield SimpleNamespace(base_url='http://127.0.0.1:1/v1')
+
+    root = tmp_path / 'cell'
+    (root / 'cell' / 'outer-requests').mkdir(parents=True)
+    for index in range(2):
+        (root / 'cell' / 'outer-requests' / f'request-{index:04d}.json').write_text('{}')
+
+    monkeypatch.setattr(p1native, 'VerificationService', _FakeService)
+    monkeypatch.setattr(p1host, 'model_gateway', _fake_gateway)
+    monkeypatch.setattr(s5_plugin_env, 'stage_runtime', lambda p: dict(root=str(p)))
+    monkeypatch.setattr(s5_arm_env, 'build', lambda *a, **k: dict(
+        work=str(root / 'dsh' / 'work'), home=str(root / 'dsh' / 'home'), env={}, patch=[]))
+    monkeypatch.setattr(s5_arm_env, 'start_headless',
+                        lambda *a, **k: dict(returncode=0, stderr=''))
+    monkeypatch.setattr(ac_fixture, '_stage_sandbox_runtime', lambda runtime, r: 'py:path')
+    monkeypatch.setattr(ac_fixture, '_sandbox_c', lambda *a, **k: None)
+    monkeypatch.setattr(ac_live, 'select_gpu', lambda *a, **k: {})
+    monkeypatch.setattr(ac_live, '_assert_tool_surface', lambda *a, **k: None)
+
+    declaration = dict(request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
+    budget = dict(max_model_calls=20, max_output_tokens_per_call=40960,
+                  total_output_token_reservations=819200, max_verifications=8,
+                  wall_clock_s=2400, final_reserve=1)
+    # prepare 真实跑完后，放一份 L2 未过的提交回执：无可选源码 ⇒ 走早退。
+    from operator_agent.app import hitl_tools as ht
+    ht.prepare(declaration, root / 'run', host_budget=dict(budget))
+    (root / 'run' / 'verify-1.json').write_text(_json.dumps(
+        dict(levels={'L1': True, 'L2': False}, source=None)))
+
+    record = ac_live.run_c_live(declaration, task_id='relu-test', root=root, budget=budget,
+                                connection=dict(host='h', work_dir='/tmp/w'))
+    assert record['outcome'] == 'failed'
+    assert record['reason'] == 'no submission passed L2'
+    assert record['model_dispatches'] == 2
+    assert record['verifications'] == 1
+    assert record['metering']['dispatches'] == 'measured'
+
+
 def test_the_runner_pins_the_declared_gpu_on_both_arms():
     """自动选卡会在卡之间跳（2026-11-10 实测 2/3 两张卡都用过），实验期必须钉住。"""
     import os

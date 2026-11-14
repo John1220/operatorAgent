@@ -53,6 +53,7 @@ from ..core.run_contract import code_hash
 from ..app.intent_parser import IntentParser
 from ..core.report import build_report
 from ..decide.tool_evidence import RoundEvidence, verification_data
+from ..decide import verdict_cache
 from ..core.execution_audit import install_level_recorder
 from ..core.schemas import (ConstraintSpec, KernelArtifact, Precision, TaskSchema,
                       VerificationLevel, VerificationResult)
@@ -548,7 +549,8 @@ def verify(run_dir: str | Path, code: str, *, verification_purpose='explore', **
     if not host_task_enabled(run):
         if verification_purpose != 'explore':
             raise ToolError('host_task_required', 'final requires a prepared host task.')
-        return _verify_candidate(run_dir, code, **options)
+        return _verify_candidate(run_dir, code, verification_purpose=verification_purpose,
+                                 **options)
     from .host_workflow import prepared_task
     _, _, contract = prepared_task(run)
     budget = HostTaskBudget(run, contract.hash)
@@ -560,7 +562,8 @@ def verify(run_dir: str | Path, code: str, *, verification_purpose='explore', **
         owner = host_context(run)
         reservation = budget.reserve(code_hash(code), purpose=verification_purpose,
             owner_invocation_id=owner['invocation_id'] if owner else None)
-        result = _verify_candidate(run_dir, code, **options)
+        result = _verify_candidate(run_dir, code, verification_purpose=verification_purpose,
+                                   **options)
         snapshot = budget.finish(reservation['id'], result=result)
         result['host_task'] = snapshot
         result['verification_purpose'] = verification_purpose
@@ -573,6 +576,74 @@ def verify(run_dir: str | Path, code: str, *, verification_purpose='explore', **
         raise
 
 
+def _environment_of(backend_obj) -> dict:
+    """缓存键用的环境身份。探测失败 ⇒ 空身份 ⇒ 本次缓存关闭（fail closed）。"""
+    try:
+        hw_info, _ = _quiet(backend_obj.get_hardware_info)
+    except Exception:
+        hw_info = {}
+    return verdict_cache.environment_identity(
+        hw_info, getattr(backend_obj, 'fingerprint_label', ''))
+
+
+def _replay_cached(evidence, cached, *, source, contract, backend, resolution,
+                   origin, level, environment, backend_log) -> dict:
+    """命中缓存：新证据目录 + 原判定逐字回放，标清来源；不执行候选。
+
+    预算门要求每次派发独立证据，所以回放也占一个完整证据目录；`cache_hit` 与
+    `cached_from` 让审计能走回原始执行。预算照扣（单位是派发，不是 GPU 秒）。
+    """
+    full = cached["payload"]
+    evidence.binding["cached_from"] = dict(
+        round=cached["round"], evidence=cached["evidence"],
+        source_hash=full.get("source_hash"), created_at=full.get("created_at"))
+    verdicts = full.get("verdicts") or []
+    compact = [{"level": v.get("level"), "passed": v.get("passed"),
+                "message": (v.get("message") or "")[:600],
+                "metrics": _selected_metrics(v.get("metrics") or {})} for v in verdicts]
+    # 报告不照抄：归因是**本次提交**的声明，旧报告里的来源/轮次/生成时间属于另一轮。
+    report_path = evidence.write_text("report.md", (
+        "# 判定回放（cache hit）\n\n"
+        f"- 候选来源: `{origin}` (调用方**声明**的归因, 不进判据)\n"
+        f"- 本轮未执行候选；判定逐字回放自 verify-{cached['round']}\n"
+        f"- 原始证据: {cached['evidence']}\n"
+        f"- 原始报告: {full.get('report') or '(无)'}\n"
+        f"- 契约哈希: `{contract.hash}`\n"
+        f"- 源码哈希: `{source['source_hash']}`\n"
+        f"- 判定: {json.dumps(full.get('levels'), ensure_ascii=False)}\n"))
+    log = backend_log + f"[cache] 命中 verify-{cached['round']} 的判定，未执行候选\n"
+    evidence.write_text("execution.log", log)
+    payload = {
+        "ok": True,
+        **tool_context(backend),
+        "run_id": evidence.run.name,
+        "round": evidence.index,
+        "contract_hash": contract.hash,
+        "backend": backend,
+        "backend_resolution": resolution,
+        "stop_after": level.value if level else None,
+        "candidate_origin": origin,
+        "levels": full.get("levels"),
+        "passed": full.get("passed"),
+        "verdicts": compact,
+        "route": full.get("route"),
+        "eligibility": full.get("eligibility"),
+        "validity": full.get("validity"),
+        "conflict": full.get("conflict"),
+        "report": report_path,
+        "log": str(evidence.run / f"verify-{evidence.index}.log"),
+        "evidence": str(evidence.path / "result.json"),
+        **source,
+        "environment": environment,
+        "notes": [],
+        "cache_hit": True,
+        "cached_from": evidence.binding["cached_from"],
+    }
+    evidence.finish({**payload, "verdicts": verdicts},
+                    legacy_payload=payload, legacy_log=log)
+    return payload
+
+
 def _verify_candidate(run_dir: str | Path, code: str, *, stop_after: Any = None,
            backend: str = "mock", target_gflops: float = 0.0,
            host: Optional[str] = None, port: Optional[int] = None,
@@ -580,6 +651,7 @@ def _verify_candidate(run_dir: str | Path, code: str, *, stop_after: Any = None,
            work_dir: Optional[str] = None, timeout: int = 300,
            persistent: bool = False,
            candidate_origin: Optional[str] = None,
+           verification_purpose: str = 'explore',
            now: Optional[float] = None) -> dict:
     """对**这一回合**的候选源码做判定；不做候选生成、不做修复、不做搜索。
 
@@ -635,6 +707,18 @@ def _verify_candidate(run_dir: str | Path, code: str, *, stop_after: Any = None,
                                                         user=user, key_path=key_path,
                                                         work_dir=work_dir, timeout=timeout,
                                                         persistent=persistent)
+        environment = _environment_of(backend_obj)
+        evidence.binding["environment"] = environment
+        if verification_purpose == 'explore' and level is not None and level.value in ('L1', 'L2'):
+            cached = verdict_cache.lookup(
+                run, contract_hash=contract.hash, source_hash=source["source_hash"],
+                stop_after=level.value, environment=environment,
+                implementation=evidence.implementation)
+            if cached is not None:
+                return _replay_cached(evidence, cached, source=source, contract=contract,
+                                      backend=backend, resolution=resolution, origin=origin,
+                                      level=level, environment=environment,
+                                      backend_log=backend_log)
         verifier = Verifier(backend_obj)
         install_level_recorder(verifier, evidence.path)
         results, verify_log = _quiet(verifier.verify, code, task, inputs, None,
@@ -694,6 +778,7 @@ def _verify_candidate(run_dir: str | Path, code: str, *, stop_after: Any = None,
             "log": str(run / f"verify-{index}.log"),
             "evidence": str(evidence.path / "result.json"),
             **source,
+            "environment": environment,
             "notes": _judgement_notes(contract, getattr(l3, "metrics", None) or {}) if l3 else [],
         }
         evidence.finish({**payload, "verdicts": verification_data(results)},
@@ -1533,6 +1618,13 @@ def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) 
     summary = None
     if (run / SUMMARY_FILE).is_file():
         summary = json.loads((run / SUMMARY_FILE).read_text(encoding="utf-8"))
+    result = None
+    if status.get('kind') == 'tool_call' and (run / 'result.json').is_file():
+        try:
+            result = json.loads(json.loads(
+                (run / 'result.json').read_text(encoding='utf-8'))['content'][0]['text'])
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            result = None
     tail = []
     log_path = run / ("execution.log" if status.get('kind') == 'tool_call' else "autonomous.log")
     if log_path.is_file():
@@ -1558,7 +1650,7 @@ def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) 
             remote_execution='unknown', provider_call='unknown') if phase == 'lost' else None),
         "partial_artifacts": status.get('partial_artifacts') or partial_artifacts(run),
         "cancellation": status.get('cancellation') or cancellation(run, status.get('invocation_id')),
-        "summary": summary, "log_tail": tail,
+        "summary": summary, "result": result, "log_tail": tail,
     }
 
 
