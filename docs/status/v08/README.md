@@ -116,6 +116,14 @@ FP32 Matmul 的 IEEE 基线与计算路径判断已修复，并通过 H20 回归
 逐条过程记录以 [A/C 工作流轮待办](ac-workflow-round-todo-20261108.md) 为准。
 后续轮次（修复型任务、更多任务族、中档模型探点）尚未登记。
 
+### P1 性能 parity（已跑完：C_worse_observed）
+
+对 v6 **两臂都交付**的 3 个配对（matmul-4096-fp32 ×2 轮 + attention-prefill-4096 ×1 轮）重跑独立 L3，
+只问「C 是否比 A 更慢超噪声带」（parity，不是增益、不是打库）。2026-11-14 在 H20 GPU3 跑完：
+三对全部可判、全部 C_worse（+24.89% / +1.85% / +38.13%），系列判 `C_worse_observed`、
+`formal_parity_claim=false`——**性能 parity 主张被否证**（与交付数增益分属两轴，互不推翻）。
+见 [P1 预登记](../../testing/v08-p1-preregistration.md) 与 [v0.8.1 进度入口 §3](../v081/README.md)。
+
 ### 其他待决定事项
 
 1. **默认 runner 的参考环境**（C5 复测已用隔离环境）
@@ -133,7 +141,8 @@ FP32 Matmul 的 IEEE 基线与计算路径判断已修复，并通过 H20 回归
 
 **测试/操作**：[noise preflight](../../testing/v08-noise-preflight.md) ·
 [两臂计量对账](../../testing/v08-arm-metering.md) ·
-[R2 预登记](../../testing/v08-r2-preregistration.md) · [R2 跑法](../../testing/v08-r2-runbook.md)
+[R2 预登记](../../testing/v08-r2-preregistration.md) · [R2 跑法](../../testing/v08-r2-runbook.md) ·
+[P1 性能 parity 预登记](../../testing/v08-p1-preregistration.md)
 
 **状态/证据**：[真机回执](real-receipt-20261107.md) ·
 [候选余量](candidate-headroom-20261107.md) · [R2 FP16 试跑](r2-pair-1-20261107.md) ·
