@@ -14,9 +14,11 @@ from typing import Mapping
 import numpy as np
 
 PROTOCOL = "numpy-storage-v1"
-MAX_STORAGE_BYTES = 256 * 1024 * 1024
-# 仅 seed 传输路径用：值已经在控制端/远端各物化一次，不再走 JSON 字节，
-# 所以可以放宽到 512 MiB；JSON 编码/解码仍受 MAX_STORAGE_BYTES 约束。
+# 2026-11-16 P2：256→512 MiB。快核（layernorm 1.46×eager、0.14ms）的 launch 地板占比要压到
+# 10% 有效性门槛下需更大输入（32768×6144=384MiB），256MiB 限额封死了 valid 窗口。放宽传输
+# 安全上限到 512MiB（与 seed 路径一致）；launch 有效性门槛本身不变，不是放宽判据。
+MAX_STORAGE_BYTES = 512 * 1024 * 1024
+# seed 传输路径：值已在控制端/远端各物化一次，不走 JSON 字节。
 MAX_SEED_STORAGE_BYTES = 512 * 1024 * 1024
 
 

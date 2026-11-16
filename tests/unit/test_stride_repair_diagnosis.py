@@ -19,6 +19,7 @@ from operator_agent.generate.repair_diagnoser import (
 from operator_agent.generate.repair_loop import repair
 from operator_agent.core.run_contract import code_hash, digest
 from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
+from operator_agent.decide import input_fidelity as fidelity
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / 'fixtures'
@@ -361,7 +362,7 @@ def test_shadowed_rebound_or_out_of_order_programs_cannot_prove_the_address_chai
     ('observed', 'shape', [8.0, 32]), ('observed', 'strides', [256, 8.0]),
     ('both', 'offset', 2048), ('both', 'offset', -4), ('both', 'offset', 2),
     ('both', 'storage_bytes', 2043), ('both', 'storage_bytes', 0),
-    ('both', 'storage_bytes', 256 * 1024 * 1024 + 1),
+    ('both', 'storage_bytes', fidelity.MAX_STORAGE_BYTES + 1),
     ('both', 'strides', [-256, 8]),
 ], ids=['bool_offset', 'bool_storage', 'int_writeable', 'float_storage_bytes',
         'float_stride', 'readback_bool_offset', 'readback_bool_storage',

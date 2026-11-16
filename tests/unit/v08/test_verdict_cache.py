@@ -188,3 +188,38 @@ def test_lookup_refuses_l3_verdict_inside_l2_binding(tmp_path):
     full['verdicts'].append(dict(level='L3', passed=True, message='', metrics={}))
     (directory / 'result.json').write_text(json.dumps(full))
     assert _lookup(tmp_path) is None
+
+
+def test_unknown_l2_is_not_cached_and_retry_reexecutes(tmp_path, monkeypatch):
+    """L2 回执为 unknown 时，同源码重试必须重新执行验证，不许回放。
+
+    复现真实形状：`correctness_preflight` 在 profile/参考身份 unknown 时返回单个 L2
+    结果，`passed=False`（bool）但 `metrics.correctness.verdict='unknown'`（设施缺口，
+    不是候选失败）。旧 `_decisive` 只查 passed 是 bool，把这种 unknown 当成决定性失败
+    缓存 ⇒ 重试命中缓存、回放那次 unknown，而不重跑。
+    """
+    from operator_agent.core.schemas import VerificationResult, VerificationLevel
+    from operator_agent.decide.verifier import Verifier
+
+    unknown = VerificationResult(
+        VerificationLevel.L2_FUNCTION, False, message='默认正确性配置无法确立',
+        metrics={'correctness': {'verdict': 'unknown', 'reason': 'fixture', 'cases': []}})
+    monkeypatch.setattr(Verifier, 'correctness_preflight',
+                        staticmethod(lambda task, test_inputs=None: unknown))
+    run = _prepared(tmp_path)
+    first = ht.verify(run, CORRECT, backend='mock', stop_after='L2')
+    assert first['levels']['L2'] is False
+    second = ht.verify(run, CORRECT, backend='mock', stop_after='L2')
+    assert not second.get('cache_hit'), 'unknown L2 不该被缓存，同源码重试必须重新执行'
+
+
+def test_lookup_refuses_backend_only_environment(tmp_path):
+    """环境探测只返回 backend 键（hw_info 空）时，应 fail-closed 判未命中。
+
+    复现真实形状：`fingerprint_of({}, label)` 只产出 `{backend: label}`。旧 lookup 的
+    `not environment` 守卫只挡真空字典，挡不住「仅 backend」⇒ 探测失败也被当成有效身份
+    去匹配。设计（environment_identity docstring）要求此时关闭缓存。
+    """
+    backend_only = {'backend': 'SSHExecutor@h20(nvidia)'}
+    _evidence(tmp_path, 1, environment=backend_only)
+    assert _lookup(tmp_path, environment=backend_only) is None

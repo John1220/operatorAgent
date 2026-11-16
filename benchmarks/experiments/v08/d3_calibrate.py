@@ -3,7 +3,8 @@
 两件量具（v0.8.1 `9fb3ce7`）各自的标定面：
 
 A. ``identity_cache`` —— 判定缓存的键里有一格是**环境身份**。在真 SSH 后端上：
-   1. 环境身份必须回读到真实 H20 字段（torch/triton/device/驱动/CUDA/UUID），不是空字典；
+   1. 环境身份必须回读到真实 H20 **型号级**字段（name/device/cc/torch/triton），不是空字典；
+      驱动/CUDA/UUID 在 SSH 上不产出——型号级身份是已接受的边界（2026-11-15），记为观测项不作门；
    2. 同源码同契约重复 verify（explore, L1）⇒ 第二次 ``cache_hit=True`` 且 ``cached_from`` 指回第一轮；
    3. 换一份源码（哈希不同）⇒ 不命中；
    4. 预算按**派发**扣，命中也扣（登记单位不是 GPU 秒）。
@@ -81,7 +82,9 @@ def identity_cache(*, host, work_dir, root, ac_root, gpu_env):
         'environment_nonempty': bool(env),
         'environment_has_device': bool(env.get('device') or env.get('name')),
         'environment_has_torch': bool(env.get('torch_version')),
-        'environment_has_gpu_uuid': bool(env.get('gpu_uuid')),
+        'environment_model_level_complete': all(
+            bool(env.get(k)) for k in ('name', 'device', 'compute_capability',
+                                       'torch_version', 'triton_version')),
         'first_not_cached': not r1.get('cache_hit'),
         'second_cache_hit': r2.get('cache_hit') is True,
         'cached_from_round1': (r2.get('cached_from') or {}).get('round') == r1.get('round'),
@@ -93,6 +96,9 @@ def identity_cache(*, host, work_dir, root, ac_root, gpu_env):
     receipt = dict(part='identity_cache', checks=checks,
                    all_pass=all(checks.values()),
                    environment=env,
+                   identity_scope='gpu_model_level_accepted',
+                   gpu_uuid_bound=bool(env.get('gpu_uuid')),
+                   accepted_limitation='SSH 不产出 gpu_uuid/driver/cuda；型号级身份为已接受边界，非缺陷',
                    rounds=[dict(round=r.get('round'), cache_hit=r.get('cache_hit'),
                                 cached_from=r.get('cached_from'),
                                 levels=r.get('levels'),

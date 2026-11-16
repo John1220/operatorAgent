@@ -642,18 +642,28 @@ class SearchAgent:
         # 「额度花完了」是预算问题, 「三条件没同时成立」是判据问题 —— 读同一份
         # perf_data 的下游必须能分开说出是哪一条（键名不同 ⇒ 理由可归因）。
         _esc_denied = perf_data.get("structural_escalation_denied")
+        # 观测格（不改判定）：本轮搜索走了哪条路。P2 诊断开关对照要求「记录是否回退
+        # 规则搜索」——三条规则路径原来只 print，配对差分会把「LLM 没被调用」误读成
+        # 「诊断无效」。last_path 让驱动逐轮落盘归因（llm / rule_*）。
+        self.last_path = None
+        self.last_llm_error = None
         if _esc_denied:
             prior_sketch, suggestion = self._rule_optimize(sketch, perf_data)
+            self.last_path = "rule_escalation_denied"
             print(f"  [Search] 结构升级门未通过 ⇒ 只做参数搜索 (规则模板): "
                   f"{'; '.join(str(r) for r in _esc_denied)}")
         elif perf_data.get("llm_budget_exhausted"):
             prior_sketch, suggestion = self._rule_optimize(sketch, perf_data)
+            self.last_path = "rule_budget_exhausted"
             print(f"  [Search] token 预算用尽 ⇒ 纯数值搜索 (规则模板): {suggestion}")
         else:
             try:
                 prior_sketch, suggestion = self._llm_optimize(sketch, perf_data)
+                self.last_path = "llm"
             except Exception as e:
                 # LLM 优化失败时回退到规则优化, 不中断整个任务
+                self.last_path = "rule_llm_fallback"
+                self.last_llm_error = str(e)
                 print(f"  [Search] LLM 优化失败 ({e}), 回退规则优化")
                 prior_sketch, suggestion = self._rule_optimize(sketch, perf_data)
 
