@@ -175,7 +175,7 @@ C 的待遇是“插件 + 其文档化工作流”（v6 已定：工作流本身
 | fixture 试跑（C 臂） | **已跑通**：scripted 模型走插件工具；L2 32/32、L3 `valid`、2.2352×、`qualified`、验证 3 次 |
 | 两格进 v7 聚合器 | **已跑通**：`pair_verdict` → `both_qualified`、配对差 0（fixture 仅供接线，不作成绩） |
 | xhigh smoke（内部 Coder 路径） | **不通过（2/2）**：真实 Coder prompt + wire 32768 ⇒ 两次都 `finish=length`、completion=32768 全部写进思考、核未发出（702 s / 697 s）。这说明 P2 起点核那条**单次整核生成**路径在 xhigh 下不可行；它**不是** A/C 臂的路径（A/C 两臂都是 DSH agent 用工具自己写） |
-| xhigh smoke（真实 A 臂） | **进行中**：一格 20 次调用；首两次启动失败已定因（见下） |
+| xhigh smoke（真实 A 臂） | **不通过**：一格真实 A 臂，首次模型调用 `outputTokens=32768`、`turn_end: max-tokens`、**零次工具调用、零次提交**。xhigh 在 wire 32768 下结构性不可用（两条路径都证实：内部 Coder 2/2、DSH agent 1/1） |
 | 冻结实际计划文件 | 待 smoke 后执行 |
 
 **fixture 暴露并修掉的四个真缺陷（都会直接影响正式格）**
