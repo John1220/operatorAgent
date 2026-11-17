@@ -250,7 +250,7 @@ class TestProtocolIdentitySurvivesAPackagedLayout(unittest.TestCase):
         self.assertTrue((root / "operator_agent").is_dir())
         self.assertTrue((root / "remote_scripts").is_dir())
         identity = run_contract.protocol_identity()
-        self.assertEqual(len(identity), 77)
+        self.assertEqual(len(identity), 78)
         self.assertIn('operator_agent/decide/verdict_cache.py', identity)
         self.assertTrue({f'operator_agent/execute/fake_backend/{name}.py'
                          for name in ('backend', 'config', 'model')} <= set(identity))

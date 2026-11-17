@@ -17,9 +17,13 @@ PROTOCOL = "numpy-storage-v1"
 # 2026-11-16 P2：256→512 MiB。快核（layernorm 1.46×eager、0.14ms）的 launch 地板占比要压到
 # 10% 有效性门槛下需更大输入（32768×6144=384MiB），256MiB 限额封死了 valid 窗口。放宽传输
 # 安全上限到 512MiB（与 seed 路径一致）；launch 有效性门槛本身不变，不是放宽判据。
-MAX_STORAGE_BYTES = 512 * 1024 * 1024
-# seed 传输路径：值已在控制端/远端各物化一次，不走 JSON 字节。
-MAX_SEED_STORAGE_BYTES = 512 * 1024 * 1024
+# 2026-11-17 fused：512 MiB → 1 GiB。residual+LayerNorm 有**两个**同形输入
+# （2×384 MiB=768 MiB），512 MiB 的总量上限会把合法任务挡在 L2 之外。上限仍是传输
+# 安全门（不是判据），fused 的 768 MiB 低于它；不改任何有效性/容差语义。
+MAX_STORAGE_BYTES = 1024 * 1024 * 1024
+# seed 传输路径：值已在控制端/远端各物化一次，不走 JSON 字节。fused 的 X+R 共
+# 768 MiB（2×32768×6144×2B），与 MAX_STORAGE_BYTES 同步放宽到 1 GiB。
+MAX_SEED_STORAGE_BYTES = 1024 * 1024 * 1024
 
 
 class InputFidelityError(ValueError):

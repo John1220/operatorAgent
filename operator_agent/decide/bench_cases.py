@@ -311,6 +311,15 @@ def _rows_case(kernel_type: str, shape: tuple, dtype: str, seed: int) -> "Benchm
 #: （不猜布局）。缺的是 attention / conv2d / csa_* 这几族：它们的输入布局要按 head 数、
 #: stride、压缩块这些参数才定得下来，本仓没有一份「已验证过的」布局可以照抄 —— 编一个
 #: 出来会让「评的是什么」静默漂移（正是本片要消掉的那类病），所以宁可没有。
+def _fused_rows_case(kernel_type: str, shape: tuple, dtype: str, seed: int) -> "BenchmarkCase":
+    """融合 residual+LayerNorm 的性能主用例：两个同形输入 X/R，末轴归一化。"""
+    m, n = shape
+    return BenchmarkCase(
+        name=f"{kernel_type}-{m}x{n}",
+        tensors=(TensorSpec("X", (m, n), dtype), TensorSpec("R", (m, n), dtype)),
+        seed=seed)
+
+
 def _attention_case(kernel_type: str, shape: tuple, dtype: str, seed: int) -> "BenchmarkCase":
     """prefill attention: Q/K/V 同形状 (B,H,S,D) + 按值直传的 `causal` 标量。
 
@@ -330,6 +339,7 @@ _CASE_LAYOUTS = {
     "log_softmax": (2, _rows_case),
     "layernorm": (2, _rows_case),
     "rmsnorm": (2, _rows_case),
+    "fused_layernorm_residual": (2, _fused_rows_case),
     "add": (2, _rows_case),
     "relu": (2, _rows_case),
     "gelu": (2, _rows_case),

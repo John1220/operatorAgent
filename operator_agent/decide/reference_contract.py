@@ -17,6 +17,14 @@ PROFILE_V2 = "builtin-layernorm-fp16-cuda-v2"
 #: attention 的 profile。语义与 layernorm 不同（没有 eps 归一化、没有 affine、softmax 沿末轴），
 #: 所以它是**另一份**契约，不是同一份改默认值。
 PROFILE_ATTENTION = "builtin-attention-fp16-cuda-v1"
+#: 融合族：`Y = LayerNorm(X + R)`。参考是 eager 两 kernel（fp16 add + native LN），
+#: primitive 单独成文件并单独 pin hash —— 不改 `builtin_layernorm.py`，因此不影响
+#: layernorm v2 / attention 已冻结的参考身份。
+PROFILE_FUSED_LN_RESIDUAL = "builtin-fused-layernorm-residual-fp16-cuda-v1"
+#: `operator_agent/decide/builtin_fused_layernorm_residual.py` 的 SHA256。
+#: 改那个文件就必须同步改这里并换 profile 版本，否则参考身份对不上。
+FUSED_LN_RESIDUAL_PRIMITIVE_SHA256 = (
+    "ee1d6cd42989aef91adefa713b1a0f3c6f08fdd5ca9fb664bb3abde467c875c2")
 # Filled from isolated read-only attestation, never discovered/accepted from a
 # candidate or auto-updated after a numerical failure.
 PINNED_RUNTIME = dict(
@@ -129,8 +137,32 @@ ATTENTION_REFERENCE = ReferenceContract(
     rtol=1e-2,
     required_matched_ratio=1.0)
 
+#: 融合 residual+LayerNorm 的受信任参考。语义与 layernorm v2 相同，只多了一步
+#: `X + R`（fp16，eager 序列的第一个 kernel）；primitive 单独文件、单独 pin hash。
+#: `atol` 由 2026-11-17 H20/GPU7 的 good/alt/bad 分离标定给出，不从 v2 借值。
+FUSED_LN_RESIDUAL_REFERENCE = ReferenceContract(
+    ExecutionIdentity(**dict(PINNED_RUNTIME,
+                             primitive_sha256=FUSED_LN_RESIDUAL_PRIMITIVE_SHA256)),
+    profile=PROFILE_FUSED_LN_RESIDUAL,
+    definition="native-pytorch-residual-add-layernorm-last-axis-no-affine-fp16-v1",
+    input_dtype="fp16",
+    candidate_accum="fp32_declared_not_arithmetic_attestation",
+    output_dtype="fp16",
+    reference_accum="native_implementation_pinned",
+    epsilon=1e-5,
+    normalized_axis=-1,
+    variance="population",
+    affine=False,
+    # 参考本身是 eager 两 kernel；候选允许把 add 与 LN 融成一个核，容差不变。
+    fp_fusion="candidate_fusion_allowed_reference_is_two_eager_kernels",
+    deterministic_outputs=True,
+    comparison="fp32_and",
+    rtol=1e-2,
+    required_matched_ratio=1.0)
+
 REGISTERED = {PROFILE_V2: ReferenceContract(ExecutionIdentity(**PINNED_RUNTIME)),
-              PROFILE_ATTENTION: ATTENTION_REFERENCE}
+              PROFILE_ATTENTION: ATTENTION_REFERENCE,
+              PROFILE_FUSED_LN_RESIDUAL: FUSED_LN_RESIDUAL_REFERENCE}
 
 
 def registered_reference(profile=PROFILE_V2):
@@ -216,13 +248,20 @@ def _file_hash(path):
     return h.hexdigest()
 
 
-def observe_execution():
+def observe_execution(profile=PROFILE_V2):
     import torch
     import torch.nn.functional as F
     if __package__:
-        from ..decide import builtin_layernorm
+        from ..decide import builtin_fused_layernorm_residual, builtin_layernorm
     else:
+        import builtin_fused_layernorm_residual
         import builtin_layernorm
+    if profile == PROFILE_FUSED_LN_RESIDUAL:
+        primitive = builtin_fused_layernorm_residual
+    elif profile in (PROFILE_V2, PROFILE_ATTENTION):
+        primitive = builtin_layernorm
+    else:
+        raise ReferenceIdentityError(f"no registered reference primitive for profile {profile!r}")
     if not torch.cuda.is_available():
         raise ReferenceIdentityError("no CUDA reference; CPU fallback forbidden")
     device = torch.cuda.current_device()
@@ -241,7 +280,7 @@ def observe_execution():
         cuda_runtime=str(torch.version.cuda), device=f"cuda:{device}", device_name=props.name,
         compute_capability=f"{props.major}.{props.minor}", driver_version=drivers[0],
         torch_config_sha256=hashlib.sha256(torch.__config__.show().encode()).hexdigest(),
-        functional_sha256=_file_hash(F.__file__), primitive_sha256=_file_hash(builtin_layernorm.__file__),
+        functional_sha256=_file_hash(F.__file__), primitive_sha256=_file_hash(primitive.__file__),
         layer_norm_callable_sha256=hashlib.sha256(inspect.getsource(F.layer_norm).encode()).hexdigest(),
         native_libraries=tuple((n, _file_hash(lib / n)) for n in
             ("libtorch_cpu.so", "libtorch_cuda.so", "libtorch_python.so")),
@@ -261,7 +300,7 @@ def check_observed(spec, observed):
 
 def execution_receipt(raw):
     try:
-        return check_observed(raw, observe_execution())
+        return check_observed(raw, observe_execution(as_reference(raw).profile))
     except ReferenceIdentityError:
         raise
     except Exception as exc:
@@ -278,9 +317,16 @@ def execution_receipt(raw):
 #: 而调用方无权纠正 —— max_error/atol/rtol 都在 hitl_tools.FORBIDDEN_KEYS 里。
 #: layernorm 的默认正好等于自己的标定值，所以这个洞只在 attention 上显形。
 REGISTERED_ATOL = {'builtin-layernorm-fp16-cuda-v2': 1e-5,
-                   'builtin-attention-fp16-cuda-v1': 3e-4}
+                   'builtin-attention-fp16-cuda-v1': 3e-4,
+                   # 2026-11-17 GPU7 标定（eager fp16 add 参考）：
+                   # good（fp32 统计）max_abs=3.90625e-3、alt（fp16 add）同量级，
+                   # bad（漏加 R）max_abs=4.53、匹配率 1.18%。5e-3 是最小的圆整值，
+                   # 同时放行 good/alt、拒绝 bad；不是从 layernorm v2 借来的 1e-5。
+                   'builtin-fused-layernorm-residual-fp16-cuda-v1': 5e-3}
 _PROFILE_OPERATOR = {'builtin-layernorm-fp16-cuda-v2': 'layernorm',
-                     'builtin-attention-fp16-cuda-v1': 'attention'}
+                     'builtin-attention-fp16-cuda-v1': 'attention',
+                     'builtin-fused-layernorm-residual-fp16-cuda-v1':
+                         'fused_layernorm_residual'}
 
 
 def registered_atol(raw):

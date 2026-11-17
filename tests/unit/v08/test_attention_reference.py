@@ -52,9 +52,12 @@ def test_the_registry_round_trips_every_entry():
 
 
 def test_the_registered_absolute_tolerance_is_per_profile():
-    from operator_agent.decide.reference_contract import REGISTERED_ATOL, registered_atol
-    assert REGISTERED_ATOL == {PROFILE_V2: 1e-5, PROFILE_ATTENTION: 3e-4}
-    for profile, expected in ((PROFILE_V2, 1e-5), (PROFILE_ATTENTION, 3e-4)):
+    from operator_agent.decide.reference_contract import (PROFILE_FUSED_LN_RESIDUAL,
+                                                          REGISTERED_ATOL, registered_atol)
+    assert REGISTERED_ATOL == {PROFILE_V2: 1e-5, PROFILE_ATTENTION: 3e-4,
+                               PROFILE_FUSED_LN_RESIDUAL: 5e-3}
+    for profile, expected in ((PROFILE_V2, 1e-5), (PROFILE_ATTENTION, 3e-4),
+                              (PROFILE_FUSED_LN_RESIDUAL, 5e-3)):
         assert registered_atol(registered_reference(profile).content_dict()) == expected
 
 

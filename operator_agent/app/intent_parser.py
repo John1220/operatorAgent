@@ -14,7 +14,8 @@ from ..core.schemas import (
     TaskType, TaskComplexity, Precision, DSLEnum,
 )
 from ..generate.prompt_manager import PromptManager
-from ..decide.correctness_profiles import with_default_correctness
+from ..decide.correctness_profiles import (REGISTERED_FUSED_KERNEL_TYPES,
+                                           with_default_correctness)
 
 
 class IntentParser:
@@ -28,6 +29,10 @@ class IntentParser:
         "attention": ["attention", "flash_attention", "flash attention", "注意力"],
         "log_softmax": ["log_softmax", "log softmax"],
         "softmax": ["softmax", "soft max"],
+        # 已注册的融合族必须排在 layernorm 之前，否则 "residual add layernorm" 会被
+        # 普通 layernorm 先匹配走，语义就从"加 R 再归一化"悄悄变成"只归一化 X"。
+        "fused_layernorm_residual": ["residual add layernorm", "residual+layernorm",
+                                     "residual_layernorm", "residual layernorm"],
         "layernorm": ["layernorm", "layer_norm", "层归一化"],
         "relu": ["relu", "激活函数"],
         "conv2d": ["conv2d", "卷积", "convolution"],
@@ -90,8 +95,11 @@ class IntentParser:
         # semantics. This is conservative detection, NOT full NL interpretation.
         source = replace(task.source, fused_ops=list(task.source.fused_ops),
                          semantic_parameters=dict(task.source.semantic_parameters))
-        if re.search(r"融合|\bfused\b|乘加|\b(?:matmul|gemm|relu|softmax|layernorm)\s*\+|"
-                     r"\+\s*(?:relu|softmax|layernorm|add|bias)\b", request, re.I):
+        if (task.source.kernel_type not in REGISTERED_FUSED_KERNEL_TYPES
+                and re.search(r"融合|\bfused\b|乘加|\b(?:matmul|gemm|relu|softmax|layernorm)\s*\+|"
+                              r"\+\s*(?:relu|softmax|layernorm|add|bias)\b", request, re.I)):
+            # 已注册的融合族（residual+LayerNorm）有受信任 profile，不再是"未解析融合"；
+            # 其余任何融合标记仍按未知语义处理（fail closed）。
             source.fused_ops = source.fused_ops or ["unresolved_fusion"]
         if re.search(r"\b(?:eps|epsilon|affine|normalized_shape|dim|axis|bias|weight)\s*[:=]|"
                      r"\b(?:affine|transpose|log_softmax)\b|"

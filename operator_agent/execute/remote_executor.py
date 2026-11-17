@@ -1155,7 +1155,9 @@ class SSHExecutor(Backend):
             files.append((repo_root / "remote_scripts" / "session_control.py",
                           f"{remote_dir}/session_control.py"))
             files.extend((repo_root / "operator_agent" / rel, f"{remote_dir}/{rel.split('/')[-1]}")
-                         for rel in ("decide/builtin_layernorm.py", "decide/reference_contract.py"))
+                         for rel in ("decide/builtin_layernorm.py",
+                                     "decide/builtin_fused_layernorm_residual.py",
+                                     "decide/reference_contract.py"))
         files.append((repo_root / "remote_scripts" / self._runner_script,
                       self.remote_runner_path))
         if self.platform == "nvidia":

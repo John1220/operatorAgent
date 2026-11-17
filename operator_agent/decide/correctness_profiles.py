@@ -10,8 +10,9 @@ import numpy as np
 from ..decide.bench_cases import BenchCaseError
 from ..decide.correctness import as_suite, CorrectnessCase, CorrectnessSuite
 from ..decide.bench_cases import BenchmarkCase, TensorSpec
-from ..decide.reference_contract import (PROFILE_ATTENTION, PROFILE_V2, as_reference,
-                                         registered_reference, validate_gate, REGISTERED_ATOL)
+from ..decide.reference_contract import (PROFILE_ATTENTION, PROFILE_FUSED_LN_RESIDUAL,
+                                         PROFILE_V2, as_reference, registered_reference,
+                                         validate_gate, REGISTERED_ATOL)
 #: attention 的 correctness profile 与它的参考 profile 是**同一个字符串** ——
 #: 与 layernorm（PROFILE_V2 同时充当两者）保持同一种写法，免得两份名字各自漂。
 ATTENTION_PROFILE_VERSION = PROFILE_ATTENTION
@@ -20,12 +21,41 @@ from ..decide.correctness_boundaries import (BoundaryAxis, BoundaryPolicy, Tenso
 
 PROFILE_VERSION = "builtin-l2-v1"
 OPERATORS = ("relu", "matmul", "softmax", "layernorm")
+#: 已注册的融合族（kernel_type 白名单）。规则解析把它们视为**已知语义**，
+#: 不再打 `unresolved_fusion` 标记 —— 那标记是给"没注册的融合"用的。
+REGISTERED_FUSED_KERNEL_TYPES = ("fused_layernorm_residual",)
 SCOPE = "内建二维算子有限 L2 子域；layernorm 为无 affine、末轴归一化、eps=1e-5；不是全域证明"
 
 #: attention 的显式 case 清单。它**不走** axis 交叉生成器：S 必须是真实规模
 #: (1000/4096 不是边界对齐值), 而 causal 是 case 级标量而非形状轴。
 #: 最后一条 `large` 是**必需**的 —— 2026-11-07 标定证明: 随机输入下 exp 不溢出,
 #: "漏掉 max 平移" 的实现能骗过容差, 只有极值输入能抓到它。
+#: 融合 residual+LayerNorm 的显式 case 清单（两个输入 X/R，pattern 同时作用于两者）。
+#: 形状/值模式沿用 v2 已标定过的矩阵；strided 只放在 rows>1 且 cols>1 的 case 上
+#: （单列/单行的跨步取样没有可比的元素步长，materialize 会拒绝）。
+FUSED_LN_RESIDUAL_CASES = (
+    ("r1c1", (1, 1), "random", "contiguous"),
+    ("r1c33", (1, 33), "random", "contiguous"),
+    ("r8c1", (8, 1), "random", "contiguous"),
+    ("r8c31", (8, 31), "random", "contiguous"),
+    ("r8c32", (8, 32), "random", "contiguous"),
+    ("r8c33", (8, 33), "random", "contiguous"),
+    ("r9c1", (9, 1), "random", "contiguous"),
+    ("r9c33", (9, 33), "random", "contiguous"),
+    ("r8c33-zeros", (8, 33), "zeros", "contiguous"),
+    ("r8c33-constant", (8, 33), "constant", "contiguous"),
+    ("r8c33-large", (8, 33), "large", "contiguous"),
+    ("r8c33-small", (8, 33), "small", "contiguous"),
+    *((f"single-column-{name}-{layout}", (8, 1), pattern, layout)
+      for name, pattern in (("zero", "zeros"), ("one", "constant"), ("large", "large"),
+                            ("small", "small"), ("nonbinary", "constant_nonbinary"))
+      for layout in ("contiguous", "strided")),
+    *((f"{pattern}-{layout}", (8, 33), pattern, layout)
+      for pattern in ("constant_nonbinary", "near_constant", "large_varying",
+                      "small_varying", "signed_large")
+      for layout in ("contiguous", "strided")),
+)
+
 ATTENTION_CASES = (
     ("s1024-nocausal", (1, 16, 1024, 128), False, "random", "contiguous"),
     ("s1024-causal", (1, 16, 1024, 128), True, "random", "contiguous"),
@@ -110,6 +140,24 @@ def attention_suite(seed=23):
     return as_suite({"cases": [case.content_dict() for case in cases]})
 
 
+def fused_ln_residual_suite(seed=17):
+    """融合 residual+LayerNorm 的默认套件：32 条显式 case（不是全域证明）。
+
+    每条 case 有两个输入 X/R（同形、同 dtype）；pattern 同时作用于两者，与 attention
+    的 Q/K/V 同一规则。输出元素数按 X 计。
+    """
+    cases = []
+    for case_id, (rows, cols), pattern, layout in FUSED_LN_RESIDUAL_CASES:
+        inputs = BenchmarkCase(
+            name=f"fused-ln-residual-r{rows}c{cols}",
+            tensors=(TensorSpec("X", (rows, cols), "fp16"),
+                     TensorSpec("R", (rows, cols), "fp16")),
+            seed=seed)
+        cases.append(CorrectnessCase(
+            f"fused-ln-residual-{rows}x{cols}-{pattern}-{layout}", inputs, pattern, layout))
+    return as_suite({"cases": [case.content_dict() for case in cases]})
+
+
 def default_policy(kernel_type, dtype, version=PROFILE_VERSION):
     if version not in (PROFILE_VERSION, PROFILE_V2):
         raise BenchCaseError(f"未知 correctness profile 版本: {version!r}")
@@ -168,7 +216,7 @@ def expected_output_elements(spec, inputs):
     未知 profile 返回 `None` —— 由调用方判 unknown，不兜默认。
     """
     profile = getattr(spec, "profile", None)
-    if profile == PROFILE_V2:
+    if profile in (PROFILE_V2, PROFILE_FUSED_LN_RESIDUAL):
         only = inputs.get("X")
     elif profile == PROFILE_ATTENTION:
         only = inputs.get("Q")
@@ -200,6 +248,18 @@ def declaration_check(kernel_type, dtype, version, suite, reference_contract=Non
                           policy_hash=attention_suite().digest())
             # 早返回：attention 不走下面那套"axis policy 必须与默认 policy 相等"的检查
             # （那套只对二维生成器成立）。
+            return result
+        elif version == PROFILE_FUSED_LN_RESIDUAL:
+            spec = as_reference(reference_contract)
+            if spec.profile != PROFILE_FUSED_LN_RESIDUAL:
+                raise BenchCaseError("fused residual LayerNorm profile 与参考身份不一致")
+            if as_suite(suite).digest() != fused_ln_residual_suite().digest():
+                raise BenchCaseError(
+                    "fused residual LayerNorm 必须保留全部 32 条显式 case（含 strided/近常量）")
+            result.update(status="passed", reference_hash=spec.digest(),
+                          scope="H20 CUDA eager x+r(native fp16 add)+native LayerNorm；"
+                                "32 条有限 L2 case，不证明任意形状/值域",
+                          policy_hash=fused_ln_residual_suite().digest())
             return result
         elif reference_contract is not None:
             raise BenchCaseError("参考身份声明只能与其可信 v2 profile 一同使用")
@@ -253,6 +313,24 @@ def profile_check(task, inputs=None):
                                for v in sets):
                 result.update(status="unknown",
                               reason="attention 主输入必须是 Q/K/V + causal 标量")
+        return result
+    if result["status"] == "passed" and version == PROFILE_FUSED_LN_RESIDUAL:
+        try:
+            validate_gate(c.reference_contract, c.precision.value, c.max_error,
+                          kernel_type="fused_layernorm_residual")
+        except (ValueError, TypeError) as exc:
+            result.update(status="unknown", reason=str(exc))
+        if result["status"] == "passed" and inputs is not None:
+            sets = inputs if isinstance(inputs, list) else [inputs]
+            for values in sets:
+                if (not isinstance(values, dict) or set(values) != {"X", "R"}
+                        or not hasattr(values["X"], "shape")
+                        or values["X"].shape != values["R"].shape
+                        or str(getattr(values["X"], "dtype", "")).split(".")[-1] != "float16"
+                        or str(getattr(values["R"], "dtype", "")).split(".")[-1] != "float16"):
+                    result.update(status="unknown",
+                                  reason="fused residual LayerNorm 主输入必须是同形 fp16 X/R")
+                    break
         return result
     if result["status"] != "passed" or inputs is None:
         return result
@@ -312,6 +390,11 @@ def with_default_correctness(task):
                 version = ATTENTION_PROFILE_VERSION
                 reference = registered_reference(PROFILE_ATTENTION).content_dict()
                 suite = attention_suite().content_dict()
+            elif (task.source.kernel_type == "fused_layernorm_residual"
+                    and getattr(task.constraints.precision, "value", None) == "fp16"):
+                version = PROFILE_FUSED_LN_RESIDUAL
+                reference = registered_reference(PROFILE_FUSED_LN_RESIDUAL).content_dict()
+                suite = fused_ln_residual_suite().content_dict()
             elif task.source.kernel_type == "layernorm" and getattr(task.constraints.precision, "value", None) == "fp16":
                 version = PROFILE_V2
                 reference = registered_reference().content_dict()

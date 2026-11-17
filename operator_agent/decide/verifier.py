@@ -2733,6 +2733,13 @@ class Verifier:
                     bytes_transferred = 2.0 * n * nbytes
                     return flops, bytes_transferred
 
+        if kt == "fused_layernorm_residual":
+            # 读 X、读 R、写 Y：三个张量的流量；FLOPs 与远端 `_compute_metrics` 同式。
+            if {"X", "R"} <= set(inputs):
+                x = np.asarray(inputs["X"])
+                n = int(np.prod(x.shape))
+                return 11.0 * n, 3.0 * n * nbytes
+
         if "layernorm" in kt or "layer_norm" in kt:
             # LayerNorm: ~7*N FLOPs (mean, var, norm, scale, shift), memory: ~2*N
             # (只算 X 的读写, 不含 weight/bias 那 O(N) 项; 远端 runner 的公式含它们,

@@ -974,6 +974,10 @@ def _shape_probe_plan(op, dims, dtype, causal=False):
     if op == 'layernorm':
         m, n = dims
         return {"X": np.empty((m, n), dtype=element)}, f'layernorm-{m}x{n}-{dtype}'
+    if op == 'fused_layernorm_residual':
+        m, n = dims
+        return ({"X": np.empty((m, n), dtype=element), "R": np.empty((m, n), dtype=element)},
+                f'fused-layernorm-residual-{m}x{n}-{dtype}')
     if op == 'attention':
         b, h, s, d = dims
         inputs = {"Q": np.empty((b, h, s, d), dtype=element),
@@ -1005,14 +1009,14 @@ def noise_preflight(*, backend='local', reps=5, planned_effect_pct=None, shape=N
     if type(reps) is not int or reps < MIN_REPS:
         raise ToolError("bad_reps", f"reps 必须是 >= {MIN_REPS} 的整数（当前 {reps!r}）")
     dims = None
-    if op == 'attention' and dtype != 'fp16':
+    if op in ('attention', 'fused_layernorm_residual') and dtype != 'fp16':
         # attention 目前只有 fp16 profile（`builtin-attention-fp16-cuda-v1`）。
         # 探针可以量别的精度，但那会给出"这个窗口对这个算子可判"的印象，
         # 而那个算子今天根本判不了 —— 直接拒绝，比事后解释便宜。
         raise ToolError("preflight_dtype",
                         f"attention 探针只支持 fp16（当前 {dtype!r}）")
     if shape is not None:
-        want = {'layernorm': 2, 'attention': 4}.get(op, 3)
+        want = {'layernorm': 2, 'fused_layernorm_residual': 2, 'attention': 4}.get(op, 3)
         if not isinstance(shape, (list, tuple)) or len(shape) != want:
             raise ToolError("bad_shape",
                             f"shape 必须是 {want} 个整数 ("

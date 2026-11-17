@@ -57,7 +57,8 @@ def _parser() -> argparse.ArgumentParser:
                     help="每个 episode 内采样几次（--shape 时有效，默认 8）")
     pf.add_argument("--dtype", default="fp16", choices=["fp16", "fp32"],
                     help="--shape 时探针的 dtype（默认 fp16）")
-    pf.add_argument("--op", default="matmul", choices=["matmul", "layernorm", "attention"],
+    pf.add_argument("--op", default="matmul",
+                    choices=["matmul", "layernorm", "attention", "fused_layernorm_residual"],
                     help="--shape 时的探针算子（默认 matmul；layernorm 用 M,N；attention 用 B,H,S,D）")
     pf.add_argument("--causal", action="store_true",
                     help="attention 探针用因果 mask（默认全注意力）")

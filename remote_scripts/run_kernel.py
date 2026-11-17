@@ -52,10 +52,12 @@ try:
     from reference_contract import (ReferenceIdentityError, execution_receipt, registered_atol,
                                     validate_gate)
     from builtin_layernorm import native_layernorm
+    from builtin_fused_layernorm_residual import native_residual_layernorm
 except ImportError:
     from operator_agent.decide.reference_contract import (ReferenceIdentityError, execution_receipt,
                                                           registered_atol, validate_gate)
     from operator_agent.decide.builtin_layernorm import native_layernorm
+    from operator_agent.decide.builtin_fused_layernorm_residual import native_residual_layernorm
 
 
 # ─── GPU 自动选择 ─────────────────────────────────────────────
@@ -492,6 +494,18 @@ def _reference_torch(kernel_type: str, inputs: dict, reference_contract=None):
                     or values["X"].ndim != 2 or any(d <= 0 for d in values["X"].shape)):
                 raise ReferenceIdentityError("v2 reference inputs outside declared semantics")
             return lambda: native_layernorm(values["X"]), "pytorch_eager"
+        if profile == "builtin-fused-layernorm-residual-fp16-cuda-v1":
+            # Y = LayerNorm(X + R)：参考是 eager 两 kernel（fp16 add + native LN），
+            # 输入两个同形 fp16 二维张量，输出与 X 同形。
+            if (kind != "fused_layernorm_residual" or set(values) != {"X", "R"}
+                    or values["X"].dtype != torch.float16 or values["R"].dtype != torch.float16
+                    or values["X"].ndim != 2 or values["R"].ndim != 2
+                    or values["X"].shape != values["R"].shape
+                    or any(d <= 0 for d in values["X"].shape)):
+                raise ReferenceIdentityError(
+                    "fused residual LayerNorm v1 reference inputs outside declared semantics")
+            return (lambda: native_residual_layernorm(values["X"], values["R"]),
+                    "pytorch_eager")
         if profile == "builtin-attention-fp16-cuda-v1":
             # 语义与受信任定义一致: 1/sqrt(D) 缩放、末轴 softmax、causal = (j <= i)、
             # 输入输出 fp16、无 affine / 无 dropout / 无加性 bias。
@@ -1717,6 +1731,20 @@ def _compute_metrics(real_inputs: dict, elapsed: float) -> tuple:
         bytes_moved = (m * k + k * n + m * n) * _itemsize(a)
         bandwidth = bytes_moved / elapsed / 1e9
         return gflops, bandwidth
+
+    # Fused residual+LayerNorm: read X + read R + write Y. 11 FLOPs/element
+    # (add 1 + mean/var/normalize ~10), matching the control-side formula.
+    if "X" in real_inputs and "R" in real_inputs:
+        x = real_inputs["X"]
+        if _ndim(x) >= 2:
+            n = 1
+            for d in x.shape:
+                n *= int(d)
+            flops = 11.0 * n
+            gflops = flops / elapsed / 1e9
+            bytes_moved = 3 * n * _itemsize(x)
+            bandwidth = bytes_moved / elapsed / 1e9
+            return gflops, bandwidth
 
     # Attention: Q, K, V with last D == head dim
     if "Q" in real_inputs and "K" in real_inputs and "V" in real_inputs:

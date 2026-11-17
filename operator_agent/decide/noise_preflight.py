@@ -97,6 +97,38 @@ def kernel(X):
 """
 
 
+#: 融合 residual+LayerNorm 的探针: 读 X、读 R、写 Y 的一趟 kernel。
+#: 它必须与候选同通道（自写 triton，不用原生算子），且**不能**复用 layernorm 探针 ——
+#: 输入从 1 份变 2 份，带宽结构不同，一个窗口在单输入 LN 上安静不代表这里也安静。
+FUSED_LN_RESIDUAL_PROBE = """import triton
+import triton.language as tl
+import torch
+
+
+@triton.jit
+def _probe_fused_ln_residual(x_ptr, r_ptr, y_ptr, N, eps, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < N
+    x = tl.load(x_ptr + row * N + cols, mask=mask, other=0.0).to(tl.float32)
+    r = tl.load(r_ptr + row * N + cols, mask=mask, other=0.0).to(tl.float32)
+    s = x + r
+    mean = tl.sum(s, axis=0) / N
+    centred = tl.where(mask, s - mean, 0.0)
+    var = tl.sum(centred * centred, axis=0) / N
+    y = centred / tl.sqrt(var + eps)
+    tl.store(y_ptr + row * N + cols, y.to(y_ptr.dtype.element_ty), mask=mask)
+
+
+def kernel(X, R):
+    M, N = X.shape
+    Y = torch.empty_like(X)
+    _probe_fused_ln_residual[(M,)](X, R, Y, N, 1e-5,
+                                  BLOCK=triton.next_power_of_2(N), num_warps=8)
+    return Y
+"""
+
+
 #: 算力+带宽混合的探针: prefill attention（Scope A: MHA, D=128, fp16 in/out, fp32 累加）。
 #: 与 matmul 探针同一个理由存在 —— 它必须量**这张卡上目标尺寸的那个核**的散布，
 #: 而不是主机 CPU 的。为什么不能拿 matmul 探针代替: attention 的时延由两个 GEMM
@@ -177,7 +209,10 @@ def probe_source(op='matmul'):
         return LAYERNORM_PROBE
     if op == 'attention':
         return ATTENTION_PROBE
-    raise ValueError(f'unsupported probe op {op!r}; use matmul, layernorm or attention')
+    if op == 'fused_layernorm_residual':
+        return FUSED_LN_RESIDUAL_PROBE
+    raise ValueError(f'unsupported probe op {op!r}; use matmul, layernorm, attention '
+                     f'or fused_layernorm_residual')
 
 
 def matmul_probe_source():
