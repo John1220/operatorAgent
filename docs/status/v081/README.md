@@ -94,7 +94,7 @@
    L2 32/32。预登记与结果见 [融合头寸预登记](../../testing/v08-fused-headroom-preregistration.md#10-头寸结果2026-11-17gpu7)。
 3. **用该任务做 A/C 对照（预登记草案已起草）。** 两边从空起点出发、同模型/采样/预算/独立终评，
    主指标是独立终评通过完整 L2 的交付数，性能与调用数只作次级观测。草案见
-   [融合任务 A/C 预登记](../../testing/v08-fused-ac-preregistration.md)；冻结前需确认模型档位、对数与墙钟。
+   [融合任务 A/C 预登记](../../testing/v08-fused-ac-preregistration.md)；参数已确认，待接线与冻结。
    不能把这份手写核直接算作插件交付。[任务选型规则](../../design/v08/task-family-selection.md)
 
 ### 方向3 标定读数（2026-11-14，H20 GPU3）
