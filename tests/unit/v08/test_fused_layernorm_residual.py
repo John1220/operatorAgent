@@ -156,3 +156,12 @@ def test_shape_layout_table_knows_the_fused_family():
     assert "fused_layernorm_residual" in known_layouts()
     cases = cases_from_shapes("fused_layernorm_residual", [((8, 33), 1.0)], "fp16")
     assert [t.name for t in cases[0].tensors] == ["X", "R"]
+
+
+def test_capabilities_lists_the_fused_family_not_just_attention():
+    from operator_agent.app.hitl_tools import capabilities
+    families = capabilities()["correctness_profiles"]["families"]
+    fused = families["fused_layernorm_residual"]
+    assert fused["profile"] == rc.PROFILE_FUSED_LN_RESIDUAL
+    assert fused["correctness_cases"] == 32
+    assert "fused_layernorm_residual" in capabilities()["kernel_types_with_input_layout"]

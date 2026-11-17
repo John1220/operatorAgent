@@ -93,6 +93,24 @@ ATTENTION_FAMILY = dict(
 )
 
 
+#: 融合 residual+LayerNorm 的能力出口（`capabilities()` 用）。说清支持什么、排除什么，
+#: 与 attention 的 `ATTENTION_FAMILY` 同一形态；不是二维 axis 生成器的词表。
+FUSED_LN_RESIDUAL_FAMILY = dict(
+    profile=PROFILE_FUSED_LN_RESIDUAL,
+    dtype=["fp16"],
+    shape="(M,N)：X 与 R 同形，Y 与 X 同形",
+    semantics=("Y = layer_norm(X + R)，末轴、总体方差、eps=1e-5、无 affine；"
+               "参考是 eager fp16 add + native LayerNorm"),
+    scope="M,N > 0；X/R 同形同 device；contiguous 与 strided 布局；32 条显式 case",
+    excluded=["affine / weight / bias", "bf16 / fp8 / int8", "非末轴归一化",
+              "X 与 R 不同形", "add 的缩放或加性 bias", "RMSNorm"],
+    correctness_cases=len(FUSED_LN_RESIDUAL_CASES),
+    performance=("L3 由 harness 与 eager X+R → F.layer_norm 配对计时；"
+                 "手写融合核的头寸读数不是 profile 的性能主张"),
+    gate="preflight --op fused_layernorm_residual --shape M,N --dtype fp16",
+)
+
+
 class AttentionScopeError(ValueError):
     """attention 声明越出 Scope A：明确拒绝，不猜语义、不静默降级。"""
 

@@ -1120,8 +1120,8 @@ def capabilities() -> dict:
     """
     from .. import __version__
     from ..decide.bench_cases import known_layouts
-    from ..decide.correctness_profiles import (ATTENTION_FAMILY, OPERATORS,
-                                               PROFILE_VERSION)
+    from ..decide.correctness_profiles import (ATTENTION_FAMILY, FUSED_LN_RESIDUAL_FAMILY,
+                                               OPERATORS, PROFILE_VERSION)
 
     def _spec(name: str) -> bool:
         try:
@@ -1162,7 +1162,9 @@ def capabilities() -> dict:
         "correctness_profiles": {"version": PROFILE_VERSION,
                                  "operators": list(OPERATORS),
                                  "operators_scope": "二维 axis 生成器覆盖的算子；不是支持清单",
-                                 "families": {"attention": dict(ATTENTION_FAMILY)}},
+                                 "families": {"attention": dict(ATTENTION_FAMILY),
+                                              "fused_layernorm_residual":
+                                                  dict(FUSED_LN_RESIDUAL_FAMILY)}},
         "notes": [
             "capabilities 不做网络探测（含 SSH）",
             "backend=ssh 需要显式 host；本层不提供 auto 降级（「以为在真机上、其实在控制机」是这里最贵的误读）",
