@@ -289,7 +289,10 @@ def _counts(root):
     # （`run/native-verification/result-*.json`，由 supervisor 的 trusted worker 写）。
     receipts = sorted((root / 'run').glob('verify-*.json'))
     native = sorted((root / 'run' / 'native-verification').glob('result-*.json'))
-    verifications = len(receipts) + len(native)
+    # 终评新开的 final-run 也是这格的验证派发（explore L2 + final L3 两次），
+    # 以前只数 run/ 下的回执，于是终评两次派发在账外。
+    final_receipts = sorted((root / 'final-run').glob('verify-*.json'))
+    verifications = len(receipts) + len(native) + len(final_receipts)
     first_full = None
     for path in receipts:
         try:
@@ -319,12 +322,31 @@ def _counts(root):
                 wall = None
         except (TypeError, ValueError):
             wall = None
+    total = None
+    if requests:
+        stamps = []
+        for path in final_receipts:
+            try:
+                value = json.loads(path.read_text())
+            except ValueError:
+                continue
+            stamp = value.get('created_at')
+            stamps.append(stamp if isinstance(stamp, (int, float)) else path.stat().st_mtime)
+        if stamps:
+            total = round(float(max(stamps)) - requests[0].stat().st_mtime, 1)
+            if total < 0:
+                total = None
     return dict(dispatches=len(requests) or None,
                 dispatch_source='measured' if requests else None,
                 verifications=verifications,
                 first_full_l2_s=wall,
+                total_wall_s=total,
                 wall_clock_source='recomputed_from_receipt_and_request_timestamps'
                                  if wall is not None else None)
+
+
+def _positive(value):
+    return type(value) in (int, float) and value > 0
 
 
 def _finish_cell(task_id, arm, selected, *, root, declaration, budget, backend,
@@ -343,15 +365,49 @@ def _finish_cell(task_id, arm, selected, *, root, declaration, budget, backend,
     conn = dict(connection or {})
     body = final_evaluation(Path(root) / 'final-run', selected.read_text(),
                             declaration=declaration, host_budget=budget, backend=backend,
+                            stop_after='L3',
                             host=conn.get('host'), work_dir=conn.get('work_dir'),
                             persistent=bool(conn.get('persistent', False)))
     # **计数必须来自量具，不是人手数**：之前 `model_dispatches`/`verifications` 都是 None，
     # 报告里的"每格 3–6 次调用"是人工数请求文件得来的（2026-11-10 评审指出）。
     counted = _counts(root)
+    # 达标 = 完整 L2 + 独立 L3 valid + >= min_speedup + 单核融合静态核验。
+    from .fusion_check import FusionCheckError, check_fused_source
+    from operator_agent.app.hitl_tools import build_task
+    from operator_agent.decide.correctness_profiles import REGISTERED_FUSED_KERNEL_TYPES
+    final_receipt = body.get('final') or {}
+    final_levels = final_receipt.get('levels') or {}
+    l3_metrics = {}
+    for verdict in final_receipt.get('verdicts') or []:
+        if verdict.get('level') == 'L3':
+            l3_metrics = verdict.get('metrics') or {}
+            break
+    declared_min = float((declaration.get('min_speedup') if isinstance(declaration, dict)
+                          else 1.0) or 1.0)
+    fused_task = (build_task(declaration).source.kernel_type
+                  in REGISTERED_FUSED_KERNEL_TYPES)
+    try:
+        fusion = (check_fused_source(selected.read_text(encoding='utf-8'))
+                  if fused_task else dict(passed=True, schema='not-applicable', reason=''))
+    except FusionCheckError as exc:
+        fusion = dict(passed=False, schema='v08-fusion-static-v1', reason=str(exc))
+    qualified = bool(
+        final_levels.get('L2') is True
+        and l3_metrics.get('measurement_validity') == 'valid'
+        and _positive(l3_metrics.get('speedup_vs_baseline'))
+        and l3_metrics.get('speedup_vs_baseline') >= declared_min
+        and fusion.get('passed') is True)
+    delivery_class = ('qualified' if qualified else
+                      'correct_only' if final_levels.get('L2') is True else 'failed')
     record = cell(task_id, arm, state='completed', final=body, source=selected,
                   model_dispatches=dispatches if dispatches is not None else counted['dispatches'],
                   verifications=counted['verifications'],
-                  wall_clock_to_first_full_L2_s=counted['first_full_l2_s'])
+                  wall_clock_to_first_full_L2_s=counted['first_full_l2_s'],
+                  wall_clock_total_s=counted.get('total_wall_s'),
+                  qualified=qualified, delivery_class=delivery_class,
+                  fusion_static=fusion,
+                  final_speedup=l3_metrics.get('speedup_vs_baseline'),
+                  final_validity=l3_metrics.get('measurement_validity'))
     record.update(outcome='delivered' if body['delivered'] else 'failed',
                   reason=body.get('reason'),
                   levels=(body['final'] or {}).get('levels') if body['final']

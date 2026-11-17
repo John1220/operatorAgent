@@ -375,3 +375,21 @@ def test_instrument_failures_are_not_recorded_as_candidate_failures():
     real = {'final': {'verdicts': [{'message': '功能验证失败: 误差 1.16e-03'}]}}
     assert _instrument_failure(pin) and _instrument_failure(oom)
     assert _instrument_failure(real) is None
+
+
+def test_a_pinned_plan_gpu_cannot_silently_become_another_card(monkeypatch):
+    """计划冻结了 GPU7 的 UUID：实际回执对不上就中止，不按候选列表换卡。"""
+    from benchmarks.experiments.v08 import ac_live
+
+    pinned = dict(index=7, uuid='GPU-52ca6155-d8bc-a416-847a-6f0c71db1552',
+                  name='NVIDIA H20')
+    monkeypatch.setattr(ac_live, 'gpu_state', lambda *a, **k: dict(
+        index=7, util=0, free_mb=90000, uuid='GPU-deadbeef', processes=0))
+    with pytest.raises(SystemExit) as error:
+        ac_live.use_pinned_gpu(dict(host='h'), pinned)
+    assert 'UUID' in str(error.value)
+
+    monkeypatch.setattr(ac_live, 'gpu_state', lambda *a, **k: dict(
+        index=7, util=0, free_mb=90000, uuid=pinned['uuid'], processes=0))
+    state = ac_live.use_pinned_gpu(dict(host='h'), pinned)
+    assert state['uuid'] == pinned['uuid'] and state['util'] == 0

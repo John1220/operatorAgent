@@ -223,6 +223,32 @@ def test_last_passing_submission_keeps_a_pass_after_the_host_dies():
     assert best["index"] == 3 and best["source_hash"] == "c"
 
 
+def test_last_full_l2_submission_ignores_a_rejected_or_failed_last_submission():
+    """A/C 的终稿规则：只认最后一次**实际执行且 L2 通过**的提交。
+
+    最后一笔是预算关闭后的 rejected 提交、或 L2 挂掉的提交时，不能拿它当终稿；
+    2 号那笔虽然 L3 没过，但 L2 通过，A/C 的"仅正确交付"也要看它。
+    """
+    from benchmarks.experiments.phase1.native import last_full_l2_submission
+    rows = [
+        {"index": 1, "admitted": True, "response": {"levels": {"L1": True, "L2": False}}},
+        {"index": 2, "admitted": True,
+         "response": {"levels": {"L1": True, "L2": True, "L3": False}}, "source_hash": "b"},
+        {"index": 3, "admitted": False,
+         "response": {"error": "development_budget_exhausted", "levels": {}}},
+        {"index": 4, "admitted": True, "response": {"levels": {"L1": True, "L2": False}}},
+    ]
+    best = last_full_l2_submission(rows)
+    assert best["index"] == 2 and best["source_hash"] == "b"
+
+
+def test_last_full_l2_submission_is_none_without_a_full_l2():
+    from benchmarks.experiments.phase1.native import last_full_l2_submission
+    rows = [{"index": 1, "admitted": True, "response": {"levels": {"L1": True, "L2": False}}},
+            {"index": 2, "admitted": False, "response": {"levels": {"L1": True, "L2": True}}}]
+    assert last_full_l2_submission(rows) is None
+
+
 def test_last_passing_submission_is_none_without_any_pass():
     from benchmarks.experiments.phase1.native import last_passing_submission
     rows = [{"index": 1, "response": {"levels": {"L1": False}}},

@@ -21,7 +21,10 @@ import subprocess
 from pathlib import Path
 
 CELL_FIELDS = ('task_id', 'arm', 'state', 'final_receipt', 'source',
-               'wall_clock_to_first_full_L2_s', 'model_dispatches', 'verifications', 'stop_reason')
+               'wall_clock_to_first_full_L2_s', 'wall_clock_total_s',
+               'model_dispatches', 'verifications', 'stop_reason',
+               'qualified', 'delivery_class', 'fusion_static',
+               'final_speedup', 'final_validity')
 
 
 class SurfaceError(ValueError):

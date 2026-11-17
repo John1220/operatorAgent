@@ -159,6 +159,20 @@ C 的待遇是“插件 + 其文档化工作流”（v6 已定：工作流本身
 7. 先做**不计入正式格**的 fixture 试跑（脚本模型）走通 A/C 终稿、终评、计数与回执；
    再做 §6 的 xhigh smoke。全过后冻结计划编号/hash，才开正式格。
 
+**接线进度（2026-11-17）**
+
+| 项 | 状态 |
+|---|---|
+| `ac_plan` v7：融合任务、`_supported_kernel_types`、execution（GPU/采样/wire 32768 / 预留 40960/2 对）、20 次/8 验证（6+2）/2400 s 预算 | 已接线 + 测试 |
+| 终稿规则：A 臂改为 `last_full_l2_submission`（实际执行且 L2 通过）；C 臂保持最近 L2 通过 | 已接线 + 测试 |
+| 终评：两臂 `stop_after=L3`；`_counts` 纳入 `final-run` 两次派发与总墙钟；新增 `qualified/delivery_class/fusion_static/final_speedup/final_validity` | 已接线 + 测试 |
+| GPU 钉卡：计划 `execution.gpu` 的 UUID 与实际回执核对，不符即中止；去掉自动选卡 | 已接线 + 测试 |
+| 融合静态核验：`fusion_check.py`（单一 `@triton.jit` + 单一 launch）接入收尾 | 已接线 + 测试 |
+| A 臂 context pack 加 32 条 case 清单（与 C 的 `operator_context` 等价） | **待接线** |
+| v7 聚合器按 `qualified` 判读（+1/0/−1、partial、子型） | **待接线** |
+| 总墙钟 >2400 s 的格判 `not_delivered`（当前只记录、未 gate） | **待接线** |
+| fixture 试跑、xhigh smoke、冻结实际计划文件 | **待执行** |
+
 ## 13. 冻结身份（冻结时填）
 
 - 计划编号/hash、任务契约 `093339587d8c462c…`、`min_speedup=1.5`、profile/atol/参考与套件 digest、

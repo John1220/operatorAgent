@@ -255,25 +255,24 @@ def run(config):
             exhausted = _model_budget_exhausted(config)
             # 验证服务自己关掉的（连续无增益）优先于「宿主怎么退的」—— 它更具体。
             stop=state.get('stop_reason')
-            if response['returncode']==0 and state['selected_source'] and not stop:
-                result.update(phase='done', reason='native_host_returned')
+            # 两臂统一的终稿规则：最后一次**实际执行且 L2 通过**的提交。
+            # 被预算拒绝、未实际运行、或 L2 挂掉的最后一次提交不得当终稿。
+            best = last_full_l2_submission(state.get('records'))
+            if best is not None:
+                result.update(selected_source=str(service.work/'native-verification'/
+                                      ('candidate-%04d.py'%best['index'])),
+                              source_hash=best.get('source_hash'),
+                              levels=(best.get('response') or {}).get('levels') or {},
+                              phase='done',
+                              reason=stop or ('budget_calls_exhausted' if exhausted
+                                              else 'last_full_l2_pass'))
+            elif stop:
+                result.update(phase='failed', reason=stop,
+                              no_gain_streak=state.get('no_gain_streak'))
+            elif exhausted:
+                result.update(phase='failed', reason='budget_calls_exhausted')
             else:
-                # 宿主退出时不再丢掉已通过的候选：验证服务的判定与宿主生死无关。
-                best = last_passing_submission(state.get('records'))
-                if best is not None:
-                    result.update(selected_source=best.get('selected_source') or
-                                      str(service.work/'native-verification'/
-                                          ('candidate-%04d.py'%best['index'])),
-                                  source_hash=best.get('source_hash'),
-                                  levels=(best.get('response') or {}).get('levels') or {},
-                                  phase='done',
-                                  reason=stop or ('budget_calls_exhausted' if exhausted
-                                                  else 'host_ended_after_pass'))
-                elif stop:
-                    result.update(phase='failed', reason=stop,
-                                  no_gain_streak=state.get('no_gain_streak'))
-                elif exhausted:
-                    result.update(phase='failed', reason='budget_calls_exhausted')
+                result.update(phase='failed', reason='no_submission_passed_full_l2')
             result['host_response']=source_ref(cell/'host-response.json')
     except Exception as exc:
         result.update(phase='failed',reason=type(exc).__name__)
@@ -333,6 +332,24 @@ def last_passing_submission(records):
         levels = response.get('levels') or {}
         if getattr(response.get('passed'), 'real', response.get('passed')) is True or (
                 levels and all(levels.get(k) is True for k in ('L1', 'L2', 'L3'))):
+            return row
+    return None
+
+
+def last_full_l2_submission(records):
+    """最后一个**实际执行且完整 L2 通过**的提交；没有就返回 None。
+
+    A/C 两臂的终稿选择必须同一个规则：C 臂取"最近一次 L2 通过的 verify 回执"，
+    A 臂此前却把最后一次提交（包括被预算拒绝、或 L2 挂掉的提交）当成终稿。
+    这个函数是 A 臂那一侧的同一规则：只认真正跑过、且 L2 为 True 的记录。
+    （`last_passing_submission` 要求 L1/L2/L3 全过，语义更窄，保留给旧路径。）
+    """
+    for row in reversed(records or []):
+        if (row or {}).get('admitted') is False:
+            continue
+        response = (row or {}).get('response') or {}
+        levels = response.get('levels') or {}
+        if levels.get('L2') is True:
             return row
     return None
 

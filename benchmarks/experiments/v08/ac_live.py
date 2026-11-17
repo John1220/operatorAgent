@@ -134,6 +134,26 @@ def select_gpu(connection, ssh=None):
     raise SystemExit('没有可用 GPU，中止本格: ' + ' | '.join(rejected))
 
 
+def use_pinned_gpu(connection, pinned, ssh=None):
+    """用冻结件里钉死的 GPU；不做候选自动选择，UUID 不符直接中止。
+
+    v6 的 `select_gpu` 会按 GPU_CANDIDATES 取第一张空闲卡 —— 那让"同预算同卡"只
+    在运行时才碰巧成立。融合 A/C 轮把 index/uuid/name 冻在计划里，实际回执必须对上。
+    """
+    if not isinstance(pinned, dict) or not pinned.get('uuid'):
+        raise SystemExit('冻结计划没有可用的 GPU 身份（execution.gpu）')
+    GPU_PIN['index'] = str(pinned.get('index'))
+    GPU_PIN['uuid'] = str(pinned['uuid'])
+    GPU_PIN['name'] = str(pinned.get('name') or 'NVIDIA H20')
+    state = gpu_state(connection, ssh)
+    if state.get('uuid') != pinned['uuid']:
+        raise SystemExit(f"冻结 GPU UUID 不符: plan={pinned['uuid']} actual={state.get('uuid')}")
+    problems = _complain(state)
+    if problems:
+        raise SystemExit('冻结 GPU 当前不可用: ' + '; '.join(problems))
+    return state
+
+
 def require_idle_gpu(connection, ssh=None):
     """兼容旧调用：检查当前钉住的那张卡。"""
     state = gpu_state(connection, ssh)
@@ -226,7 +246,7 @@ def _widen_stream_deadline():
 
 
 def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wall_clock_s=None,
-               arm='A', timeout_s=None):
+               arm='A', timeout_s=None, pinned_gpu=None):
     from benchmarks.experiments.phase1.host import model_gateway
     from benchmarks.experiments.phase1.native import VerificationService
     from benchmarks.experiments.s5 import s5_arm_env
@@ -243,7 +263,8 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
     wall = int(wall_clock_s or budget['wall_clock_s'])
     model = dict(model or A_MODEL)
     _assert_budget_consistent(budget)
-    gpu = select_gpu(connection)             # A 臂没有显式 ssh 参数，按 connection 读
+    gpu = (use_pinned_gpu(connection, pinned_gpu) if pinned_gpu
+           else select_gpu(connection))     # A 臂没有显式 ssh 参数，按 connection 读
     _pin_gpu()
 
     prepared = ht.prepare(declaration, run_dir, host_budget=dict(budget))
@@ -348,7 +369,7 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
 
 
 def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
-               wall_clock_s=None, timeout_s=None, ssh=None):
+               wall_clock_s=None, timeout_s=None, ssh=None, pinned_gpu=None):
     """C 臂一格（真模型 + 沙箱 + 20 次预算）。
 
     与 A 臂共用同一套 supervisor 件：`prepare(host_budget)`、`VerificationService`、
@@ -370,7 +391,8 @@ def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
     wall = int(wall_clock_s or budget['wall_clock_s'])
     model = dict(model or A_MODEL)
     _assert_budget_consistent(budget)
-    gpu = select_gpu(connection, ssh)
+    gpu = (use_pinned_gpu(connection, pinned_gpu, ssh) if pinned_gpu
+           else select_gpu(connection, ssh))
     _pin_gpu()
 
     prepared = ht.prepare(declaration, run_dir, host_budget=dict(budget))
@@ -544,6 +566,7 @@ def main(argv=None):
         if task is None:
             raise SystemExit(f'计划里没有任务 {args.task_id}')
         declaration = dict(task['declaration'])
+        pinned_gpu = (plan.get('execution') or {}).get('gpu')
         budget = dict(wall_clock_s=plan['budget']['wall_clock_s'],
                       max_model_calls=plan['budget']['max_model_calls'],
                       max_output_tokens_per_call=plan['budget']['max_output_tokens_per_call'],
@@ -551,15 +574,18 @@ def main(argv=None):
                       max_verifications=plan['budget']['max_verifications'],
                       final_reserve=plan['budget']['final_reserve'])
     else:
+        pinned_gpu = None
         declaration = dict(request='fp32 4096x4096x4096 matmul, triton',
                            shapes=[[4096, 4096, 4096]], hardware='nvidia_gpu', dsl='triton',
                            precision='fp32', min_speedup=1.0)
-    # 缺省预算取计划 v2 的口径（线上 32768、每次预留 40960）；给了 `--plan` 就以计划为准。
-    from benchmarks.experiments.v08 import ac_plan
-    budget = dict(wall_clock_s=2400, max_model_calls=20,
-                  max_output_tokens_per_call=ac_plan.OUTPUT_RESERVATION_PER_CALL,
-                  total_output_token_reservations=20 * ac_plan.OUTPUT_RESERVATION_PER_CALL,
-                  max_verifications=8, final_reserve=1)
+    # 缺省预算只在**没有** --plan 时生效；给了计划就必须用计划里的冻结值，
+    # 否则"同预算"只是命令行巧合（2026-11-17 评审指出旧代码会覆盖计划预算）。
+    if not args.plan:
+        from benchmarks.experiments.v08 import ac_plan
+        budget = dict(wall_clock_s=2400, max_model_calls=20,
+                      max_output_tokens_per_call=ac_plan.OUTPUT_RESERVATION_PER_CALL,
+                      total_output_token_reservations=20 * ac_plan.OUTPUT_RESERVATION_PER_CALL,
+                      max_verifications=8, final_reserve=1)
     # 按 --arm 分派：这里曾经写死 `run_a_live`，于是 `--arm C` 跑出来的是 A 臂
     # （工具面只有 bash，没有 mcp__operator__*），而回执被记成了 C 臂。
     runner = run_c_live if args.arm == 'C' else run_a_live
@@ -567,7 +593,8 @@ def main(argv=None):
                           key=args.ssh_key)) if args.arm == 'C' else {}
     record = runner(declaration, task_id=args.task_id, root=args.root, budget=budget,
                     connection=dict(host=args.host, work_dir=args.work_dir, persistent=True),
-                    wall_clock_s=budget['wall_clock_s'], timeout_s=args.timeout, **extra)
+                    wall_clock_s=budget['wall_clock_s'], timeout_s=args.timeout,
+                    pinned_gpu=pinned_gpu, **extra)
     # 每格必须自报用的哪个模型：跨格换模型时，交付数不可比，得能查出来。
     record['model'] = os.environ.get('AC_MODEL_ID', A_MODEL['id'])
     record['reasoning_effort'] = os.environ.get('AC_REASONING_EFFORT', 'none')

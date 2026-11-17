@@ -20,6 +20,7 @@ is `None`, and both credit fields are pinned to `False`.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from operator_agent.core.run_contract import digest
@@ -32,8 +33,10 @@ PLAN_IDS = dict(v1='operator-v08-workflow-ac-v1',
                 v3='operator-v08-workflow-ac-v3',
                 v4='operator-v08-workflow-ac-v4',
                 v5='operator-v08-workflow-ac-v5',
-                v6='operator-v08-workflow-ac-v6')
-PLAN_ID = PLAN_IDS['v2']          # 当前可执行/可冻结的那一份
+                v6='operator-v08-workflow-ac-v6',
+                v7='operator-v08-workflow-ac-v7')
+PLAN_ID = PLAN_IDS['v2']          # 历史默认；融合轮显式用 FUSED_PLAN_VERSION
+FUSED_PLAN_VERSION = 'v7'          # 融合 A/C 轮：qualified delivery，2 对
 
 #: 撤回必须**指名**，并写清理由 —— 不能落进"编号不认识"那条通用消息里。
 WITHDRAWN_PLAN_IDS = {
@@ -137,6 +140,54 @@ TASKS = [
 
 TASK_IDS = tuple(row['task_id'] for row in TASKS)
 
+#: v7：融合任务。头寸门已过（手写核 2.229× eager），本轮问工作流能否**达标交付**。
+#: 达标 = 完整 L2 + 独立 L3 valid + speedup >= 1.5 + 单核融合静态核验（见 fusion_check）。
+FUSED_TASK = dict(
+    task_id='fused-layernorm-residual-32768x6144-fp16',
+    declaration=dict(request='fp16 32768x6144 residual add layernorm',
+                     shapes=[[32768, 6144]], precision='fp16', dsl='triton',
+                     hardware='nvidia_gpu', min_speedup=1.5),
+    held_out='family',
+    why=('newly registered residual+LayerNorm fusion family; no v0.8 optimize rule was '
+         'developed against it, and the headroom gate confirmed a hand-written fused kernel '
+         'runs at 2.229x the eager two-kernel baseline'),
+    performance_probe=dict(required=True, measured_band_pct=None,
+                           note=('window probe is fused_layernorm_residual on 32768x6144; '
+                                 'measure it fresh for the round, do not inherit the headroom '
+                                 'window')),
+    acceptance=dict(full_l2=True, l3_validity='valid', min_speedup=1.5,
+                    fusion_check='v08-fusion-static-v1'),
+)
+
+FUSED_METRIC = dict(
+    primary=('number of cells whose final source is a QUALIFIED DELIVERY: full L2 in the '
+             'independent final evaluation, final L3 measurement_validity=valid, '
+             'speedup_vs_baseline >= 1.5, and the single-kernel fusion static check passes'),
+    denominator='every dispatched cell; planned-but-unexecuted cells are listed separately, never dropped',
+    minimum_detectable_unit='+1 task',
+    minimum_detectable_unit_is_not_statistical_significance=True,
+    secondary=['delivery that passes full L2 but misses the performance/fusion bar (correct_only)',
+               'model dispatches used', 'verifications used',
+               'wall clock to first full L2 and to the qualified final receipt'],
+    never_report=['a correct-only delivery as a qualified delivery',
+                  'an unpaired average as a comparison',
+                  'cost inferred from token counters',
+                  'a pass rate without its dispatched denominator'],
+)
+
+FUSED_EXECUTION = dict(
+    gpu=dict(index=7, uuid='GPU-52ca6155-d8bc-a416-847a-6f0c71db1552', name='NVIDIA H20'),
+    model='Qwen3.8-27B',
+    model_endpoint_sha256=('67df113c7123ab1a97394b809da88efe35489ab43b6657850846c180f54d23d1'),
+    sampling=dict(temperature=0.1, n=1, max_tokens=32768,
+                  enable_thinking=True, reasoning_effort='xhigh'),
+    wire_max_tokens=32768,
+    output_reservation_per_call=40960,
+    pairs=2,
+    final_policy=dict(purpose='final', stop_after='L3',
+                      final_run_verifications=2),
+)
+
 METRIC = dict(
     primary=('number of tasks whose submitted final source passes full L2 in the '
              'independent final evaluation, inside the frozen per-cell budget'),
@@ -171,6 +222,13 @@ FROZEN_PER_CELL = dict(max_model_calls=30,
                        max_output_tokens_per_call=OUTPUT_RESERVATION_PER_CALL,
                        total_output_token_reservations=30 * OUTPUT_RESERVATION_PER_CALL,
                        max_verifications=8, wall_clock_s=2400, final_reserve=1)
+
+#: v7 的每格预算：20 次调用、8 次验证（6 开发 + 2 终评）、2400 s 含终评。
+FROZEN_FUSED_PER_CELL = dict(max_model_calls=20,
+                             max_output_tokens_per_call=OUTPUT_RESERVATION_PER_CALL,
+                             total_output_token_reservations=20 * OUTPUT_RESERVATION_PER_CALL,
+                             max_verifications=8, wall_clock_s=2400, final_reserve=2,
+                             gpu_minutes=240)
 
 STOP_RULES = dict(
     per_cell=['stop at the frozen budget; never raise it mid-round to reach a threshold',
@@ -250,25 +308,35 @@ def _kernel_type(declaration):
 def _supported_kernel_types():
     """从权威词表取，不再抄一份。OPERATORS 是 axis 生成器的词表，attention 单独注册
     （`docs/testing/v08-support.md` §1 就是按这两种身份区分它们的）。"""
-    from operator_agent.decide.correctness_profiles import OPERATORS
-    return set(OPERATORS) | {'attention'}
+    from operator_agent.decide.correctness_profiles import (OPERATORS,
+                                                           REGISTERED_FUSED_KERNEL_TYPES)
+    return set(OPERATORS) | {'attention'} | set(REGISTERED_FUSED_KERNEL_TYPES)
 
 
 def design(version='v2'):
     """The freezable part: no budget, no outcome, no credit."""
+    fused = version == 'v7'
     body = dict(schema=SCHEMA, plan_id=PLAN_IDS[version], status='draft_awaiting_budget',
                 arms=list(ARMS), arm_surfaces=json.loads(json.dumps(ARM_SURFACES)),
-                tasks=json.loads(json.dumps(
+                tasks=json.loads(json.dumps([FUSED_TASK] if fused else (
                     [task for task in TASKS if task['task_id'] in REPRODUCTION_TASKS]
-                    if version in REPRODUCTION_ROUNDS else TASKS)),
+                    if version in REPRODUCTION_ROUNDS else TASKS))),
                 **({'reproduction': dict(json.loads(json.dumps(REPRODUCTION)),
                                          rounds=REPRODUCTION_ROUNDS[version])}
                    if version in REPRODUCTION_ROUNDS else {}),
-                metric=dict(METRIC),
+                metric=dict(FUSED_METRIC if fused else METRIC),
                 stop_rules=json.loads(json.dumps(STOP_RULES)),
-                final_evaluation=dict(FINAL_EVALUATION), boundaries=list(BOUNDARIES),
+                final_evaluation=dict(FINAL_EVALUATION),
+                boundaries=list(BOUNDARIES) + ([
+                    'v7 is the fused task only; its primary is qualified delivery, not the v6 '
+                    'full-L2 delivery count, and its result must not be merged into v6 rounds',
+                    'the hand-written headroom kernel is context, never an arm delivery',
+                ] if fused else []),
                 budget={name: None for name in BUDGET_FIELDS},
                 formal_gain_claim=False, formal_comparison_credit=False, outcome=None)
+    if fused:
+        body['execution'] = json.loads(json.dumps(FUSED_EXECUTION))
+        body['pairs'] = FUSED_EXECUTION['pairs']
     body['design_hash'] = digest(body)
     return body
 
@@ -350,16 +418,38 @@ def validate(plan):
     if plan.get('status') == 'frozen':
         if unfilled:
             problems.append(f'a frozen plan needs every budget filled, missing: {unfilled}')
-        expected = len(tasks) * len(ARMS)
+        pairs = plan.get('pairs') or 1
+        if type(pairs) is not int or pairs < 1:
+            problems.append(f'pairs must be a positive int, got {pairs!r}')
+        expected = len(tasks) * len(ARMS) * pairs
         if budget.get('cells') != expected:
-            problems.append(f'cells must equal tasks x arms = {expected}, got {budget.get("cells")}')
+            problems.append(f'cells must equal tasks x arms x pairs = {expected}, '
+                            f'got {budget.get("cells")}')
+    if plan.get('execution') is not None:
+        ex = plan['execution']
+        gpu = (ex or {}).get('gpu') or {}
+        if (type(gpu.get('index')) is not int
+                or not isinstance(gpu.get('uuid'), str)
+                or not re.fullmatch(r'GPU-[0-9a-f-]{16,}', gpu.get('uuid') or '')
+                or gpu.get('name') != 'NVIDIA H20'):
+            problems.append('execution.gpu must pin index/uuid/name for NVIDIA H20')
+        sampling = (ex or {}).get('sampling') or {}
+        if set(sampling) != {'temperature', 'n', 'max_tokens', 'enable_thinking',
+                             'reasoning_effort'}:
+            problems.append('execution.sampling must carry the six frozen fields')
+        if (ex or {}).get('wire_max_tokens') != 32768:
+            problems.append('execution.wire_max_tokens must be the 32768 wire cap')
+        if (ex or {}).get('output_reservation_per_call') != OUTPUT_RESERVATION_PER_CALL:
+            problems.append('execution.output_reservation_per_call must be 40960')
+        if (ex or {}).get('pairs') != plan.get('pairs'):
+            problems.append('execution.pairs must match plan.pairs')
     return problems
 
 
 def freeze(budget, output, version='v2'):
     """Write the plan once, with budgets filled. Refuses to overwrite or to guess."""
     plan = design(version)
-    supplied = dict(FROZEN_PER_CELL)
+    supplied = dict(FROZEN_FUSED_PER_CELL if version == 'v7' else FROZEN_PER_CELL)
     supplied.update(budget or {})
     plan['budget'] = {name: supplied.get(name) for name in BUDGET_FIELDS}
     plan['status'] = 'frozen'
