@@ -1,6 +1,6 @@
 # v0.8.1 优化分支进度入口
 
-更新于 2026-11-16 · 分支 `codex/v0.8.1-optimize`（11 月 14 日由 `codex/v0.9-optimize` 改名）。
+更新于 2026-11-17 · 分支 `codex/v0.8.1-optimize`（11 月 14 日由 `codex/v0.9-optimize` 改名）。
 
 > **为什么是 v0.8.1 而不是 v0.9**：产品路线里的 **v0.9 是「业务接入版」**（把已验证核接进真实
 > 框架/模型、端到端回归，见 [产品路线](../../design/operator-development-product-roadmap.md) §5.3），
@@ -16,6 +16,11 @@
 - **P2 优化诊断闭环已完成正式判读。** 正式两对（pair-1/2）均完整 L2、独立 L3 `valid`；
   pair-1 诊断组低 8.49%、pair-2 仅 0.15%（落当窗带内）⇒ 整轮 `no_increment_observed`，
   `formal_gain_claim=false`；四份终稿均慢于起点核。见 [P2 正式结果](../../testing/v08-p2-preregistration.md#p2-formal-result)。
+- **方向2 Q1 真机已跑（2026-11-17，GPU7）。** 16 点确定性参数扫描（零模型调用、字面量机械注入），
+  量具判 `no_increment`：best=bs1024-w4 比起点快 1.31%（>噪声门 0.71%，<效应阈 2.5%），15/16 合格，
+  复算器重验 58 件证据一致；formal_gain_claim=False，主张留给人。见 [D2 预登记](../../testing/v08-d2-preregistration.md)。
+- **D2 整行加载试验已完成，暂缓 Q2。** 同卡独立终评中，整行加载版比 Q1 最佳版慢 26.21%，两份实现
+  均通过 32 项 L2 用例，L3 均为 `valid`。[D2 结构试验记录](../../testing/v08-d2-preregistration.md#d2-structure-probe-result)
 
 ## 2. 已完成
 
@@ -67,10 +72,25 @@
 | 项 | 状态 | 说明 |
 |---|---|---|
 | **方向3 真机标定** | **已标定（2026-11-14）** | 异步全链路 6/6 过；身份+缓存机制全对，环境身份为型号级（已接受，见下） |
-| 方向2 autotune 拆分 | 未开始 | 参数层确定性扫描 + LLM 语义重构 |
+| 方向2 autotune 拆分 | **Q1 `no_increment`，Q2 暂缓（2026-11-17，GPU7）** | 16 点确定性参数扫描，GPU7 计划冻结 `d8c2f735…`。最佳点快 1.31%，超过当窗噪声，低于 2.5% 门槛。[D2 预登记与后续试验](../../testing/v08-d2-preregistration.md) |
 | P2 诊断增量 | **已完成正式判读（2026-11-16）** | 两对可判：pair-1 `optimize_helps`（+8.49%），pair-2 `no_increment`（+0.15%，带内）⇒ 整轮 `no_increment_observed`，`formal_gain_claim=false`。见 [P2 正式结果](../../testing/v08-p2-preregistration.md#p2-formal-result)。 |
 | P3 中档模型探点 | 未开始 | 测「模型变弱时诊断增益是否变大」 |
 | **缓存环境身份边界**（标定捕到） | **已接受型号级身份**（2026-11-15） | 当前工作树已拒绝仅有 `backend` 的身份。后端返回 `Unknown GPU` 等占位值时仍可能命中。见 [`_identified`](../../../operator_agent/decide/verdict_cache.py#L79)。 |
+
+<a id="v081-next-steps"></a>
+
+### 下一步
+
+1. **收口 D2。** 把扫描工具、回归测试、Q1 判读和整行加载试验记录整理成一组可复验的变更。
+   用冻结计划和原始回执复算 Q1，核对整行试验的候选源码和独立 L3 回执。Q2 继续暂缓。
+   [D2 试验记录](../../testing/v08-d2-preregistration.md#d2-structure-probe-result)
+2. **选一条真实融合任务，先验证提速空间。** 从实际调用中选取任务，例如 `residual add + LayerNorm`。
+   冻结输入、精度和当前实现，写明 PyTorch eager 算子序列、该任务的噪声探针与提速门槛。用一份已有或手写的
+   融合核做对照，两份实现各跑完整 L2 和同卡独立 L3。融合核相对当前实现的提速须达到事先约定的门槛，
+   且超过当窗噪声。[任务选型规则](../../design/v08/task-family-selection.md)
+
+确认有提速空间后，再用该任务比较普通 Agent 和插件流程。两边从同一份源码出发，使用相同预算和性能目标，
+记录各自能否交付达标的核，以及从启动到独立终评达标的时间。
 
 ### 方向3 标定读数（2026-11-14，H20 GPU3）
 
@@ -199,6 +219,7 @@ optimize **只在 L3 未过且 round<max_rounds 时才进**（[conductor.py:1822
 
 **测试/操作**：[P1 性能 parity 预登记](../../testing/v08-p1-preregistration.md) ·
 [P2 优化闭环预登记草案](../../testing/v08-p2-preregistration.md) ·
+[D2 参数扫描 Q1 预登记](../../testing/v08-d2-preregistration.md) ·
 [noise preflight](../../testing/v08-noise-preflight.md)
 
 **上游进度**：[v0.8 进度入口](../v08/README.md)（A/C 复现 reproduced 的完整过程与回执）·
@@ -222,6 +243,8 @@ optimize **只在 L3 未过且 round<max_rounds 时才进**（[conductor.py:1822
 | `logs/p2-formal-pair1-20261116/pilot.json` | 正式 pair-1 判读，`optimize_helps`（+8.49%），带宽 0.3376% |
 | `logs/p2-formal-pair2-20261116/pilot.json` | 正式 pair-2 判读，`no_increment`（+0.15%），带宽 0.5621% |
 | `logs/p2-formal-series-20261116.json` | 正式两对聚合，`no_increment_observed`，`decidable_pairs=2`、`helps=1`、`hurts=0` |
+| `output/v08-d2-gpu7-20261117/sweep-plan.json` | D2 Q1 冻结计划（GPU7 绑定），哈希 `d8c2f735…`，16 点格、零模型预算 |
+| `output/v08-d2-gpu7-20261117/sweep3/` | D2 Q1 真机回执：sweep.json（no_increment）+ replay.json（58 件证据重验）+ points/best/seed |
 
 GPU 身份钉在 GPU3（UUID 见冻结件与 `series.json`）；源码哈希按文件重算与预登记逐字一致。
 
@@ -246,3 +269,9 @@ DSH-headless 沙箱集成测试（`test_the_c_arm_session_delivers…` / `test_t
 
 **2026-11-16 P2 正式轮后复核：`test_p2_*` 29 passed；缓存/步幅 125 passed。** 正式轮未改代码路径，
 两批提交为 `db176f8`（缓存身份/unknown 加固）与 `f318910`（P2 量具与预登记）。
+
+**2026-11-17 D2 Q1 量具 + 真机：`test_d2_{rewrite,plan,sweep}` 43 passed；P1/P2/噪声门回归合计 101 passed。**
+量具为新增受控驱动（`benchmarks/experiments/v08/d2_*`），未改核心代码路径。真机（GPU7）判 `no_increment`
+（best 快 1.31%，<阈 2.5%），复算器重验一致。真机暴露并修复三个离线 mock 未抓到的缺陷：host 预算契约
+（max_verifications≥2 / max_model_calls≥1 / 终评需 explore L2 先行）、参考服务 linger 自污染（owned scope
+回收）、复算器终评结构（verify-2 两条记录）+ 符号链接路径解析；均已重标定。
