@@ -89,7 +89,7 @@ C 的待遇是“插件 + 其文档化工作流”（v6 已定：工作流本身
 |---|---|
 | 每臂每格模型调用 | 20 次 |
 | 单次 wire `max_tokens` / 账本预留 | 32768 / 40960 |
-| 每格验证派发 | **8 次总预算 = 6 次开发 + 2 次终评**（终评 = 1 次 explore L2 + 1 次 final L3） |
+| 每格验证派发 | **8 次总预算**；终评 run 占 2 次（1 次 explore L2 + 1 次 `purpose=final`），其余 6 次给开发（host 的 `final_reserve` 仍为 1，2 次是计数口径） |
 | 墙钟 | **2400 s/格，含终评** |
 | 正式格 | 2 对 = 4 格；**模型调用上限 4×20 = 80 次** |
 | 重跑额度 | 只给有证据的 `unknown` 格，最多 2 格（+40 次调用、+2×2400 s）；总上限 **120 次 / 6 格墙钟** |
@@ -141,7 +141,7 @@ C 的待遇是“插件 + 其文档化工作流”（v6 已定：工作流本身
 | 墙钟 | 2400 s/格（含终评） |
 | A 臂套件清单 | **给**（与 C 的 `operator_context` 等价） |
 | 达标门槛 | **L2 32/32 + L3 `valid` + speedup ≥ 1.5 + 单核融合静态核验**（评审后新增） |
-| 终评预算 | 8 次验证中的 2 次，计入 2400 s（评审后新增） |
+| 终评预算 | 终评 run 占 8 次中的 2 次（explore L2 + 预留 final），计入 2400 s |
 
 ## 12. 执行前置（A/C harness 待接线，冻结前完成）
 
@@ -171,7 +171,29 @@ C 的待遇是“插件 + 其文档化工作流”（v6 已定：工作流本身
 | A 臂 context pack 加 32 条 case 清单（与 C 的 `operator_context` 等价） | **已接线**：两臂 prompt 都带同一段 `correctness_cases`（32 条 case_id/形状/dtype/pattern/layout） |
 | v7 聚合器按 `qualified` 判读（+1/0/−1、partial、子型） | **已接线**：[fused_ac_aggregate.py](../../benchmarks/experiments/v08/fused_ac_aggregate.py)，8 项测试 |
 | 总墙钟 >2400 s 的格判 `not_delivered` | **已接线**：`_finish_cell` 的 `over_wall` 直接降为 failed，不记 unknown |
-| fixture 试跑、xhigh smoke、冻结实际计划文件 | **待执行** |
+| fixture 试跑（A 臂） | **已跑通**：scripted 模型 → `check.py` → supervisor → 终评；L2 32/32、L3 `valid`、2.2392×、`qualified`、验证 3 次 |
+| fixture 试跑（C 臂） | **已跑通**：scripted 模型走插件工具；L2 32/32、L3 `valid`、2.2352×、`qualified`、验证 3 次 |
+| 两格进 v7 聚合器 | **已跑通**：`pair_verdict` → `both_qualified`、配对差 0（fixture 仅供接线，不作成绩） |
+| xhigh smoke | **受阻**：H20 上 `Qwen3.8-27B-FP8` 的 vLLM 已不在服务（18003 无监听，模型目录仍在）；需重启服务后才能做 |
+| 冻结实际计划文件 | 待 smoke 后执行 |
+
+**fixture 暴露并修掉的四个真缺陷（都会直接影响正式格）**
+
+1. **终评 UTC 回收**（下述）。
+2. **A 臂会话提交根本没进判据**：`VerificationService` 缺 `deadline_monotonic` ⇒ `develop()`
+   `KeyError` ⇒ 服务回 400 ⇒ `check.py` 只报 `development_transport_failed`。此前 A 臂
+   "完成"只是因为终评直接用了落盘的 candidate 文件。
+3. **DSH 的 `workspace-write` 沙箱在本机不可用** ⇒ bash 工具被拒；fixture 改用
+   `danger-full-access`（`test_only`，不是公平性声明）。
+4. **MCP 工具 60 s 超时会掐断融合 L2**（v6 第 5 号缺陷翻版）；按格墙钟放宽
+   `toolCallTimeoutMs` 与 bash 超时后 C 臂才通。
+5. **A 臂派发被数两次**：一次会话提交同时留下 `native-verification/result-N.json` 与
+   `run/verify-N.json`；按臂取其一后两臂计数对称（各 3 次）。
+
+**终评 UTC 回收（会影响正式格）**：终评的远端持久 worker 不回收，会留在同卡被
+下一段质量检查记成 `harness peer`，L3 判 `degraded` ⇒ 达标门永远过不去。现在 `final_evaluation`
+的每次派发各自包一层 `owned_worker_scope`（独立目录，避免 write-once 审计文件相撞），
+A 臂 fixture 已复现修复前后的差别：修复前 `degraded/correct_only`，修复后 `valid/qualified`。
 
 ## 13. 冻结身份（冻结时填）
 

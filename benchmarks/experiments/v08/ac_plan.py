@@ -227,7 +227,7 @@ FROZEN_PER_CELL = dict(max_model_calls=30,
 FROZEN_FUSED_PER_CELL = dict(max_model_calls=20,
                              max_output_tokens_per_call=OUTPUT_RESERVATION_PER_CALL,
                              total_output_token_reservations=20 * OUTPUT_RESERVATION_PER_CALL,
-                             max_verifications=8, wall_clock_s=2400, final_reserve=2,
+                             max_verifications=8, wall_clock_s=2400, final_reserve=1,
                              gpu_minutes=240)
 
 STOP_RULES = dict(

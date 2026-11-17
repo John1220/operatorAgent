@@ -350,7 +350,7 @@ def test_v7_freezes_the_fused_budget_and_pins_the_gpu(tmp_path):
     plan = ac_plan.freeze(dict(cells=4), tmp_path / 'v7.json', version='v7')
     assert plan['budget']['max_model_calls'] == 20
     assert plan['budget']['max_verifications'] == 8
-    assert plan['budget']['final_reserve'] == 2
+    assert plan['budget']['final_reserve'] == 1  # HostTaskLimits 只允许 1 个 final 预留
     assert plan['budget']['wall_clock_s'] == 2400
     assert plan['budget']['cells'] == 4
     assert plan['hash']

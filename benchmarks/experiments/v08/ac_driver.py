@@ -104,7 +104,7 @@ def surface_check(arm, *, runtime, builder, node, entry, base_url='http://127.0.
 
 def final_evaluation(run_dir, code, *, declaration, host_budget, backend, stop_after='L2',
                      host=None, port=None, user=None, key_path=None, work_dir=None,
-                     timeout=300, persistent=False):
+                     timeout=300, persistent=False, worker_root=None):
     """A 臂的独立终评：prepare（含终评预留）→ 同源码完整 L2 → `purpose=final`。
 
     顺序不是风格问题：`host_final_source` 会拒绝"没有 L2 通过的源码"，
@@ -120,13 +120,29 @@ def final_evaluation(run_dir, code, *, declaration, host_budget, backend, stop_a
     kwargs = dict(backend=backend, stop_after=stop_after, host=host, port=port, user=user,
                   key_path=key_path, work_dir=work_dir, timeout=timeout,
                   persistent=persistent)
-    explore = ht.verify(run, code, **kwargs)
+    # 每次派发各自包一层 owned_worker_scope：远端持久 worker 若不审计回收，会留在同卡
+    # 被下一段质量检查记成 `harness peer`，把 L3 判成 degraded（D2/P2 都踩过）。
+    import uuid as _uuid
+
+    from operator_agent.execute.backend_ownership import owned_worker_scope
+
+    def _verify(**extra):
+        if worker_root is None:
+            return ht.verify(run, code, **extra)
+        # 每次派发一个**独立**目录：审计回收文件是 write-once，共用一个目录在第二次
+        # 派发时会撞 FileExistsError（实测）。
+        directory = Path(worker_root) / _uuid.uuid4().hex
+        directory.mkdir(parents=True, exist_ok=False)
+        with owned_worker_scope(directory, _uuid.uuid4().hex):
+            return ht.verify(run, code, **extra)
+
+    explore = _verify(**kwargs)
     if not (explore.get('levels') or {}).get('L2'):
         return dict(prepared=made, delivered=False,
                     explore=explore, final=None,
                     reason='prior full L2 did not pass: a final evaluation would be refused '
                            '(host_final_source) and this arm did not deliver')
-    final = ht.verify(run, code, verification_purpose='final', **kwargs)
+    final = _verify(verification_purpose='final', **kwargs)
     return dict(prepared=made, delivered=bool((final.get('levels') or {}).get('L2')),
                 explore=explore, final=final)
 

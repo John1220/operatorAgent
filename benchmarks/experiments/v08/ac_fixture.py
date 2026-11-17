@@ -77,7 +77,7 @@ def _scripted_server(*, command, requests, errors, model_id):
 
 
 def run_a_cell(declaration, *, task_id, candidate_code, root, budget, backend='fake',
-               model_id='ac-fixture', timeout=180):
+               connection=None, model_id='ac-fixture', timeout=180):
     """跑一格 A 臂（scripted 模型），返回 `ac_driver.cell` 形状的 dict。"""
     from benchmarks.experiments.phase1.native import VerificationService
     from benchmarks.experiments.s5 import s5_arm_env, s5_plugin_env
@@ -89,9 +89,17 @@ def run_a_cell(declaration, *, task_id, candidate_code, root, budget, backend='f
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     run_dir = root / 'run'
-    prepared = ht.prepare(declaration, run_dir)
+    connection = dict(connection or {})
+    prepared = ht.prepare(declaration, run_dir, host_budget=dict(budget))
+    from operator_agent.execute.task_clock import monotonic
+    wall = int(budget['wall_clock_s'])
     service_config = dict(run_dir=str(run_dir), backend=backend, declaration=declaration,
-                          budget=dict(wall_clock_s=int(budget['wall_clock_s']),
+                          connection=connection,
+                          # `deadline_monotonic` 是 native 服务的必填项：缺了它 develop()
+                          # 会 KeyError，服务回 400，check.py 只报
+                          # `development_transport_failed`（2026-11-17 fixture 实测）。
+                          deadline_monotonic=monotonic() + wall,
+                          budget=dict(wall_clock_s=wall,
                                       max_llm_calls=int(budget['max_model_calls']),
                                       oracle_total=int(budget['max_verifications'])))
     service = VerificationService(service_config, prepared['contract_hash'])
@@ -116,6 +124,10 @@ def run_a_cell(declaration, *, task_id, candidate_code, root, budget, backend='f
                 'A', base_url=f'http://127.0.0.1:{server.server_port}/v1',
                 model=model_id, tools=True, max_tokens=1024, context_window=65536,
                 development=service.client_config(), arm_dir=root / 'dsh')
+            # 本机 DSH 的 workspace-write 沙箱后端不可用（test_only fixture，不是公平性
+            # 声明）；fixture 只用 danger-full-access 把 check.py 跑通。
+            built['env']['DSH_PERMISSION_MODE'] = 'danger-full-access'
+            _widen_tool_timeout(built, budget['wall_clock_s'])
             work = Path(built['work'])
             work.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(Path(runtime['root']) / 'check.py', work / 'check.py')
@@ -134,21 +146,35 @@ def run_a_cell(declaration, *, task_id, candidate_code, root, budget, backend='f
                     source=None, outcome='unknown',
                     reason=f'no submission reached the supervisor: {errors or response.get("stderr")}',
                     scripted_fixture=True, model_dispatches=len(requests))
-    body = final_evaluation(root / 'final-run', Path(selected).read_text(),
-                            declaration=declaration, host_budget=budget, backend=backend)
-    # `cell()` 收的是 final_evaluation 的**整个结果**（它从里面取 'final'）；
-    # 传 `body['final']` 会被再解一层，回执变 None —— 这个坑今天踩过一次。
-    record = cell(task_id, 'A', state='completed', final=body, source=selected,
-                  model_dispatches=len(requests), verifications=state.get('verification_count'))
-    instrument = _instrument_failure(body)
-    record.update(outcome=('delivered' if body['delivered'] else
-                          'unknown' if instrument else 'failed'),
-                  instrument_failure=instrument,
-                  reason=body.get('reason'), levels=(body['final'] or {}).get('levels')
-                  if body['final'] else (body['explore'] or {}).get('levels'),
-                  scripted_fixture=True, fixture_requests=len(requests),
-                  fixture_errors=list(errors), dsh_returncode=response.get('returncode'))
+    # 与 C 臂同一套收尾：final-run 里 explore L2 + final L3，qualified/融合检查都在
+    # `_finish_cell` 一处决定。fixture 不另走一条判据路。
+    record = _finish_cell(task_id, 'A', Path(selected), root=root,
+                          declaration=declaration, budget=budget, backend=backend,
+                          dispatches=len(requests), errors=errors,
+                          returncode=response.get('returncode'), connection=connection)
+    record.update(scripted_fixture=True, fixture_requests=len(requests),
+                  fixture_errors=list(errors))
     return record
+
+
+def _widen_tool_timeout(built, timeout_s):
+    """把 MCP 工具调用与 bash 的超时放宽到整格墙钟量级。
+
+    融合 L2（768 MiB 输入、32 条 case）在 SSH 上要**数分钟**，而 `s5_arm_env.build`
+    给的缺省是 60 s —— v6 的第 5 个仪器缺陷（"MCP 工具调用 60 s 超时"）在这里原样复现：
+    2026-11-17 fixture 首跑 C 臂 `operator_verify` 直接 `Request timed out`。
+    """
+    limit = max(120, int(timeout_s)) * 1000
+    for row in built.get('patch') or ():
+        for entry in row.get('insert') or ():
+            entry_id = entry.get('id')
+            config = entry.setdefault('config', {})
+            if entry_id == 'mcp-operator':
+                config['toolCallTimeoutMs'] = limit
+            elif entry_id == 'bash-sandbox':
+                config['timeoutMs'] = limit
+                config['maxTimeoutMs'] = limit
+    return built
 
 
 def _stage_sandbox_runtime(runtime, root):
@@ -272,7 +298,7 @@ def _instrument_failure(body):
     return None
 
 
-def _counts(root):
+def _counts(root, arm=None):
     """从盘上的记录数出这一格的调用数、验证数与"到首次完整 L2"的墙钟。
 
     - **调用数**：`cell/outer-requests/request-NNNN.json` 一一对应一次派发（网关原样落盘）；
@@ -292,7 +318,16 @@ def _counts(root):
     # 终评新开的 final-run 也是这格的验证派发（explore L2 + final L3 两次），
     # 以前只数 run/ 下的回执，于是终评两次派发在账外。
     final_receipts = sorted((root / 'final-run').glob('verify-*.json'))
-    verifications = len(receipts) + len(native) + len(final_receipts)
+    # **一次派发只能数一次**：A 臂的会话提交同时留下 `native-verification/result-N.json`
+    # 与 `run/verify-N.json`（后者是服务内部调 ht.verify 写的），两处都数会把 A 的
+    # 预算翻倍，与 C 臂不可比。按臂取其一，终评的 final-run 两臂都数。
+    if arm == 'A':
+        session = native
+    elif arm == 'C':
+        session = receipts
+    else:
+        session = receipts + native
+    verifications = len(session) + len(final_receipts)
     first_full = None
     for path in receipts:
         try:
@@ -363,11 +398,13 @@ def _finish_cell(task_id, arm, selected, *, root, declaration, budget, backend,
 
     selected = Path(selected)
     conn = dict(connection or {})
-    body = final_evaluation(Path(root) / 'final-run', selected.read_text(),
+    final_run = Path(root) / 'final-run'
+    body = final_evaluation(final_run, selected.read_text(),
                             declaration=declaration, host_budget=budget, backend=backend,
                             stop_after='L3',
                             host=conn.get('host'), work_dir=conn.get('work_dir'),
-                            persistent=bool(conn.get('persistent', False)))
+                            persistent=bool(conn.get('persistent', False)),
+                            worker_root=final_run / 'owned-worker')
     # **计数必须来自量具，不是人手数**：之前 `model_dispatches`/`verifications` 都是 None，
     # 报告里的"每格 3–6 次调用"是人工数请求文件得来的（2026-11-10 评审指出）。
     counted = _counts(root)
@@ -429,7 +466,7 @@ def _finish_cell(task_id, arm, selected, *, root, declaration, budget, backend,
     return record
 
 
-def _c_script(declaration, budget, run_dir, code, backend='fake'):
+def _c_script(declaration, budget, run_dir, code, backend='fake', ssh=None):
     """C 臂的 scripted 剧本：prepare → verify(explore) → verify(final) → 收尾。
 
     顺序被 `host_final_source` 强制：final 之前必须有一次**同源码**的完整 L2。
@@ -447,7 +484,12 @@ def _c_script(declaration, budget, run_dir, code, backend='fake'):
                                         total_output_token_reservations=budget['total_output_token_reservations']))),
         dict(tool='mcp__operator__operator_verify',
              args=dict(run_dir=str(run_dir), code=code, candidate_origin='outer',
-                       stop_after='L2', backend=backend)),
+                       stop_after='L2', backend=backend,
+                       **({'host': (ssh or {}).get('host'),
+                           'port': (ssh or {}).get('port'),
+                           'user': (ssh or {}).get('user'),
+                           'key_path': (ssh or {}).get('key_path')}
+                          if backend == 'ssh' else {}))),
         # 终评**不在这里做**：方案 1 里 A/C 的终评同源，由 supervisor 在 `_finish_cell`
         # 用同一套 host task 产出。会话只负责把候选提交到判据上。
         dict(tool=None, args=None),
@@ -459,7 +501,7 @@ def _scripted_handlers(handler, requests, errors, model_id):
 
 
 def run_c_cell(declaration, *, task_id, candidate_code, root, budget, backend='fake',
-               model_id='ac-fixture', timeout=240, sandbox=False):
+               ssh=None, connection=None, model_id='ac-fixture', timeout=240, sandbox=False):
     """跑一格 C 臂（scripted 模型走插件 MCP 工具），返回 `ac_driver.cell` 形状的 dict。"""
     from benchmarks.experiments.s5 import s5_arm_env, s5_plugin_env
     from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT, NODE
@@ -473,7 +515,7 @@ def run_c_cell(declaration, *, task_id, candidate_code, root, budget, backend='f
     run_dir = (root / 'run').resolve()
     from operator_agent.app import hitl_tools as ht
     prepared = ht.prepare(declaration, run_dir, host_budget=dict(budget))
-    plan = _c_script(declaration, budget, run_dir, candidate_code, backend=backend)
+    plan = _c_script(declaration, budget, run_dir, candidate_code, backend=backend, ssh=ssh)
     requests, errors = [], []
 
     def handler_factory():
@@ -540,6 +582,7 @@ def run_c_cell(declaration, *, task_id, candidate_code, root, budget, backend='f
             'C', base_url=f'http://127.0.0.1:{server.server_port}/v1', model=model_id, tools=True,
             max_tokens=1024, context_window=65536, arm_dir=root / 'dsh')
         built['env'] = dict(built['env'], OPERATOR_AGENT_WORKFLOW='host')
+        _widen_tool_timeout(built, budget['wall_clock_s'])
         if sandbox:
             # 沙箱里看不到仓库：插件与 operator_agent 都从 runtime 读。
             # `s5_seatbelt.configure` 已经允许读 runtime/{core,plugin,deps}（arm=C 时），
@@ -594,40 +637,94 @@ def run_c_cell(declaration, *, task_id, candidate_code, root, budget, backend='f
                     model_dispatches=len(requests), fixture_requests=len(requests))
     record = _finish_cell(task_id, 'C', selected, root=root, declaration=declaration,
                           budget=budget, backend=backend, dispatches=len(requests),
-                          errors=errors, returncode=response.get('returncode'))
+                          errors=errors, returncode=response.get('returncode'),
+                          connection=dict(connection or {}))
     return record
 
 
 def main(argv=None):
     import argparse
+    import os
+    import tempfile
 
     parser = argparse.ArgumentParser(prog='ac_fixture', description=__doc__.splitlines()[0])
     parser.add_argument('--json-out', required=True)
-    parser.add_argument('--root', default=None,
-                        help='这一格的私有目录；缺省用随机私有临时目录（不要写死共享路径）')
-    parser.add_argument('--task-id', default='relu-fixture')
-    parser.add_argument('--backend', default='fake', choices=['mock', 'fake'])
-    parser.add_argument('--arm', default='A', choices=['A', 'C'])
+    parser.add_argument('--plan', default=None,
+                        help='v7 计划 JSON；省略时用 ac_plan.design("v7") + 冻结每格预算')
+    parser.add_argument('--task-id', default=None)
+    parser.add_argument('--arm', default='all', choices=['A', 'C', 'all'])
+    parser.add_argument('--candidate-file', default=None,
+                        help='脚本模型提交的候选源码；缺省用手写融合核')
+    parser.add_argument('--root', default=None, help='这一对的私有目录')
+    parser.add_argument('--host', default='h20')
+    parser.add_argument('--work-dir', default='/root/operator-p2-seed-20261116')
+    parser.add_argument('--ssh-host', default=None)
+    parser.add_argument('--ssh-port', default=None)
+    parser.add_argument('--ssh-user', default=None)
+    parser.add_argument('--ssh-key', default=None)
+    parser.add_argument('--timeout', type=int, default=600)
     args = parser.parse_args(argv)
 
-    declaration = dict(request='fp16 relu 256x256', shapes=[[256, 256]], hardware='mock_gpu',
-                       dsl='python', precision='fp16', min_speedup=1.0)
-    budget = dict(wall_clock_s=600, max_model_calls=30, max_output_tokens_per_call=8192,
-                  total_output_token_reservations=245760, max_verifications=4, final_reserve=1)
-    import tempfile
-    root = Path(args.root) if args.root else Path(tempfile.mkdtemp(prefix='ac-fixture-'))
-    runner = run_c_cell if args.arm == 'C' else run_a_cell
-    extra = {} if args.arm == 'C' else dict(backend=args.backend)
-    record = runner(declaration, task_id=args.task_id,
-                        candidate_code="import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n",
-                        root=root, budget=budget, **extra)
+    from benchmarks.experiments.v08 import ac_plan
+    plan = (json.loads(Path(args.plan).read_text(encoding='utf-8')) if args.plan
+            else ac_plan.design('v7'))
+    task = next((row for row in plan['tasks']
+                 if args.task_id in (None, row['task_id'])), None)
+    if task is None:
+        raise SystemExit(f'计划里没有任务 {args.task_id!r}')
+    task_id = task['task_id']
+    declaration = dict(task['declaration'])
+    raw_budget = {key: value for key, value in (plan.get('budget') or {}).items()
+                  if value is not None}
+    for key, value in ac_plan.FROZEN_FUSED_PER_CELL.items():
+        raw_budget.setdefault(key, value)
+    # `hitl_tools.prepare` 只认 HostTaskLimits 的字段；cells/gpu_minutes 是计划账，
+    # 不是 host budget。在这里投影一次，不把计划字段漏给执行器。
+    from operator_agent.execute.host_task_budget import HostTaskLimits
+    budget = {key: raw_budget[key] for key in HostTaskLimits.__dataclass_fields__
+              if raw_budget.get(key) is not None}
+
+    execution = plan.get('execution') or {}
+    gpu = execution.get('gpu') or {}
+    if gpu.get('index') is not None:
+        os.environ.setdefault('OPERATOR_AGENT_REQUIRED_GPU', str(gpu['index']))
+        os.environ.setdefault('OPERATOR_AGENT_REQUIRED_GPU_UUID', str(gpu.get('uuid') or ''))
+        os.environ.setdefault('OPERATOR_AGENT_REQUIRED_GPU_NAME',
+                              str(gpu.get('name') or 'NVIDIA H20'))
+
+    candidate = Path(args.candidate_file) if args.candidate_file else (
+        Path(__file__).resolve().parent / 'kernels' / 'fused_ln_residual.py')
+    code = candidate.read_text(encoding='utf-8')
+    base = Path(args.root) if args.root else Path(tempfile.mkdtemp(prefix='ac-fused-fixture-'))
+    base.mkdir(parents=True, exist_ok=True)
+    connection = dict(host=args.host, work_dir=args.work_dir, persistent=True)
+    ssh = dict(host=args.ssh_host or args.host, port=args.ssh_port,
+               user=args.ssh_user, key_path=args.ssh_key)
+    if args.arm in ('C', 'all') and not ssh.get('key_path'):
+        raise SystemExit('C 臂 SSH 验证需要 --ssh-key（operator_verify 要求显式 key_path）')
+    arms = ('A', 'C') if args.arm == 'all' else (args.arm,)
+    cells = []
+    for arm in arms:
+        root = base / arm
+        if arm == 'A':
+            record = run_a_cell(declaration, task_id=task_id, candidate_code=code, root=root,
+                                budget=budget, backend='ssh', connection=connection,
+                                timeout=args.timeout)
+        else:
+            record = run_c_cell(declaration, task_id=task_id, candidate_code=code, root=root,
+                                budget=budget, backend='ssh', ssh=ssh, connection=connection,
+                                timeout=args.timeout)
+        cells.append(record)
     Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.json_out).write_text(json.dumps(record, ensure_ascii=False, indent=2, default=str) + '\n',
-                                   encoding='utf-8')
-    print(json.dumps({key: record.get(key) for key in
-                      ('state', 'outcome', 'reason', 'model_dispatches', 'fixture_requests')},
+    Path(args.json_out).write_text(
+        json.dumps(cells if len(cells) > 1 else cells[0], ensure_ascii=False, indent=2,
+                   default=str) + '\n', encoding='utf-8')
+    print(json.dumps([{key: record.get(key) for key in
+                       ('arm', 'state', 'outcome', 'delivery_class', 'qualified',
+                        'final_validity', 'final_speedup', 'model_dispatches',
+                        'verifications')} for record in cells],
                      ensure_ascii=False))
-    return 0 if record.get('final_receipt') else 2
+    return 0 if all(record.get('final_receipt') for record in cells) else 2
 
 
 if __name__ == '__main__':
