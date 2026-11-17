@@ -393,3 +393,21 @@ def test_a_pinned_plan_gpu_cannot_silently_become_another_card(monkeypatch):
         index=7, util=0, free_mb=90000, uuid=pinned['uuid'], processes=0))
     state = ac_live.use_pinned_gpu(dict(host='h'), pinned)
     assert state['uuid'] == pinned['uuid'] and state['util'] == 0
+
+
+def test_both_arm_prompts_carry_the_same_32_case_facts():
+    """A 臂不能因为"没有插件"就缺 tested layouts / 值模式；那会把事实差当成工具差。"""
+    from benchmarks.experiments.v08.ac_plan import FUSED_TASK
+    from benchmarks.experiments.v08.ac_round import arm_prompt, correctness_cases
+
+    declaration = FUSED_TASK['declaration']
+    facts = correctness_cases(declaration)
+    assert facts['count'] == 32
+    assert facts['profile'] == 'builtin-fused-layernorm-residual-fp16-cuda-v1'
+    budget = {'max_model_calls': 20, 'wall_clock_s': 2400}
+    prompts = {arm: arm_prompt(arm, declaration=declaration, budget=budget)
+               for arm in ('A', 'C')}
+    for arm, prompt in prompts.items():
+        for case in facts['cases']:
+            assert case['case_id'] in prompt, (arm, case['case_id'])
+        assert 'fused-ln-residual-8x33-near_constant-strided' in prompt

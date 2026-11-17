@@ -391,13 +391,20 @@ def _finish_cell(task_id, arm, selected, *, root, declaration, budget, backend,
                   if fused_task else dict(passed=True, schema='not-applicable', reason=''))
     except FusionCheckError as exc:
         fusion = dict(passed=False, schema='v08-fusion-static-v1', reason=str(exc))
+    claimed_wall = (budget or {}).get('wall_clock_s')
+    total_wall = counted.get('total_wall_s')
+    over_wall = (type(claimed_wall) in (int, float) and _positive(total_wall)
+                 and total_wall > claimed_wall)
     qualified = bool(
-        final_levels.get('L2') is True
+        not over_wall
+        and final_levels.get('L2') is True
         and l3_metrics.get('measurement_validity') == 'valid'
         and _positive(l3_metrics.get('speedup_vs_baseline'))
         and l3_metrics.get('speedup_vs_baseline') >= declared_min
         and fusion.get('passed') is True)
+    # 正常用完墙钟仍未达标是失败，不是 unknown；over_wall 单独记录在墙钟字段里。
     delivery_class = ('qualified' if qualified else
+                      'failed' if over_wall else
                       'correct_only' if final_levels.get('L2') is True else 'failed')
     record = cell(task_id, arm, state='completed', final=body, source=selected,
                   model_dispatches=dispatches if dispatches is not None else counted['dispatches'],

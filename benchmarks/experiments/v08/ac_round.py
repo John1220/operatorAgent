@@ -31,6 +31,7 @@ A_PROMPT = (
     'tool argument) and submit it. Do not dictate or re-derive the full source inside your '
     'reasoning or reply — that burns the output budget and produces no submission.\n'
     'Numeric contract (authoritative): {numeric}\n'
+    'L2 correctness cases (authoritative, all must pass): {cases}\n'
     'Rules you must obey (authoritative): {policy}\n'
     'Frozen common budget: {budget}. Frozen declaration: {declaration}.'
 )
@@ -48,7 +49,8 @@ C_PROMPT = (
     '这一份是独立终评，不能用来探索。\n'
     '提交方式：把源码写成文件（或作为工具参数）再提交；**不要**在思考或正文里整段复述源码——'
     '那会烧光输出预算却交不出东西。\n'
-    '调用约定（ABI，权威）：\n{abi}\n数值契约（权威）：{numeric}\n规则（权威）：{policy}\n'
+    '调用约定（ABI，权威）：\n{abi}\n数值契约（权威）：{numeric}\n'
+    'L2 正确性用例（权威，全部要通过）：{cases}\n规则（权威）：{policy}\n'
     '冻结预算：{budget}\n冻结声明：{declaration}\n'
     '如实报告最后一次提交的结果；预算用尽就停，不要新增调用去凑一个通过。'
 )
@@ -100,16 +102,41 @@ def numeric_contract(declaration):
                 comparison='elementwise: a mismatch must exceed BOTH atol and rtol*|reference|')
 
 
+def correctness_cases(declaration):
+    """这套 L2 用例的**布局与值模式**——C 从 `operator_context` 拿到同一份事实。
+
+    2026-11-17 评审：A 臂若只拿到 ABI、不知道 tested layouts / 值模式，就不是
+    "插件多给了工具"，而是 A 缺事实。这里把 32 条 case 的 case_id、输入形状/dtype、
+    pattern、layout 原样列出，两臂 prompt 都带同一段。
+    """
+    from operator_agent.app.hitl_tools import build_task
+    from operator_agent.core.contract import freeze_from_task
+
+    contract = freeze_from_task(build_task(declaration))
+    suite = contract.correctness_suite
+    rows = []
+    for case in suite.cases:
+        rows.append(dict(
+            case_id=case.case_id, pattern=case.pattern, layout=case.layout,
+            tensors=[dict(name=t.name, shape=list(t.shape), dtype=t.dtype)
+                     for t in case.inputs.tensors],
+            scalars=dict(getattr(case.inputs, 'scalars', None) or {})))
+    return dict(profile=contract.correctness_profile, count=len(rows), cases=rows)
+
+
 def arm_prompt(arm, *, declaration, budget):
     """(prompt 文本) —— 预算与声明**原样**插进去，不在这里改写口径。"""
     if arm not in ('A', 'C'):
         raise SurfaceError(f'unknown arm {arm!r}')
     from operator_agent.decide.anticheat import ANTICHEAT_POLICY
     template = A_PROMPT if arm == 'A' else C_PROMPT
-    return template.format(policy=ANTICHEAT_POLICY,abi=json.dumps(calling_convention(declaration), ensure_ascii=False,
+    return template.format(policy=ANTICHEAT_POLICY,
+                           abi=json.dumps(calling_convention(declaration), ensure_ascii=False,
                                           sort_keys=True, indent=1),
                            numeric=json.dumps(numeric_contract(declaration), ensure_ascii=False,
                                               sort_keys=True),
+                           cases=json.dumps(correctness_cases(declaration), ensure_ascii=False,
+                                            sort_keys=True),
                            budget=json.dumps(budget, ensure_ascii=False, sort_keys=True),
                            declaration=json.dumps(declaration, ensure_ascii=False, sort_keys=True))
 

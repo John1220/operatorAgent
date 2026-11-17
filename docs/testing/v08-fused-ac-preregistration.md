@@ -168,9 +168,9 @@ C 的待遇是“插件 + 其文档化工作流”（v6 已定：工作流本身
 | 终评：两臂 `stop_after=L3`；`_counts` 纳入 `final-run` 两次派发与总墙钟；新增 `qualified/delivery_class/fusion_static/final_speedup/final_validity` | 已接线 + 测试 |
 | GPU 钉卡：计划 `execution.gpu` 的 UUID 与实际回执核对，不符即中止；去掉自动选卡 | 已接线 + 测试 |
 | 融合静态核验：`fusion_check.py`（单一 `@triton.jit` + 单一 launch）接入收尾 | 已接线 + 测试 |
-| A 臂 context pack 加 32 条 case 清单（与 C 的 `operator_context` 等价） | **待接线** |
-| v7 聚合器按 `qualified` 判读（+1/0/−1、partial、子型） | **待接线** |
-| 总墙钟 >2400 s 的格判 `not_delivered`（当前只记录、未 gate） | **待接线** |
+| A 臂 context pack 加 32 条 case 清单（与 C 的 `operator_context` 等价） | **已接线**：两臂 prompt 都带同一段 `correctness_cases`（32 条 case_id/形状/dtype/pattern/layout） |
+| v7 聚合器按 `qualified` 判读（+1/0/−1、partial、子型） | **已接线**：[fused_ac_aggregate.py](../../benchmarks/experiments/v08/fused_ac_aggregate.py)，8 项测试 |
+| 总墙钟 >2400 s 的格判 `not_delivered` | **已接线**：`_finish_cell` 的 `over_wall` 直接降为 failed，不记 unknown |
 | fixture 试跑、xhigh smoke、冻结实际计划文件 | **待执行** |
 
 ## 13. 冻结身份（冻结时填）
