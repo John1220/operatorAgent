@@ -92,9 +92,10 @@
 2. **融合任务头寸门：已通过（2026-11-17）。** 任务 `residual add + LayerNorm`，形状 32768×6144 fp16，
    eager 基线 = fp16 add + native LN；手写融合核快 55.14%（2.229×），当窗带宽 0.42%、L3 `valid`、
    L2 32/32。预登记与结果见 [融合头寸预登记](../../testing/v08-fused-headroom-preregistration.md#10-头寸结果2026-11-17gpu7)。
-3. **下一步：用该任务做 A/C 对照。** 两边从同一份起点出发，使用相同预算和性能目标，记录各自能否交付
-   达标的核，以及从启动到独立终评达标的时间。A/C 需另立预登记（本文件的头寸门只管"值不值得做"）；
-   两边都要重新生成/选择实现，不能把这份手写核直接算作插件交付。[任务选型规则](../../design/v08/task-family-selection.md)
+3. **用该任务做 A/C 对照（预登记草案已起草）。** 两边从空起点出发、同模型/采样/预算/独立终评，
+   主指标是独立终评通过完整 L2 的交付数，性能与调用数只作次级观测。草案见
+   [融合任务 A/C 预登记](../../testing/v08-fused-ac-preregistration.md)；冻结前需确认模型档位、对数与墙钟。
+   不能把这份手写核直接算作插件交付。[任务选型规则](../../design/v08/task-family-selection.md)
 
 ### 方向3 标定读数（2026-11-14，H20 GPU3）
 
@@ -225,6 +226,7 @@ optimize **只在 L3 未过且 round<max_rounds 时才进**（[conductor.py:1822
 [P2 优化闭环预登记草案](../../testing/v08-p2-preregistration.md) ·
 [D2 参数扫描 Q1 预登记](../../testing/v08-d2-preregistration.md) ·
 [融合头寸预登记与结果](../../testing/v08-fused-headroom-preregistration.md#10-头寸结果2026-11-17gpu7) ·
+[融合任务 A/C 预登记（草案）](../../testing/v08-fused-ac-preregistration.md) ·
 [noise preflight](../../testing/v08-noise-preflight.md)
 
 **上游进度**：[v0.8 进度入口](../v08/README.md)（A/C 复现 reproduced 的完整过程与回执）·
