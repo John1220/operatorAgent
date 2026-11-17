@@ -6,7 +6,7 @@ from benchmarks.experiments.v08 import ac_plan, fused_ac_aggregate as fa
 
 @pytest.fixture()
 def plan(tmp_path):
-    return ac_plan.freeze(dict(cells=4), tmp_path / 'v7.json', version='v7')
+    return ac_plan.freeze(dict(cells=4), tmp_path / 'v8.json', version='v8')
 
 
 def cell(arm, delivery_class, *, task_id=None, qualified=None):

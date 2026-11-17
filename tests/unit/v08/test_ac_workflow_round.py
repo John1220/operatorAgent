@@ -330,10 +330,10 @@ def test_the_v1_plan_is_withdrawn_by_name():
     assert ac_plan.design()['plan_id'] == 'operator-v08-workflow-ac-v2'
 
 
-def test_v7_is_the_fused_qualified_delivery_plan():
-    plan = ac_plan.design('v7')
+def test_v8_is_the_fused_qualified_delivery_plan():
+    plan = ac_plan.design('v8')
     assert ac_plan.validate(plan) == []
-    assert plan['plan_id'] == 'operator-v08-workflow-ac-v7'
+    assert plan['plan_id'] == 'operator-v08-workflow-ac-v8'
     assert [task['task_id'] for task in plan['tasks']] == [
         'fused-layernorm-residual-32768x6144-fp16']
     task = plan['tasks'][0]
@@ -342,12 +342,12 @@ def test_v7_is_the_fused_qualified_delivery_plan():
     assert plan['pairs'] == 2
     assert plan['execution']['gpu']['uuid'].startswith('GPU-52ca6155')
     assert plan['execution']['wire_max_tokens'] == 32768
-    assert plan['execution']['sampling']['reasoning_effort'] == 'xhigh'
+    assert plan['execution']['sampling']['reasoning_effort'] == 'medium'
     assert 'qualified' in plan['metric']['primary'].lower()
 
 
-def test_v7_freezes_the_fused_budget_and_pins_the_gpu(tmp_path):
-    plan = ac_plan.freeze(dict(cells=4), tmp_path / 'v7.json', version='v7')
+def test_v8_freezes_the_fused_budget_and_pins_the_gpu(tmp_path):
+    plan = ac_plan.freeze(dict(cells=4), tmp_path / 'v8.json', version='v8')
     assert plan['budget']['max_model_calls'] == 20
     assert plan['budget']['max_verifications'] == 8
     assert plan['budget']['final_reserve'] == 1  # HostTaskLimits 只允许 1 个 final 预留
@@ -356,18 +356,18 @@ def test_v7_freezes_the_fused_budget_and_pins_the_gpu(tmp_path):
     assert plan['hash']
 
 
-def test_v7_rejects_a_cell_count_that_is_not_tasks_arms_pairs(tmp_path):
+def test_v8_rejects_a_cell_count_that_is_not_tasks_arms_pairs(tmp_path):
     with pytest.raises(ValueError):
-        ac_plan.freeze(dict(cells=2), tmp_path / 'bad.json', version='v7')
-    plan = ac_plan.design('v7')
+        ac_plan.freeze(dict(cells=2), tmp_path / 'bad.json', version='v8')
+    plan = ac_plan.design('v8')
     plan['budget'] = dict(ac_plan.FROZEN_FUSED_PER_CELL, cells=2)
     plan['status'] = 'frozen'
     problems = ' '.join(ac_plan.validate(plan))
     assert 'tasks x arms x pairs' in problems
 
 
-def test_v7_rejects_drifted_execution_identity():
-    plan = ac_plan.design('v7')
+def test_v8_rejects_drifted_execution_identity():
+    plan = ac_plan.design('v8')
     plan['execution']['gpu']['uuid'] = 'GPU-deadbeef'
     assert any('execution.gpu' in issue for issue in ac_plan.validate(plan))
     plan = ac_plan.design('v7')
@@ -376,3 +376,9 @@ def test_v7_rejects_drifted_execution_identity():
     plan = ac_plan.design('v7')
     plan['execution']['sampling'].pop('reasoning_effort')
     assert any('execution.sampling' in issue for issue in ac_plan.validate(plan))
+
+
+def test_v7_is_withdrawn_because_xhigh_cannot_submit_at_the_wire_cap():
+    problems = ' '.join(ac_plan.validate(ac_plan.design('v7')))
+    assert 'withdrawn' in problems and 'xhigh' in problems
+    assert ac_plan.design('v7')['execution']['sampling']['reasoning_effort'] == 'xhigh'

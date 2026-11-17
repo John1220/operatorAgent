@@ -33,7 +33,7 @@ def test_c_arm_session_dispatch_is_counted_once(tmp_path):
 
 
 def test_fixture_cells_aggregate_into_a_pair_verdict(tmp_path):
-    plan = ac_plan.freeze(dict(cells=4), tmp_path / 'v7.json', version='v7')
+    plan = ac_plan.freeze(dict(cells=4), tmp_path / 'v8.json', version='v8')
     task_id = ac_plan.FUSED_TASK['task_id']
 
     def cell(arm, delivery_class, speedup):

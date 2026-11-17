@@ -34,12 +34,18 @@ PLAN_IDS = dict(v1='operator-v08-workflow-ac-v1',
                 v4='operator-v08-workflow-ac-v4',
                 v5='operator-v08-workflow-ac-v5',
                 v6='operator-v08-workflow-ac-v6',
-                v7='operator-v08-workflow-ac-v7')
+                v7='operator-v08-workflow-ac-v7',
+                v8='operator-v08-workflow-ac-v8')
 PLAN_ID = PLAN_IDS['v2']          # 历史默认；融合轮显式用 FUSED_PLAN_VERSION
-FUSED_PLAN_VERSION = 'v7'          # 融合 A/C 轮：qualified delivery，2 对
+FUSED_PLAN_VERSION = 'v8'          # 融合 A/C 轮：qualified delivery，2 对（27B/medium）
 
 #: 撤回必须**指名**，并写清理由 —— 不能落进"编号不认识"那条通用消息里。
 WITHDRAWN_PLAN_IDS = {
+    'operator-v08-workflow-ac-v7':
+        'sampling identity xhigh cannot submit inside the 32768 wire cap (2026-11-17: '
+        'internal Coder 2/2 and a real A-arm cell 1/1 spent all 32768 output tokens in '
+        'reasoning with zero tool calls and zero submissions). Superseded by '
+        'operator-v08-workflow-ac-v8 at reasoning_effort=medium, decided by the user.',
     'operator-v08-workflow-ac-v5':
         'per-call output reservation 65536 is refused by the gateway guard '
         '(`s5_gateway_policy` rejects snapshot.max_output_tokens > 40960 with '
@@ -140,7 +146,10 @@ TASKS = [
 
 TASK_IDS = tuple(row['task_id'] for row in TASKS)
 
-#: v7：融合任务。头寸门已过（手写核 2.229× eager），本轮问工作流能否**达标交付**。
+#: v8：融合任务 + 27B/medium。v7 原本登记 xhigh，但 2026-11-17 smoke 证实 xhigh 在 wire
+#: 32768 下结构性不可用（内部 Coder 2/2、真实 A 臂 1/1 都把 32768 全写在思考里、零提交），
+#: 用户据此决定降 medium ⇒ 新计划编号 v8，v7 不执行。
+#: 融合任务。头寸门已过（手写核 2.229× eager），本轮问工作流能否**达标交付**。
 #: 达标 = 完整 L2 + 独立 L3 valid + speedup >= 1.5 + 单核融合静态核验（见 fusion_check）。
 FUSED_TASK = dict(
     task_id='fused-layernorm-residual-32768x6144-fp16',
@@ -180,7 +189,7 @@ FUSED_EXECUTION = dict(
     model='Qwen3.8-27B',
     model_endpoint_sha256=('67df113c7123ab1a97394b809da88efe35489ab43b6657850846c180f54d23d1'),
     sampling=dict(temperature=0.1, n=1, max_tokens=32768,
-                  enable_thinking=True, reasoning_effort='xhigh'),
+                  enable_thinking=True, reasoning_effort='medium'),
     wire_max_tokens=32768,
     output_reservation_per_call=40960,
     pairs=2,
@@ -313,9 +322,13 @@ def _supported_kernel_types():
     return set(OPERATORS) | {'attention'} | set(REGISTERED_FUSED_KERNEL_TYPES)
 
 
+#: 融合计划的两个编号：v7（xhigh，未执行）与 v8（medium，当前可执行）。
+FUSED_VERSIONS = ('v7', 'v8')
+
+
 def design(version='v2'):
     """The freezable part: no budget, no outcome, no credit."""
-    fused = version == 'v7'
+    fused = version in FUSED_VERSIONS
     body = dict(schema=SCHEMA, plan_id=PLAN_IDS[version], status='draft_awaiting_budget',
                 arms=list(ARMS), arm_surfaces=json.loads(json.dumps(ARM_SURFACES)),
                 tasks=json.loads(json.dumps([FUSED_TASK] if fused else (
@@ -335,7 +348,11 @@ def design(version='v2'):
                 budget={name: None for name in BUDGET_FIELDS},
                 formal_gain_claim=False, formal_comparison_credit=False, outcome=None)
     if fused:
-        body['execution'] = json.loads(json.dumps(FUSED_EXECUTION))
+        execution = json.loads(json.dumps(FUSED_EXECUTION))
+        if version == 'v7':
+            # v7 登记的是 xhigh；它的存在价值是记录"为什么没执行"，不是可执行计划。
+            execution['sampling']['reasoning_effort'] = 'xhigh'
+        body['execution'] = execution
         body['pairs'] = FUSED_EXECUTION['pairs']
     body['design_hash'] = digest(body)
     return body
@@ -449,7 +466,7 @@ def validate(plan):
 def freeze(budget, output, version='v2'):
     """Write the plan once, with budgets filled. Refuses to overwrite or to guess."""
     plan = design(version)
-    supplied = dict(FROZEN_FUSED_PER_CELL if version == 'v7' else FROZEN_PER_CELL)
+    supplied = dict(FROZEN_FUSED_PER_CELL if version in FUSED_VERSIONS else FROZEN_PER_CELL)
     supplied.update(budget or {})
     plan['budget'] = {name: supplied.get(name) for name in BUDGET_FIELDS}
     plan['status'] = 'frozen'

@@ -71,8 +71,8 @@ def pair_verdict(plan, cells):
     problems = list(ac_plan.validate(plan))
     if problems:
         raise ValueError('plan 不可执行: ' + '; '.join(problems))
-    if plan.get('plan_id') != ac_plan.PLAN_IDS[ac_plan.FUSED_PLAN_VERSION]:
-        raise ValueError('pair_verdict 只接受 v7 融合计划')
+    if plan.get('plan_id') not in {ac_plan.PLAN_IDS[name] for name in ac_plan.FUSED_VERSIONS}:
+        raise ValueError('pair_verdict 只接受融合计划（v7/v8）')
     if plan.get('status') != 'frozen':
         raise ValueError('只有冻结的计划才能产出配对判读')
     task_id = plan['tasks'][0]['task_id']
@@ -118,8 +118,8 @@ def pair_verdict(plan, cells):
 def aggregate_fused(plan, pairs):
     """Two pairs -> round verdict (reproduced / delivery_parity / not_established / contrary / unknown)."""
     problems = list(ac_plan.validate(plan))
-    if plan.get('plan_id') != ac_plan.PLAN_IDS[ac_plan.FUSED_PLAN_VERSION]:
-        problems.append('不是 v7 融合计划')
+    if plan.get('plan_id') not in {ac_plan.PLAN_IDS[name] for name in ac_plan.FUSED_VERSIONS}:
+        problems.append('不是融合计划（v7/v8）')
     if plan.get('status') != 'frozen':
         problems.append('只有冻结的计划才能产出整轮结论')
     if plan.get('pairs') != PAIRS:
