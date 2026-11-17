@@ -21,6 +21,10 @@
   复算器重验 58 件证据一致；formal_gain_claim=False，主张留给人。见 [D2 预登记](../../testing/v08-d2-preregistration.md)。
 - **D2 整行加载试验已完成，暂缓 Q2。** 同卡独立终评中，整行加载版比 Q1 最佳版慢 26.21%，两份实现
   均通过 32 项 L2 用例，L3 均为 `valid`。[D2 结构试验记录](../../testing/v08-d2-preregistration.md#d2-structure-probe-result)
+- **融合头寸门已过（2026-11-17，GPU7）。** 新注册 `residual add + LayerNorm` 族（独立参考 primitive、
+  32 条显式 case、atol=5e-3 真机标定）。手写融合核 vs eager 两 kernel：**0.331968 ms vs 0.739968 ms，
+  快 55.14%（2.229×）**，当窗带宽 0.42%，终评 `valid`、完整 L2 32/32，判 `headroom_confirmed`。
+  这是头寸门，不是插件读数；`formal_gain_claim=false`。见 [融合头寸预登记](../../testing/v08-fused-headroom-preregistration.md#10-头寸结果2026-11-17gpu7)。
 
 ## 2. 已完成
 
@@ -33,6 +37,7 @@
 | **方向1 任务族选型定案**（性能基线认 eager 组合，不认厂商库；只有库基线的任务只进交付数对照） | `9fb3ce7` | [任务族选型定案](../../design/v08/task-family-selection.md) |
 | **P1 预登记 + 判读量具 + 测量执行器** | `0c83cd1` | `benchmarks/experiments/v08/p1_plan.py`（judge_pair/judge_series/validate/freeze）、`p1_run.py`；`tests/unit/v08/test_p1_plan.py`（11）+ `test_p1_run.py`（8）；[P1 预登记](../../testing/v08-p1-preregistration.md) |
 | **P1 真机取数 + 判读** | 已归档（仓外证据树） | `output/v08-p1-20261114/run3/series.json` + 三对 `pair.json`；计划哈希 `529b499e…` |
+| **融合 residual+LayerNorm profile + 头寸门**（新参考 primitive、32 case、fused 噪声通道、手写核头寸） | `4ba5022` | `tests/unit/v08/test_fused_layernorm_residual.py`（11）+ `test_fusion_headroom.py`（6）；[融合头寸预登记](../../testing/v08-fused-headroom-preregistration.md)。`headroom_confirmed`（+55.14%） |
 | **P2 诊断开关量具 + 起点核 + 正式两对判读** | `f318910` | `p2_plan.py` / `p2_run.py` / `p2_optimize.py` / `p2_seed.py` + 两组提示；`tests/unit/v08/test_p2_*`（29 项）；[P2 预登记](../../testing/v08-p2-preregistration.md#p2-formal-result)。整轮 `no_increment_observed` |
 
 协议身份（`protocol_identity`）随判定缓存加入扩到 **77 文件**（`tests/unit/test_input_seed_spec.py` 钉住）；
@@ -84,13 +89,12 @@
 1. **收口 D2。** 把扫描工具、回归测试、Q1 判读和整行加载试验记录整理成一组可复验的变更。
    用冻结计划和原始回执复算 Q1，核对整行试验的候选源码和独立 L3 回执。Q2 继续暂缓。
    [D2 试验记录](../../testing/v08-d2-preregistration.md#d2-structure-probe-result)
-2. **选一条真实融合任务，先验证提速空间。** 从实际调用中选取任务，例如 `residual add + LayerNorm`。
-   冻结输入、精度和当前实现，写明 PyTorch eager 算子序列、该任务的噪声探针与提速门槛。用一份已有或手写的
-   融合核做对照，两份实现各跑完整 L2 和同卡独立 L3。融合核相对当前实现的提速须达到事先约定的门槛，
-   且超过当窗噪声。[任务选型规则](../../design/v08/task-family-selection.md)
-
-确认有提速空间后，再用该任务比较普通 Agent 和插件流程。两边从同一份源码出发，使用相同预算和性能目标，
-记录各自能否交付达标的核，以及从启动到独立终评达标的时间。
+2. **融合任务头寸门：已通过（2026-11-17）。** 任务 `residual add + LayerNorm`，形状 32768×6144 fp16，
+   eager 基线 = fp16 add + native LN；手写融合核快 55.14%（2.229×），当窗带宽 0.42%、L3 `valid`、
+   L2 32/32。预登记与结果见 [融合头寸预登记](../../testing/v08-fused-headroom-preregistration.md#10-头寸结果2026-11-17gpu7)。
+3. **下一步：用该任务做 A/C 对照。** 两边从同一份起点出发，使用相同预算和性能目标，记录各自能否交付
+   达标的核，以及从启动到独立终评达标的时间。A/C 需另立预登记（本文件的头寸门只管"值不值得做"）；
+   两边都要重新生成/选择实现，不能把这份手写核直接算作插件交付。[任务选型规则](../../design/v08/task-family-selection.md)
 
 ### 方向3 标定读数（2026-11-14，H20 GPU3）
 
@@ -220,6 +224,7 @@ optimize **只在 L3 未过且 round<max_rounds 时才进**（[conductor.py:1822
 **测试/操作**：[P1 性能 parity 预登记](../../testing/v08-p1-preregistration.md) ·
 [P2 优化闭环预登记草案](../../testing/v08-p2-preregistration.md) ·
 [D2 参数扫描 Q1 预登记](../../testing/v08-d2-preregistration.md) ·
+[融合头寸预登记与结果](../../testing/v08-fused-headroom-preregistration.md#10-头寸结果2026-11-17gpu7) ·
 [noise preflight](../../testing/v08-noise-preflight.md)
 
 **上游进度**：[v0.8 进度入口](../v08/README.md)（A/C 复现 reproduced 的完整过程与回执）·
@@ -243,6 +248,9 @@ optimize **只在 L3 未过且 round<max_rounds 时才进**（[conductor.py:1822
 | `logs/p2-formal-pair1-20261116/pilot.json` | 正式 pair-1 判读，`optimize_helps`（+8.49%），带宽 0.3376% |
 | `logs/p2-formal-pair2-20261116/pilot.json` | 正式 pair-2 判读，`no_increment`（+0.15%），带宽 0.5621% |
 | `logs/p2-formal-series-20261116.json` | 正式两对聚合，`no_increment_observed`，`decidable_pairs=2`、`helps=1`、`hurts=0` |
+| `logs/fused-calib-20261117-{c,d,e,f}/` | fused profile 真机标定：good/alt 在 atol=5e-3 全过，bad（漏 R）被拒 |
+| `logs/fusion-headroom-plan-20261117.json` | 融合头寸冻结计划，hash `d0497326…`，契约 `88f248ae…`，候选 `500c84d0…` |
+| `logs/fusion-headroom-20261117b/{receipt,judgement}.json` | 头寸终评：fused 0.331968 ms vs eager 0.739968 ms，`headroom_confirmed` |
 | `output/v08-d2-gpu7-20261117/sweep-plan.json` | D2 Q1 冻结计划（GPU7 绑定），哈希 `d8c2f735…`，16 点格、零模型预算 |
 | `output/v08-d2-gpu7-20261117/sweep3/` | D2 Q1 真机回执：sweep.json（no_increment）+ replay.json（58 件证据重验）+ points/best/seed |
 
@@ -269,6 +277,9 @@ DSH-headless 沙箱集成测试（`test_the_c_arm_session_delivers…` / `test_t
 
 **2026-11-16 P2 正式轮后复核：`test_p2_*` 29 passed；缓存/步幅 125 passed。** 正式轮未改代码路径，
 两批提交为 `db176f8`（缓存身份/unknown 加固）与 `f318910`（P2 量具与预登记）。
+
+**2026-11-17 融合族新增：`test_fused_layernorm_residual.py` 11 passed；`test_fusion_headroom.py` 6 passed。**
+参考契约/套件/输入保真等受影响套件同批复跑。
 
 **2026-11-17 D2 Q1 量具 + 真机：`test_d2_{rewrite,plan,sweep}` 43 passed；P1/P2/噪声门回归合计 101 passed。**
 量具为新增受控驱动（`benchmarks/experiments/v08/d2_*`），未改核心代码路径。真机（GPU7）判 `no_increment`
