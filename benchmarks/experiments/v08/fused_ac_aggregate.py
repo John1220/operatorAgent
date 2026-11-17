@@ -73,6 +73,8 @@ def pair_verdict(plan, cells):
         raise ValueError('plan 不可执行: ' + '; '.join(problems))
     if plan.get('plan_id') != ac_plan.PLAN_IDS[ac_plan.FUSED_PLAN_VERSION]:
         raise ValueError('pair_verdict 只接受 v7 融合计划')
+    if plan.get('status') != 'frozen':
+        raise ValueError('只有冻结的计划才能产出配对判读')
     task_id = plan['tasks'][0]['task_id']
     if not isinstance(cells, (list, tuple)) or len(cells) != 2:
         raise ValueError('一对必须正好是 A/C 两格')
@@ -118,6 +120,8 @@ def aggregate_fused(plan, pairs):
     problems = list(ac_plan.validate(plan))
     if plan.get('plan_id') != ac_plan.PLAN_IDS[ac_plan.FUSED_PLAN_VERSION]:
         problems.append('不是 v7 融合计划')
+    if plan.get('status') != 'frozen':
+        problems.append('只有冻结的计划才能产出整轮结论')
     if plan.get('pairs') != PAIRS:
         problems.append(f'计划登记的正式对数是 {plan.get("pairs")!r}，需要 {PAIRS}')
     if not isinstance(pairs, (list, tuple)) or len(pairs) != PAIRS:
