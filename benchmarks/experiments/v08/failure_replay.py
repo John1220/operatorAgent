@@ -135,8 +135,22 @@ def _close(observed, expected, tolerance=1e-6):
     return abs(float(observed) - float(expected)) <= max(tolerance, abs(expected) * 1e-3)
 
 
-def _matches(case, observed):
+def _matches(case, observed, *, source_name=None):
+    """冻结预期 vs 观测：级别、具名用例，**以及源码/契约身份**。
+
+    身份也要进判据，不能只记字段：2016-11-19 的复核指出，源码哈希与契约哈希此前只是
+    回执里的记录项，于是「回放器跑的是另一份源码/另一份契约」也能显示 passed。
+    """
     expected = case.get("expected") or {}
+    want_contract = case.get("contract_hash")
+    if want_contract and observed.get("contract_hash") != want_contract:
+        return False, (f"contract_hash: expected {want_contract}, "
+                       f"observed {observed.get('contract_hash')}")
+    recorded = (case.get("origin") or {}).get("source_hash")
+    replaying_recorded_source = source_name in (None, "candidate.py")
+    if recorded and replaying_recorded_source and observed.get("source_hash") != recorded:
+        return False, (f"source_hash: expected {recorded}, "
+                       f"observed {observed.get('source_hash')}")
     levels = observed.get("levels") or {}
     for level, want in (expected.get("levels") or {}).items():
         if levels.get(level) is not want:
@@ -160,7 +174,8 @@ def _matches(case, observed):
             return False, f"{case_id}: max_error {max_error} != {want['max_error']}"
         if "matched_ratio" in want and not _close(matched, want["matched_ratio"]):
             return False, f"{case_id}: matched_ratio {matched} != {want['matched_ratio']}"
-    return True, "matches the frozen expectation (levels + the named cases)"
+    return True, ("matches the frozen expectation "
+                  "(contract + source identity + levels + the named cases)")
 
 
 def run_case(*, case_dir, source_name, expect, host, work_dir, timeout, output=None,
@@ -178,10 +193,11 @@ def run_case(*, case_dir, source_name, expect, host, work_dir, timeout, output=N
     failure = _compile_failure(receipt)
     observed = dict(levels=levels, compile_failure=failure,
                     cases=_case_rows(receipt),
+                    contract_hash=receipt.get("contract_hash"),
                     source_hash=_sha(source_text),
                     expected_source_hash=(case.get("origin") or {}).get("source_hash"))
     if expect == "fail":
-        matched, why = _matches(case, observed)
+        matched, why = _matches(case, observed, source_name=source_name)
         passed = matched
     else:
         cases = ((_verdict(receipt, "L2").get("metrics") or {}).get("correctness")

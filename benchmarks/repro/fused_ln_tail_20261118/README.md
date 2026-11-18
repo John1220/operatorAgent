@@ -25,7 +25,7 @@ python -m benchmarks.experiments.v08.failure_replay \
   --host h20 --work-dir /root/operator-p2-seed-20261116
 ```
 
-第 1 条不只看 `L1/L2` 两格，还核对 `case.json` 里点名的用例：
+第 1 条不只看 `L1/L2` 两格：**契约哈希与修前源码哈希都要对得上**，再核对 `case.json` 里点名的用例——
 `fused-ln-residual-1x1-random-contiguous` 必须**通过**、
 `fused-ln-residual-1x33-random-contiguous` 必须**失败**且 `max_error=0.099609375`、
 `matched_ratio=0.1515`（容差内相等）。任一项对不上就判回放不成立。

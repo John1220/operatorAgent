@@ -87,3 +87,26 @@ def test_the_runner_matches_case_level_expectations(tmp_path):
     matched, why = fr._matches(case, dict(levels=dict(L1=True, L2=False),
                                           compile_failure={}, cases=drifted))
     assert matched is False and 'max_error' in why
+
+
+def test_identity_is_part_of_the_pass_criteria(tmp_path):
+    """源码哈希与契约哈希不能只当记录字段：回放跑错源码/契约也要判不成立。"""
+    case = _case(tmp_path, expected=dict(levels=dict(L1=True, L2=False)))
+    case['contract_hash'] = 'c' * 64
+    case['origin'] = dict(source_hash='s' * 64)
+    observed = dict(levels=dict(L1=True, L2=False), compile_failure={}, cases=[],
+                    contract_hash='c' * 64, source_hash='s' * 64)
+    matched, why = fr._matches(case, observed, source_name='candidate.py')
+    assert matched and 'named cases' in why
+
+    drifted_contract = dict(observed, contract_hash='d' * 64)
+    matched, why = fr._matches(case, drifted_contract, source_name='candidate.py')
+    assert matched is False and 'contract_hash' in why
+
+    drifted_source = dict(observed, source_hash='x' * 64)
+    matched, why = fr._matches(case, drifted_source, source_name='candidate.py')
+    assert matched is False and 'source_hash' in why
+
+    # 补丁源码本来就不是那份字节，不按修前哈希判否
+    matched, why = fr._matches(case, drifted_source, source_name='candidate_fixed.py')
+    assert matched is True

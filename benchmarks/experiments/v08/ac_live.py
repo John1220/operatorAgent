@@ -181,27 +181,93 @@ def _assert_budget_consistent(budget):
         raise SystemExit('累计预留小于 调用数 × 每次预留：预算不自洽')
 
 
-def _repair_prompt(prompt, seed_source, seed_receipt):
-    """把“从零实现”改成“修这份坏核”，并把故障事实原样给出。"""
-    from pathlib import Path as _Path
-    seed = _Path(seed_source).read_text(encoding="utf-8")
-    facts = {}
-    if seed_receipt:
-        import json as _json
-        receipt = _json.load(open(seed_receipt, encoding="utf-8"))
-        for verdict in receipt.get("verdicts") or []:
-            if verdict.get("level") == "L2":
-                cases = ((verdict.get("metrics") or {}).get("correctness") or {}).get("cases") or []
-                facts = dict(message=str(verdict.get("message"))[:1200],
-                             cases=[dict(case_id=row.get("case_id"), verdict=row.get("verdict"),
-                                         reason=row.get("reason")) for row in cases])
-    return (prompt + "\n\n## 这是修复任务，不是从零实现\n"
-            "工作目录里已经有 `start_kernel.py`，它就是当前失败的实现（不要重写结构，先修它）。\n"
-            "权威故障事实（来自同一冻结契约的 L2 回执）：\n"
-            + _json_dump(facts) + "\n"
-            "把修好的源码**以同一入口**保存并提交（`check.py --code-file <你的文件>`）。\n"
-            "契约与套件不许改；不要求性能，只要求完整 L2 通过。\n"
-            "```python\n" + seed + "\n```\n")
+def repair_workflow(arm, *, run_dir, ssh, budget, seed_receipt):
+    """修复任务的**工作流**：两边都是「先原样复现 → 再看诊断 → 再改」。
+
+    2026-11-18 的 C 臂修复试跑仍在 `operator_context(phase="generate")`：那一步发的是
+    「从零写一个核」的材料（生成规约、技能、配方），而 repair 轮需要的材料是
+    「这份源码为什么挂」。所以这里把修复阶段的入口写死成：
+    先提交**未修改**的 `start_kernel.py`（复现，产生 round 1 的失败回执），
+    再 `operator_context(phase="repair", verification_round=1)` 取绑定该源码+结果的诊断。
+    """
+    facts = _receipt_facts(seed_receipt)
+    head = ("## 这是修复任务\n"
+            "工作目录里的 `start_kernel.py` 就是当前**失败**的实现——不要重写结构，先修它。\n"
+            "验收条件（权威）：修好的源码必须在**同一份冻结契约与 32 条套件**上完整 L2 通过，"
+            "并再通过一次独立终评（`purpose=final`）的 L2；**不比性能、不要求融合结构**。"
+            "契约、套件、容差都不许改。\n"
+            "已知故障（来自同一冻结契约的 L2 回执）：\n" + _json_dump(facts) + "\n")
+    if arm == 'C':
+        body = ("工作流（按顺序）：\n"
+                "1. 先**原样不改**提交 `start_kernel.py` 复现失败："
+                f'operator_verify(run_dir="{run_dir}", code=<start_kernel.py 的内容>, '
+                'candidate_origin="outer", backend="ssh", '
+                f'host="{ssh.get("host")}", port={ssh.get("port") or 22}, '
+                f'user="{ssh.get("user") or "root"}", '
+                f'key_path="{Path(ssh.get("key") or "").expanduser()}", stop_after="L2")；'
+                "这一步只为拿到 round 1 的失败回执。\n"
+                f'2. 调 operator_context(run_dir="{run_dir}", phase="repair", '
+                'verification_round=1, backend="ssh") 取绑定这份源码与这次失败的诊断材料；'
+                "它是**假设**，不是指令。\n"
+                "3. 改源码，再 `operator_verify(...)` 提交；按回包继续改，"
+                f"最多 {budget['max_model_calls']} 次模型调用，不要超。\n"
+                "4. 终评由 supervisor 做，你不用调 final。\n")
+    else:
+        body = ("工作流：读 `start_kernel.py`，改好后用 `check.py --code-file <你的文件>` 提交；"
+                "按回包继续改，最多 " + str(budget['max_model_calls']) + " 次模型调用。\n")
+    tail = ("不要重写整个实现、不要在思考里整段复述源码（会烧光输出预算），"
+            "只回复必要的说明。\n")
+    return head + body + tail
+
+
+#: 会话因**设施**而中断的标记：这些不是候选结果，必须记 unknown。
+#: 2026-11-18 修复轮：C 臂两次都是 `Stream ended without finish_reason`（上游流时限），
+#: 却被记成 `failed / no submission passed L2` —— 那是把仪器故障算成候选失败。
+_SESSION_INSTRUMENT_MARKERS = ('Stream ended without finish_reason',
+                               'stream idle timeout',
+                               'invalid upstream timeout',
+                               'TRANSPORT:',
+                               'ECONNRESET',
+                               'socket hang up')
+
+
+def session_instrument_failure(response):
+    """这一次会话是被设施打断的吗？是就返回原因串，否则 None。"""
+    if not isinstance(response, dict):
+        return None
+    text = str(response.get('stderr') or '')
+    for event in response.get('events') or ():
+        if isinstance(event, dict) and event.get('type') in ('final', 'status', 'error'):
+            text += ' ' + json.dumps(event, ensure_ascii=False)
+    for marker in _SESSION_INSTRUMENT_MARKERS:
+        if marker in text:
+            return marker
+    return None
+
+
+def _receipt_facts(seed_receipt):
+    """从原始失败回执里抽出**这条样本**的故障事实（具名用例 + 误差）。"""
+    if not seed_receipt:
+        return {}
+    import json as _json
+    receipt = _json.load(open(seed_receipt, encoding="utf-8"))
+    for verdict in receipt.get("verdicts") or []:
+        if verdict.get("level") != "L2":
+            continue
+        cases = ((verdict.get("metrics") or {}).get("correctness") or {}).get("cases") or []
+        named = []
+        for row in cases:
+            metrics = row.get("metrics") or {}
+            if row.get("verdict") == "failed":
+                named.append(dict(case_id=row.get("case_id"), verdict="failed",
+                                  max_error=metrics.get("max_error"),
+                                  matched_ratio=metrics.get("matched_ratio"),
+                                  reason=str(row.get("reason"))[:300]))
+            elif row.get("verdict") == "passed":
+                named.append(dict(case_id=row.get("case_id"), verdict="passed"))
+        return dict(contract_hash=receipt.get("contract_hash"),
+                    summary=str(verdict.get("message"))[:600], cases=named)
+    return {}
 
 
 def _json_dump(value):
@@ -260,7 +326,12 @@ def _widen_stream_deadline():
     from benchmarks.experiments.phase1 import host as _host
     from benchmarks.experiments.phase1 import sampling as _sampling
 
-    per_1k = float(os.environ.get('AC_UPSTREAM_S_PER_1K', '24'))
+    # 24 s/1k 在 32768 上限下只有 786 s；35 s/1k ≈1147 s。2026-11-18 修复轮实测：
+    # A 臂第 3 次调用正好在 786.4 s 被掐、C 臂在 1146.9 s 被掐（都已流出 1.6/4.9 MB，
+    # 仍在写）。本机 vLLM 在长上下文下明显慢于 53 tok/s。
+    # 取 50 s/1k ≈ 1638 s，仍在传输层 1800 s 硬上限之内，且最坏 1 次长调用后
+    # 还剩约 760 s 墙钟给其余步骤。
+    per_1k = float(os.environ.get('AC_UPSTREAM_S_PER_1K', '50'))
 
     # `UpstreamTransport` 硬性拒绝 > 1800 s 的 timeout（MAX_WALL_SECONDS）；
     # 65536 输出 × 30 s/1k = 1966 s 会直接 `invalid upstream timeout`（2026-11-10 实测）。
@@ -366,10 +437,14 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
         # `unable to read data link`。用仓库 venv 的 python（绝对路径），并把
         # **`.venv` 这一个子目录**放进读白名单——仓库源码仍然读不到。
         interpreter = str(Path(sys.executable).resolve())
-        prompt = arm_prompt(arm, declaration=declaration, budget=budget).replace(
-            'python check.py', f'{interpreter} check.py')
         if seed_source is not None:
-            prompt = _repair_prompt(prompt, seed_source, seed_receipt)
+            # 修复格：不给“从零实现”的整段 prompt，只给修复工作流 + 故障事实 + 提交命令。
+            prompt = (repair_workflow('A', run_dir=run_dir, ssh={}, budget=budget,
+                                      seed_receipt=seed_receipt)
+                      + '\n提交命令：`' + interpreter + ' check.py --code-file <你的文件>`。\n')
+        else:
+            prompt = arm_prompt(arm, declaration=declaration, budget=budget).replace(
+                'python check.py', f'{interpreter} check.py')
         if True:  # A 臂同样进沙箱：只放行 `.venv` 与臂目录，仓库源码读不到
             from .ac_fixture import _sandbox_c as _sandbox
             _sandbox(built, runtime=runtime, root=root,
@@ -389,6 +464,7 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
             deadline_hit = True
         state = service.snapshot()
 
+    instrument = session_instrument_failure(response)
     selected = state.get('selected_source')
     _assert_tool_surface(root, arm, ('bash',))
     (root / 'session.json').write_text(json.dumps(
@@ -398,12 +474,16 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
     if not selected:
         from .ac_fixture import _counts
         counted = _counts(root)
-        return dict(task_id=task_id, arm=arm,
-                    state='deadline' if deadline_hit else 'crashed',
+        # 优先级：设施中断 ⇒ unknown；正常用完墙钟 ⇒ failed（预登记口径）。
+        state_name = ('crashed' if instrument else
+                      'deadline' if deadline_hit else 'crashed')
+        return dict(task_id=task_id, arm=arm, state=state_name,
                     final_receipt=None, source=None,
-                    outcome='failed' if deadline_hit else 'unknown',
-                    reason=('wall clock exhausted without a full-L2 submission'
-                            if deadline_hit else 'no submission reached the supervisor'),
+                    outcome='unknown' if (instrument or not deadline_hit) else 'failed',
+                    instrument_failure=instrument,
+                    reason=(f'instrument: {instrument}' if instrument else
+                            ('wall clock exhausted without a full-L2 submission'
+                             if deadline_hit else 'no submission reached the supervisor')),
                     scripted_fixture=False, model_dispatches=counted['dispatches'],
                     verifications=counted['verifications'],
                     metering=dict(dispatches=counted['dispatch_source'],
@@ -557,7 +637,9 @@ def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
             work_c = Path(built['work'])
             work_c.mkdir(parents=True, exist_ok=True)
             _shutil.copyfile(seed_source, work_c / 'start_kernel.py')
-            prompt = _repair_prompt(prompt, seed_source, seed_receipt)
+            prompt = (repair_workflow('C', run_dir=run_dir, ssh=ssh,
+                                      budget=budget, seed_receipt=seed_receipt)
+                      + '\n调用约定（ABI，权威）：' + abi_text + '\n')
         (root / 'prompt.txt').write_text(prompt, encoding='utf-8')
         response = s5_arm_env.start_headless(built, prompt, timeout=timeout_s or wall,
                                              capture_dir=root / 'host-output')
@@ -579,8 +661,16 @@ def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
     if not selected:
         from .ac_fixture import _counts
         counted = _counts(root)
-        return dict(task_id=task_id, arm='C', state='completed', final_receipt=None, source=None,
-                    outcome='failed', reason='no submission passed L2',
+        instrument = session_instrument_failure(response)
+        # 没提交 ≠ 候选失败：会话被设施掐断时记 unknown（预登记：只有“正常用完预算
+        # 仍未达标”才是 not_delivered）。
+        return dict(task_id=task_id, arm='C',
+                    state='crashed' if instrument else 'completed',
+                    final_receipt=None, source=None,
+                    outcome='unknown' if instrument else 'failed',
+                    instrument_failure=instrument,
+                    reason=(f'instrument: {instrument}' if instrument
+                            else 'no submission passed L2'),
                     scripted_fixture=False, last_receipt=last, model_dispatches=counted['dispatches'],
                     verifications=counted['verifications'],
                     metering=dict(dispatches=counted['dispatch_source'],
