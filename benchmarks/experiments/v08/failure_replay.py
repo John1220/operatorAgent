@@ -103,6 +103,38 @@ def observe(case, source_text, *, host, work_dir, timeout, backend="ssh", final=
     return body
 
 
+def _case_rows(receipt):
+    for verdict in (receipt or {}).get("verdicts") or []:
+        if verdict.get("level") == "L2":
+            metrics = verdict.get("metrics") or {}
+            return (metrics.get("correctness") or {}).get("cases") or []
+    return []
+
+
+def _case_verdict(row):
+    """One case row -> (verdict, max_error, matched_ratio).
+
+    A case that passed but only carries ``bad_elements`` counts as passed; a
+    missing verdict is ``unknown`` and never silently treated as a pass.
+    """
+    metrics = row.get("metrics") or {}
+    verdict = row.get("verdict")
+    if verdict is None:
+        if metrics.get("bad_elements") == 0:
+            verdict = "passed"
+        elif metrics.get("bad_elements"):
+            verdict = "failed"
+        else:
+            verdict = "unknown"
+    return verdict, metrics.get("max_error"), metrics.get("matched_ratio")
+
+
+def _close(observed, expected, tolerance=1e-6):
+    if observed is None or expected is None:
+        return False
+    return abs(float(observed) - float(expected)) <= max(tolerance, abs(expected) * 1e-3)
+
+
 def _matches(case, observed):
     expected = case.get("expected") or {}
     levels = observed.get("levels") or {}
@@ -113,7 +145,22 @@ def _matches(case, observed):
     for key in ("producer", "line", "column"):
         if key in expected and failure.get(key) != expected[key]:
             return False, f"{key}: expected {expected[key]!r}, observed {failure.get(key)!r}"
-    return True, "matches the frozen expectation"
+    rows = {row.get("case_id"): _case_verdict(row)
+            for row in observed.get("cases") or []}
+    for case_id in expected.get("passing_cases") or ():
+        verdict, _, _ = rows.get(case_id, ("missing", None, None))
+        if verdict != "passed":
+            return False, f"{case_id}: expected passed, observed {verdict}"
+    for want in expected.get("failing_cases") or ():
+        case_id = want.get("case_id")
+        verdict, max_error, matched = rows.get(case_id, ("missing", None, None))
+        if verdict != want.get("verdict", "failed"):
+            return False, f"{case_id}: expected {want.get('verdict', 'failed')}, observed {verdict}"
+        if "max_error" in want and not _close(max_error, want["max_error"]):
+            return False, f"{case_id}: max_error {max_error} != {want['max_error']}"
+        if "matched_ratio" in want and not _close(matched, want["matched_ratio"]):
+            return False, f"{case_id}: matched_ratio {matched} != {want['matched_ratio']}"
+    return True, "matches the frozen expectation (levels + the named cases)"
 
 
 def run_case(*, case_dir, source_name, expect, host, work_dir, timeout, output=None,
@@ -130,6 +177,7 @@ def run_case(*, case_dir, source_name, expect, host, work_dir, timeout, output=N
     levels = receipt.get("levels") or {}
     failure = _compile_failure(receipt)
     observed = dict(levels=levels, compile_failure=failure,
+                    cases=_case_rows(receipt),
                     source_hash=_sha(source_text),
                     expected_source_hash=(case.get("origin") or {}).get("source_hash"))
     if expect == "fail":

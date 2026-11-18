@@ -53,3 +53,37 @@ def test_the_case_manifest_pins_the_contract_and_the_original_source_hash():
     assert case['expected']['levels'] == {'L1': True, 'L2': False}
     fixed = (root / 'candidate_fixed.py').read_text(encoding='utf-8')
     assert 'next_power_of_2' in fixed and 'tl.where(cols < N, s - mean, 0.0)' in fixed
+
+
+def test_the_tail_case_pins_the_specific_failing_shape():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[3] / 'benchmarks/repro/fused_ln_tail_20261118'
+    case = json.loads((root / 'case.json').read_text(encoding='utf-8'))
+    source = (root / 'candidate.py').read_text(encoding='utf-8')
+    assert fr._sha(source) == case['origin']['source_hash']
+    assert case['contract_hash'].startswith('09333958')
+    failing = case['expected']['failing_cases']
+    assert [row['case_id'] for row in failing] == ['fused-ln-residual-1x33-random-contiguous']
+    assert failing[0]['max_error'] == 0.099609375 and failing[0]['matched_ratio'] == 0.1515
+    assert case['expected']['passing_cases'] == ['fused-ln-residual-1x1-random-contiguous']
+    fixed = (root / 'candidate_fixed.py').read_text(encoding='utf-8')
+    assert 'tl.where(mask, s - mean, 0.0)' in fixed and 'idx * r_inner' in fixed
+
+
+def test_the_runner_matches_case_level_expectations(tmp_path):
+    case = _case(tmp_path, expected=dict(
+        levels=dict(L1=True, L2=False),
+        passing_cases=['ok'], failing_cases=[dict(case_id='bad', verdict='failed',
+                                                  max_error=0.1, matched_ratio=0.1515)]))
+    rows = [dict(case_id='ok', verdict='passed', metrics=dict(bad_elements=0)),
+            dict(case_id='bad', verdict='failed',
+                 metrics=dict(max_error=0.1, matched_ratio=0.1515, bad_elements=28))]
+    matched, why = fr._matches(case, dict(levels=dict(L1=True, L2=False),
+                                          compile_failure={}, cases=rows))
+    assert matched and 'named cases' in why
+
+    drifted = [dict(rows[0]), dict(case_id='bad', verdict='failed',
+                                   metrics=dict(max_error=0.2, matched_ratio=0.1515))]
+    matched, why = fr._matches(case, dict(levels=dict(L1=True, L2=False),
+                                          compile_failure={}, cases=drifted))
+    assert matched is False and 'max_error' in why

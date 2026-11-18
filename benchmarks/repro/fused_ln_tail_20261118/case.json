@@ -1,0 +1,47 @@
+{
+  "schema": "v08-failure-replay-case-v1",
+  "case_id": "fused-ln-tail-20261118",
+  "summary": "27B/medium A-arm kernel is correct on the big shape and on single-column rows, but the tail block (N=33) is off by 9.96e-02: the padded lanes contribute -mean to the variance.",
+  "origin": {
+    "collected_at": "2026-11-18T11:33:00+08:00",
+    "arm": "A (bare DSH, plan operator-v08-workflow-ac-v8, pair-2)",
+    "cell_root": "output/ac-v08f-pair2-A",
+    "receipt": "output/ac-v08f-pair2-A/run/native-verification/result-0001.json",
+    "source_hash": "9e760eb0c55711f61600280e393e204cfe4041af973f8c38c6e9cd701f8db2ea",
+    "note": "the source is committed verbatim as candidate.py in this directory"
+  },
+  "declaration": {
+    "request": "fp16 32768x6144 residual add layernorm",
+    "shapes": [[32768, 6144]],
+    "precision": "fp16",
+    "dsl": "triton",
+    "hardware": "nvidia_gpu",
+    "min_speedup": 1.5
+  },
+  "contract_hash": "093339587d8c462c8af2328095b00fd471575ed26e2630c2ef81a6925ebdc44a",
+  "correctness_profile": "builtin-fused-layernorm-residual-fp16-cuda-v1",
+  "suite_digest": "652f65b16440864795cf60bd75bd3e93146dd26dfce3b0e6b6d2ccf195cf4aa7",
+  "expected": {
+    "levels": {"L1": true, "L2": false},
+    "failure_kind": "numeric_tail_block",
+    "passing_cases": ["fused-ln-residual-1x1-random-contiguous"],
+    "failing_cases": [
+      {
+        "case_id": "fused-ln-residual-1x33-random-contiguous",
+        "verdict": "failed",
+        "max_error": 0.099609375,
+        "matched_ratio": 0.1515,
+        "shape": "tail_block"
+      }
+    ],
+    "root_cause": "kernel loads with mask but computes d = s - mean on every lane; padded lanes hold s=0 so they contribute (-mean)^2 to the variance",
+    "known_related": "the same source also ignores the inner stride (idx instead of idx*inner_stride), which is why the strided 8x33 cases fail harder (7.29e-01)"
+  },
+  "budget": {
+    "wall_clock_s": 900,
+    "max_verifications": 2,
+    "max_model_calls": 1,
+    "max_output_tokens_per_call": 8192,
+    "total_output_token_reservations": 8192
+  }
+}

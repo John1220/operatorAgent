@@ -1,0 +1,23 @@
+{
+  "schema": "v08-failure-replay-v1",
+  "case_id": "fused-ln-tail-20261118",
+  "source": "candidate_fixed.py",
+  "source_hash": "b1d42e8481122c3a976c4f4ad813ab88c31231625e874c0f5c58a7f723ed42d9",
+  "expect": "pass",
+  "passed": true,
+  "why": "L2=True cases=32/32; independent final L2=True",
+  "levels": {
+    "L1": true,
+    "L2": true
+  },
+  "compile_failure": {},
+  "contract_hash": "093339587d8c462c8af2328095b00fd471575ed26e2630c2ef81a6925ebdc44a",
+  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_tail_20261118/run/candidate_fixed-f917d6db/verify-1/result.json",
+  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_tail_20261118/run/candidate_fixed-f917d6db",
+  "final_levels": {
+    "L1": true,
+    "L2": true
+  },
+  "final_evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_tail_20261118/run/candidate_fixed-f917d6db/verify-2/result.json",
+  "final_verification_purpose": null
+}
