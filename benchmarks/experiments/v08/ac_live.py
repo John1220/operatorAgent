@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from subprocess import TimeoutExpired
 import sys
 from pathlib import Path
 
@@ -341,8 +342,17 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
                      extra_roots=[Path(interpreter).parent.parent],
                      extra_files=[Path(interpreter)])
         (root / 'prompt.txt').write_text(prompt, encoding='utf-8')
-        response = s5_arm_env.start_headless(built, prompt, timeout=timeout_s or wall,
-                                             capture_dir=root / 'host-output')
+        # 墙钟到点是**正常终止**（记 deadline），不是崩溃：2026-11-18 实测 A 臂在预算
+        # 用尽后仍会循环重试 check.py，`start_headless` 抛 TimeoutExpired 会把整格丢成
+        # crash/unknown —— 而预登记要求"用完墙钟仍未达标 ⇒ not_delivered（失败）"。
+        try:
+            response = s5_arm_env.start_headless(built, prompt, timeout=timeout_s or wall,
+                                                 capture_dir=root / 'host-output')
+            deadline_hit = False
+        except TimeoutExpired:
+            response = dict(returncode=None, stderr='wall_clock_exhausted', events=[],
+                            output_capture={})
+            deadline_hit = True
         state = service.snapshot()
 
     selected = state.get('selected_source')
@@ -354,8 +364,12 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
     if not selected:
         from .ac_fixture import _counts
         counted = _counts(root)
-        return dict(task_id=task_id, arm=arm, state='crashed', final_receipt=None, source=None,
-                    outcome='unknown', reason='no submission reached the supervisor',
+        return dict(task_id=task_id, arm=arm,
+                    state='deadline' if deadline_hit else 'crashed',
+                    final_receipt=None, source=None,
+                    outcome='failed' if deadline_hit else 'unknown',
+                    reason=('wall clock exhausted without a full-L2 submission'
+                            if deadline_hit else 'no submission reached the supervisor'),
                     scripted_fixture=False, model_dispatches=counted['dispatches'],
                     verifications=counted['verifications'],
                     metering=dict(dispatches=counted['dispatch_source'],

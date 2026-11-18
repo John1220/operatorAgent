@@ -27,14 +27,27 @@ def _digest(value):
 
 
 def _unknown_reason(cell):
+    """这一格是不是**不可判**（接线/设施问题），而不是候选失败。
+
+    没有终评回执不必然等于 unknown：`host_final_source` 会**拒绝**为“没有完整 L2 通过”
+    的源码开终评，于是“跑完预算但没交付”的格天然没有 final 回执 —— 那正是
+    `delivery_class=failed`（预登记：用完预算仍未达标 ⇒ not_delivered，计入分母）。
+    """
     state = cell.get('state')
     if state in ('not_executed', 'crashed'):
         return f'{cell.get("arm")}: state={state}'
     if cell.get('outcome') == 'unknown':
         return f'{cell.get("arm")}: outcome=unknown'
+    delivery_class = cell.get('delivery_class')
+    if delivery_class not in ('qualified', 'correct_only', 'failed'):
+        return f'{cell.get("arm")}: missing delivery_class'
     receipt = cell.get('final_receipt')
+    if receipt is None:
+        if delivery_class == 'failed':
+            return None
+        return f'{cell.get("arm")}: no final receipt for a {delivery_class} delivery'
     if not isinstance(receipt, dict):
-        return f'{cell.get("arm")}: no final receipt'
+        return f'{cell.get("arm")}: final receipt is not an object'
     if receipt.get('verification_purpose') != 'final':
         return f'{cell.get("arm")}: receipt is not the independent final'
     return None

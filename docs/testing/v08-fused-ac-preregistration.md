@@ -218,6 +218,33 @@ A 臂 fixture 已复现修复前后的差别：修复前 `degraded/correct_only`
 
 pair-1 配对差 **+1**（C 达标、A 未达标），子型 `mixed_a_correct_only_c_qualified`。
 
+pair-2（反序 C→A）：
+
+| 对 | 臂 | 完整 L2 | 独立 L3 | speedup | 静态融合核验 | 判定 | 调用 | 验证 | 墙钟 |
+|---|---|---|---|---|---|---|---:|---:|---:|
+| pair-2 | C | 32/32 | `valid` | 2.1801× | 通过 | **`qualified`** | 3 | 3 | 1112.5 s |
+| pair-2 | A | **失败**（主用例过，尾块 1x33 挂：`max 9.96e-02`） | — | — | 通过 | `failed` | 20 | 3 | 1403.6 s |
+
+pair-2 配对差 **+1**，子型 `mixed_a_failed_c_qualified`。
+
+**整轮判读**：`reproduced`，`formal_gain_claim=true`（两对均 +1）。
+
+```
+pair-1  A correct_only   C qualified   +1
+pair-2  A failed         C qualified   +1
+series  reproduced, pairs_observed=2
+```
+
+两条必须一起读的限制：
+
+1. **A 的 pair-2 失败是真实的候选缺陷**：主用例（32768×6144）过、尾块 `1x33` 挂，
+   与 [失败回放包](../../../benchmarks/repro/fused_ln_compile_20261118/README.md) 里那个
+   “补齐 lane 计入方差”同属尾块类；A 这次没修出来。
+2. **A 的 pair-1 记为 `correct_only` 是判据误伤**（见下），所以两对的“A 未达标”
+   不是同一原因；`reproduced` 只说明“按冻结判据，两对都是 C 达标而 A 未达标”。
+   若把 pair-1 按“单条执行路径最大 launch 数”重判，A 会变成 `qualified`，pair-1 变 0，
+   整轮会落到 `not_established`。这条边界必须随结论一起写。
+
 **A 的“未达标”是判据误伤，已如实记录、不改判据。** A 交付的核在 `N<=8192` / `else` 两支
 各有一个 `@triton.jit`（都是 add+LN 单趟融合，冻结形状只走第一支），而 v8 冻结的
 `v08-fusion-static-v1` 规则要求“全文件恰好一个 jit 核 + 一个 launch”。因此：

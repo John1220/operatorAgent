@@ -81,3 +81,30 @@ def test_unknown_cell_makes_the_round_unknown_and_never_adds_a_third_pair(plan):
     result = fa.aggregate_fused(plan, [good, fa.pair_verdict(plan, [cell('A', 'failed'), bad])])
     assert result['verdict'] == 'unknown'
     assert result['pairs_expected'] == 2 and result['pairs_observed'] == 2
+
+
+def test_a_failed_delivery_without_a_final_receipt_is_failed_not_unknown(plan):
+    """host 会拒绝为“没有完整 L2 通过”的源码开终评：那格天然没有 final 回执。
+
+    预登记把“用完预算仍未达标”记 `not_delivered`（失败、计入分母），不是 unknown；
+    unknown 只留给接线/设施问题。
+    """
+    failed = dict(task_id=fa.ac_plan.FUSED_TASK['task_id'], arm='A', state='completed',
+                  final_receipt=None, delivery_class='failed', qualified=False,
+                  outcome='failed', model_dispatches=20, verifications=3,
+                  wall_clock_total_s=1403.6,
+                  reason='prior full L2 did not pass')
+    qualified = cell('C', 'qualified')
+    result = fa.pair_verdict(plan, [failed, qualified])
+    assert result['round_complete'] is True
+    assert result['paired_difference_C_minus_A'] == 1
+    assert result['per_arm']['A']['outcome'] == 'failed'
+
+
+def test_a_qualified_delivery_without_a_final_receipt_is_still_unknown(plan):
+    bogus = dict(task_id=fa.ac_plan.FUSED_TASK['task_id'], arm='A', state='completed',
+                 final_receipt=None, delivery_class='qualified', qualified=True,
+                 outcome='delivered')
+    result = fa.pair_verdict(plan, [bogus, cell('C', 'qualified')])
+    assert result['round_complete'] is False
+    assert result['subtype'] == 'unknown'
