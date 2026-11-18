@@ -223,3 +223,61 @@ def test_lookup_refuses_backend_only_environment(tmp_path):
     backend_only = {'backend': 'SSHExecutor@h20(nvidia)'}
     _evidence(tmp_path, 1, environment=backend_only)
     assert _lookup(tmp_path, environment=backend_only) is None
+
+def test_reference_identity_is_queried_once_per_verification_not_per_case():
+    """32 条 case 不该各查一次远端身份（2026-11-19 实测冷 L2：68 次 gpu_info / 16.0 s）。
+
+    缓存的**作用域**是一次 verify：同一次之内复用，跨 verify（以及「生成前 vs 生成后」
+    这类跨阶段检查）仍各查一次 —— 后者由 `test_identity_hold_after_generation_...` 钉住。
+    """
+    from unittest.mock import Mock
+
+    from operator_agent.app.hitl_tools import build_task
+    from operator_agent.core.backend_caps import Cap
+    from operator_agent.decide.reference_contract import (PROFILE_FUSED_LN_RESIDUAL,
+                                                          check_observed, registered_reference)
+    from operator_agent.decide.verifier import Verifier
+
+    spec = registered_reference(PROFILE_FUSED_LN_RESIDUAL)
+    receipt = check_observed(spec, spec.execution.content_dict())
+    backend = Mock()
+    backend.reference_identity = Mock(
+        return_value=dict(success=True, reference_receipt=receipt))
+    backend.capabilities = frozenset({Cap.REAL_DEVICE, Cap.REMOTE_VERIFY,
+                                      Cap.SAME_DEVICE_BASELINE, Cap.REFERENCE_IDENTITY,
+                                      Cap.GPU_PINNING})
+    verifier = Verifier(backend)
+    task = build_task(dict(request='fp16 32768x6144 residual add layernorm',
+                           shapes=[[32768, 6144]], precision='fp16', dsl='triton',
+                           hardware='nvidia_gpu', min_speedup=1.5))
+    assert verifier.reference_preflight(task) is None
+    assert verifier.reference_preflight(task) is None      # 同一次 L2：命中缓存
+    assert backend.reference_identity.call_count == 1
+    verifier._reference_identity_cache.clear()             # 新的一次 verify
+    verifier.reference_preflight(task)
+    assert backend.reference_identity.call_count == 2
+
+
+def test_a_failed_reference_preflight_is_never_cached():
+    """校验失败不能进缓存，否则下一次就失去了重试机会。"""
+    from unittest.mock import Mock
+
+    from operator_agent.app.hitl_tools import build_task
+    from operator_agent.core.backend_caps import Cap
+    from operator_agent.decide.verifier import Verifier
+
+    backend = Mock()
+    backend.reference_identity = Mock(return_value=dict(success=False,
+                                                        reference_error='runtime drift'))
+    backend.capabilities = frozenset({Cap.REAL_DEVICE, Cap.REMOTE_VERIFY,
+                                      Cap.SAME_DEVICE_BASELINE, Cap.REFERENCE_IDENTITY,
+                                      Cap.GPU_PINNING})
+    verifier = Verifier(backend)
+    task = build_task(dict(request='fp16 32768x6144 residual add layernorm',
+                           shapes=[[32768, 6144]], precision='fp16', dsl='triton',
+                           hardware='nvidia_gpu', min_speedup=1.5))
+    first = verifier.reference_preflight(task)
+    assert first is not None                                  # 判 unknown
+    second = verifier.reference_preflight(task)
+    assert second is not None
+    assert backend.reference_identity.call_count == 2         # 没有被缓存吞掉

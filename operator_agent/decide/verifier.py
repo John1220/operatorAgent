@@ -336,6 +336,15 @@ class Verifier:
         # 硬件理论峰值缓存 (延迟探测)
         self._theoretical_peak: Optional[dict] = None
         self._reference_bindings = {}
+        # 参考身份回执缓存: 契约哈希 -> 已校验的远端回执。
+        # 为什么要缓存：`reference_preflight` 在**每条 suite case 之前**都会调一次
+        # `backend.reference_identity`（远端 `gpu_info`），32 条 case 就是 32 次
+        # 纯重复的往返（2026-11-19 实测：冷 L2 里 68 次 gpu_info 占 16.0 s / 71.6 s）。
+        # **作用域是一次 L2**：`_verify_function` / `verify_l3_only` / `_verify_compile`
+        # 入口都会清空它。所以「生成前身份 OK、生成后漂移」这类跨阶段检查仍然各查一次
+        # （`test_identity_hold_after_generation_...` 钉住这条），只在**同一次 L2 的 32 条
+        # case 之间**复用。
+        self._reference_identity_cache: dict = {}
         self.on_level_complete = None
 
     def _tag_evidence(self, result):
@@ -388,6 +397,9 @@ class Verifier:
         两个都由**拿着测量计数的那一层** (Conductor) 传进来: Verifier 不知道这是第几次
         真值测量。
         """
+        # 一次 verify 之内，参考身份只查一次远端（32 条 case 共享）；跨 verify 调用、
+        # 以及「生成前 vs 生成后」这类跨阶段检查仍然各查一次，漂移不会被缓存吃掉。
+        self._reference_identity_cache.clear()
         results = []
 
         preflight = self.correctness_preflight(task, test_inputs)
@@ -656,6 +668,9 @@ class Verifier:
             if bound is not None and not start_run and bound != contract.hash:
                 raise ValueError("生成前冻结的契约哈希已漂移")
             self._reference_bindings[task.task_id] = contract.hash
+            cached = self._reference_identity_cache.get(contract.hash)
+            if cached is not None:
+                return None
             self.backend.require(Cap.REAL_DEVICE, Cap.REMOTE_VERIFY, Cap.SAME_DEVICE_BASELINE,
                                  Cap.REFERENCE_IDENTITY, Cap.GPU_PINNING)
             response = self.backend.reference_identity(contract.reference_contract.content_dict())
@@ -663,6 +678,8 @@ class Verifier:
                 raise ValueError(response.get("reference_error", "执行侧参考身份回执缺失")
                                  if isinstance(response, dict) else "执行侧参考身份回执缺失")
             validate_receipt(raw, response.get("reference_receipt"))
+            # 只有**校验通过**的回执才进缓存；失败一律不缓存（否则下一次会拿不到重试机会）。
+            self._reference_identity_cache[contract.hash] = response.get("reference_receipt")
         except (ValueError, TypeError, RuntimeError, OSError, CapabilityMissing) as exc:
             return self._reference_unknown(str(exc), payload=response)
         return None
@@ -673,6 +690,9 @@ class Verifier:
         Caller inputs cannot replace declared checks. Suite arrays stay local to
         this method, so performance ledgers/weights retain their original cases.
         """
+        # 一次 L2 开始：身份缓存重新计。32 条 case 共用一次远端身份查询，
+        # 但跨阶段（生成前 → 生成后）仍然各查一次，漂移不会被缓存吃掉。
+        self._reference_identity_cache.clear()
         raw = task.constraints.correctness_suite
         preflight = self.correctness_preflight(task, test_inputs)
         if preflight is not None:
