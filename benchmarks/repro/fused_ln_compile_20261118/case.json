@@ -1,0 +1,39 @@
+{
+  "schema": "v08-failure-replay-case-v1",
+  "case_id": "fused-ln-compile-20261118",
+  "summary": "27B/medium A-arm wrong tl.arange bound: NBLK=6 is not a power of two, so the JIT compile fails at launch time (L1 passes, L2 dies).",
+  "origin": {
+    "collected_at": "2026-11-18T00:15:49+08:00",
+    "arm": "A (bare DSH, plan operator-v08-workflow-ac-v8)",
+    "cell_root": "output/ac-fused-smoke-A4",
+    "receipt": "output/ac-fused-smoke-A4/run/native-verification/result-0001.json",
+    "source_hash": "55110ad2c532a9d87b40e7af0f0a79a73761458ab93e0f019ba6e7da4098d4a8",
+    "note": "the source is committed verbatim as candidate.py in this directory"
+  },
+  "declaration": {
+    "request": "fp16 32768x6144 residual add layernorm",
+    "shapes": [[32768, 6144]],
+    "precision": "fp16",
+    "dsl": "triton",
+    "hardware": "nvidia_gpu",
+    "min_speedup": 1.5
+  },
+  "contract_hash": "093339587d8c462c8af2328095b00fd471575ed26e2630c2ef81a6925ebdc44a",
+  "correctness_profile": "builtin-fused-layernorm-residual-fp16-cuda-v1",
+  "suite_digest": "652f65b16440864795cf60bd75bd3e93146dd26dfce3b0e6b6d2ccf195cf4aa7",
+  "expected": {
+    "levels": {"L1": true, "L2": false},
+    "failure_kind": "candidate_jit_compile_failure",
+    "producer": "triton.compiler.errors.CompilationError",
+    "line": 30,
+    "column": 11,
+    "root_cause": "wrapper passes NBLK=triton.cdiv(6144, 1024)=6; tl.arange(0, NBLK) requires a power-of-two bound"
+  },
+  "budget": {
+    "wall_clock_s": 900,
+    "max_verifications": 2,
+    "max_model_calls": 1,
+    "max_output_tokens_per_call": 8192,
+    "total_output_token_reservations": 8192
+  }
+}

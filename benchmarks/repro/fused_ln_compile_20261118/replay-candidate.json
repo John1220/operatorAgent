@@ -1,0 +1,29 @@
+{
+  "schema": "v08-failure-replay-v1",
+  "case_id": "fused-ln-compile-20261118",
+  "source": "candidate.py",
+  "source_hash": "55110ad2c532a9d87b40e7af0f0a79a73761458ab93e0f019ba6e7da4098d4a8",
+  "expect": "fail",
+  "passed": true,
+  "why": "matches the frozen expectation",
+  "levels": {
+    "L1": true,
+    "L2": false
+  },
+  "compile_failure": {
+    "column": 11,
+    "end_column": 29,
+    "end_line": 30,
+    "evidence_hash": "09066f6227e7088f1d50ac14ce8beb1757c6020f8276ae837dfd22460fb8ee08",
+    "helper_name": "_fused_ln_residual_kernel",
+    "line": 30,
+    "node_ast_hash": "5711f2bef1f7eed0584a2dcd751571be8e2adccb44229f4f94b58606ece986f1",
+    "phase": "candidate_launch",
+    "producer": "triton.compiler.errors.CompilationError",
+    "schema": "candidate-jit-compile-failure-v1",
+    "source_hash": "55110ad2c532a9d87b40e7af0f0a79a73761458ab93e0f019ba6e7da4098d4a8"
+  },
+  "contract_hash": "093339587d8c462c8af2328095b00fd471575ed26e2630c2ef81a6925ebdc44a",
+  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_compile_20261118/run/candidate/verify-1/result.json",
+  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_compile_20261118/run/candidate"
+}

@@ -1,0 +1,3 @@
+# 回放产物（回执里含远端绝对路径与候选副本）；只有 case.json / candidate*.py /
+# patch.diff / replay-*.json / README 进版本库
+run/

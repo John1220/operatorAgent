@@ -1,0 +1,25 @@
+--- benchmarks/repro/fused_ln_compile_20261118/candidate.py	2026-11-18 10:23:59
++++ benchmarks/repro/fused_ln_compile_20261118/candidate_fixed.py	2026-11-18 10:26:46
+@@ -48,7 +48,9 @@
+ 
+     s = r + x
+     mean = tl.sum(s) / N
+-    diff = s - mean
++    # 补齐的 lane 必须**排除在中心化之后**：s 在 pad 区是 0，直接 s-mean 会得到
++    # -mean，把它们累进方差就会把 var 抬大（N=33 时甚至整块判否）。
++    diff = tl.where(cols < N, s - mean, 0.0)
+     var = tl.sum(diff * diff) / N
+     out = diff / tl.sqrt(var + eps)
+ 
+@@ -67,8 +69,9 @@
+         NBLK = 1
+     else:
+         BLOCK = 1024
+-        NBLK = triton.cdiv(N, BLOCK)
+-    EXACT = (N % BLOCK) == 0
++        # tl.arange() 的 bound 必须是 2 的幂：N=6144 时 cdiv=6，直接传会编译失败。
++        NBLK = triton.next_power_of_2(triton.cdiv(N, BLOCK))
++    EXACT = (N % BLOCK) == 0 and NBLK == triton.cdiv(N, BLOCK)
+     num_warps = 8 if N >= 4096 else 4
+     _fused_ln_residual_kernel[(M,)](
+         R, X, out,
