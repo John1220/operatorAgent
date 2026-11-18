@@ -79,3 +79,25 @@ def test_correct_but_slow_or_two_kernel_is_only_correct_only(tmp_path, monkeypat
 def test_l2_failure_is_failed_not_correct_only(tmp_path, monkeypatch):
     record = _run(tmp_path, monkeypatch, source=FUSED, body=_body(l2=False))
     assert record['qualified'] is False and record['delivery_class'] == 'failed'
+
+
+def test_repair_acceptance_only_requires_full_l2_and_final_l2(tmp_path, monkeypatch):
+    """修复模式的判据只看“修好没有”：不比性能、不查融合结构。"""
+    (tmp_path / 'cell').mkdir(exist_ok=True)
+    (tmp_path / 'run').mkdir(exist_ok=True)
+    selected = tmp_path / 'candidate.py'
+    selected.write_text(FUSED, encoding='utf-8')
+    # 修复格：L3 不存在（stop_after=L2 的终评）也要能判达标
+    body = dict(delivered=True, explore=dict(levels={'L1': True, 'L2': True}),
+                final=dict(levels={'L1': True, 'L2': True}, verdicts=[
+                    dict(level='L2', passed=True, metrics={'correctness': {'cases': [
+                        dict(case_id=f'c{i}', verdict='passed') for i in range(32)]}})]))
+    monkeypatch.setattr(ac_driver, 'final_evaluation', lambda *a, **k: body)
+    record = _finish_cell('t', 'A', selected, root=tmp_path / 'cell',
+                          declaration=FUSED_TASK['declaration'],
+                          budget=dict(wall_clock_s=2400, max_model_calls=10),
+                          backend='fake', dispatches=5, errors=[], returncode=0,
+                          connection={}, acceptance='repair')
+    assert record['qualified'] is True
+    assert record['delivery_class'] == 'qualified'
+    assert record['final_validity'] is None   # 修复模式不要求 L3

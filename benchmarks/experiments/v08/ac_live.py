@@ -181,6 +181,34 @@ def _assert_budget_consistent(budget):
         raise SystemExit('累计预留小于 调用数 × 每次预留：预算不自洽')
 
 
+def _repair_prompt(prompt, seed_source, seed_receipt):
+    """把“从零实现”改成“修这份坏核”，并把故障事实原样给出。"""
+    from pathlib import Path as _Path
+    seed = _Path(seed_source).read_text(encoding="utf-8")
+    facts = {}
+    if seed_receipt:
+        import json as _json
+        receipt = _json.load(open(seed_receipt, encoding="utf-8"))
+        for verdict in receipt.get("verdicts") or []:
+            if verdict.get("level") == "L2":
+                cases = ((verdict.get("metrics") or {}).get("correctness") or {}).get("cases") or []
+                facts = dict(message=str(verdict.get("message"))[:1200],
+                             cases=[dict(case_id=row.get("case_id"), verdict=row.get("verdict"),
+                                         reason=row.get("reason")) for row in cases])
+    return (prompt + "\n\n## 这是修复任务，不是从零实现\n"
+            "工作目录里已经有 `start_kernel.py`，它就是当前失败的实现（不要重写结构，先修它）。\n"
+            "权威故障事实（来自同一冻结契约的 L2 回执）：\n"
+            + _json_dump(facts) + "\n"
+            "把修好的源码**以同一入口**保存并提交（`check.py --code-file <你的文件>`）。\n"
+            "契约与套件不许改；不要求性能，只要求完整 L2 通过。\n"
+            "```python\n" + seed + "\n```\n")
+
+
+def _json_dump(value):
+    import json as _json
+    return _json.dumps(value, ensure_ascii=False, indent=1)
+
+
 def _assert_tool_surface(root, arm, expected):
     """会话后核对**第一次请求实际拿到的工具面**；缺关键工具就判失败，不许静默。
 
@@ -247,7 +275,8 @@ def _widen_stream_deadline():
 
 
 def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wall_clock_s=None,
-               arm='A', timeout_s=None, pinned_gpu=None):
+               arm='A', timeout_s=None, pinned_gpu=None, seed_source=None, seed_receipt=None,
+               acceptance='delivery'):
     from benchmarks.experiments.phase1.host import model_gateway
     from benchmarks.experiments.phase1.native import VerificationService
     from benchmarks.experiments.s5 import s5_arm_env
@@ -330,12 +359,17 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
         work = Path(built['work'])
         work.mkdir(parents=True, exist_ok=True)
         _shutil.copyfile(Path(runtime['root']) / 'check.py', work / 'check.py')
+        if seed_source is not None:
+            # 修复任务的起点：坏核原样放进工作目录，两臂拿同一份字节。
+            _shutil.copyfile(seed_source, work / 'start_kernel.py')
         # `/usr/bin/python3` 在这台机器上是 xcode-select 的壳，DSH 的内层沙箱下直接报
         # `unable to read data link`。用仓库 venv 的 python（绝对路径），并把
         # **`.venv` 这一个子目录**放进读白名单——仓库源码仍然读不到。
         interpreter = str(Path(sys.executable).resolve())
         prompt = arm_prompt(arm, declaration=declaration, budget=budget).replace(
             'python check.py', f'{interpreter} check.py')
+        if seed_source is not None:
+            prompt = _repair_prompt(prompt, seed_source, seed_receipt)
         if True:  # A 臂同样进沙箱：只放行 `.venv` 与臂目录，仓库源码读不到
             from .ac_fixture import _sandbox_c as _sandbox
             _sandbox(built, runtime=runtime, root=root,
@@ -376,6 +410,7 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
                                   verifications='measured' if counted['verifications'] else None,
                                   wall_clock=None))
     record = _finish_cell(task_id, arm, selected, root=root, declaration=declaration,
+                          acceptance=acceptance,
                           budget=budget, backend='ssh', dispatches=None, errors=[],
                           returncode=response.get('returncode'), connection=connection)
     record['gpu'] = gpu          # 实际用的卡 + 卡上邻居：杜绝"以为在测 A 卡其实在 B 卡"
@@ -383,7 +418,8 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
 
 
 def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
-               wall_clock_s=None, timeout_s=None, ssh=None, pinned_gpu=None):
+               wall_clock_s=None, timeout_s=None, ssh=None, pinned_gpu=None,
+               seed_source=None, seed_receipt=None, acceptance='delivery'):
     """C 臂一格（真模型 + 沙箱 + 20 次预算）。
 
     与 A 臂共用同一套 supervisor 件：`prepare(host_budget)`、`VerificationService`、
@@ -515,6 +551,13 @@ def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
             'stop_after="L2")；失败就按回包改，最多 ' +
             str(budget['max_model_calls']) + ' 次模型调用，不要超。终评由 supervisor 做，你不用调 final。\n'
             '只回复必要的说明，不要长篇思考。')
+        if seed_source is not None:
+            # C 臂也拿到同一份修前源码（写进它的工作目录，沙箱里只读得到臂目录）。
+            import shutil as _shutil
+            work_c = Path(built['work'])
+            work_c.mkdir(parents=True, exist_ok=True)
+            _shutil.copyfile(seed_source, work_c / 'start_kernel.py')
+            prompt = _repair_prompt(prompt, seed_source, seed_receipt)
         (root / 'prompt.txt').write_text(prompt, encoding='utf-8')
         response = s5_arm_env.start_headless(built, prompt, timeout=timeout_s or wall,
                                              capture_dir=root / 'host-output')
@@ -544,6 +587,7 @@ def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
                                   verifications='measured' if counted['verifications'] else None,
                                   wall_clock=None))
     record = _finish_cell(task_id, 'C', selected, root=root, declaration=declaration,
+                          acceptance=acceptance,
                           budget=budget, backend='ssh', dispatches=None, errors=[],
                           returncode=response.get('returncode'), connection=connection)
     record['gpu'] = gpu
@@ -567,6 +611,12 @@ def main(argv=None):
     parser.add_argument('--ssh-user', default=os.environ.get('AC_SSH_USER'))
     parser.add_argument('--ssh-key', default=os.environ.get('AC_SSH_KEY'))
     parser.add_argument('--plan', default=None, help='冻结计划 JSON；给了就按其任务声明与预算跑')
+    parser.add_argument('--seed-source', default=None,
+                        help='修复任务：把这份修前源码放进臂的工作目录（start_kernel.py）')
+    parser.add_argument('--seed-receipt', default=None,
+                        help='修复任务：原始失败回执，作为权威故障事实发给模型')
+    parser.add_argument('--acceptance', default='delivery', choices=['delivery', 'repair'],
+                        help='delivery=达标交付（L2+valid+1.5x+单核）；repair=修好（完整 L2+独立终评 L2）')
     args = parser.parse_args(argv)
 
     # 凭据只从环境读。本地 vLLM 用占位 key（`EMPTY`），云端换 provider 时改这里即可。
@@ -608,7 +658,8 @@ def main(argv=None):
     record = runner(declaration, task_id=args.task_id, root=args.root, budget=budget,
                     connection=dict(host=args.host, work_dir=args.work_dir, persistent=True),
                     wall_clock_s=budget['wall_clock_s'], timeout_s=args.timeout,
-                    pinned_gpu=pinned_gpu, **extra)
+                    pinned_gpu=pinned_gpu, seed_source=args.seed_source,
+                    seed_receipt=args.seed_receipt, acceptance=args.acceptance, **extra)
     # 每格必须自报用的哪个模型：跨格换模型时，交付数不可比，得能查出来。
     record['model'] = os.environ.get('AC_MODEL_ID', A_MODEL['id'])
     record['reasoning_effort'] = os.environ.get('AC_REASONING_EFFORT', 'none')

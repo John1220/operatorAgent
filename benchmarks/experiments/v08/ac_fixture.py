@@ -386,7 +386,7 @@ def _positive(value):
 
 def _finish_cell(task_id, arm, selected, *, root, declaration, budget, backend,
                  dispatches=None, errors=(), returncode=None, connection=None,
-                 scripted_fixture=False):
+                 scripted_fixture=False, acceptance='delivery'):
     """两臂共用的收尾：supervisor 在同一套 host task 上做完整 L2 + 独立终评。
 
     A 臂与 C 臂**必须**走这里（2026-11-08 决定：终评同源）。差别只在"提交经哪条路到达
@@ -423,6 +423,10 @@ def _finish_cell(task_id, arm, selected, *, root, declaration, budget, backend,
                           else 1.0) or 1.0)
     fused_task = (build_task(declaration).source.kernel_type
                   in REGISTERED_FUSED_KERNEL_TYPES)
+    # 修复模式：判据只看“修好没有” —— 完整 L2 + 独立终评 L2 都过；不比性能、不查融合结构
+    # （修的是既有结构）。见 docs/testing/v08-repair-ac-preregistration.md。
+    repair_mode = acceptance == 'repair'
+    final_l2 = bool((((body.get('final') or {}).get('levels') or {}).get('L2')) is True)
     try:
         fusion = (check_fused_source(selected.read_text(encoding='utf-8'))
                   if fused_task else dict(passed=True, schema='not-applicable', reason=''))
@@ -432,13 +436,16 @@ def _finish_cell(task_id, arm, selected, *, root, declaration, budget, backend,
     total_wall = counted.get('total_wall_s')
     over_wall = (type(claimed_wall) in (int, float) and _positive(total_wall)
                  and total_wall > claimed_wall)
-    qualified = bool(
-        not over_wall
-        and final_levels.get('L2') is True
-        and l3_metrics.get('measurement_validity') == 'valid'
-        and _positive(l3_metrics.get('speedup_vs_baseline'))
-        and l3_metrics.get('speedup_vs_baseline') >= declared_min
-        and fusion.get('passed') is True)
+    if repair_mode:
+        qualified = bool(not over_wall and final_levels.get('L2') is True and final_l2)
+    else:
+        qualified = bool(
+            not over_wall
+            and final_levels.get('L2') is True
+            and l3_metrics.get('measurement_validity') == 'valid'
+            and _positive(l3_metrics.get('speedup_vs_baseline'))
+            and l3_metrics.get('speedup_vs_baseline') >= declared_min
+            and fusion.get('passed') is True)
     # 正常用完墙钟仍未达标是失败，不是 unknown；over_wall 单独记录在墙钟字段里。
     delivery_class = ('qualified' if qualified else
                       'failed' if over_wall else
