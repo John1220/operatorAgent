@@ -65,7 +65,7 @@
 | **融合 A/C v8 正式两对**（qualified delivery：L2 + L3 valid + ≥1.5× + 单核融合核验） | `761f1d2` | `fused_ac_aggregate`（10 项测试）；两对 +1 / +1 ⇒ `reproduced`；[结果](../../testing/v08-fused-ac-preregistration.md#13b-正式轮结果v82026-11-18) |
 | **P2 诊断开关量具 + 起点核 + 正式两对判读** | `f318910` | `p2_plan.py` / `p2_run.py` / `p2_optimize.py` / `p2_seed.py` + 两组提示；`tests/unit/v08/test_p2_*`（29 项）；[P2 预登记](../../testing/v08-p2-preregistration.md#p2-formal-result)。整轮 `no_increment_observed` |
 
-协议身份（`protocol_identity`）随判定缓存加入扩到 **77 文件**（`tests/unit/test_input_seed_spec.py` 钉住）；
+协议身份（`protocol_identity`）随判定缓存加入扩到 **78 文件**（融合族的参考 primitive 入表）（`tests/unit/test_input_seed_spec.py` 钉住）；
 旧证据不会命中新缓存（实现身份已变）。
 
 ## 3. P1 性能 parity 判读（核心结果）
