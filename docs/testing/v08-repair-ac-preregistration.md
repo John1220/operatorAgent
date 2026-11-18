@@ -77,7 +77,19 @@
 | 1 | A | `unknown`（仪器） | 第 3 次调用在 786.4 s 被上游掐断（`Stream ended without finish_reason`，已流出 1.58 MB）——正好是当时 24 s/1k × 32768 的截止 |
 | 2 | A | **`failed`（未修好）** | 用满 20 次调用、1765.2 s、1 次提交；该提交**修好了 stride、没修尾块**，`1x33` 仍是 9.96e-02 |
 | 1 | C | `unknown`（仪器） | 第 2 次调用在 1146.9 s 被掐（35 s/1k 的截止，已流出 4.87 MB） |
-| 2 | C | 进行中 | 截止放宽到 50 s/1k ≈ 1638 s（仍 < 传输层 1800 s 上限） |
+| 2 | C | `unknown`（仪器） | 1638.4 s 被掐，已流出 7.27 MB / 32399 chunks，零提交 |
+| 3 | C | **`qualified`（修好）** | 7 次调用 / 5 次验证 / 1960.5 s；第 1 次原样复现失败，第 2 次修好尾块但漏了 strided，第 3 次 32/32 通过；独立终评 L2 32/32 |
+
+**C 臂第 3 次成功的关键是工作流改造**：修复轮不再调 `operator_context(phase="generate")`
+（那一步发的是"从零写核"的材料），而是**先原样提交复现（round 1）→
+`operator_context(phase="repair", verification_round=1)` 取绑定该源码与失败的诊断 → 再改**。
+三次提交的回执正好演示了这条链路：`1x33` 失败 → 改完 `1x33` 过、strided 全挂
+（回执直接点出"失败全部落在 layout=strided"）→ 补齐内层 stride 后 32/32。
+
+C 交付的补丁与人工修的 `patch.diff` **结构相同**：方差按 mask 归零 + 行列 stride 各自独立读取。
+
+**超时分类已修正**：会话因 `Stream ended without finish_reason` 中断时记 `unknown`
+（设施），不再记成 `failed / no submission passed L2` —— 这条以前把两次仪器故障算成了候选失败。
 
 **A 臂的修法值得记一笔**：它把 `r_stride/x_stride/o_stride` 拆成行列两个 stride 并乘进地址，
 修掉了 strided 用例，但 `d = s - mean` 一行没动 —— 于是尾块 `1x33` 分毫未变。
