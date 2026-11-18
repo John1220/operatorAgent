@@ -1,6 +1,6 @@
 # v0.8.1 优化分支进度入口
 
-更新于 2026-11-17 · 分支 `codex/v0.8.1-optimize`（11 月 14 日由 `codex/v0.9-optimize` 改名）。
+更新于 2026-11-18 · 分支 `codex/v0.8.1-optimize`（11 月 14 日由 `codex/v0.9-optimize` 改名）。
 
 > **为什么是 v0.8.1 而不是 v0.9**：产品路线里的 **v0.9 是「业务接入版」**（把已验证核接进真实
 > 框架/模型、端到端回归，见 [产品路线](../../design/operator-development-product-roadmap.md) §5.3），
@@ -61,6 +61,8 @@
 | **P1 预登记 + 判读量具 + 测量执行器** | `0c83cd1` | `benchmarks/experiments/v08/p1_plan.py`（judge_pair/judge_series/validate/freeze）、`p1_run.py`；`tests/unit/v08/test_p1_plan.py`（11）+ `test_p1_run.py`（8）；[P1 预登记](../../testing/v08-p1-preregistration.md) |
 | **P1 真机取数 + 判读** | 已归档（仓外证据树） | `output/v08-p1-20261114/run3/series.json` + 三对 `pair.json`；计划哈希 `529b499e…` |
 | **融合 residual+LayerNorm profile + 头寸门**（新参考 primitive、32 case、fused 噪声通道、手写核头寸） | `4ba5022` | `tests/unit/v08/test_fused_layernorm_residual.py`（11）+ `test_fusion_headroom.py`（6）；[融合头寸预登记](../../testing/v08-fused-headroom-preregistration.md)。`headroom_confirmed`（+55.14%） |
+| **失败回放包**（residual+LayerNorm 编译失败 → 定位两个缺陷 → 补丁 → L2 32/32 + 独立终评 32/32；一条命令可重跑） | `a9eea61` | [回放说明](../../../benchmarks/repro/fused_ln_compile_20261118/README.md)；`tests/unit/v08/test_failure_replay.py`（4 项）；回执 `replay-candidate{,_fixed}.json` |
+| **融合 A/C v8 正式两对**（qualified delivery：L2 + L3 valid + ≥1.5× + 单核融合核验） | `761f1d2` | `fused_ac_aggregate`（10 项测试）；两对 +1 / +1 ⇒ `reproduced`；[结果](../../testing/v08-fused-ac-preregistration.md#13b-正式轮结果v82026-11-18) |
 | **P2 诊断开关量具 + 起点核 + 正式两对判读** | `f318910` | `p2_plan.py` / `p2_run.py` / `p2_optimize.py` / `p2_seed.py` + 两组提示；`tests/unit/v08/test_p2_*`（29 项）；[P2 预登记](../../testing/v08-p2-preregistration.md#p2-formal-result)。整轮 `no_increment_observed` |
 
 协议身份（`protocol_identity`）随判定缓存加入扩到 **77 文件**（`tests/unit/test_input_seed_spec.py` 钉住）；
@@ -103,6 +105,9 @@
 | 方向2 autotune 拆分 | **Q1 `no_increment`，Q2 暂缓（2026-11-17，GPU7）** | 16 点确定性参数扫描，GPU7 计划冻结 `d8c2f735…`。最佳点快 1.31%，超过当窗噪声，低于 2.5% 门槛。[D2 预登记与后续试验](../../testing/v08-d2-preregistration.md) |
 | P2 诊断增量 | **已完成正式判读（2026-11-16）** | 两对可判：pair-1 `optimize_helps`（+8.49%），pair-2 `no_increment`（+0.15%，带内）⇒ 整轮 `no_increment_observed`，`formal_gain_claim=false`。见 [P2 正式结果](../../testing/v08-p2-preregistration.md#p2-formal-result)。 |
 | P3 中档模型探点 | 未开始 | 测「模型变弱时诊断增益是否变大」 |
+| **融合 A/C v8** | **已完成（2026-11-18）** | 两对 +1 / +1 ⇒ `reproduced`、`formal_gain_claim=true`；C 各 3 次调用达标，A 一次 `correct_only`（判据误伤）、一次尾块真失败。[结果](../../testing/v08-fused-ac-preregistration.md#13b-正式轮结果v82026-11-18) |
+| **失败回放下一批** | 待专家样本 | 需要真实尾块/步幅/精度故障：现有实现、失败输入、参考与误差要求；按同一 case 格式做成可重跑包 |
+| **国产卡试点** | 待输入 | 按纪要 §7.2：**一张卡 + 固定工具链 + 一个任务 + 真实失败输入 + 现有实现与参考**；先跑通编译/正确性/计时，再谈局部优化 |
 | **缓存环境身份边界**（标定捕到） | **已接受型号级身份**（2026-11-15） | 当前工作树已拒绝仅有 `backend` 的身份。后端返回 `Unknown GPU` 等占位值时仍可能命中。见 [`_identified`](../../../operator_agent/decide/verdict_cache.py#L79)。 |
 
 <a id="v081-next-steps"></a>
@@ -115,11 +120,14 @@
 2. **融合任务头寸门：已通过（2026-11-17）。** 任务 `residual add + LayerNorm`，形状 32768×6144 fp16，
    eager 基线 = fp16 add + native LN；手写融合核快 55.14%（2.229×），当窗带宽 0.42%、L3 `valid`、
    L2 32/32。预登记与结果见 [融合头寸预登记](../../testing/v08-fused-headroom-preregistration.md#10-头寸结果2026-11-17gpu7)。
-3. **用该任务做 A/C 对照（预登记已按评审修订）。** 两边从空起点出发、同模型/采样/预算/独立终评；
-   主指标是**达标交付数** = 完整 L2 + 独立 L3 `valid` + ≥1.5× eager + 单核融合静态核验；
-   仅正确交付、调用数与时间作次级观测。草案见
-   [融合任务 A/C 预登记](../../testing/v08-fused-ac-preregistration.md)；参数已确认，待接线与冻结。
-   不能把这份手写核直接算作插件交付。[任务选型规则](../../design/v08/task-family-selection.md)
+3. **融合 A/C 对照：已完成（2026-11-18）。** v8 计划（27B/medium）两对均为 C 达标、A 未达标
+   （+1 / +1）⇒ `reproduced`。**注意判据边界**：A 的 pair-1 被冻结的单核静态规则误伤，
+   两次"未达标"原因不同；若按分支感知规则重判，pair-1 为 0、整轮会落到 `not_established`。
+   详见 [结果节](../../testing/v08-fused-ac-preregistration.md#13b-正式轮结果v82026-11-18)。
+4. **主线下一批：真实故障修复包。** 拿专家实际遇到的尾块/步幅/精度故障，做成与首个包同格式的
+   case（复现命令 + 补丁 + 独立 L2 回执）；同一源码下再对比普通 DSH 与插件，记录达标与否、耗时与人工接管。
+5. **国产卡试点（待输入）。** 需要一张卡 + 固定工具链、一个任务、真实失败输入、现有实现与参考、
+   误差要求；先用同一套编译/验收/计时骨架跑通，再做一次有实测依据的局部优化。
 
 ### 方向3 标定读数（2026-11-14，H20 GPU3）
 
@@ -279,6 +287,12 @@ optimize **只在 L3 未过且 round<max_rounds 时才进**（[conductor.py:1822
 | `logs/fusion-headroom-20261117b/{receipt,judgement}.json` | 头寸终评：fused 0.331968 ms vs eager 0.739968 ms，`headroom_confirmed` |
 | `output/v08-d2-gpu7-20261117/sweep-plan.json` | D2 Q1 冻结计划（GPU7 绑定），哈希 `d8c2f735…`，16 点格、零模型预算 |
 | `output/v08-d2-gpu7-20261117/sweep3/` | D2 Q1 真机回执：sweep.json（no_increment）+ replay.json（58 件证据重验）+ points/best/seed |
+| `logs/v8-fused-ac-plan.json` | 融合 A/C v8 冻结计划（27B/medium、GPU7、2 对、20 调用/8 验证/2400 s），hash `f44e750c…` |
+| `output/ac-v08f-pair{1,2}-{A,C}.json` | 四格回执：L2/L3、达标分类、融合静态核验、调用与验证数、墙钟 |
+| `logs/v8-fused-ac-pair{1,2}.json` | 两对判读：pair-1 `+1`、pair-2 `+1` |
+| `logs/v8-fused-ac-series.json` | 序列终判 `reproduced`，`formal_gain_claim=true` |
+| `benchmarks/repro/fused_ln_compile_20261118/replay-candidate.json` | 复现原始失败（`CompilationError` line 30 col 11，`passed=true`） |
+| `benchmarks/repro/fused_ln_compile_20261118/replay-candidate_fixed.json` | 补丁：L2 32/32 + 独立终评 L2 32/32 |
 
 GPU 身份钉在 GPU3（UUID 见冻结件与 `series.json`）；源码哈希按文件重算与预登记逐字一致。
 
@@ -306,6 +320,12 @@ DSH-headless 沙箱集成测试（`test_the_c_arm_session_delivers…` / `test_t
 
 **2026-11-17 融合族新增：`test_fused_layernorm_residual.py` 11 passed；`test_fusion_headroom.py` 6 passed。**
 参考契约/套件/输入保真等受影响套件同批复跑。
+
+**2026-11-18 失败回放与 A/C 收尾：`tests/unit/v08` 365 passed，0 failed。** 新增
+`test_failure_replay.py`（4）、`test_fusion_check.py`（4）、`test_ac_qualified.py`（3）、
+`test_fused_ac_aggregate.py`（10）、`test_ac_counts_and_fixture_wiring.py`（3）；
+`test_ac_round.py` 的 repo-blind 沙箱两条在本会话的 danger-full-access 下也转绿。
+环境说明：A/C 格目录必须放在仓库之外（否则 DSH 启动会 `realpath` 到仓库 `.git` 被 seatbelt 拒绝）。
 
 **2026-11-17 D2 Q1 量具 + 真机：`test_d2_{rewrite,plan,sweep}` 43 passed；P1/P2/噪声门回归合计 101 passed。**
 量具为新增受控驱动（`benchmarks/experiments/v08/d2_*`），未改核心代码路径。真机（GPU7）判 `no_increment`
