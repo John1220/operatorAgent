@@ -84,6 +84,14 @@
 
 两例都**不支持**"插件修得更好"的结论；它们验收的是闭环本身。
 
+## 1c. 分支收尾（2026-11-19）
+
+本分支（`codex/v0.8.1-optimize`）**就此收口**，后续工作在
+[`codex/v0.8.2-profile-optimize`](../../../operatorAgent-v082/docs/status/v082/README.md) 的独立 worktree 里并行开展
+（范围：保留实测最佳候选 / NCU 采集真实候选 / 完成一次证据指导的优化）。
+
+worktree：`/Users/zh/repos/operatorAgent-v082`，从本分支 `296ee47` 建出。
+
 ## 2. 已完成
 
 | 交付 | 提交或状态 | 验收证据 |
