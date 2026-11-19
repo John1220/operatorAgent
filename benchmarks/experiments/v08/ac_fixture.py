@@ -329,6 +329,19 @@ def _counts(root, arm=None):
     else:
         session = receipts + native
     verifications = len(session) + len(final_receipts)
+    def _completion(path):
+        """这一次验证**真正结束**的时刻。`complete.json` 落盘 = 收尾完毕；
+        回执的 `created_at` 早于记账/回写几步，会把时间算短（2026-11-19 复核）。"""
+        done = path.with_suffix('') / 'complete.json'
+        if done.is_file():
+            return done.stat().st_mtime
+        try:
+            value = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return path.stat().st_mtime
+        stamp = value.get('created_at')
+        return stamp if isinstance(stamp, (int, float)) else path.stat().st_mtime
+
     first_full = None
     for path in receipts:
         try:
@@ -336,7 +349,8 @@ def _counts(root, arm=None):
         except ValueError:
             continue
         if (value.get('levels') or {}).get('L2') is True:
-            first_full = value.get('created_at')
+            # **首次完整 L2 也按完成时间计**，与总墙钟同一口径。
+            first_full = _completion(path)
             break
     if first_full is None and native:
         # 原生 worker 的回执不带 created_at，用它的落盘时间；这是**实测**时间戳，
@@ -347,7 +361,7 @@ def _counts(root, arm=None):
             except ValueError:
                 continue
             if (value.get('levels') or {}).get('L2') is True:
-                first_full = path.stat().st_mtime
+                first_full = _completion(path)
                 break
     wall = None
     if first_full is not None and requests:
@@ -365,16 +379,7 @@ def _counts(root, arm=None):
             # **完成时间**：`complete.json` 落盘那一刻 = 这次验证真正结束；回执的
             # `created_at` 早于收尾几步（记账、回写），会把墙钟算短十几秒
             # （2026-11-19 复核：A 355.9 vs 369.8）。
-            done = path.with_suffix('') / 'complete.json'
-            if done.is_file():
-                stamps.append(done.stat().st_mtime)
-                continue
-            try:
-                value = json.loads(path.read_text())
-            except ValueError:
-                continue
-            stamp = value.get('created_at')
-            stamps.append(stamp if isinstance(stamp, (int, float)) else path.stat().st_mtime)
+            stamps.append(_completion(path))
         if stamps:
             total = round(float(max(stamps)) - requests[0].stat().st_mtime, 1)
             if total < 0:

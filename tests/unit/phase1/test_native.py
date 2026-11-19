@@ -301,3 +301,13 @@ def test_no_gain_only_counts_valid_l3_and_ignores_compile_failures():
     assert l3_no_gain(valid_slow) is True
     assert l3_no_gain(degraded) is None
     assert l3_no_gain(faster) is False
+
+
+def test_a_transport_unknown_verdict_is_feedback_unknown_not_failed(service):
+    """后端没答话 ≠ 候选写错：反馈里必须保持 unknown，模型才不会去改对的东西。"""
+    from benchmarks.experiments.phase1.native import _transport_unknown
+
+    assert _transport_unknown([dict(level='L2', metrics={'transport_outcome': 'outcome_unknown'})])
+    assert _transport_unknown([dict(level='L1', metrics={'compile_status': 'transport_unknown'})])
+    assert not _transport_unknown([dict(level='L2', metrics={'transport_outcome': 'outcome_answered'})])
+    assert not _transport_unknown([])

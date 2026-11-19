@@ -21,6 +21,7 @@ from operator_agent.app import autonomous, hitl_tools as ht
 from operator_agent.execute.budget import BudgetLedger, BudgetPlan
 from operator_agent.execute.task_budget import TaskBudgetConfig
 from operator_agent.execute.task_clock import monotonic
+from operator_agent.decide.measurement import TRANSPORT_KEY, TRANSPORT_UNKNOWN
 from operator_agent.generate.repair_loop import _full_l2_passed
 
 from .baseline import _persist_verification
@@ -159,7 +160,9 @@ class VerificationService:
                 full_l2=_full_l2_passed(_verdicts(result['verdicts']))
                 passed=(result.get('passed') is True or
                         self.config['backend']=='fake' and full_l2 is True)
-                status='passed' if passed else 'failed' if result.get('ok') is True else 'unknown'
+                status=('unknown' if _transport_unknown(result.get('verdicts'))
+                        else 'passed' if passed
+                        else 'failed' if result.get('ok') is True else 'unknown')
                 reply=dict(schema='s5-development-feedback-v1',ok=True,phase='development',
                     source_sha256=self.selected_hash,contract_hash=self.contract_hash,
                     status=status,passed={'passed':True,'failed':False,'unknown':None}[status],
@@ -330,6 +333,23 @@ def l3_no_gain(response):
     if metrics.get('measurement_validity')!='valid':
         return None
     return True
+
+
+def _transport_unknown(verdicts):
+    """这次验证里有没有**传输没答话**的一级。
+
+    传输异常不是候选失败：后端没听到回答，远端那次执行可能已经发生。反馈里必须保持
+    `unknown`，否则模型会把"设施抖了一下"当成"我写错了"去改（2026-11-19 复核）。
+    """
+    for verdict in verdicts or ():
+        if not isinstance(verdict, dict):
+            continue
+        metrics = verdict.get('metrics') or {}
+        if metrics.get(TRANSPORT_KEY) == TRANSPORT_UNKNOWN:
+            return True
+        if metrics.get('compile_status') == 'transport_unknown':
+            return True
+    return False
 
 
 def last_passing_submission(records):

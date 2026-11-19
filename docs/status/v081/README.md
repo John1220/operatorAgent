@@ -57,6 +57,33 @@
   快 55.14%（2.229×）**，当窗带宽 0.42%，终评 `valid`、完整 L2 32/32，判 `headroom_confirmed`。
   这是头寸门，不是插件读数；`formal_gain_claim=false`。见 [融合头寸预登记](../../testing/v08-fused-headroom-preregistration.md#10-头寸结果2026-11-17gpu7)。
 
+## 1b. 结项材料（v0.8.1 交付什么）
+
+**给的是"给定故障后的修复闭环"**：一个真实故障 → 一条命令复现 → 补丁 → 独立正确性验收。
+不包含"主动发现未知故障"和"稳定降低工程师投入"——那要真实业务任务验证。
+
+### 四个可回放的故障样本
+
+全部零模型调用、一条命令可重跑（`sh benchmarks/repro/run_all_replays.sh`），最新一次全绿：
+
+| 包 | 故障 | 判据 | 修前 → 补丁 |
+|---|---|---|---|
+| [编译期](<../../../benchmarks/repro/fused_ln_compile_20261118/README.md>) | `tl.arange` bound 非 2 的幂 | 编译失败 | `CompilationError` L30C11 → L2 32/32 |
+| [尾块数值](<../../../benchmarks/repro/fused_ln_tail_20261118/README.md>) | 补齐 lane 计入方差 + 内层 stride | 32 条 case | `1x33` 9.96e-02 → L2 32/32 |
+| [非连续布局](<../../../benchmarks/repro/matmul_strided_20261107/README.md>) | 写死连续寻址 | 15 条 case | strided 9.69140625 → L2 15/15 |
+| [因果掩码](<../../../benchmarks/repro/attention_causal_20261109/README.md>) | 掩码在 softmax 之后 | 8 条 case | 5 条 causal 1.95e-03 → L2 8/8 |
+
+回放判据含**契约哈希、修前源码哈希、级别、具名用例与误差**四项，任一项不符即判不成立。
+
+### 两例修复对照（都通过独立验收，都**没有**测出两臂差别）
+
+| 样本 | A（裸 DSH） | C（插件） | 判读 |
+|---|---|---|---|
+| 融合尾块 `1×33` | 1 次提交 / 7 调用 / 621.4 s | 3 次提交 / 7 调用 / 1960.5 s | `both_qualified` |
+| MatMul 非连续 | 2 次提交 / 11 调用 / 355.9 s | 2 次提交 / 6 调用 / 527.3 s | `both_qualified` |
+
+两例都**不支持**"插件修得更好"的结论；它们验收的是闭环本身。
+
 ## 2. 已完成
 
 | 交付 | 提交或状态 | 验收证据 |
