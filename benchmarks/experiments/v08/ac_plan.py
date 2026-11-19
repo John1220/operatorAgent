@@ -35,7 +35,8 @@ PLAN_IDS = dict(v1='operator-v08-workflow-ac-v1',
                 v5='operator-v08-workflow-ac-v5',
                 v6='operator-v08-workflow-ac-v6',
                 v7='operator-v08-workflow-ac-v7',
-                v8='operator-v08-workflow-ac-v8')
+                v8='operator-v08-workflow-ac-v8',
+                v9='operator-v08-workflow-ac-v9')
 PLAN_ID = PLAN_IDS['v2']          # 历史默认；融合轮显式用 FUSED_PLAN_VERSION
 FUSED_PLAN_VERSION = 'v8'          # 融合 A/C 轮：qualified delivery，2 对（27B/medium）
 
@@ -166,6 +167,36 @@ FUSED_TASK = dict(
                                  'window')),
     acceptance=dict(full_l2=True, l3_validity='valid', min_speedup=1.5,
                     fusion_check='v08-fusion-static-v1'),
+)
+
+#: v9：**修复轮**（matmul 非连续布局）。判据只有一条：能不能把给定坏核修到
+#: 完整 L2 + 独立终评 L2 —— 不比性能、不查融合结构（修的是既有实现）。
+REPAIR_TASK = dict(
+    task_id='matmul-4096-fp16-strided-repair',
+    declaration=dict(request='fp16 4096x4096x4096 matmul, triton',
+                     shapes=[[4096, 4096, 4096]], precision='fp16', dsl='triton',
+                     hardware='nvidia_gpu', min_speedup=1.0),
+    held_out='no',
+    why=('real 2026-11-07 failure: the kernel is correct on every contiguous case and '
+         'fails only auto-k4-m32-n32-fp16-random-strided at 9.69140625 because it '
+         'hard-codes contiguous addressing'),
+    performance_probe=dict(required=False,
+                           note='repair round: L3 is not part of the acceptance'),
+    acceptance=dict(full_l2=True, final_l2=True, performance=False, fusion_check=None),
+)
+
+REPAIR_METRIC = dict(
+    primary=('number of cells whose final source is REPAIRED: full L2 in the independent '
+             'final evaluation AND the reserved purpose=final L2 passes, on the frozen '
+             'contract (15 cases); no performance or fusion requirement'),
+    denominator='every dispatched cell; planned-but-unexecuted cells are listed separately, never dropped',
+    minimum_detectable_unit='+1 task',
+    minimum_detectable_unit_is_not_statistical_significance=True,
+    secondary=['model dispatches used', 'verifications used',
+               'wall clock to first full L2 and to the qualified final receipt'],
+    never_report=['a repaired kernel as a performance result',
+                  'an unpaired average as a comparison',
+                  'cost inferred from token counters'],
 )
 
 FUSED_METRIC = dict(
@@ -322,38 +353,60 @@ def _supported_kernel_types():
     return set(OPERATORS) | {'attention'} | set(REGISTERED_FUSED_KERNEL_TYPES)
 
 
-#: 融合计划的两个编号：v7（xhigh，未执行）与 v8（medium，当前可执行）。
+#: 融合计划的编号：v7（xhigh，已撤回）与 v8（medium）。v9 是修复轮（matmul）。
 FUSED_VERSIONS = ('v7', 'v8')
+REPAIR_VERSIONS = ('v9',)
+
+
+def _tasks_for(version, *, fused, repair):
+    """这个版本登记哪些任务（融合/修复/复现/默认）。"""
+    if repair:
+        return [REPAIR_TASK]
+    if fused:
+        return [FUSED_TASK]
+    if version in REPRODUCTION_ROUNDS:
+        return [task for task in TASKS if task['task_id'] in REPRODUCTION_TASKS]
+    return TASKS
 
 
 def design(version='v2'):
     """The freezable part: no budget, no outcome, no credit."""
     fused = version in FUSED_VERSIONS
+    repair = version in REPAIR_VERSIONS
     body = dict(schema=SCHEMA, plan_id=PLAN_IDS[version], status='draft_awaiting_budget',
                 arms=list(ARMS), arm_surfaces=json.loads(json.dumps(ARM_SURFACES)),
-                tasks=json.loads(json.dumps([FUSED_TASK] if fused else (
-                    [task for task in TASKS if task['task_id'] in REPRODUCTION_TASKS]
-                    if version in REPRODUCTION_ROUNDS else TASKS))),
+                tasks=json.loads(json.dumps(_tasks_for(version, fused=fused, repair=repair))),
                 **({'reproduction': dict(json.loads(json.dumps(REPRODUCTION)),
                                          rounds=REPRODUCTION_ROUNDS[version])}
                    if version in REPRODUCTION_ROUNDS else {}),
-                metric=dict(FUSED_METRIC if fused else METRIC),
+                metric=dict(REPAIR_METRIC if repair else FUSED_METRIC if fused else METRIC),
                 stop_rules=json.loads(json.dumps(STOP_RULES)),
                 final_evaluation=dict(FINAL_EVALUATION),
-                boundaries=list(BOUNDARIES) + ([
-                    'v7 is the fused task only; its primary is qualified delivery, not the v6 '
-                    'full-L2 delivery count, and its result must not be merged into v6 rounds',
-                    'the hand-written headroom kernel is context, never an arm delivery',
-                ] if fused else []),
+                boundaries=list(BOUNDARIES) + (
+                    [
+                        'v7 is the fused task only; its primary is qualified delivery, not the v6 '
+                        'full-L2 delivery count, and its result must not be merged into v6 rounds',
+                        'the hand-written headroom kernel is context, never an arm delivery',
+                    ] if fused else [
+                        'v9 is a repair round: acceptance is full L2 plus the independent final L2; '
+                        'performance and fusion structure are out of scope',
+                        'the 2026-11-07 historical patch is verifier-side only and must never '
+                        'reach an arm',
+                    ] if repair else []),
                 budget={name: None for name in BUDGET_FIELDS},
                 formal_gain_claim=False, formal_comparison_credit=False, outcome=None)
-    if fused:
+    if fused or repair:
         execution = json.loads(json.dumps(FUSED_EXECUTION))
         if version == 'v7':
             # v7 登记的是 xhigh；它的存在价值是记录"为什么没执行"，不是可执行计划。
             execution['sampling']['reasoning_effort'] = 'xhigh'
+        if repair:
+            # 修复轮是一例验收：一对（A/C 各一格），不是两对。
+            execution['pairs'] = 1
+            execution['final_policy'] = dict(purpose='final', stop_after='L2',
+                                             final_run_verifications=2)
         body['execution'] = execution
-        body['pairs'] = FUSED_EXECUTION['pairs']
+        body['pairs'] = execution['pairs']
     body['design_hash'] = digest(body)
     return body
 
@@ -423,7 +476,9 @@ def validate(plan):
             problems.append(f'task {task_id!r} builds kernel_type {kernel_type!r}, which has '
                             f'no profile; supported: {sorted(_supported_kernel_types())}')
         probe = task.get('performance_probe')
-        if not isinstance(probe, dict) or probe.get('required') is not True:
+        # 必须**显式**说要不要探针；修复轮（v9）可以 required=False —— 但要说出来，
+        # 不能靠缺省沉默。
+        if not isinstance(probe, dict) or type(probe.get('required')) is not bool:
             problems.append(f'task {task_id!r} must say whether a window probe is required '
                             'for the secondary performance observation')
     budget = plan.get('budget') or {}
@@ -466,7 +521,9 @@ def validate(plan):
 def freeze(budget, output, version='v2'):
     """Write the plan once, with budgets filled. Refuses to overwrite or to guess."""
     plan = design(version)
-    supplied = dict(FROZEN_FUSED_PER_CELL if version in FUSED_VERSIONS else FROZEN_PER_CELL)
+    supplied = dict(FROZEN_FUSED_PER_CELL
+                    if (version in FUSED_VERSIONS or version in REPAIR_VERSIONS)
+                    else FROZEN_PER_CELL)
     supplied.update(budget or {})
     plan['budget'] = {name: supplied.get(name) for name in BUDGET_FIELDS}
     plan['status'] = 'frozen'

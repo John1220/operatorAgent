@@ -382,3 +382,26 @@ def test_v7_is_withdrawn_because_xhigh_cannot_submit_at_the_wire_cap():
     problems = ' '.join(ac_plan.validate(ac_plan.design('v7')))
     assert 'withdrawn' in problems and 'xhigh' in problems
     assert ac_plan.design('v7')['execution']['sampling']['reasoning_effort'] == 'xhigh'
+
+
+def test_v9_is_the_repair_plan_for_the_matmul_strided_case():
+    plan = ac_plan.design('v9')
+    assert ac_plan.validate(plan) == []
+    assert plan['plan_id'] == 'operator-v08-workflow-ac-v9'
+    task = plan['tasks'][0]
+    assert task['task_id'] == 'matmul-4096-fp16-strided-repair'
+    assert task['declaration']['request'] == 'fp16 4096x4096x4096 matmul, triton'
+    assert task['acceptance'] == dict(full_l2=True, final_l2=True, performance=False,
+                                      fusion_check=None)
+    assert task['performance_probe']['required'] is False
+    assert plan['pairs'] == 1
+    assert plan['execution']['final_policy']['stop_after'] == 'L2'
+    assert 'repair' in plan['metric']['primary'].lower()
+    assert any('historical patch' in row for row in plan['boundaries'])
+
+
+def test_v9_freezes_two_cells_one_pair(tmp_path):
+    plan = ac_plan.freeze(dict(cells=2), tmp_path / 'v9.json', version='v9')
+    assert plan['budget']['cells'] == 2
+    assert plan['budget']['max_model_calls'] == 20
+    assert plan['budget']['max_verifications'] == 8
