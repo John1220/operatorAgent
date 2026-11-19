@@ -12,8 +12,8 @@
   },
   "compile_failure": {},
   "contract_hash": "e9f75d60cf1c2b35372cf87e3c77d8b63e69514e426a558733363d0e2f96bfe5",
-  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/attention_causal_20261109/run/candidate-56e9f342/verify-1/result.json",
-  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/attention_causal_20261109/run/candidate-56e9f342",
+  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/attention_causal_20261109/run/candidate-a05b364a/verify-1/result.json",
+  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/attention_causal_20261109/run/candidate-a05b364a",
   "final_levels": null,
   "final_evidence": null,
   "final_verification_purpose": null

@@ -5,19 +5,27 @@ set -eu
 HOST="${1:-h20}"
 WORKDIR="${2:-/root/operator-p2-seed-20261116}"
 PY="${PY:-.venv/bin/python}"
+mkdir -p logs
+receipts=$(mktemp -d logs/replays.XXXXXX)
+echo "回放回执写入 $receipts"
 fail=0
 for case in fused_ln_compile_20261118 fused_ln_tail_20261118 \
             matmul_strided_20261107 attention_causal_20261109; do
+  case_dir="benchmarks/repro/$case"
+  if [ -f "$case_dir/historical_fix.py" ]; then
+    patch=historical_fix.py
+  else
+    patch=candidate_fixed.py
+  fi
   echo "== $case :: 修前"
   "$PY" -m benchmarks.experiments.v08.failure_replay \
-      --case "benchmarks/repro/$case" --source candidate.py \
+      --case "$case_dir" --source candidate.py \
+      --output "$receipts/$case/replay-candidate.json" \
       --host "$HOST" --work-dir "$WORKDIR" || fail=1
   echo "== $case :: 补丁"
   "$PY" -m benchmarks.experiments.v08.failure_replay \
-      --case "benchmarks/repro/$case" --source historical_fix.py --expect pass \
-      --host "$HOST" --work-dir "$WORKDIR" 2>/dev/null || \
-  "$PY" -m benchmarks.experiments.v08.failure_replay \
-      --case "benchmarks/repro/$case" --source candidate_fixed.py --expect pass \
+      --case "$case_dir" --source "$patch" --expect pass \
+      --output "$receipts/$case/replay-${patch%.py}.json" \
       --host "$HOST" --work-dir "$WORKDIR" || fail=1
 done
 [ "$fail" -eq 0 ] && echo "ALL REPLAYS OK" || echo "SOME REPLAYS FAILED"

@@ -13,33 +13,38 @@
 
 ## 一次完整的验收示例（`1×33`）
 
-这条链路是"给定故障后的修复闭环"的最小可验收形态：**复现 → 补丁 → 独立终评**。
+在仓库根目录运行 `sh benchmarks/repro/run_all_replays.sh`，可复现四个故障并验证对应补丁的完整 L2。
+每次批量回放将新回执写入 `logs/replays.*/`。以下示例用 `1×33` 展示如何额外取得独立终评。
 
 ```bash
-cd <repo>
+mkdir -p logs
+receipts=$(mktemp -d logs/replays.XXXXXX)
 
 # 1) 复现：契约哈希、修前源码哈希、级别、具名用例与误差四项都要对上
 python -m benchmarks.experiments.v08.failure_replay \
   --case benchmarks/repro/fused_ln_tail_20261118 \
-  --source candidate.py --host h20 --work-dir /root/operator-p2-seed-20261116
+  --source candidate.py --host h20 --work-dir /root/operator-p2-seed-20261116 \
+  --output "$receipts/replay-candidate.json"
 #   → passed: true  (L1=true / L2=false, 1x33 max_error=0.099609375)
 
 # 2) 补丁：完整 L2 32/32
 python -m benchmarks.experiments.v08.failure_replay \
   --case benchmarks/repro/fused_ln_tail_20261118 \
   --source candidate_fixed.py --expect pass --host h20 \
-  --work-dir /root/operator-p2-seed-20261116
+  --work-dir /root/operator-p2-seed-20261116 \
+  --output "$receipts/replay-candidate_fixed.json"
 #   → passed: true  (L2=True cases=32/32)
 
 # 3) 独立终评：同源码再取预留的 purpose=final 回执
 python -m benchmarks.experiments.v08.failure_replay \
   --case benchmarks/repro/fused_ln_tail_20261118 \
   --source candidate_fixed.py --expect pass --final --host h20 \
-  --work-dir /root/operator-p2-seed-20261116
+  --work-dir /root/operator-p2-seed-20261116 \
+  --output "$receipts/replay-candidate_fixed-final.json"
 #   → passed: true  (... independent final L2=True)
 ```
 
-每一步都在 case 目录里落一份 `replay-<source>.json`；`run/` 是回放产物（已 gitignore）。
+各个步骤的回执在 `$receipts`，详细的验证产物在样本目录的 `run/`。
 
 ## 回放器判什么
 
@@ -63,5 +68,5 @@ python -m benchmarks.experiments.v08.failure_replay \
 
 这些包只回答"这个故障能不能稳定复现、补丁能不能过独立验收"。
 "普通 DSH 与插件谁修得更省"是另一件事，见
-[修复对照预登记](../docs/testing/v08-repair-ac-preregistration.md)：两例都是 `both_qualified`，
+[修复对照预登记](../../docs/testing/v08-repair-ac-preregistration.md)：两例都是 `both_qualified`，
 目前只验收了闭环，没有测出差别。

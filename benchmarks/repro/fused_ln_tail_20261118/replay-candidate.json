@@ -5,15 +5,15 @@
   "source_hash": "9e760eb0c55711f61600280e393e204cfe4041af973f8c38c6e9cd701f8db2ea",
   "expect": "fail",
   "passed": true,
-  "why": "matches the frozen expectation (levels + the named cases)",
+  "why": "matches the frozen expectation (contract + source identity + levels + the named cases)",
   "levels": {
     "L1": true,
     "L2": false
   },
   "compile_failure": {},
   "contract_hash": "093339587d8c462c8af2328095b00fd471575ed26e2630c2ef81a6925ebdc44a",
-  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_tail_20261118/run/candidate-d8c94716/verify-1/result.json",
-  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_tail_20261118/run/candidate-d8c94716",
+  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_tail_20261118/run/candidate-90004806/verify-1/result.json",
+  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_tail_20261118/run/candidate-90004806",
   "final_levels": null,
   "final_evidence": null,
   "final_verification_purpose": null
