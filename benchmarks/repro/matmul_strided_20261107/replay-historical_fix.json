@@ -1,0 +1,20 @@
+{
+  "schema": "v08-failure-replay-v1",
+  "case_id": "matmul-strided-20261107",
+  "source": "historical_fix.py",
+  "source_hash": "37e0de22ddfc19f817d49c4b2520012993732c8f9a73a59e2818d25cb2998f25",
+  "expect": "pass",
+  "passed": true,
+  "why": "L2=True cases=15/15",
+  "levels": {
+    "L1": true,
+    "L2": true
+  },
+  "compile_failure": {},
+  "contract_hash": "6e337b0f1be605919844d29c0200178c9bf281b3214ef2bf2b32288f3894df97",
+  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/matmul_strided_20261107/run/historical_fix-4ab84405/verify-1/result.json",
+  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/matmul_strided_20261107/run/historical_fix-4ab84405",
+  "final_levels": null,
+  "final_evidence": null,
+  "final_verification_purpose": null
+}

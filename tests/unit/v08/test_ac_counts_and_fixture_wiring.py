@@ -76,7 +76,8 @@ def test_repair_prompt_points_at_the_seed_source_and_the_named_failure():
     for arm in ('A', 'C'):
         text = repair_workflow(arm, run_dir='/tmp/run', ssh=dict(host='h', port=1,
                                                                 user='u', key='/k'),
-                               budget=dict(max_model_calls=20), seed_receipt=receipt)
+                               budget=dict(max_model_calls=20), seed_receipt=receipt,
+                               declaration=ac_plan.FUSED_TASK['declaration'])
         assert 'start_kernel.py' in text
         assert '完整 L2' in text and '独立终评' in text
         assert 'fused-ln-residual-1x33-random-contiguous' in text
@@ -84,7 +85,8 @@ def test_repair_prompt_points_at_the_seed_source_and_the_named_failure():
         assert 'phase="generate"' not in text
     c_text = repair_workflow('C', run_dir='/tmp/run',
                              ssh=dict(host='h', port=1, user='u', key='/k'),
-                             budget=dict(max_model_calls=20), seed_receipt=receipt)
+                             budget=dict(max_model_calls=20), seed_receipt=receipt,
+                             declaration=ac_plan.FUSED_TASK['declaration'])
     assert 'phase="repair"' in c_text and 'verification_round=1' in c_text
 
 
@@ -128,3 +130,37 @@ def test_the_feedback_reply_carries_the_L2_verdicts(tmp_path):
     assert reply['execution_context'] == {'cell': 't'}
     assert reply['levels'], '回执必须带 levels'
     assert [v['level'] for v in reply['verdicts']] == ['L2']
+
+
+def test_the_case_count_in_the_prompt_comes_from_the_contract():
+    """融合任务 32 条、matmul 15 条：写死会让另一族的 prompt 报错数。"""
+    from benchmarks.experiments.v08.ac_live import repair_workflow
+
+    fused = dict(request='fp16 32768x6144 residual add layernorm', shapes=[[32768, 6144]],
+                 precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.5)
+    matmul = dict(request='fp16 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
+                  precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0)
+    ssh = dict(host='h', port=1, user='u', key='/k')
+    for declaration, expected in ((fused, 32), (matmul, 15)):
+        text = repair_workflow('A', run_dir='/tmp/run', ssh=ssh,
+                               budget=dict(max_model_calls=20), seed_receipt=None,
+                               declaration=declaration)
+        assert f'{expected} 条套件' in text, text[:200]
+
+
+def test_repair_finish_counts_each_dispatch_once_and_skips_L3(tmp_path, monkeypatch):
+    """A4 曾记 4 次验证，实际 3 次：A 的会话提交同时留 result-N 与 verify-N。"""
+    from benchmarks.experiments.v08 import ac_driver
+    from benchmarks.experiments.v08.ac_fixture import _counts, _finish_cell
+
+    run = tmp_path / 'run'
+    (run / 'native-verification').mkdir(parents=True)
+    for name in ('run/native-verification/result-0001.json', 'run/verify-1.json',
+                 'final-run/verify-1.json', 'final-run/verify-2.json'):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dict(created_at=100.0, levels={'L2': True})),
+                        encoding='utf-8')
+    # 同一份盘面：按臂去重后 A 是 3（1 次会话 + 终评 2 次）
+    assert _counts(tmp_path, arm='A')['verifications'] == 3
+    assert _counts(tmp_path, arm='C')['verifications'] == 3

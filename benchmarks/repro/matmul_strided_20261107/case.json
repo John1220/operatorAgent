@@ -1,0 +1,57 @@
+{
+  "schema": "v08-failure-replay-case-v1",
+  "case_id": "matmul-strided-20261107",
+  "summary": "FP16 4096^3 matmul candidate is correct on every contiguous case but fails the strided A=32x4 / B=4x32 case at 9.69140625: the kernel assumes contiguous layout instead of reading runtime strides.",
+  "origin": {
+    "collected_at": "2026-11-07T13:58:00+08:00",
+    "arm": "hand-written regression fixture (S3 reconstructed, 2026-11-07)",
+    "cell_root": "output/v08-real-receipt-20261107",
+    "receipt": "output/v08-real-receipt-20261107/run/verify-1/result.json",
+    "fixed_receipt": "output/v08-real-receipt-20261107/run/verify-2/result.json",
+    "source_hash": "93eba1dbb338e2ed412cb8c7ec4b445e40df55870523d51f9b1064aae8f2b925",
+    "note": "candidate.py is the pre-fix source byte-for-byte; historical_fix.py is the 2026-11-07 patch, kept for the verifier to check, never handed to an arm"
+  },
+  "declaration": {
+    "request": "fp16 4096x4096x4096 matmul, triton",
+    "shapes": [
+      [
+        4096,
+        4096,
+        4096
+      ]
+    ],
+    "precision": "fp16",
+    "dsl": "triton",
+    "hardware": "nvidia_gpu",
+    "min_speedup": 1.0
+  },
+  "contract_hash": "6e337b0f1be605919844d29c0200178c9bf281b3214ef2bf2b32288f3894df97",
+  "correctness_profile": "builtin-layernorm-fp16-cuda-v2",
+  "expected": {
+    "levels": {
+      "L1": true,
+      "L2": false
+    },
+    "failure_kind": "numeric_strided_layout",
+    "passing_cases": [
+      "auto-k4-m32-n32-fp16-random-contiguous"
+    ],
+    "failing_cases": [
+      {
+        "case_id": "auto-k4-m32-n32-fp16-random-strided",
+        "verdict": "failed",
+        "max_error": 9.69140625,
+        "matched_ratio": 0.0029296875
+      }
+    ],
+    "root_cause": "a_ptrs/b_ptrs use rows*K and ks*N; a strided A (strides [16,4]) and B are read with the contiguous formula",
+    "known_related": "the 2026-11-07 patch threads sa_m/sa_k/sb_k/sb_n through and passes 15/15"
+  },
+  "budget": {
+    "wall_clock_s": 900,
+    "max_verifications": 2,
+    "max_model_calls": 1,
+    "max_output_tokens_per_call": 8192,
+    "total_output_token_reservations": 8192
+  }
+}

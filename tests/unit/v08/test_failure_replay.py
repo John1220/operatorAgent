@@ -110,3 +110,19 @@ def test_identity_is_part_of_the_pass_criteria(tmp_path):
     # 补丁源码本来就不是那份字节，不按修前哈希判否
     matched, why = fr._matches(case, drifted_source, source_name='candidate_fixed.py')
     assert matched is True
+
+
+def test_the_matmul_case_pins_the_strided_layout_failure():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[3] / 'benchmarks/repro/matmul_strided_20261107'
+    case = json.loads((root / 'case.json').read_text(encoding='utf-8'))
+    source = (root / 'candidate.py').read_text(encoding='utf-8')
+    assert fr._sha(source) == case['origin']['source_hash']
+    assert case['contract_hash'].startswith('6e337b0f')
+    failing = case['expected']['failing_cases'][0]
+    assert failing['case_id'] == 'auto-k4-m32-n32-fp16-random-strided'
+    assert failing['max_error'] == 9.69140625 and failing['matched_ratio'] == 0.0029296875
+    fix = (root / 'historical_fix.py').read_text(encoding='utf-8')
+    assert 'sa_m' in fix and 'sb_n' in fix
+    # 修前源码里不该出现 stride 形参
+    assert 'sa_m' not in source

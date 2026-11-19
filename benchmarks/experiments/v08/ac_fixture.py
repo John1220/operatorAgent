@@ -400,15 +400,21 @@ def _finish_cell(task_id, arm, selected, *, root, declaration, budget, backend,
     selected = Path(selected)
     conn = dict(connection or {})
     final_run = Path(root) / 'final-run'
+    # 修复验收的主判据是 L2（不比性能）⇒ 终评停在 L2：省掉一次 L3 派发（约 150 s/格），
+    # 且不改变判据（`acceptance == 'repair'` 时 qualified 只看 L2）。
+    repair_mode_early = acceptance == 'repair'
     body = final_evaluation(final_run, selected.read_text(),
                             declaration=declaration, host_budget=budget, backend=backend,
-                            stop_after='L3',
+                            stop_after='L2' if repair_mode_early else 'L3',
                             host=conn.get('host'), work_dir=conn.get('work_dir'),
                             persistent=bool(conn.get('persistent', False)),
                             worker_root=final_run / 'owned-worker')
     # **计数必须来自量具，不是人手数**：之前 `model_dispatches`/`verifications` 都是 None，
     # 报告里的"每格 3–6 次调用"是人工数请求文件得来的（2026-11-10 评审指出）。
-    counted = _counts(root)
+    # `arm=` 必须传：A 臂一次会话提交会同时写 `native-verification/result-N.json` 与
+    # `run/verify-N.json`，不带臂就会把同一次派发数两遍（2026-11-19 复核：A4 记 4，
+    # 实际 3）。
+    counted = _counts(root, arm=arm)
     # 达标 = 完整 L2 + 独立 L3 valid + >= min_speedup + 单核融合静态核验。
     from .fusion_check import FusionCheckError, check_fused_source
     from operator_agent.app.hitl_tools import build_task

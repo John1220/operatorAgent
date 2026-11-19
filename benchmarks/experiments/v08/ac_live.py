@@ -181,7 +181,7 @@ def _assert_budget_consistent(budget):
         raise SystemExit('累计预留小于 调用数 × 每次预留：预算不自洽')
 
 
-def repair_workflow(arm, *, run_dir, ssh, budget, seed_receipt):
+def repair_workflow(arm, *, run_dir, ssh, budget, seed_receipt, declaration):
     """修复任务的**工作流**：两边都是「先原样复现 → 再看诊断 → 再改」。
 
     2026-11-18 的 C 臂修复试跑仍在 `operator_context(phase="generate")`：那一步发的是
@@ -191,9 +191,11 @@ def repair_workflow(arm, *, run_dir, ssh, budget, seed_receipt):
     再 `operator_context(phase="repair", verification_round=1)` 取绑定该源码+结果的诊断。
     """
     facts = _receipt_facts(seed_receipt)
+    # 用例数从**冻结契约**读，不写死：融合任务 32 条，matmul 是 15 条（2026-11-19 复核）。
+    case_count = _suite_case_count(declaration)
     head = ("## 这是修复任务\n"
             "工作目录里的 `start_kernel.py` 就是当前**失败**的实现——不要重写结构，先修它。\n"
-            "验收条件（权威）：修好的源码必须在**同一份冻结契约与 32 条套件**上完整 L2 通过，"
+            f"验收条件（权威）：修好的源码必须在**同一份冻结契约与 {case_count} 条套件**上完整 L2 通过，"
             "并再通过一次独立终评（`purpose=final`）的 L2；**不比性能、不要求融合结构**。"
             "契约、套件、容差都不许改。\n"
             "已知故障（来自同一冻结契约的 L2 回执）：\n" + _json_dump(facts) + "\n")
@@ -243,6 +245,17 @@ def session_instrument_failure(response):
         if marker in text:
             return marker
     return None
+
+
+def _suite_case_count(declaration):
+    """冻结契约里有几条 L2 case（不写死：融合 32、matmul 15）。"""
+    try:
+        from operator_agent.app.hitl_tools import build_task
+        from operator_agent.core.contract import freeze_from_task
+        contract = freeze_from_task(build_task(declaration))
+        return len(contract.correctness_suite.cases)
+    except Exception:                       # noqa: BLE001 — 读不出来就不报数，不猜
+        return None
 
 
 def _receipt_facts(seed_receipt):
@@ -443,7 +456,8 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
         if seed_source is not None:
             # 修复格：不给“从零实现”的整段 prompt，只给修复工作流 + 故障事实 + 提交命令。
             prompt = (repair_workflow('A', run_dir=run_dir, ssh={}, budget=budget,
-                                      seed_receipt=seed_receipt)
+                                      seed_receipt=seed_receipt,
+                                      declaration=declaration)
                       + '\n提交命令：`' + interpreter + ' check.py --code-file <你的文件>`。\n')
         else:
             prompt = arm_prompt(arm, declaration=declaration, budget=budget).replace(
@@ -644,7 +658,8 @@ def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
             work_c.mkdir(parents=True, exist_ok=True)
             _shutil.copyfile(seed_source, work_c / 'start_kernel.py')
             prompt = (repair_workflow('C', run_dir=run_dir, ssh=ssh,
-                                      budget=budget, seed_receipt=seed_receipt)
+                                      budget=budget, seed_receipt=seed_receipt,
+                                      declaration=declaration)
                       + '\n调用约定（ABI，权威）：' + abi_text + '\n')
         (root / 'prompt.txt').write_text(prompt, encoding='utf-8')
         response = s5_arm_env.start_headless(built, prompt, timeout=timeout_s or wall,
