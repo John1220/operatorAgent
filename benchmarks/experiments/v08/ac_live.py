@@ -394,6 +394,8 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
         dict(run_dir=str(run_dir), backend='ssh', connection=dict(connection),
              declaration=declaration,
              execution_context=execution_context,
+             # 修复轮：开发验证只到 L2（终评同样停在 L2，见 ac_fixture._finish_cell）。
+             **({'stop_after': 'L2'} if acceptance == 'repair' else {}),
              budget=dict(wall_clock_s=wall, max_llm_calls=int(budget['max_model_calls']),
                          oracle_total=int(budget['max_verifications'])),
              deadline_monotonic=monotonic() + wall),
@@ -555,6 +557,8 @@ def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
         dict(run_dir=str(run_dir), backend='ssh', connection=dict(connection),
              declaration=declaration,
              execution_context=execution_context,
+             # 修复轮：开发验证只到 L2（终评同样停在 L2，见 ac_fixture._finish_cell）。
+             **({'stop_after': 'L2'} if acceptance == 'repair' else {}),
              budget=dict(wall_clock_s=wall, max_llm_calls=int(budget['max_model_calls']),
                          oracle_total=int(budget['max_verifications'])),
              deadline_monotonic=monotonic() + wall),

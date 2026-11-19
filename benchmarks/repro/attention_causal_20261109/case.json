@@ -1,0 +1,77 @@
+{
+  "schema": "v08-failure-replay-case-v1",
+  "case_id": "attention-causal-20261109",
+  "summary": "FP16 prefill attention candidate passes the non-causal case but fails all five causal cases at 1.95e-03: the mask is applied after the softmax instead of before it.",
+  "origin": {
+    "collected_at": "2026-11-09T20:31:00+08:00",
+    "arm": "C (DSH + plugin, A/C workflow round)",
+    "cell_root": "output/v08-ac-20261108/cell-attention-prefill-4096-C",
+    "receipt": "output/v08-ac-20261108/cell-attention-prefill-4096-C/run/verify-5/result.json",
+    "fixed_receipt": "output/v08-ac-20261108/cell-attention-prefill-4096-C/run/verify-6/result.json",
+    "source_hash": "e1b711b7a8c8bd265d1c576766d550d8896015059b7d56184169018055ac3384",
+    "note": "candidate.py is the pre-fix source byte-for-byte; historical_fix.py is the 2026-11-09 fix, verifier-side only"
+  },
+  "declaration": {
+    "request": "fp16 attention prefill 1x16x4096x128",
+    "shapes": [
+      [
+        1,
+        16,
+        4096,
+        128
+      ]
+    ],
+    "precision": "fp16",
+    "dsl": "triton",
+    "hardware": "nvidia_gpu",
+    "min_speedup": 1.0
+  },
+  "contract_hash": "e9f75d60cf1c2b35372cf87e3c77d8b63e69514e426a558733363d0e2f96bfe5",
+  "correctness_profile": "builtin-attention-fp16-cuda-v1",
+  "expected": {
+    "levels": {
+      "L1": true,
+      "L2": false
+    },
+    "failure_kind": "causal_mask_applied_after_softmax",
+    "passing_cases": [
+      "s1024-nocausal"
+    ],
+    "failing_cases": [
+      {
+        "case_id": "s1024-causal",
+        "verdict": "failed",
+        "max_error": 0.001953125
+      },
+      {
+        "case_id": "s2048-causal",
+        "verdict": "failed",
+        "max_error": 0.001953125
+      },
+      {
+        "case_id": "s4096-causal",
+        "verdict": "failed",
+        "max_error": 0.0009765625
+      },
+      {
+        "case_id": "s4096-causal-strided",
+        "verdict": "failed",
+        "max_error": 0.0009765625
+      },
+      {
+        "case_id": "s1000-causal",
+        "verdict": "failed",
+        "max_error": 0.001953125
+      }
+    ],
+    "root_cause": "the mask is multiplied in after softmax instead of being added as -inf before it, so every masked position still contributes its normalized probability",
+    "known_related": "the 2026-11-09 patch passes all 8 cases"
+  },
+  "budget": {
+    "wall_clock_s": 1800,
+    "max_verifications": 2,
+    "max_model_calls": 1,
+    "max_output_tokens_per_call": 8192,
+    "total_output_token_reservations": 8192
+  }
+}

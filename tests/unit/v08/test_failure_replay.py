@@ -126,3 +126,17 @@ def test_the_matmul_case_pins_the_strided_layout_failure():
     assert 'sa_m' in fix and 'sb_n' in fix
     # 修前源码里不该出现 stride 形参
     assert 'sa_m' not in source
+
+
+def test_the_attention_case_pins_all_five_causal_failures():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[3] / 'benchmarks/repro/attention_causal_20261109'
+    case = json.loads((root / 'case.json').read_text(encoding='utf-8'))
+    source = (root / 'candidate.py').read_text(encoding='utf-8')
+    assert fr._sha(source) == case['origin']['source_hash']
+    assert case['contract_hash'].startswith('e9f75d60')
+    failing = [row['case_id'] for row in case['expected']['failing_cases']]
+    assert len(failing) == 5 and all('causal' in name for name in failing)
+    assert case['expected']['passing_cases'] == ['s1024-nocausal']
+    assert {row['max_error'] for row in case['expected']['failing_cases']} == {
+        0.001953125, 0.0009765625}

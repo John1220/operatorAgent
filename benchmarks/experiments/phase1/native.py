@@ -54,6 +54,9 @@ class VerificationService:
         self.timeout=max(1,min(1810,int(self.policy.wall_clock_s)+5))
         self.records=[]
         self.events=[]
+        # 开发验证停在哪一级：`None` = 保持历史行为（跑满 L1/L2/L3）；修复轮由调用方
+        # 显式传 'L2'（不比性能，L3 对判据无用，且每次多花约 150 s）。
+        self.stop_after=config.get('stop_after')
         self.selected_source=None
         self.selected_hash=None
         self.levels={}
@@ -114,6 +117,7 @@ class VerificationService:
         receipt=self.work/'native-verification'/('result-%04d.json'%index)
         write_once(request,dict(run_dir=str(self.work),source=str(candidate),
             source_hash=self.selected_hash,contract_hash=self.contract_hash,
+            stop_after=self.stop_after,
             backend=self.config['backend'],connection=self.config.get('connection',{}),result=str(receipt)))
         with (self.work/'native-verification'/('verifier-%04d.log'%index)).open('x') as stream:
             process=subprocess.run([sys.executable,'-B','-m','benchmarks.experiments.phase1.native',
@@ -374,8 +378,11 @@ def verify_worker(request):
         raise ValueError('native source binding mismatch')
     if read(Path(request['run_dir'])/'contract.json').get('hash')!=request['contract_hash']:
         raise ValueError('native contract binding mismatch')
+    extra=options(request)
+    if request.get('stop_after'):
+        extra['stop_after']=request['stop_after']
     result=ht.verify(request['run_dir'],data.decode('utf-8'),backend=request['backend'],
-        candidate_origin='outer',**options(request))
+        candidate_origin='outer',**extra)
     write_once(request['result'],result)
 
 

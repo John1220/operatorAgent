@@ -362,6 +362,13 @@ def _counts(root, arm=None):
     if requests:
         stamps = []
         for path in final_receipts:
+            # **完成时间**：`complete.json` 落盘那一刻 = 这次验证真正结束；回执的
+            # `created_at` 早于收尾几步（记账、回写），会把墙钟算短十几秒
+            # （2026-11-19 复核：A 355.9 vs 369.8）。
+            done = path.with_suffix('') / 'complete.json'
+            if done.is_file():
+                stamps.append(done.stat().st_mtime)
+                continue
             try:
                 value = json.loads(path.read_text())
             except ValueError:

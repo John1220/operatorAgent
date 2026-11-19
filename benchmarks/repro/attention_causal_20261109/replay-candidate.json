@@ -1,0 +1,20 @@
+{
+  "schema": "v08-failure-replay-v1",
+  "case_id": "attention-causal-20261109",
+  "source": "candidate.py",
+  "source_hash": "e1b711b7a8c8bd265d1c576766d550d8896015059b7d56184169018055ac3384",
+  "expect": "fail",
+  "passed": true,
+  "why": "matches the frozen expectation (contract + source identity + levels + the named cases)",
+  "levels": {
+    "L1": true,
+    "L2": false
+  },
+  "compile_failure": {},
+  "contract_hash": "e9f75d60cf1c2b35372cf87e3c77d8b63e69514e426a558733363d0e2f96bfe5",
+  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/attention_causal_20261109/run/candidate-56e9f342/verify-1/result.json",
+  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/attention_causal_20261109/run/candidate-56e9f342",
+  "final_levels": null,
+  "final_evidence": null,
+  "final_verification_purpose": null
+}
