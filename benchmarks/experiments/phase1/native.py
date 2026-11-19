@@ -32,7 +32,17 @@ from .summary import _verdicts
 
 class VerificationService:
     """Serialize full ordinary verification and reserve its budget first."""
+    #: 反馈组装要用到的配置项。缺了它们的表现是 **`check.py` 只能说
+    #: `development_transport_failed`**（handler 把 KeyError 当 400 收掉），
+    #: 于是模型整轮拿不到 L2 结果却仍在花预算 —— 2026-11-19 A 臂实测就是这么废掉的。
+    #: 所以在这里 fail-fast：宁可这一格起不来，也不要在模型那一轮里静默断线。
+    REQUIRED_CONFIG = ('run_dir', 'backend', 'declaration', 'budget',
+                       'deadline_monotonic', 'execution_context')
+
     def __init__(self,config,contract_hash):
+        missing=[name for name in self.REQUIRED_CONFIG if name not in config]
+        if missing:
+            raise ValueError('native verification service missing config: '+', '.join(missing))
         self.config=config
         self.work=Path(config['run_dir'])
         self.contract_hash=contract_hash

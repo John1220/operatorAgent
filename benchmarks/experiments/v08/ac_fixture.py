@@ -95,6 +95,7 @@ def run_a_cell(declaration, *, task_id, candidate_code, root, budget, backend='f
     wall = int(budget['wall_clock_s'])
     service_config = dict(run_dir=str(run_dir), backend=backend, declaration=declaration,
                           connection=connection,
+                          execution_context=dict(cell_id=task_id, arm='A', fixture=True),
                           # `deadline_monotonic` 是 native 服务的必填项：缺了它 develop()
                           # 会 KeyError，服务回 400，check.py 只报
                           # `development_transport_failed`（2026-11-17 fixture 实测）。

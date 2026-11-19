@@ -375,9 +375,12 @@ def run_a_live(declaration, *, task_id, root, budget, connection, model=None, wa
                   max_output_tokens=int(budget['max_output_tokens_per_call']),
                   total_output_tokens=int(budget['total_output_token_reservations']),
                   wall_clock_s=wall)
+    # `execution_context` 是反馈回执的必填字段（缺了模型只会看到 transport_failed）。
+    execution_context = dict(plan_hash=None, cell_id=task_id, arm='A', root=str(root))
     service = VerificationService(
         dict(run_dir=str(run_dir), backend='ssh', connection=dict(connection),
              declaration=declaration,
+             execution_context=execution_context,
              budget=dict(wall_clock_s=wall, max_llm_calls=int(budget['max_model_calls']),
                          oracle_total=int(budget['max_verifications'])),
              deadline_monotonic=monotonic() + wall),
@@ -532,9 +535,12 @@ def run_c_live(declaration, *, task_id, root, budget, connection, model=None,
                   max_output_tokens=int(budget['max_output_tokens_per_call']),
                   total_output_tokens=int(budget['total_output_token_reservations']),
                   wall_clock_s=wall)
+    # `execution_context` 是反馈回执的必填字段（缺了模型只会看到 transport_failed）。
+    execution_context = dict(plan_hash=None, cell_id=task_id, arm='A', root=str(root))
     service = VerificationService(
         dict(run_dir=str(run_dir), backend='ssh', connection=dict(connection),
              declaration=declaration,
+             execution_context=execution_context,
              budget=dict(wall_clock_s=wall, max_llm_calls=int(budget['max_model_calls']),
                          oracle_total=int(budget['max_verifications'])),
              deadline_monotonic=monotonic() + wall),

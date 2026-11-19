@@ -86,3 +86,45 @@ def test_repair_prompt_points_at_the_seed_source_and_the_named_failure():
                              ssh=dict(host='h', port=1, user='u', key='/k'),
                              budget=dict(max_model_calls=20), seed_receipt=receipt)
     assert 'phase="repair"' in c_text and 'verification_round=1' in c_text
+
+
+def test_the_native_service_refuses_to_start_without_the_feedback_fields():
+    """缺 `execution_context` 时不能起服务：否则 check.py 只能说 transport_failed，
+    模型整轮看不到 L2 结果却还在花预算（2026-11-19 A 臂实测）。"""
+    import pytest
+
+    from benchmarks.experiments.phase1.native import VerificationService
+
+    base = dict(run_dir='/tmp/x', backend='mock', declaration={}, budget={},
+                deadline_monotonic=1.0, execution_context={'cell': 't'})
+    for missing in ('execution_context', 'deadline_monotonic', 'budget'):
+        broken = {k: v for k, v in base.items() if k != missing}
+        with pytest.raises(ValueError) as error:
+            VerificationService(broken, 'a' * 64)
+        assert missing in str(error.value)
+
+
+def test_the_feedback_reply_carries_the_L2_verdicts(tmp_path):
+    """回执里必须有 levels/verdicts：模型就是靠这两个字段知道哪条用例挂了。"""
+    from operator_agent.execute.task_clock import monotonic
+    from operator_agent.app import hitl_tools as ht
+    from benchmarks.experiments.phase1.native import VerificationService
+
+    decl = dict(request='fp16 64x64 residual add layernorm', shapes=[[64, 64]],
+                precision='fp16', dsl='python', hardware='mock_gpu', min_speedup=0.0)
+    run = tmp_path / 'run'
+    prepared = ht.prepare(decl, run, host_budget=dict(
+        wall_clock_s=120, max_model_calls=2, max_output_tokens_per_call=1024,
+        total_output_token_reservations=2048, max_verifications=2, final_reserve=1))
+    service = VerificationService(dict(
+        run_dir=str(run), backend='mock', connection={}, declaration=decl,
+        execution_context=dict(cell='t'),
+        budget=dict(wall_clock_s=120, max_llm_calls=2, oracle_total=2),
+        deadline_monotonic=monotonic() + 120), prepared['contract_hash'])
+    with service:
+        reply = service.develop("def kernel(X, R):\n    return X\n",
+                                prepared['contract_hash'])
+    assert reply['ok'] is True
+    assert reply['execution_context'] == {'cell': 't'}
+    assert reply['levels'], '回执必须带 levels'
+    assert [v['level'] for v in reply['verdicts']] == ['L2']

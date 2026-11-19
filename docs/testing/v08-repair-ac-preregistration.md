@@ -113,6 +113,38 @@ C 交付的补丁与人工修的 `patch.diff` **结构相同**：方差按 mask 
 （作用域=一次 verify，跨阶段仍各查一次，失败不缓存），冷 L2 71.6 s → 62.6 s。
 剩下的 65 次逐 case `verify`（约 39 s）要合并成批量 RPC 才能再省，那是协议改动，未做。
 
+## 7d-勘误. A 臂的 L2 结果没有回到模型（2026-11-19 复核，采纳外部意见）
+
+**撤回上面对 A 的 `failed` 判定与整对 `+1`。**
+
+`ac_live.run_a_live` 起验证服务时**没给 `execution_context`**，而 `native.VerificationService`
+在组装反馈回执时读 `self.config['execution_context']` ⇒ `KeyError` ⇒
+`_Handler.do_POST` 把 KeyError 当 400 收掉 ⇒ `check.py` 只报
+`{"error": "development_transport_failed", "ok": false, "status": "unknown"}`。
+
+已本地复现（同一个 KeyError 在成功路径与 except 路径各抛一次）：
+
+```
+KeyError: 'execution_context'   native.py:154
+KeyError: 'execution_context'   native.py:165
+```
+
+**后果**：A 臂整轮**从未拿到过 L2 反馈**。它把 20 次调用中的大部分花在排查传输上
+（`curl` 探测、端口扫描、`lsof` 被沙箱拒），最后提交的是**未修改的原始源码**。
+这不是"没交出来"，是**反馈通道断了**。按预登记「有证据的设施故障 ⇒ `unknown`」，
+**A2 与 A3 都应记 `unknown`**，而不是 `failed`；因此两臂的对照**不成立**，`+1` 撤回。
+
+**已修**：
+
+1. `ac_live` / `ac_fixture` 起服务时提供 `execution_context`（含 cell/arm/root）。
+2. `VerificationService.__init__` 增加 **fail-fast**：`run_dir / backend / declaration /
+   budget / deadline_monotonic / execution_context` 缺一项就拒绝启动。宁可这一格起不来，
+   也不要让模型在"静默断线"里烧预算。
+3. 复核：同一份回执现在能正常返回 `levels={'L2': False}` 与 `verdicts=[L2]`；
+   新增两条测试钉住「缺字段拒绝启动」与「回执必须带 levels/verdicts」。
+
+**待办**：按预登记顺序重跑 A 臂（修复对照），再重算配对判读。
+
 ## 7d. 修复对照结果（2026-11-19，一例验收）
 
 两臂同一份修前源码（sha256 `9e760eb0…`）、同一份失败回执、同一预算（20 调用 / 8 派发 / 2400 s）、
@@ -120,10 +152,10 @@ C 交付的补丁与人工修的 `patch.diff` **结构相同**：方差按 mask 
 
 | 臂 | 修好了吗 | 调用 | 验证 | 墙钟 | 交付的补丁 |
 |---|---|---:|---:|---:|---|
-| **A（裸 DSH）** | **否**（`failed`） | 20（用满） | 3 | 988.8 s | 只有 1 次提交，且**与修前源码逐字相同**（未改动就提交了） |
+| **A（裸 DSH）** | ~~否（`failed`）~~ → **`unknown`（设施：反馈通道断）** | 20（用满） | 3 | 988.8 s | 只有 1 次提交，且与修前源码逐字相同 —— 因为**它从没收到过 L2 反馈**（见 §7d-勘误） |
 | **C（插件）** | **是**（`qualified`） | **7** | 5 | 1960.5 s | 3 次提交：原样复现 → 修尾块但漏 strided → 32/32 通过 |
 
-单对判读：**`+1`**（C 修好、A 未修好），子型 `mixed_a_failed_c_qualified`。
+单对判读：~~`+1`~~ → **不可判**（A 为设施 `unknown`；`+1` 已撤回，待 A 重跑）。
 
 **到独立验收的路径**（C）：首次完整 L2 在 1255.8 s；终评（explore L2 + final L2）后
 `qualified`，总墙钟 1960.5 s。C 交付的补丁与人工 `patch.diff` 结构相同——
