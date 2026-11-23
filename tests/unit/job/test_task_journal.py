@@ -25,6 +25,13 @@ def _activate(run, task=TASK):
     return j.append(run, 'task_activated', task_id=task)
 
 
+def _finish(run, job_id, *, outcome='completed', result='received', **fields):
+    """queued → started → finished。跳步现在会被拒，所以测试也必须走完整序列。"""
+    _job(run, job_id)
+    _job(run, job_id, kind='job_started')
+    return _job(run, job_id, kind='job_finished', outcome=outcome, result=result, **fields)
+
+
 def _job(run, job_id, *, kind='job_queued', op='verify', **fields):
     return j.append(run, kind, task_id=TASK, job_id=job_id,
                     operation=op, invocation=job_id.replace('job', 'inv'), **fields)
@@ -39,9 +46,10 @@ def test_an_absent_journal_is_a_state_not_an_error(tmp_path):
 
 
 def test_appends_get_contiguous_revisions(tmp_path):
-    for index in range(1, 4):
-        event = j.append(tmp_path, 'task_prepared', task_id=TASK)
+    for index, kind in enumerate(('task_prepared', 'task_activated'), start=1):
+        event = j.append(tmp_path, kind, task_id=TASK)
         assert event['rev'] == index
+    assert _job(tmp_path, 'job-1')['rev'] == 3
     assert j.fold(j.read_events(tmp_path))['rev'] == 3
 
 
@@ -84,8 +92,7 @@ def test_only_task_closed_seals_the_stream(tmp_path):
     _prepare(tmp_path)
     _activate(tmp_path)
     for name in ('job-a', 'job-b'):
-        _job(tmp_path, name)
-        _job(tmp_path, name, kind='job_finished', outcome='completed', result='received')
+        _finish(tmp_path, name)
     settled = j.fold(j.read_events(tmp_path))
     assert j.is_open(settled) is True
     assert set(settled['jobs']) == {'job-a', 'job-b'}
@@ -106,6 +113,8 @@ def test_unknown_result_is_not_a_failure_and_must_say_why(tmp_path):
     """`unknown` 与 `failed` 并列，不是子类；而且必须带 result_reason。"""
     _prepare(tmp_path)
     _activate(tmp_path)
+    _job(tmp_path, 'job-a')
+    _job(tmp_path, 'job-a', kind='job_started')
     with pytest.raises(j.JournalError) as caught:
         _job(tmp_path, 'job-a', kind='job_finished', outcome='failed', result='unknown')
     assert caught.value.code == 'journal_missing_result_reason'
@@ -141,6 +150,8 @@ def test_a_misspelled_kind_is_refused_by_both_sides(tmp_path):
 def test_an_out_of_vocabulary_enum_is_refused(tmp_path):
     _prepare(tmp_path)
     _activate(tmp_path)
+    _job(tmp_path, 'job-a')
+    _job(tmp_path, 'job-a', kind='job_started')
     for fields, code in (
             (dict(outcome='exploded', result='received'), 'journal_unknown_outcome'),
             (dict(outcome='completed', result='maybe'), 'journal_unknown_result'),
@@ -198,8 +209,9 @@ def test_concurrent_appends_do_not_collide(tmp_path):
 
     def writer(index):
         try:
-            for _ in range(5):
-                _job(tmp_path, f'job-{index:02d}')
+            for step in range(5):
+                # 每个 Job 一个唯一 id：重复排队现在会被拒（journal_job_exists）。
+                _job(tmp_path, f'job-{index:02d}-{step}')
         except Exception as error:           # noqa: BLE001 - 线程里只能记账
             errors.append(error)
 
@@ -220,8 +232,8 @@ def test_is_open_answers_only_about_the_task(tmp_path):
     """
     _prepare(tmp_path)
     _activate(tmp_path)
-    _job(tmp_path, 'job-a', kind='job_finished', outcome='failed',
-         result='unknown', result_reason='receipt_absent')
+    _finish(tmp_path, 'job-a', outcome='failed', result='unknown',
+            result_reason='receipt_absent')
     projection = j.fold(j.read_events(tmp_path))
     assert projection['jobs']['job-a']['result'] == 'unknown'
     assert j.is_open(projection) is True          # 任务本身还没关
@@ -230,3 +242,67 @@ def test_is_open_answers_only_about_the_task(tmp_path):
     closed = j.fold(j.read_events(tmp_path))
     assert j.is_open(closed) is False             # 封账之后 Job 的 unknown 不算数
     assert closed['jobs']['job-a']['result'] == 'unknown'   # 但诊断入口仍在
+
+
+def test_a_job_cannot_start_on_an_empty_directory(tmp_path):
+    """没有 prepare 就没有契约。凭空开 Job 是无主调用，不是「还没开始」。
+
+    第一版的病：空目录直接 `job_started` 被接受，投影显示 task=absent + job=running ——
+    一个既不属于任何任务、又在跑的东西。
+    """
+    with pytest.raises(j.JournalError) as caught:
+        _job(tmp_path, 'job-a', kind='job_started')
+    assert caught.value.code == 'journal_not_activated'
+    assert j.read_events(tmp_path) == []
+    assert j.fold(j.read_events(tmp_path))['task']['phase'] == 'absent'
+
+
+def test_a_finished_job_cannot_return_to_running(tmp_path):
+    """终态不可回退。
+
+    第一版的病：正常完成后追加一条迟到的 `job_started`，投影会得到
+    `phase=running` 与 `outcome=completed, result=received` 并存的**自相矛盾**记录 ——
+    形状校验看不出来，因为它不在单条事件里，只在序列里。
+    """
+    _prepare(tmp_path)
+    _activate(tmp_path)
+    _finish(tmp_path, 'job-a', outcome='completed', result='received')
+    before = j.fold(j.read_events(tmp_path))['rev']
+
+    with pytest.raises(j.JournalError) as caught:
+        _job(tmp_path, 'job-a', kind='job_started')
+    assert caught.value.code == 'journal_job_closed'
+
+    after = j.fold(j.read_events(tmp_path))
+    assert after['rev'] == before
+    row = after['jobs']['job-a']
+    assert (row['phase'], row['outcome'], row['result']) == ('completed', 'completed', 'received')
+
+
+def test_skipping_a_job_phase_is_refused(tmp_path):
+    _prepare(tmp_path); _activate(tmp_path)
+    with pytest.raises(j.JournalError) as caught:
+        _job(tmp_path, 'job-a', kind='job_finished', outcome='completed', result='received')
+    assert caught.value.code == 'journal_job_unknown'
+    _job(tmp_path, 'job-a')
+    with pytest.raises(j.JournalError) as caught:
+        _job(tmp_path, 'job-a', kind='job_finished', outcome='completed', result='received')
+    assert caught.value.code == 'journal_bad_transition'
+
+
+def test_replay_refuses_an_out_of_order_stream(tmp_path):
+    """手写进文件的乱序事件不能因为「形状合法」就被接受 —— 回放走同一份判据。"""
+    target = j.path_for(tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        dict(schema=j.SCHEMA, rev=1, kind='task_prepared', task_id=TASK),
+        dict(schema=j.SCHEMA, rev=2, kind='task_activated', task_id=TASK),
+        dict(schema=j.SCHEMA, rev=3, kind='job_queued', task_id=TASK,
+             job_id='job-a', operation='verify'),
+        dict(schema=j.SCHEMA, rev=4, kind='job_finished', task_id=TASK,
+             job_id='job-a', operation='verify', outcome='completed', result='received'),
+    ]
+    target.write_text(''.join(json.dumps(line) + '\n' for line in lines), encoding='utf-8')
+    with pytest.raises(j.JournalError) as caught:
+        j.fold(j.read_events(tmp_path))
+    assert caught.value.code == 'journal_bad_transition'

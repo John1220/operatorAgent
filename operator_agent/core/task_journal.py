@@ -145,6 +145,59 @@ def validate(event: dict) -> None:
                 f"task_closed 的 outcome={event.get('outcome')!r} 必须是 {list(OUTCOMES)} 之一")
 
 
+_JOB_TERMINAL = frozenset({'completed', 'failed', 'cancelled'})
+
+
+def admit(task_phase: str, jobs: dict, event: dict) -> None:
+    """这条事件在**当前状态**下允许吗。`append` 与 `fold` 共用同一份。
+
+    为什么必须共用：只用 `validate()` 校验单条事件的形状是不够的 —— 形状合法的
+    「迟到的 `job_started`」会把一个已经完成的 Job 拉回 running，而投影里还留着
+    `outcome=completed, result=received`，于是同一条记录自相矛盾。这类错误
+    **不在单条事件里**，只在序列里，所以判据必须看当前状态。
+    """
+    kind = event['kind']
+    if task_phase == 'closed':
+        raise JournalError(
+            'journal_closed',
+            "任务已显式关闭（task_closed），不再接受新事件；"
+            "要开始新的工作请新建任务目录")
+    if kind == 'task_prepared' and task_phase != 'absent':
+        raise JournalError('journal_already_prepared',
+                           f"任务已经是 {task_phase!r}，不能重复 prepare")
+    if kind == 'task_activated' and task_phase not in ('prepared', 'active'):
+        raise JournalError('journal_not_prepared',
+                           'task_activated 之前必须先 task_prepared')
+    if kind in JOB_EVENTS:
+        if task_phase != 'active':
+            # absent 也不行：没有 prepare 就没有契约，凭空开 Job 是无主调用。
+            raise JournalError(
+                'journal_not_activated',
+                f"任务相位是 {task_phase!r}，Job 事件只允许在 'active' 之后到达")
+        job_id = event['job_id']
+        row = jobs.get(job_id)
+        if row is not None and row['phase'] in _JOB_TERMINAL:
+            # 终态不许回退。这条正是「已结束的 Job 被迟到事件拉回 running」的门。
+            raise JournalError(
+                'journal_job_closed',
+                f"Job {job_id!r} 已经是 {row['phase']!r}，终态不可回退")
+        if kind == 'job_queued':
+            if row is not None:
+                raise JournalError('journal_job_exists',
+                                   f"Job {job_id!r} 已经存在，不能重复排队")
+        elif row is None:
+            raise JournalError('journal_job_unknown',
+                               f"Job {job_id!r} 从未排队，不能直接 {kind}")
+        elif kind == 'job_started' and row['phase'] != 'queued':
+            raise JournalError(
+                'journal_bad_transition',
+                f"Job {job_id!r} 现在是 {row['phase']!r}，job_started 只接 queued")
+        elif kind == 'job_finished' and row['phase'] != 'running':
+            raise JournalError(
+                'journal_bad_transition',
+                f"Job {job_id!r} 现在是 {row['phase']!r}，job_finished 只接 running")
+
+
 def read_events(run) -> list:
     """读出全部事件。文件不存在 ⇒ 空流（不是错误：还没开始也是合法状态）。"""
     target = path_for(run)
@@ -195,23 +248,14 @@ def append(run, kind: str, *, task_id: str = '', job_id: str = '',
         import fcntl
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         events = read_events(run)
-        current = fold(events)['task']['phase'] if events else 'absent'
-        # **唯一的封账门**：只有任务被显式关闭才拒绝后续事件。
-        # 单个 Job 的终态只约束它自己 —— 否则第一个 Job 成功就锁死整条流。
-        if current == 'closed':
-            raise JournalError(
-                'journal_closed',
-                "任务已显式关闭（task_closed），不再接受新事件；"
-                "要开始新的工作请新建任务目录")
-        if kind in JOB_EVENTS and current == 'prepared':
-            raise JournalError(
-                'journal_not_activated',
-                "任务还没有激活（task_activated），Job 事件不能先到")
-
+        projection = fold(events) if events else None
+        current = projection['task']['phase'] if projection else 'absent'
         event = dict(schema=SCHEMA, rev=last_rev(events) + 1, kind=kind,
                      at=time.time(), task_id=task_id or '', job_id=job_id or '',
                      invocation=invocation or '', **fields)
         validate(event)
+        # 形状过了还不够：**序列**是否成立由 admit 判，`fold` 用的是同一份。
+        admit(current, (projection['jobs'] if projection else {}), event)
         handle = os.open(target, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
         try:
             os.write(handle, _line(event))
@@ -257,6 +301,8 @@ def fold(events: Iterable) -> dict:
     budget: dict = {}
     for event in events:
         validate(event)
+        # 回放也走同一份序列校验：手写进文件的乱序事件不能因为「形状合法」就被接受。
+        admit(task['phase'], jobs, event)
         kind = event['kind']
         task['task_id'] = event.get('task_id') or task['task_id']
         if kind == 'task_prepared':
