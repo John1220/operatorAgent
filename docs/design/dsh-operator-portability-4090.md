@@ -10,10 +10,10 @@
 
 | 层 | 是否依赖具体型号 | 依据 |
 |---|---|---|
-| 插件本体（`operator_run` / `verify` / `repair` / `bench`、MCP/CLI、取消、留存、证据包） | **不依赖** | 认卡靠探测，未命中硬件表就走"什么都不承诺"的未知路径（[hardware_caps.py:458](../../operator_agent/hardware_caps.py)）；换机只改 SSH 别名（[remote_executor.py:614](../../operator_agent/remote_executor.py)） |
+| 插件本体（`operator_run` / `verify` / `repair` / `bench`、MCP/CLI、取消、留存、证据包） | **不依赖** | 认卡靠探测，未命中硬件表就走"什么都不承诺"的未知路径（[hardware_caps.py:458](../../operator_agent/core/hardware_caps.py)）；换机只改 SSH 别名（[remote_executor.py:614](../../operator_agent/execute/remote_executor.py)） |
 | 已有数值证据（S4/S5 结果、峰值、脊点、launch 地板、噪声带） | **完全依赖** | 全部是 H20 实测；4090 脊点约 327 FLOP/B，与 H20 的约 37 相差近 9 倍，优化取向相反 |
-| 实验装置（S5 的 `h20` 后端代号、固定主机/UUID/型号校验） | **硬编码** | [s5_formal_run.py:39](../../benchmarks/s5_formal_run.py)、[s5_verify_service.py:68](../../benchmarks/s5_verify_service.py)、[s5_workflow_preflight.py:188](../../benchmarks/s5_workflow_preflight.py) 等 |
-| 标定产物（floor / L2 冲刷 / dispersion / `NOISE_BAND`） | **完全依赖** | 都按 8 卡共享 H20 标定（[measurement.py:92](../../operator_agent/measurement.py)） |
+| 实验装置（S5 的 `h20` 后端代号、固定主机/UUID/型号校验） | **硬编码** | [s5_formal_run.py:39](../../benchmarks/experiments/s5/s5_formal_run.py)、[s5_verify_service.py:68](../../benchmarks/experiments/s5/s5_verify_service.py)、[s5_workflow_preflight.py:188](../../benchmarks/experiments/s5/s5_workflow_preflight.py) 等 |
+| 标定产物（floor / L2 冲刷 / dispersion / `NOISE_BAND`） | **完全依赖** | 都按 8 卡共享 H20 标定（[measurement.py:92](../../operator_agent/decide/measurement.py)） |
 
 一句话：**依赖的不是 H20 这个型号，而是"每张卡先标定、再出结论"这条纪律。**
 迁移是可以做的工程，不是重写；但 S4/S5 的成绩一条都不能继承，且必须先把 §4 的
@@ -26,13 +26,13 @@
 
 | 能力 | 代码位置 | 行为 |
 |---|---|---|
-| 换机器 | [remote_executor.py:614](../../operator_agent/remote_executor.py) | 默认 `algorithm-h20`，可用 `REMOTE_SSH_HOST` 或 ssh config 别名覆盖，由 Host 块解析端口/用户/密钥 |
-| 认卡 | [hardware_caps.py:458](../../operator_agent/hardware_caps.py) | 命中 `_KNOWN_HARDWARE` 才用表内规格；未命中从 `unknown_caps()` 起，只按 compute capability 推能在整个受支持架构区间保证的中立事实（共享内存、warp shuffle、块归约可声明；TMA/FP8 等一律 False） |
-| 认不出就报错 | [hardware_caps.py:545](../../operator_agent/hardware_caps.py) | `get_caps_for_target()` 未命中直接抛 `UnknownHardware`，不兜底成 A100 的规格 |
-| 型号混淆守卫 | [hardware_caps.py:328](../../operator_agent/hardware_caps.py) | `_match_known_key` 要求键前后不紧跟数字，"nvidia h200" 不会吃到 `h20` 的 4.0 TB/s |
-| 资源预检 | [resource_check.py:254](../../operator_agent/resource_check.py) | smem 未知时返回"上界未知，交由原生检查"，既不误拒也不假装剪枝 |
-| Hopper 专属配方 | [optimization_planner.py:103](../../operator_agent/optimization_planner.py) | TMA / warp specialization / PDL / FP8 由 `requires_caps` 门控，Ada 上判 False 就选不出来 |
-| 卡号固定 | [remote_executor.py:747](../../operator_agent/remote_executor.py) | 通过 `nvidia-smi` 选卡并钉住，单卡机器同样成立（索引 0） |
+| 换机器 | [remote_executor.py:614](../../operator_agent/execute/remote_executor.py) | 默认 `algorithm-h20`，可用 `REMOTE_SSH_HOST` 或 ssh config 别名覆盖，由 Host 块解析端口/用户/密钥 |
+| 认卡 | [hardware_caps.py:458](../../operator_agent/core/hardware_caps.py) | 命中 `_KNOWN_HARDWARE` 才用表内规格；未命中从 `unknown_caps()` 起，只按 compute capability 推能在整个受支持架构区间保证的中立事实（共享内存、warp shuffle、块归约可声明；TMA/FP8 等一律 False） |
+| 认不出就报错 | [hardware_caps.py:545](../../operator_agent/core/hardware_caps.py) | `get_caps_for_target()` 未命中直接抛 `UnknownHardware`，不兜底成 A100 的规格 |
+| 型号混淆守卫 | [hardware_caps.py:328](../../operator_agent/core/hardware_caps.py) | `_match_known_key` 要求键前后不紧跟数字，"nvidia h200" 不会吃到 `h20` 的 4.0 TB/s |
+| 资源预检 | [resource_check.py:254](../../operator_agent/decide/resource_check.py) | smem 未知时返回"上界未知，交由原生检查"，既不误拒也不假装剪枝 |
+| Hopper 专属配方 | [optimization_planner.py:103](../../operator_agent/generate/optimization_planner.py) | TMA / warp specialization / PDL / FP8 由 `requires_caps` 门控，Ada 上判 False 就选不出来 |
+| 卡号固定 | [remote_executor.py:747](../../operator_agent/execute/remote_executor.py) | 通过 `nvidia-smi` 选卡并钉住，单卡机器同样成立（索引 0） |
 | LLM / 控制面 | — | 模型走远端 API，控制机只需 Python，不需要本地 GPU |
 
 结论：4090 不会被当成 H20 使用。上表是刻意的设计（缺证据不许折成一个能当分母的数），
@@ -63,20 +63,20 @@
 
 | 位置 | 校验内容 | 迁移动作 |
 |---|---|---|
-| [s5_formal_run.py:39](../../benchmarks/s5_formal_run.py) | `GATEWAY_HOST = 'algorithm-h20'` | 改为新主机别名并重冻结计划 |
-| [s5_verify_service.py:68](../../benchmarks/s5_verify_service.py) | `backend` 只接受 `mock`/`h20`，且非 mock 分支当前返回"real device adapter not wired" | 新增后端标签并接线，或明确本批不用该服务 |
-| [s5_workflow_preflight.py:188](../../benchmarks/s5_workflow_preflight.py) | GPU 型号必须为 `NVIDIA H20` | 改为按探测名/cc 断言 |
-| [s5_workflow_preflight.py:41](../../benchmarks/s5_workflow_preflight.py) | 预检要求空闲显存 ≥ 8192 MiB | 小卡不可能满足，必须重设（见 §5） |
-| [s5_ruler_preflight.py:75](../../benchmarks/s5_ruler_preflight.py) | 固定 GPU 索引/UUID/型号 | 换 UUID 与型号 |
-| [workload_codegen_h20.py:291](../../benchmarks/workload_codegen_h20.py) | `'H20' not in name` 即拒 | 同上 |
-| [s5_preflight_plan.py:34](../../benchmarks/s5_preflight_plan.py) | `verify_backend` 只允许 `mock`/`h20` | 同 s5_verify_service |
+| [s5_formal_run.py:39](../../benchmarks/experiments/s5/s5_formal_run.py) | `GATEWAY_HOST = 'algorithm-h20'` | 改为新主机别名并重冻结计划 |
+| [s5_verify_service.py:68](../../benchmarks/experiments/s5/s5_verify_service.py) | `backend` 只接受 `mock`/`h20`，且非 mock 分支当前返回"real device adapter not wired" | 新增后端标签并接线，或明确本批不用该服务 |
+| [s5_workflow_preflight.py:188](../../benchmarks/experiments/s5/s5_workflow_preflight.py) | GPU 型号必须为 `NVIDIA H20` | 改为按探测名/cc 断言 |
+| [s5_workflow_preflight.py:41](../../benchmarks/experiments/s5/s5_workflow_preflight.py) | 预检要求空闲显存 ≥ 8192 MiB | 小卡不可能满足，必须重设（见 §5） |
+| [s5_ruler_preflight.py:75](../../benchmarks/experiments/s5/s5_ruler_preflight.py) | 固定 GPU 索引/UUID/型号 | 换 UUID 与型号 |
+| [workload_codegen_h20.py:291](../../benchmarks/drivers/workload_codegen_h20.py) | `'H20' not in name` 即拒 | 同上 |
+| [s5_preflight_plan.py:34](../../benchmarks/experiments/s5/s5_preflight_plan.py) | `verify_backend` 只允许 `mock`/`h20` | 同 s5_verify_service |
 | [test_nvidia_matmul.py:109](../../test_nvidia_matmul.py) | 驱动里写死 `compute_units=78` | 只影响这三个历史驱动，不属插件路径 |
 | [config.yaml](../../config.yaml) | 注释即规格索引，**全仓无模块读取** | 仅需同步注释，改它不会生效 |
 
 ### 3.3 标定产物
 
 floor、L2 冲刷口径、样本离散度阈值、`NOISE_BAND` 都是 H20 的实测值
-（[measurement.py:83-92](../../operator_agent/measurement.py)；离散度与污染阈值在
+（[measurement.py:83-92](../../operator_agent/decide/measurement.py)；离散度与污染阈值在
 同文件 894/906 行），必须在目标卡上重标。
 脚本已存在：`benchmarks/calibrate_achievable_peak.py`、`benchmarks/cuda_calibration_h20.py`、
 `benchmarks/durable_profile_h20.py`（后两者的 `--host/--gpu` 是参数，改参数即可，
@@ -87,8 +87,8 @@ floor、L2 冲刷口径、样本离散度阈值、`NOISE_BAND` 都是 H20 的实
 ### G1 未知卡的 launch 地板不检查，也不降档
 
 `assess()` 在 `launch_floor_us is None` 时只写一条 reason，`validity` 保持 `VALID`
-（[measurement.py:1211](../../operator_agent/measurement.py)），于是 `can_gate` 仍为 True
-（[measurement.py:1036](../../operator_agent/measurement.py)），连"可禁用配方"也为 True。
+（[measurement.py:1211](../../operator_agent/decide/measurement.py)），于是 `can_gate` 仍为 True
+（[measurement.py:1036](../../operator_agent/decide/measurement.py)），连"可禁用配方"也为 True。
 
 H20 上小形状会被 `uninformative` 拦掉；同一份代码在未标定的卡上会把它当成可裁决读数，
 而禁用配方是**永久**决策。这是本次评估里唯一"方向性变松"的缺口：**先标 floor 并落表，
@@ -96,26 +96,26 @@ H20 上小形状会被 `uninformative` 拦掉；同一份代码在未标定的�
 
 ### G2 共享内存未知时被解析成 128 KiB
 
-[agents.py:117](../../operator_agent/agents.py) 把 `memory.local.size`（未知时为字符串
+[agents.py:117](../../operator_agent/generate/agents.py) 把 `memory.local.size`（未知时为字符串
 `"unknown"`）解析成 128 KiB，再乘 0.9 作为 Designer 的 tile 预算。Ada 量级约 100 KiB，
 即提示值偏高约 28%。后果是编译失败多烧几轮（L1 会拒，不会静默错值），但会直接烧预算。
-同源的隐患是 [agents.py:111](../../operator_agent/agents.py) 只有 `8.0`/`9.0` 两个分支，
+同源的隐患是 [agents.py:111](../../operator_agent/generate/agents.py) 只有 `8.0`/`9.0` 两个分支，
 Ada（8.9）落到 else 分支。
 
 ### G3 峰值行口径未核，roofline 轴向不参与筛选
 
-[verifier.py:157](../../operator_agent/verifier.py) 有 `4090` 行，但出处标为
-`⚠️口径未核`（[verifier.py:177](../../operator_agent/verifier.py)），于是
+[verifier.py:157](../../operator_agent/decide/verifier.py) 有 `4090` 行，但出处标为
+`⚠️口径未核`（[verifier.py:177](../../operator_agent/decide/verifier.py)），于是
 `peak_trusted` 不为 True，`axis_evidence()` 判轴不可用：配方筛选退化为不过滤、
 "已到上界"的出口永不打开。能跑，但拿不到 H20 上那种判停质量。
-另外 `_PEAK_BY_CC["8.9"]` 按 L40S 填（[verifier.py:206](../../operator_agent/verifier.py)），
+另外 `_PEAK_BY_CC["8.9"]` 按 L40S 填（[verifier.py:206](../../operator_agent/decide/verifier.py)），
 是"宁可偏大"的口径，同样不能用来判停。
 
 ### G4 噪声带与污染阈值按 8 卡共享机标定
 
 `NOISE_BAND`（0.1% / 0.4% / 2%）、`CONTAMINATION_UTIL_PCT = 5`
-（[measurement.py:894](../../operator_agent/measurement.py)）、
-`DISPERSION_DEGRADED = 0.10`（[measurement.py:906](../../operator_agent/measurement.py)）
+（[measurement.py:894](../../operator_agent/decide/measurement.py)）、
+`DISPERSION_DEGRADED = 0.10`（[measurement.py:906](../../operator_agent/decide/measurement.py)）
 的注释都写明依据是"8 卡共享、恒有 7 个其他进程"的 H20。若 4090 是接显示器的工作站，
 util 长期 >5% 会让每轮都 `degraded`；反之若独占，带宽可能比阈值更干净。需要重标。
 
@@ -132,7 +132,7 @@ util 长期 >5% 会让每轮都 `degraded`；反之若独占，带宽可能比�
 | 来源 | 形状 | 单张量 | 三张量合计 |
 |---|---|---|---|
 | [S4 真机四项](../status/dsh-operator-s4-gpu6-results-20261027.md) | MatMul 64³、31×47×19、Softmax 7×33、LayerNorm 7×33 | KiB 级 | 可忽略 |
-| [S5 六任务](../../benchmarks/s5_minimal_tasks.py) | 96×128×64、37×53×23、12×128、11×79、10×128、13×83 | KiB 级 | 可忽略 |
+| [S5 六任务](../../benchmarks/experiments/s5/s5_minimal_tasks.py) | 96×128×64、37×53×23、12×128、11×79、10×128、13×83 | KiB 级 | 可忽略 |
 | [GPU 冻结](../status/dsh-operator-gpu-freeze-20261030.md) | 4096³ fp16 | 32 MiB | 约 96 MiB |
 | 同上 | 8192³ fp16 | 128 MiB | 约 384 MiB |
 | 同上 | LayerNorm 16384×6144 fp32 | 384 MiB | 约 1.1 GiB |
@@ -157,8 +157,8 @@ attention 的参考实现走 `F.scaled_dot_product_attention`
 
 | 路径 | 单张量上限 | 出处 |
 |---|---|---|
-| JSON 传输（输入 + 标量同一预算） | 256 MiB | [input_fidelity.py:17](../../operator_agent/input_fidelity.py)、冻结记录 §2.6 |
-| seed 可复算路径 | 512 MiB | [input_fidelity.py:20](../../operator_agent/input_fidelity.py)、冻结记录 §2.7 |
+| JSON 传输（输入 + 标量同一预算） | 256 MiB | [input_fidelity.py:17](../../operator_agent/decide/input_fidelity.py)、冻结记录 §2.6 |
+| seed 可复算路径 | 512 MiB | [input_fidelity.py:20](../../operator_agent/decide/input_fidelity.py)、冻结记录 §2.7 |
 
 把字节上限换成形状：512 MiB 允许的最大方阵边长，fp16 约 16384、fp32 约 11585。
 即 fp16 matmul 在现有协议下的形状上限约 16384³，fp32 约 11585³ —— 这些张量的峰值
@@ -171,17 +171,17 @@ attention 的参考实现走 `F.scaled_dot_product_attention`
 ### 5.3 但 8 GB 会收窄三件事
 
 1. **候选写爆显存不会被记成候选的错。** `_INFRA_MARKERS` 含 `"oom"` / `"out of memory"`
-   （[failure_route.py:93](../../operator_agent/failure_route.py)），OOM 归"基础设施失败"：
+   （[failure_route.py:93](../../operator_agent/decide/failure_route.py)），OOM 归"基础设施失败"：
    不算迭代、不学习、重试。卡越小，候选自己的内存缺陷越容易被记成环境未知。
 2. **可裁决的读数更少。** 8 GB 档的卡算力与带宽都低，小形状上 launch 地板占比更高，
    `uninformative` 更多。S4 在 H20 上已经是"完整正确 4/4、性能可裁决 0/4"，
    换更小的卡不会改善；缓解只能靠更大的形状，而形状先受 256/512 MiB 的传输预算限制。
-3. **设备预检阈值要重设。** 8192 MiB（[s5_workflow_preflight.py:41](../../benchmarks/s5_workflow_preflight.py)）
-   在 8 GB 卡上等于要求整卡全空；4096 MiB（[s5_ruler_preflight.py:76](../../benchmarks/s5_ruler_preflight.py)）
+3. **设备预检阈值要重设。** 8192 MiB（[s5_workflow_preflight.py:41](../../benchmarks/experiments/s5/s5_workflow_preflight.py)）
+   在 8 GB 卡上等于要求整卡全空；4096 MiB（[s5_ruler_preflight.py:76](../../benchmarks/experiments/s5/s5_ruler_preflight.py)）
    尚可；通用默认 1024 MiB（[_preparation.py:21](../../benchmarks/_preparation.py)）无问题。
 
 补充：峰值显存已经在被记录，只作观测不参与判定
-（[verifier.py:1946](../../operator_agent/verifier.py) 的 `candidate_peak_memory_bytes` /
+（[verifier.py:1946](../../operator_agent/decide/verifier.py) 的 `candidate_peak_memory_bytes` /
 `baseline_peak_memory_bytes`），所以小卡上还能顺带攒"我们的核多吃多少显存"的数据，
 不需要为这项观测预留大显存。
 

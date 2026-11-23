@@ -38,9 +38,9 @@ HEAD 不能独立复现当前实现。归档同时保存工作区相对 HEAD 的
 
 补充核验：
 
-- [autonomous 的 Conductor 构造](../../operator_agent/autonomous.py)显式设置 `use_coder_pipeline=False`，AST 检查确认为 `False`。本次未开启 Pipeline。
+- [autonomous 的 Conductor 构造](../../operator_agent/app/autonomous.py)显式设置 `use_coder_pipeline=False`，AST 检查确认为 `False`。本次未开启 Pipeline。
 - MCP 当前公开 **7** 个工具；没有取消或单候选生成工具。`bench` 当前通过 MCP/Python 暴露，CLI parser 没有独立 `bench` 子命令。
-- [MCP server](../../operator_agent/mcp_server.py)逐条同步处理请求，取消通知被忽略且不返回响应；[宿主插件](../../integrations/dsh-operator/index.mjs)对子进程命令的取消不等于后台 run 的任务取消。
+- [MCP server](../../operator_agent/app/mcp_server.py)逐条同步处理请求，取消通知被忽略且不返回响应；[宿主插件](../../integrations/dsh-operator/index.mjs)对子进程命令的取消不等于后台 run 的任务取消。
 - `candidate_origin` 是声明式归因，不参与裁决；不能靠该字段认定实际走过某个生成器。
 - `run` 的 `done` 代表流程结束，预算停止或性能目标未达也可能结束；须结合停止原因与验证结果判读。
 

@@ -10,7 +10,7 @@
 | 2 | `private: true` 让 `npm publish` 直接失败 | `integrations/dsh-operator/package.json` | 改为 `false`，版本 `0.1.9` → `0.1.10` | 同上（`private` 必须为 `false`） |
 | 3 | 版本号与内容不一一对应 | `0.1.9` 已被两份内容不同的本地构建占用（靠 SHA256 区分）；Python `0.6.0` 同理 | 插件 `0.1.10`，Python `0.6.1`（`pyproject.toml` 与 `operator_agent/__init__.py` 同步） | 同上 + `test_pyproject_version_matches_the_package` |
 | 4 | 仓库完全没有 CI | 无 `.github/`，所有验证靠手工 | 新增 `.github/workflows/ci.yml`：Python 3.9/3.12 全量 pytest、插件 `node --test`、发布物形态（wheel 含 prompts/skills 与许可、`npm pack` 文件表含许可） | 工作流本身（`release-shape` 作业） |
-| 5 | 受控验证面的拒绝消息不可修正 | 2026-10-30 Matmul C 两次把 `run_dir` 指向 `/work`（应为 `/work/task`），两次都只收到 `Frozen development surface refused this request`，模型无从纠正、耗尽调用额度 | [s5_plugin_rpc.py](../../benchmarks/s5_plugin_rpc.py) 的拒绝回 `reason + 可接受取值`，一次列出**全部**违规项，并写入账本 `refusal` 字段 | `tests/test_s5_plugin_rpc.py` 两条新用例：命名违规规则与可接受值、多违规同时列出、账本留痕，且断言消息里**不出现** supervisor 路径 |
+| 5 | 受控验证面的拒绝消息不可修正 | 2026-10-30 Matmul C 两次把 `run_dir` 指向 `/work`（应为 `/work/task`），两次都只收到 `Frozen development surface refused this request`，模型无从纠正、耗尽调用额度 | [s5_plugin_rpc.py](../../benchmarks/experiments/s5/s5_plugin_rpc.py) 的拒绝回 `reason + 可接受取值`，一次列出**全部**违规项，并写入账本 `refusal` 字段 | `tests/test_s5_plugin_rpc.py` 两条新用例：命名违规规则与可接受值、多违规同时列出、账本留痕，且断言消息里**不出现** supervisor 路径 |
 
 第 5 项修的是受控实验的验证面（`benchmarks/`），不是已发布插件本身——产品侧的 `hitl_tools` 早就返结构化的 `ToolError`（`code_required` / `run_not_prepared` / `contract_refused`）。所以它不改工具契约，也不进 wheel。
 

@@ -32,7 +32,7 @@ DSH usage 的 `inputTokens` 是未命中缓存的输入，缓存读取和写入�
 
 ## 3. 任务草案：14 项，不将历史任务冒充未见样本
 
-优先复用 [quality_suite.py](../../operator_agent/quality_suite.py) 的 10 个版本化任务及其明确语义：
+优先复用 [quality_suite.py](../../operator_agent/decide/quality_suite.py) 的 10 个版本化任务及其明确语义：
 
 | 原任务 | 算子 / 主形状 / 精度 | 特征 |
 |---|---|---|

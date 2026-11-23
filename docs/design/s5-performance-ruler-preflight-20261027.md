@@ -25,7 +25,7 @@
 
 两项至少一项完整 L2 通过且 L3 `measurement_can_gate=true` 才证明**存在一个在此环境下可裁决的单次量尺读数**；第二次独立确认、跨形状结论和更大的 S5 工作负载都不能由此自动取得资格。两项都不可裁决/未知则说明本次计划未找到可用读数；另行制定方案，不覆盖本轮。配对基线或计时窗口无来源、设备变化或进程清理未知时立即中止。任何实际执行应记录是否为真实 H20，而非模拟后端；历史 S4 的四项性能未知维持不变。
 
-执行器 [s5_ruler_preflight.py](../../benchmarks/s5_ruler_preflight.py) 的 `freeze` 只进行本地操作；`execute` 必须显式提供原计划 SHA256 并进行真实 GPU 工作。当前计划位于 [20261027-s5-ruler-v2/plan.json](../../output/plugin_completion/20261027-s5-ruler-v2/plan.json)，SHA256 `d7a0bf906d19b57546a062a04d4436880ecf3f472d93f490eacf847632664cc5`，冻结 15 个远端文件身份、70 个协议文件摘要和脚本自身哈希。旧目录 `20261027-s5-ruler` 是预检查的早期计划，未包含完整远端文件哈希，已废弃，未执行。重入执行标记不可覆盖；开始后无论成功或中断，不在同一计划目录重复执行。
+执行器 [s5_ruler_preflight.py](../../benchmarks/experiments/s5/s5_ruler_preflight.py) 的 `freeze` 只进行本地操作；`execute` 必须显式提供原计划 SHA256 并进行真实 GPU 工作。当前计划位于 [20261027-s5-ruler-v2/plan.json](../../output/plugin_completion/20261027-s5-ruler-v2/plan.json)，SHA256 `d7a0bf906d19b57546a062a04d4436880ecf3f472d93f490eacf847632664cc5`，冻结 15 个远端文件身份、70 个协议文件摘要和脚本自身哈希。旧目录 `20261027-s5-ruler` 是预检查的早期计划，未包含完整远端文件哈希，已废弃，未执行。重入执行标记不可覆盖；开始后无论成功或中断，不在同一计划目录重复执行。
 
 离线测试 `python -m pytest tests/test_s5_ruler_preflight.py -q`：**5 通过**，覆盖冻结身份、候选及 runner 漂移、不可重入、其他 GPU 进程与无效查询；离线测试本身没有模型或 GPU 调用。上述真实 GPU 结果仅为量尺预检。
 

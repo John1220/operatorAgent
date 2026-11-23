@@ -41,8 +41,8 @@ LLM 可以生成、修复和提出优化，但不能更改参考实现、容差�
 **已核事实：**
 
 - [内外层分工文档 §4.3](hitl-generation-boundary.md)将 `operator_run` 描述为 `Conductor → CoderPipeline`，包含规划、三温度采样与 smem 剪枝编译门。
-- [autonomous.py](../../operator_agent/autonomous.py) 的 `main()` 构造 `Conductor` 时显式设置 `use_coder_pipeline=False`。
-- [conductor.py](../../operator_agent/conductor.py) 的构造函数只在该开关开启且存在 LLM 时创建 `CoderPipeline`。
+- [autonomous.py](../../operator_agent/app/autonomous.py) 的 `main()` 构造 `Conductor` 时显式设置 `use_coder_pipeline=False`。
+- [conductor.py](../../operator_agent/app/conductor.py) 的构造函数只在该开关开启且存在 LLM 时创建 `CoderPipeline`。
 
 因此，不能把完整 CoderPipeline 的能力直接归到当前插件的 `operator_run` 入口上。这里并不意味着插件没有生成、修复或搜索能力；不一致集中在所声明的生成流水线。
 
@@ -58,7 +58,7 @@ LLM 可以生成、修复和提出优化，但不能更改参考实现、容差�
 
 - `autonomous.main()` 创建 `LLMClient` 时设置单次输出 token 上限和超时，但没有传入 `LLMCallBudget`。
 - 同一入口创建 `Conductor` 时没有传入 `BudgetPlan`。
-- [budget.py](../../operator_agent/budget.py) 中 `BudgetPlan` 的 `oracle_total`、`wall_clock_s`、`llm_tokens` 默认均为 `None`；[Conductor](../../operator_agent/conductor.py) 未收到预算时使用默认计划。
+- [budget.py](../../operator_agent/execute/budget.py) 中 `BudgetPlan` 的 `oracle_total`、`wall_clock_s`、`llm_tokens` 默认均为 `None`；[Conductor](../../operator_agent/app/conductor.py) 未收到预算时使用默认计划。
 
 现有优化轮数限制、单次模型超时和后端超时确实提供了约束，但不等同于整个任务的墙钟、模型消耗或测量次数上限。不能将实验驱动中的有界性直接视为插件入口已有的能力。
 

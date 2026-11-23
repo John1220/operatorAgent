@@ -239,7 +239,7 @@ series  reproduced, pairs_observed=2
 两条必须一起读的限制：
 
 1. **A 的 pair-2 失败是真实的候选缺陷**：主用例（32768×6144）过、尾块 `1x33` 挂，
-   与 [失败回放包](../../../benchmarks/repro/fused_ln_compile_20261118/README.md) 里那个
+   与 [失败回放包](../../benchmarks/repro/fused_ln_compile_20261118/README.md) 里那个
    “补齐 lane 计入方差”同属尾块类；A 这次没修出来。
 2. **A 的 pair-1 记为 `correct_only` 是判据误伤**（见下），所以两对的“A 未达标”
    不是同一原因；`reproduced` 只说明“按冻结判据，两对都是 C 达标而 A 未达标”。

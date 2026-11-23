@@ -64,7 +64,7 @@ S0 之后可先完成 S1–S3 的本地实现与验证。S4 前冻结实际参�
 
 在同一 `run_dir` 连续执行两次 `hitl_tools.verify()`，两份 `verify-N.json` 都指向同一个 `report.md`；第二轮覆盖第一轮报告。该目录保留了两轮 JSON 和日志，但没有对应候选源码。
 
-定位：[hitl_tools.verify](../../operator_agent/hitl_tools.py)、[report.write_report](../../operator_agent/report.py)。
+定位：[hitl_tools.verify](../../operator_agent/app/hitl_tools.py)、[report.write_report](../../operator_agent/core/report.py)。
 
 ### 待办
 
@@ -104,7 +104,7 @@ run/
 
 `/op` 命令子进程可被宿主取消，但 `operator_run` 后台任务没有取消工具。MCP server 同步处理调用，当前忽略取消通知。既有任务预算和截止监督可复用，不重新建设。
 
-定位：[hitl_tools.run_autonomous / autonomous_status](../../operator_agent/hitl_tools.py)、[autonomous](../../operator_agent/autonomous.py)、[MCP server](../../operator_agent/mcp_server.py)、[宿主插件](../../integrations/dsh-operator/index.mjs)。
+定位：[hitl_tools.run_autonomous / autonomous_status](../../operator_agent/app/hitl_tools.py)、[autonomous](../../operator_agent/app/autonomous.py)、[MCP server](../../operator_agent/app/mcp_server.py)、[宿主插件](../../integrations/dsh-operator/index.mjs)。
 
 ### 待办
 
@@ -132,7 +132,7 @@ run/
 
 `resource_check._elem_bytes_from_code()` 看到 `tl.float32` 等字符串就按 4 字节估算；FP16 输入、FP32 累加的候选可能因此被过度估算并误拒。
 
-定位：[资源预检](../../operator_agent/resource_check.py)。该修改涉及拒绝条件，实施前须核对设计规范和受影响的协议身份。
+定位：[资源预检](../../operator_agent/decide/resource_check.py)。该修改涉及拒绝条件，实施前须核对设计规范和受影响的协议身份。
 
 ### 待办
 

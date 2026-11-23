@@ -14,7 +14,7 @@
 
 这份文档的价值有一半在纠正里，所以按时序写。
 
-**第一步**：先问「插件形式是否比内层 agent 更合适」。查到的第一条内层独有优势是语料入库——`oracle.admit_to_corpus` 只在 [`conductor.py:3677`](../../operator_agent/conductor.py#L3677)（`_produce_remeasure` → 两次确认 → 入库）接线，`hitl_tools.py` 里没有这条路径。成立。
+**第一步**：先问「插件形式是否比内层 agent 更合适」。查到的第一条内层独有优势是语料入库——`oracle.admit_to_corpus` 只在 [`conductor.py:3677`](../../operator_agent/app/conductor.py)（`_produce_remeasure` → 两次确认 → 入库）接线，`hitl_tools.py` 里没有这条路径。成立。
 
 **第二步**：但前提说语料库弱化，这条优势作废。于是重新查：拿掉入库之后，内层还剩什么是外层结构上够不着的。得到三条（§3）。
 
@@ -52,49 +52,49 @@
 
 ### 3-1 生成侧领域知识从未暴露给外层（最硬的一条）
 
-`PromptManager` 按 Agent 角色把 `skills/triton_skill.md` 切片注入（[`prompt_manager.py:103`](../../operator_agent/prompt_manager.py#L103) 的筛选 + `:116` 的 `_SKILL_SECTION_AGENTS` 映射），消费者是 Designer / Coder / Search / Planner / CoderPipeline / Fixer。`SingleCandidateCoder` 另有一份 `GENERATION_SPEC`（[`single_candidate_coder.py:28`](../../operator_agent/single_candidate_coder.py#L28) 的 `PROMPT` 拼接）。
+`PromptManager` 按 Agent 角色把 `skills/triton_skill.md` 切片注入（[`prompt_manager.py:103`](../../operator_agent/generate/prompt_manager.py) 的筛选 + `:116` 的 `_SKILL_SECTION_AGENTS` 映射），消费者是 Designer / Coder / Search / Planner / CoderPipeline / Fixer。`SingleCandidateCoder` 另有一份 `GENERATION_SPEC`（[`single_candidate_coder.py:28`](../../operator_agent/generate/single_candidate_coder.py) 的 `PROMPT` 拼接）。
 
-外层模型能看到的只有 [`mcp_server.py:56`](../../operator_agent/mcp_server.py#L56) 的 `INSTRUCTIONS`——**全部是「怎么读回包」，一个字都没有 Triton 该怎么写**。
+外层模型能看到的只有 [`mcp_server.py:56`](../../operator_agent/app/mcp_server.py) 的 `INSTRUCTIONS`——**全部是「怎么读回包」，一个字都没有 Triton 该怎么写**。
 
-唯一的泄漏点是 `repair` 内部的 Fixer：它确实带技能（[`fixer.py:303`](../../operator_agent/fixer.py#L303) `_skill_name = "triton_skill"`、`:302` `_agent_role = "coder"`），但那些内容只活在**内层那一次 LLM 调用里**；回到外层的只有截断后的 `fix_summary`（[`hitl_tools.py:791`](../../operator_agent/hitl_tools.py#L791)，160 字符上限）。
+唯一的泄漏点是 `repair` 内部的 Fixer：它确实带技能（[`fixer.py:303`](../../operator_agent/generate/fixer.py) `_skill_name = "triton_skill"`、`:302` `_agent_role = "coder"`），但那些内容只活在**内层那一次 LLM 调用里**；回到外层的只有截断后的 `fix_summary`（[`hitl_tools.py:791`](../../operator_agent/app/hitl_tools.py)，160 字符上限）。
 
 后果：外层模型写核是**裸写**。它可能很强，但拿不到这个仓里沉淀的 smem 上限、tile 选择、累加器精度这些约束。这是「从 0 到可用」主路径上最关键的一份知识，而它被锁在内层。
 
-一个很说明问题的细节：[`hitl_tools.py:49`](../../operator_agent/hitl_tools.py#L49) 已经 import 了 `generation_spec_identity`——**判定层知道那份 spec 的身份（能校验它有没有漂），却没有接上能执行它的生成器。**
+一个很说明问题的细节：[`hitl_tools.py:49`](../../operator_agent/app/hitl_tools.py) 已经 import 了 `generation_spec_identity`——**判定层知道那份 spec 的身份（能校验它有没有漂），却没有接上能执行它的生成器。**
 
 ### 3-2 搜索是策略，`bench` 只是量尺
 
 内层：`SearchAgent` 的邻域格点 + roofline 排序 + smem 剪枝，`Bandit` 用累积奖励重排队列（`conductor.py` 的 `selection.choose` 一线）。
 
-外层只有 `bench`（[`hitl_tools.py:540`](../../operator_agent/hitl_tools.py#L540)），而它的 docstring 把边界写得很清楚：测**调用方给的**候选、逐臂各自与基线同窗配对、**回包没有 `levels` / `route` / `eligibility` / `passed`**——「这不是省略，是设计」，因为一旦 `bench` 能出裁决，调用方就会拿它替代 `verify`。
+外层只有 `bench`（[`hitl_tools.py:540`](../../operator_agent/app/hitl_tools.py)），而它的 docstring 把边界写得很清楚：测**调用方给的**候选、逐臂各自与基线同窗配对、**回包没有 `levels` / `route` / `eligibility` / `passed`**——「这不是省略，是设计」，因为一旦 `bench` 能出裁决，调用方就会拿它替代 `verify`。
 
 它不生成、不排序、不剪枝。所以「下一个点试哪里」全在外层模型手里，而它没有剪枝——真机一次完整判定的成本在 `dsh-plugin-implementation.md` §9 第 3 条记着，逐个试是结构性的效率劣势，不只是知识劣势。
 
 ### 3-3 跨轮记忆，以及一处需要确认的没接线
 
-内层的 `RunState`（[`conductor.py:309`](../../operator_agent/conductor.py#L309)）跨轮携带 `verified_parent`（回退到上一个已验证的核）、recipe 的 applied/disabled 账、`best_gflops`、停滞计数、bandit、round 去重签名、环境漂移指纹、snapshot 存/恢复。
+内层的 `RunState`（[`conductor.py:309`](../../operator_agent/app/conductor.py)）跨轮携带 `verified_parent`（回退到上一个已验证的核）、recipe 的 applied/disabled 账、`best_gflops`、停滞计数、bandit、round 去重签名、环境漂移指纹、snapshot 存/恢复。
 
-`repair` 的循环（[`repair_loop.py:112`](../../operator_agent/repair_loop.py#L112) 的 `repair()`）状态只活在**一次调用内**；跨调用 `hitl_tools` 只留 run 目录里的文件。
+`repair` 的循环（[`repair_loop.py:112`](../../operator_agent/generate/repair_loop.py) 的 `repair()`）状态只活在**一次调用内**；跨调用 `hitl_tools` 只留 run 目录里的文件。
 
-**具体一处**：[`hitl_tools.py:780`](../../operator_agent/hitl_tools.py#L780) 构造的是 `FixerAgent(llm=llm)`，**没传 `failure_db`** ⇒ [`fixer.py:299`](../../operator_agent/fixer.py#L299) 默认 `None` ⇒ 渲染成 `history_cases="无"`（[`fixer.py:412`](../../operator_agent/fixer.py#L412)）。而 Conductor 传了（[`conductor.py:585`](../../operator_agent/conductor.py#L585)）。**同一个修复器，两条路上能力不同。**
+**具体一处**：[`hitl_tools.py:780`](../../operator_agent/app/hitl_tools.py) 构造的是 `FixerAgent(llm=llm)`，**没传 `failure_db`** ⇒ [`fixer.py:299`](../../operator_agent/generate/fixer.py) 默认 `None` ⇒ 渲染成 `history_cases="无"`（[`fixer.py:412`](../../operator_agent/generate/fixer.py)）。而 Conductor 传了（[`conductor.py:585`](../../operator_agent/app/conductor.py)）。**同一个修复器，两条路上能力不同。**
 
 ⚠️ **这可能是刻意的，不要直接改。** `FailureDatabase()` 的默认构造会绑到仓库自己的 `output/failure_db.jsonl`（`../research/49-后端能力声明与静默降级.md` 记过这条后果链），而 `tests/test_hitl_tools.py` 钉住「语料不写回仓库」。所以「不传」是**安全默认**。要补的话应该传一个 **run 目录内**的实例，照 `run_autonomous` 重定向 `OPERATOR_AGENT_KERNEL_DB` / `_FAILURE_DB` 的同一套做法（`dsh-plugin-implementation.md` §6）。**先确认是刻意还是漏接线，再动。**
 
 ### 3-4 多路采样 + 编译门（次要，但便宜）
 
-`CoderPipeline` 的 `SAMPLE_TEMPERATURES = (0.1, 0.4, 0.7)`（[`coder_pipeline.py:52`](../../operator_agent/coder_pipeline.py#L52)）：Plan → 三路并行采样 → 机械改写 → smem 剪枝的编译门 → 有状态修复（≤2 轮）→ 规则模板兜底。
+`CoderPipeline` 的 `SAMPLE_TEMPERATURES = (0.1, 0.4, 0.7)`（[`coder_pipeline.py:52`](../../operator_agent/generate/coder_pipeline.py)）：Plan → 三路并行采样 → 机械改写 → smem 剪枝的编译门 → 有状态修复（≤2 轮）→ 规则模板兜底。
 
 外层模型通常一次给一个候选，而且对它来说每次采样是一次完整推理，不会自发这么放大成功率。
 
 ### 内层没有优势的地方（同样重要，别把这些当成理由）
 
-判定纪律**两条路都吃得到**：`exec_guard` 在后端里强制（[`mock_gpu.py:431`](../../operator_agent/mock_gpu.py#L431)、`remote_executor.py` 的 `run_compile` 一线），资源可行性预检在 `Verifier` 的 L1 里（[`verifier.py:486`](../../operator_agent/verifier.py#L486) 起）。输入 seed+digest 保真、`bench_cases` 套件、persistent SSH、`write_report` 也都是共享的。
+判定纪律**两条路都吃得到**：`exec_guard` 在后端里强制（[`mock_gpu.py:431`](../../operator_agent/execute/mock_gpu.py)、`remote_executor.py` 的 `run_compile` 一线），资源可行性预检在 `Verifier` 的 L1 里（[`verifier.py:486`](../../operator_agent/decide/verifier.py) 起）。输入 seed+digest 保真、`bench_cases` 套件、persistent SSH、`write_report` 也都是共享的。
 
 ---
 
 ## 4. 真正的设计难点：这条边界现在是**建议性**的
 
-`operator_verify` 的 schema 明明白白接受 `code`（[`mcp_server.py:118`](../../operator_agent/mcp_server.py#L118) 起的 `anyOf: [{code}, {code_file}]`），而且**必须**接受——`dsh-plugin-implementation.md` §0.4 的**工作流 B 就是「外层写候选，判定层只判」**，那是明确设计过的用法，不能砍。`INSTRUCTIONS` 现在会**劝退**外层自己从头写核（§4.3），但**不禁止**：劝退是措辞，禁止是门，而 (C) 那条门已经被否掉了。
+`operator_verify` 的 schema 明明白白接受 `code`（[`mcp_server.py:118`](../../operator_agent/app/mcp_server.py) 起的 `anyOf: [{code}, {code_file}]`），而且**必须**接受——`dsh-plugin-implementation.md` §0.4 的**工作流 B 就是「外层写候选，判定层只判」**，那是明确设计过的用法，不能砍。`INSTRUCTIONS` 现在会**劝退**外层自己从头写核（§4.3），但**不禁止**：劝退是措辞，禁止是门，而 (C) 那条门已经被否掉了。
 
 于是失效模式是：**外层模型自己裸写一个核 → 判定层照样判 → 判过了照样报「通过」→ 事后从证据里看不出来这个核是谁写的、有没有走过 spec 与技能注入。** 不是出错，是静默走了一条能力更弱的路。
 
@@ -126,7 +126,7 @@
 
 **这一格治什么、不治什么**：它治「看不见」，不治「说谎」。来源是**声明式**的，所以只和调用方的诚实一样可靠——外层模型完全可以把自己写的核标成 `inner_coder`。这是 (B) 相对 (C) 的固有代价，也是为什么 (C) 那条（强制门）没有被选：它会废掉工作流 B。
 
-代码：[`hitl_tools.py`](../../operator_agent/hitl_tools.py) 的 `CANDIDATE_ORIGINS` / `_origin_of` / `verify` / `repair`；[`report.py`](../../operator_agent/report.py) 的 `_candidate_origin_lines`。守卫：`tests/test_hitl_tools.py` 的 `TestCandidateOriginIsAttributionNotJudgement` 与 `TestRepairAttributesTheFinalCodeNotTheInput`。
+代码：[`hitl_tools.py`](../../operator_agent/app/hitl_tools.py) 的 `CANDIDATE_ORIGINS` / `_origin_of` / `verify` / `repair`；[`report.py`](../../operator_agent/core/report.py) 的 `_candidate_origin_lines`。守卫：`tests/test_hitl_tools.py` 的 `TestCandidateOriginIsAttributionNotJudgement` 与 `TestRepairAttributesTheFinalCodeNotTheInput`。
 
 ### 4.2 落地时顺带撞出来的一条死路
 
@@ -157,7 +157,7 @@
 | `operator_repair` → `FixerAgent` | `GENERATION_SPEC` + coder 角色的 `triton_skill` 注入 + 失败反馈与绑定当前源码的诊断 | 不做规划、多候选采样或参数搜索；`history_cases` 在本路径恒为「无」（§3-3） |
 | `SingleCandidateCoder` | `GENERATION_SPEC` + `anticheat.static_audit` + 接口契约静态门 + 有界一次调用 | **不走 `PromptManager`，所以没有 `triton_skill`** |
 
-Fixer 的共享规约来自 [`PromptManager.render()`](../../operator_agent/prompt_manager.py#L182)：`fixer_repair` 模板命中 `fixer_` 前缀，渲染后会自动前置 `GENERATION_SPEC`；coder 技能则按角色填入模板。只查看 `fixer.py` 是否直接引用该常量，会漏掉这层间接注入。
+Fixer 的共享规约来自 [`PromptManager.render()`](../../operator_agent/generate/prompt_manager.py)：`fixer_repair` 模板命中 `fixer_` 前缀，渲染后会自动前置 `GENERATION_SPEC`；coder 技能则按角色填入模板。只查看 `fixer.py` 是否直接引用该常量，会漏掉这层间接注入。
 
 因此，`operator_repair` 同时具有共享规约和 coder 技能；`operator_run` 串起生成、验证与控制器迭代，三温度并行采样则要求显式启用 Pipeline。路径之间的区别在流程能力，而不是 Fixer 缺少共享规约。
 

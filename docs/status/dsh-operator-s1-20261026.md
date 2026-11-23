@@ -50,13 +50,13 @@
 
 | 部分 | 实现 | 验证重点 |
 |---|---|---|
-| 目录预留、完整事实与回执 | [tool_evidence.py](../../operator_agent/tool_evidence.py) | 缺号、中断、并发预留、写盘失败、完整指标与文件哈希 |
-| HITL 三条入口 | [hitl_tools.py](../../operator_agent/hitl_tools.py) | 独立源码/报告、兼容文件、摘要与完整证据分离 |
-| 修复中的逐次验证 | [repair_loop.py](../../operator_agent/repair_loop.py) | 初始/修后源码与各轮真实判定相互对应 |
-| 受控写入与自主运行 | [run_layout.py](../../operator_agent/run_layout.py)、[conductor.py](../../operator_agent/conductor.py) | 角色权限、唯一事件、被拒源码不落盘 |
-| 文件入口与协议 | [cli.py](../../operator_agent/cli.py)、[mcp_server.py](../../operator_agent/mcp_server.py)、[run_contract.py](../../operator_agent/run_contract.py) | CRLF 原样读取、协议清单及旧数据漂移检查 |
+| 目录预留、完整事实与回执 | [tool_evidence.py](../../operator_agent/decide/tool_evidence.py) | 缺号、中断、并发预留、写盘失败、完整指标与文件哈希 |
+| HITL 三条入口 | [hitl_tools.py](../../operator_agent/app/hitl_tools.py) | 独立源码/报告、兼容文件、摘要与完整证据分离 |
+| 修复中的逐次验证 | [repair_loop.py](../../operator_agent/generate/repair_loop.py) | 初始/修后源码与各轮真实判定相互对应 |
+| 受控写入与自主运行 | [run_layout.py](../../operator_agent/core/run_layout.py)、[conductor.py](../../operator_agent/app/conductor.py) | 角色权限、唯一事件、被拒源码不落盘 |
+| 文件入口与协议 | [cli.py](../../operator_agent/app/cli.py)、[mcp_server.py](../../operator_agent/app/mcp_server.py)、[run_contract.py](../../operator_agent/core/run_contract.py) | CRLF 原样读取、协议清单及旧数据漂移检查 |
 
-新增 [test_tool_evidence.py](../../tests/test_tool_evidence.py) 的 **17 项**用例覆盖上述核心边界，其中包括：两个生产子进程退出后由独立消费者恢复两轮源码和报告；错误候选、仅 L1 和无效测量不被留存过程提升；磁盘错误不损坏历史；并发预留不冲突；未测臂不补造结果；被执行门拒绝的源码仍只留哈希。
+新增 [test_tool_evidence.py](../../tests/unit/test_tool_evidence.py) 的 **17 项**用例覆盖上述核心边界，其中包括：两个生产子进程退出后由独立消费者恢复两轮源码和报告；错误候选、仅 L1 和无效测量不被留存过程提升；磁盘错误不损坏历史；并发预留不冲突；未测臂不补造结果；被执行门拒绝的源码仍只留哈希。
 
 已更新既有 RunLayout 生产接线测试，明确允许 S1 的候选、测量和报告历史，同时继续禁止其他角色目录产生未声明写入。协议清单测试检查新增文件及 61 文件总数，不放宽漂移验证。
 

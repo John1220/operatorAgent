@@ -4,7 +4,7 @@
 来源是 Google Benchmark 明列为**无需 root** 的降噪手段之一 ✅ 一手文档）。
 决策从 ⏸ 暂缓 → ❌ **不采纳（本机口径下）**。
 
-工具：[`benchmarks/probe_cpu_affinity.py`](../../benchmarks/probe_cpu_affinity.py)
+工具：[`benchmarks/probe_cpu_affinity.py`](../../benchmarks/probes/probe_cpu_affinity.py)
 （自包含，在 GPU 机上跑，不需要 LLM）。
 
 数据来自**同一脚本的两次连续运行**，本文给每个数字标来源：

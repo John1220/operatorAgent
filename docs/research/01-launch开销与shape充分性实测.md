@@ -2,7 +2,7 @@
 
 > 版本: v1.0 | 日期: 2026-09-24 | 设备: algorithm-h20 / NVIDIA H20 (GPU 2, 测时全机 0% util)
 > 服务于: [`00-架构基线与缺口核实.md`](00-架构基线与缺口核实.md) 缺口 1（测量有效性无第三态）
-> 复现脚本: [`benchmarks/measure_launch_floor.py`](../../benchmarks/measure_launch_floor.py)
+> 复现脚本: [`benchmarks/measure_launch_floor.py`](../../benchmarks/measurement/measure_launch_floor.py)
 
 ## 为什么要测这个
 

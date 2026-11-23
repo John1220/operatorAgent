@@ -96,7 +96,7 @@ eager 序列要读 X、读 R、写中间和、再读中间和、写 Y（多一�
 - 探针 kernel 与候选同通道：读 X、R → 末轴 LN → 写 Y，必须自己写 Triton
   （远端 `shield_torch()` 会拦原生算子）。
 - **不复用** LayerNorm 的 channel：输入从 1 份变 2 份，带宽结构不同；
-  按 [任务族选型 §3](../../design/v08/task-family-selection.md) 逐任务登记窗口。
+  按 [任务族选型 §3](../design/v08/task-family-selection.md) 逐任务登记窗口。
 
 ## 6. 头寸试验
 

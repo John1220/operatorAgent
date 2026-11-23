@@ -191,7 +191,7 @@ KeyError: 'execution_context'   native.py:165
 
 ## 7e. 第二例：FP16 MatMul 非连续布局（v9，2026-11-19）
 
-样本：[matmul_strided_20261107](../../../benchmarks/repro/matmul_strided_20261107/README.md)
+样本：[matmul_strided_20261107](../../benchmarks/repro/matmul_strided_20261107/README.md)
 （`4096³` 全过、只有 `auto-k4-m32-n32-fp16-random-strided` 差 9.69140625）。
 零模型回放先在当前 H20 上对上：修前复现同一用例、历史补丁 15/15。
 
