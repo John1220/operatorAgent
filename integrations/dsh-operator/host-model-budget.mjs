@@ -3,13 +3,18 @@ import { existsSync, readFileSync, readdirSync, lstatSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import { MANIFEST } from "./manifest.mjs";
 import { HostModelLedger, HostModelBudgetError } from "./host-model-ledger.mjs";
 import { recoverHostSession, newTaskReceipt, canAutoStartTask } from "./host-session-lifecycle.mjs";
 
 const PREFIX = "mcp__operator__";
-const TASK_TOOLS = new Set(["operator_prepare", "operator_resume", "operator_context",
-  "operator_verify", "operator_status", "operator_cancel", "operator_capabilities"].map(name => PREFIX + name));
-const BIND_TOOLS = new Set([PREFIX + "operator_prepare", PREFIX + "operator_resume"]);
+
+// 工具名单与分类**全部来自构建期清单**（`manifest.mjs` 是唯一加载点）。
+// 它们此前在 JS 里各有手抄副本：TASK_TOOLS 七条、READ_ONLY 四条、BIND_TOOLS 两条。
+// 名单是判据 —— 落后了不会编译失败，只会静默地守着一个不存在的工具集。
+export { MANIFEST };
+const TASK_TOOLS = new Set(MANIFEST.host_tools.map(name => PREFIX + name));
+const BIND_TOOLS = new Set(MANIFEST.bind_tools.map(name => PREFIX + name));
 const USAGE_FIELDS = ["inputTokens", "outputTokens", "totalTokens", "cacheReadTokens", "cacheWriteTokens"];
 const text = content => Array.isArray(content)
   ? content.filter(block => block?.type === "text").map(block => block.text).join("\n") : "";
@@ -63,7 +68,7 @@ export function installHostModelBudget(ctx, config = {}) {
   }
   const sessions = new Map(), blocked = new Map(), restores = new Map();
   const childSessions = new Set(), nativeSignals = new WeakMap(), disposers = [];
-  const READ_ONLY = new Set(["operator_capabilities", "operator_status", "operator_resume", "operator_context"].map(n => PREFIX + n));
+  const READ_ONLY = new Set(MANIFEST.read_only_tools.map(name => PREFIX + name));
   const read = path => {
     if (lstatSync(path).isSymbolicLink()) throw new Error("Task evidence must not be a symbolic link.");
     return JSON.parse(readFileSync(path, "utf8"));

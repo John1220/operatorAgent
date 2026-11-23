@@ -7,6 +7,8 @@
   "icon": "./icon.svg",
   "files": [
     "index.mjs",
+    "manifest.json",
+    "manifest.mjs",
     "model-relay.mjs",
     "host-model-budget.mjs",
     "host-model-ledger.mjs",

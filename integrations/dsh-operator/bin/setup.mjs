@@ -25,16 +25,15 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 /** 本插件配套的 Python 版本；与 package.json 的 version 一起决定安装目录。 */
-export const PYTHON_VERSION = "0.7.2";
+import { MANIFEST } from "../manifest.mjs";
+
+export const PYTHON_VERSION = MANIFEST.package_version;
 
 /** PyPI 上的分布名（import 名仍是 operator_agent，命令名仍是 operator-agent / operator-agent-mcp）。 */
 export const DIST_NAME = "dsh-operator-agent";
 
 /** host 模式暴露的七个工具。少了任何一个都说明 Python 侧不是这一版。 */
-export const TOOLS = [
-  "operator_cancel", "operator_capabilities", "operator_context", "operator_prepare",
-  "operator_resume", "operator_status", "operator_verify",
-];
+export const TOOLS = MANIFEST.host_tools;
 
 export const BEGIN = "# BEGIN operator-agent host installer v1";
 export const END = "# END operator-agent host installer v1";

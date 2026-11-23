@@ -1,0 +1,62 @@
+{
+  "bind_tools": [
+    "operator_prepare",
+    "operator_resume"
+  ],
+  "host_tools": [
+    "operator_cancel",
+    "operator_capabilities",
+    "operator_context",
+    "operator_prepare",
+    "operator_resume",
+    "operator_status",
+    "operator_verify"
+  ],
+  "package_version": "0.7.2",
+  "read_only_tools": [
+    "operator_capabilities",
+    "operator_context",
+    "operator_resume",
+    "operator_status"
+  ],
+  "schema": "dsh-operator-manifest-v1",
+  "tool_version": 12,
+  "tools": [
+    {
+      "host": true,
+      "name": "operator_cancel",
+      "schema_hash": "3629033da765833ee2caa7d02cca48e29e08d7f49c44ab7d225031e7521262e9"
+    },
+    {
+      "host": true,
+      "name": "operator_capabilities",
+      "schema_hash": "99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa"
+    },
+    {
+      "host": true,
+      "name": "operator_context",
+      "schema_hash": "711e1ce74c9813b0eb7841e2c4ab92d4d98dfbf3943d35f21d5e840f447843fa"
+    },
+    {
+      "host": true,
+      "name": "operator_prepare",
+      "schema_hash": "18ff5bf840ffe5909c366542f8d58d3b398f3dfec21c7a8057ef97d14e1b2de5"
+    },
+    {
+      "host": true,
+      "name": "operator_resume",
+      "schema_hash": "ae5324a22356d9d6a02a39637a86b4889923e6732eeb823f82e2c0fbc4077398"
+    },
+    {
+      "host": true,
+      "name": "operator_status",
+      "schema_hash": "3bb53823d7b491710ee5e810ad9f8476ba8d7bef2e3f283d943b88ba9840c778"
+    },
+    {
+      "host": true,
+      "name": "operator_verify",
+      "schema_hash": "54967be0079cc37c10fd2a1edd6e9fb756261b4c0b4f4fb1c134418a9e945c3b"
+    }
+  ],
+  "tools_hash": "20fe1e0eb01f0800b01c0ef9532304410c209ed5bcae7d2b6fc446375a2b1dee"
+}

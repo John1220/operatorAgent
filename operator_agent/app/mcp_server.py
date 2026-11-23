@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Optional, TextIO
 
 from .. import __version__
-from ..app.hitl_tools import (CANDIDATE_ORIGINS, ToolError, autonomous_status, cancel_task, bench,
+from ..app.hitl_tools import (CANDIDATE_ORIGINS, TOOL_VERSION, ToolError, autonomous_status, cancel_task, bench,
                          capabilities, prepare, repair, run_autonomous, verify)
 from ..execute.fake_backend.config import PROFILES, SCENARIOS
 
@@ -162,6 +162,78 @@ operator_cancel(run_dir, invocation_id) 取消在飞验证，随后查 status �
 HOST_TOOLS = frozenset(('operator_prepare', 'operator_resume', 'operator_context', 'operator_verify',
                         'operator_status', 'operator_cancel', 'operator_capabilities'))
 
+#: 不消耗模型预算的工具：只读，或只做本地状态迁移。
+#: JS 的模型门靠它区分「这次调用要不要预留额度」。这张表此前是 JS 里的第三个手抄
+#: 副本（`host-model-budget.mjs` 的 `READ_ONLY`）—— 与工具面同源、随清单发出去，
+#: 才能保证「工具面变了，门也跟着变」。
+READ_ONLY_TOOLS = frozenset(('operator_capabilities', 'operator_status',
+                             'operator_resume', 'operator_context'))
+
+#: 会把会话绑定到某个任务的工具。绑定之后其余工具才被允许 —— JS 侧的三处
+#: 「BINDS / BIND_TOOLS」都是这张表的手抄副本。
+BIND_TOOLS = frozenset(('operator_prepare', 'operator_resume'))
+
+#: 构建期清单的 schema 号。工具面一变就换号。
+MANIFEST_SCHEMA = 'dsh-operator-manifest-v1'
+
+#: 清单落在 JS 包目录里：它是 Python 与 JS 两个产物之间的握手凭据，必须随包一起发。
+#: 只有 `--emit-manifest` 与守卫会用到这个路径，**运行期不读它** —— Python 自己就是来源。
+MANIFEST_PATH = Path(__file__).resolve().parents[2] / 'integrations' / 'dsh-operator' / 'manifest.json'
+
+
+def build_manifest() -> dict:
+    """构建期清单：工具面、版本、身份哈希。**由本函数生成，不许手改。**
+
+    为什么需要它：JS 侧手抄过一份工具名单（`host-model-budget.mjs` 的 `TASK_TOOLS`），
+    与这里的 `HOST_TOOLS` 一字不差地各存一份。Python 改了工具面，JS 那份不会响 ——
+    而那份名单是**模型预算门**的判据，落后了那道门就会守着一个已经不存在的工具集，
+    看起来一切正常。清单把「手抄两份」换成「生成一份 + 两侧对账」。
+    """
+    from .. import __version__ as package_version
+    from ..core.run_contract import digest
+    rows = [{'name': tool['name'],
+             'host': tool['name'] in HOST_TOOLS,
+             'schema_hash': digest(tool['inputSchema'])}
+            for tool in sorted(_tool_definitions(host_mode=True),
+                              key=lambda item: item['name'])]
+    return {
+        'schema': MANIFEST_SCHEMA,
+        'package_version': package_version,
+        'tool_version': TOOL_VERSION,
+        'tools_hash': digest(rows),
+        'host_tools': sorted(HOST_TOOLS),
+        'read_only_tools': sorted(READ_ONLY_TOOLS),
+        'bind_tools': sorted(BIND_TOOLS),
+        'tools': rows,
+    }
+
+
+def manifest_problems(manifest: dict) -> list:
+    """清单自洽性检查。**不抛错**，返回问题清单（守卫与握手都用它）。"""
+    problems = []
+    if not isinstance(manifest, dict):
+        return ['manifest 不是一个对象']
+    if manifest.get('schema') != MANIFEST_SCHEMA:
+        problems.append(f"schema 不是 {MANIFEST_SCHEMA!r}: {manifest.get('schema')!r}")
+    rows = manifest.get('tools')
+    if not isinstance(rows, list) or not rows:
+        return problems + ['manifest.tools 必须是条目非空的数组']
+    names = [row.get('name') for row in rows if isinstance(row, dict)]
+    if len(set(names)) != len(names):
+        problems.append('工具名在清单里重复')
+    # 每个 host 工具都必须真的被定义 —— 否则「名单里说有」与「实际能调用」两件事会分家。
+    undefined = sorted(set(manifest.get('host_tools') or ()) - set(names))
+    if undefined:
+        problems.append(f'清单声明的 host 工具没有定义: {undefined}')
+    marked = {row.get('name') for row in rows if row.get('host') is True}
+    if marked != set(manifest.get('host_tools') or ()):
+        problems.append(f"host 标记与 host_tools 清单不一致: {sorted(marked)}")
+    for key in ('read_only_tools', 'bind_tools'):
+        stray = sorted(set(manifest.get(key) or ()) - set(names))
+        if stray:
+            problems.append(f'{key} 里有未定义的工具: {stray}')
+    return problems
+
 
 def _host_mode():
     from .host_workflow import enabled
@@ -188,7 +260,11 @@ _ORIGIN = {"type": "string", "enum": list(CANDIDATE_ORIGINS),
                            "不是为了好看 —— 自己写的核填 outer，不要填 inner_coder。")}
 
 
-def _tool_definitions() -> list[dict]:
+def _tool_definitions(host_mode=None) -> list[dict]:
+    # `host_mode` 可显式传入：构建期清单要按**正式路径**（host 模式）枚举，
+    # 否则 resume/context 这两个只在 host 模式下暴露的工具会缺席，清单就会
+    # 声称一套、实际另一套。
+    host_mode = _host_mode() if host_mode is None else bool(host_mode)
     definitions = [
         {
             "name": "operator_prepare",
@@ -428,7 +504,7 @@ def _tool_definitions() -> list[dict]:
     verify_tool['inputSchema']['properties']['verification_purpose'] = {
         'type': 'string', 'enum': ['explore', 'final'], 'default': 'explore',
         'description': 'host task 的探索验证或预留的独立终评；final 需相同源码已完整 L2 通过。'}
-    if _host_mode():
+    if host_mode:
         definitions.append({
             'name': 'operator_resume',
             'description': '恢复原 host 任务的身份、预算与候选引用；不重置截止/额度，不调用模型。根据 next_action/next_context 继续或报告停止。',
@@ -799,6 +875,22 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--selftest" in argv:
         return _selftest()
+    if "--emit-manifest" in argv:
+        # 构建期生成，写到 JS 包目录。stdout 只印路径，方便脚本接着用。
+        target = MANIFEST_PATH
+        if "--out" in argv:
+            target = Path(argv[argv.index("--out") + 1])
+        manifest = build_manifest()
+        problems = manifest_problems(manifest)
+        if problems:
+            for problem in problems:
+                print(f"manifest problem: {problem}", file=sys.stderr)
+            return 1
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                          encoding="utf-8")
+        print(str(target))
+        return 0
     # stdout 只许走协议行：所有库的 print 都改道 stderr（与 runner_server 同源）。
     real_out = sys.stdout
     sys.stdout = sys.stderr

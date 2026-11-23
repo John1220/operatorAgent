@@ -10,8 +10,10 @@ export function canAutoStartTask(state) {
     && state.lastUserEventSeq > state.latestTurnEnded.seq
     && state.latestTurnEnded.seq > state.lastBindingEventSeq;
 }
+import { MANIFEST } from "./manifest.mjs";
+
 const PREFIX = "mcp__operator__";
-const BINDS = new Set([PREFIX + "operator_prepare", PREFIX + "operator_resume"]);
+const BINDS = new Set(MANIFEST.bind_tools.map(name => PREFIX + name));
 const HASH = /^[0-9a-f]{64}$/;
 const TASK = /^[0-9a-f]{32}$/;
 const identity = value => typeof value === "string" && value.length > 0 && value.length <= 256
