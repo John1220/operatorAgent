@@ -12,8 +12,8 @@
   },
   "compile_failure": {},
   "contract_hash": "093339587d8c462c8af2328095b00fd471575ed26e2630c2ef81a6925ebdc44a",
-  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_tail_20261118/run/candidate_fixed-93ae9004/verify-1/result.json",
-  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_tail_20261118/run/candidate_fixed-93ae9004",
+  "evidence": "benchmarks/repro/fused_ln_tail_20261118/run/candidate_fixed-93ae9004/verify-1/result.json",
+  "run_dir": "benchmarks/repro/fused_ln_tail_20261118/run/candidate_fixed-93ae9004",
   "final_levels": null,
   "final_evidence": null,
   "final_verification_purpose": null

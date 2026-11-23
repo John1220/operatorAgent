@@ -90,7 +90,7 @@
 [`codex/v0.8.2-profile-optimize`](../../../operatorAgent-v082/docs/status/v082/README.md) 的独立 worktree 里并行开展
 （范围：保留实测最佳候选 / NCU 采集真实候选 / 完成一次证据指导的优化）。
 
-worktree：`/Users/zh/repos/operatorAgent-v082`，从本分支 `296ee47` 建出。
+worktree：与本源仓同级的 `operatorAgent-v082`，从本分支 `296ee47` 建出。
 
 ## 2. 已完成
 

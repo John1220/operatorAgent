@@ -24,8 +24,8 @@
     "source_hash": "55110ad2c532a9d87b40e7af0f0a79a73761458ab93e0f019ba6e7da4098d4a8"
   },
   "contract_hash": "093339587d8c462c8af2328095b00fd471575ed26e2630c2ef81a6925ebdc44a",
-  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_compile_20261118/run/candidate-aa56b26e/verify-1/result.json",
-  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/fused_ln_compile_20261118/run/candidate-aa56b26e",
+  "evidence": "benchmarks/repro/fused_ln_compile_20261118/run/candidate-aa56b26e/verify-1/result.json",
+  "run_dir": "benchmarks/repro/fused_ln_compile_20261118/run/candidate-aa56b26e",
   "final_levels": null,
   "final_evidence": null,
   "final_verification_purpose": null

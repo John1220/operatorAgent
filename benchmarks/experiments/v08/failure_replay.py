@@ -42,6 +42,8 @@ from operator_agent.execute.backend_ownership import owned_worker_scope
 
 SCHEMA = "v08-failure-replay-v1"
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 def _read(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
@@ -49,6 +51,26 @@ def _read(path):
 
 def _sha(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _portable(path):
+    """Provenance paths in a receipt are committed, so they must not be absolute.
+
+    Origin is a public repo: an absolute path leaks the author's home directory
+    and is meaningless on another machine. Paths inside the checkout become
+    repo-relative; paths outside it keep their absolute form because there is no
+    portable spelling for them. Only the receipt is rewritten -- callers still
+    read evidence through the absolute path they were given.
+    """
+    if not path:
+        return path
+    raw = Path(str(path))
+    if not raw.is_absolute():
+        return str(path)
+    try:
+        return str(raw.resolve().relative_to(_REPO_ROOT))
+    except (ValueError, OSError):
+        return str(path)
 
 
 def _verdict(receipt, level):
@@ -216,9 +238,11 @@ def run_case(*, case_dir, source_name, expect, host, work_dir, timeout, output=N
                   source_hash=observed["source_hash"], expect=expect, passed=passed,
                   why=why, levels=levels, compile_failure=failure,
                   contract_hash=receipt.get("contract_hash"),
-                  evidence=observed_raw["evidence"], run_dir=observed_raw["run_dir"],
+                  evidence=_portable(observed_raw["evidence"]),
+                  run_dir=_portable(observed_raw["run_dir"]),
                   final_levels=(final_receipt.get("levels") or None),
-                  final_evidence=observed_raw.get("final_evidence"),
+                  final_evidence=_portable(
+                      observed_raw.get("final_evidence")),
                   final_verification_purpose=final_receipt.get("verification_purpose"))
     target = Path(output) if output else case_dir / f"replay-{case['_label']}.json"
     target.parent.mkdir(parents=True, exist_ok=True)

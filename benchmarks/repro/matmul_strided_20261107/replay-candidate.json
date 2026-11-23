@@ -12,8 +12,8 @@
   },
   "compile_failure": {},
   "contract_hash": "6e337b0f1be605919844d29c0200178c9bf281b3214ef2bf2b32288f3894df97",
-  "evidence": "/Users/zh/repos/operatorAgent/benchmarks/repro/matmul_strided_20261107/run/candidate-c5844ed4/verify-1/result.json",
-  "run_dir": "/Users/zh/repos/operatorAgent/benchmarks/repro/matmul_strided_20261107/run/candidate-c5844ed4",
+  "evidence": "benchmarks/repro/matmul_strided_20261107/run/candidate-c5844ed4/verify-1/result.json",
+  "run_dir": "benchmarks/repro/matmul_strided_20261107/run/candidate-c5844ed4",
   "final_levels": null,
   "final_evidence": null,
   "final_verification_purpose": null

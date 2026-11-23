@@ -71,7 +71,7 @@ def test_repair_prompt_points_at_the_seed_source_and_the_named_failure():
     """修复轮不能再用 phase="generate"；要指向修前源码、1x33 回执与验收条件。"""
     from benchmarks.experiments.v08.ac_live import repair_workflow
 
-    receipt = ('/Users/zh/repos/operatorAgent/output/ac-v08f-pair2-A/run/'
+    receipt = ('output/ac-v08f-pair2-A/run/'
                'native-verification/result-0001.json')
     for arm in ('A', 'C'):
         text = repair_workflow(arm, run_dir='/tmp/run', ssh=dict(host='h', port=1,
