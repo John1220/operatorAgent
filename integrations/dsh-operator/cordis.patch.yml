@@ -20,7 +20,8 @@
         failOnStartupError: false
         env:
           OPERATOR_AGENT_WORKFLOW: host
-        # Legacy inner-model workflow: set OPERATOR_AGENT_WORKFLOW: legacy
+        # v0.9 起 host 是默认；这一行保留为显式声明。要用 legacy 内层模型工作流：
+        # 把下面这行改成 OPERATOR_AGENT_WORKFLOW: legacy，并配 hostModelBudget: false
         # and set operator-tools.config.hostModelBudget: false below.
         #   LLM_BASE_URL: https://your-endpoint/v1
         #   LLM_MODEL: your-inner-model

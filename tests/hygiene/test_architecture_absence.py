@@ -163,6 +163,60 @@ class TestOneAuthorityForTheDeclarationVocabulary:
         assert caught.value.code == "unsupported_schema_version"
 
 
+class TestTheWorkflowSwitchBehavesAsDocumented:
+    """默认值是一条架构决定，所以它要被钉住 —— 钉的是**现实**，不是愿望。
+
+    现状（v0.9）：Python 侧默认仍是 `legacy`，正式路径靠捆包 `cordis.patch.yml`
+    设 `OPERATOR_AGENT_WORKFLOW=host`。把默认改成 host 是一次专门的迁移，不是顺手
+    改一行：实测影响面 ≈30 个用例，其中既有驱动 legacy 工具的，也有走无界 verify
+    的（host 模式要求先 prepare 绑定 host task），还有用 `setUpClass` 提前抓工具面
+    的类（函数级 fixture 到得太晚）。
+
+    这几条守的是「不会悄悄漂」：默认值改了、或者模式名拼错了，都得有人看见。
+    """
+
+    def test_the_current_default_is_pinned(self, monkeypatch):
+        from operator_agent.app import host_workflow
+        monkeypatch.delenv("OPERATOR_AGENT_WORKFLOW", raising=False)
+        assert host_workflow.DEFAULT_WORKFLOW == "legacy"
+        assert host_workflow.enabled() is False
+
+    def test_host_hides_and_refuses_the_inner_generation_entry(self, monkeypatch):
+        """两处都要拒：不给清单，给了也拦 —— 缺一处都是半个门。"""
+        from operator_agent.app import mcp_server
+        from operator_agent.app.hitl_tools import ToolError
+        monkeypatch.setenv("OPERATOR_AGENT_WORKFLOW", "host")
+        names = {tool["name"] for tool in mcp_server._tool_definitions()}
+        assert "operator_run" not in names, "host 面上不该出现内层生成入口"
+        with pytest.raises(ToolError) as caught:
+            mcp_server._guard_host_tool("operator_run")
+        assert caught.value.code == "host_workflow_only"
+
+    def test_legacy_still_has_its_entry(self, monkeypatch):
+        from operator_agent.app import mcp_server
+        monkeypatch.setenv("OPERATOR_AGENT_WORKFLOW", "legacy")
+        names = {tool["name"] for tool in mcp_server._tool_definitions()}
+        assert "operator_run" in names
+        mcp_server._guard_host_tool("operator_run")     # legacy 下不拦，不该抛
+
+    def test_the_mode_can_be_scoped_without_leaking(self, monkeypatch):
+        """`workflow_mode` 是限定作用域的：pytest 一个进程跑完，全局改 env 会串味。"""
+        from operator_agent.app import host_workflow
+        monkeypatch.delenv("OPERATOR_AGENT_WORKFLOW", raising=False)
+        with host_workflow.workflow_mode("host"):
+            assert host_workflow.enabled() is True
+        assert host_workflow.enabled() is False
+
+    def test_a_typo_in_the_mode_is_refused_not_defaulted(self, monkeypatch):
+        """拼错模式名不许静默退回某个默认值 —— 那是「配了却没生效」的经典形状。"""
+        from operator_agent.app import host_workflow
+        from operator_agent.app.hitl_tools import ToolError
+        monkeypatch.setenv("OPERATOR_AGENT_WORKFLOW", "hst")
+        with pytest.raises(ToolError) as caught:
+            host_workflow.mode()
+        assert caught.value.code == "invalid_workflow"
+
+
 class TestTheConductorIsNotReachableFromTheDeclaredPath:
     """`build_task` 不许把活儿委派给 Conductor —— 那是第二条生成路径。"""
 

@@ -63,6 +63,16 @@ class TestTheManifestDoesNotRot:
         research = {tool["name"] for tool in mcp_server._tool_definitions(host_mode=False)}
         assert legacy <= research, "legacy 工具被删了而不是被藏起来 —— 那是另一件事"
 
+    def test_the_manifest_names_what_must_not_be_exposed(self):
+        """清单要说清「哪些工具存在但不该出现在正式路径上」。
+
+        否则 JS 侧只能手抄一份排除名单 —— 又一张会漂的表，而且漂了不会响：
+        它只在「本该排除某工具」的那条用例上静默变成空转。
+        """
+        committed = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        assert committed["legacy_tools"] == ["operator_bench", "operator_repair", "operator_run"]
+        assert set(committed["legacy_tools"]) & set(committed["host_tools"]) == set()
+
     def test_the_read_only_list_is_in_the_manifest(self):
         """只读集合也随清单发 —— 它是 JS 模型门的第三个手抄副本。"""
         committed = json.loads(MANIFEST.read_text(encoding="utf-8"))
@@ -184,9 +194,9 @@ class TestThereIsNoSecondCopyOfTheToolList:
     def test_the_bundle_actually_selects_the_mode_the_manifest_describes(self):
         """清单描述的是**host 模式**的工具面，捆包就必须真的选 host。
 
-        `OPERATOR_AGENT_WORKFLOW` 的 Python 默认是 `legacy`（独立 CLI 保留原行为，
-        这是有意的）。所以「清单说七支」只在捆包把环境设成 host 时才成立 —— 这一条
-        把两件事钉在一起：谁把捆包改成 legacy，工具面与清单立刻分家。
+        v0.9 起 `host` 已是 Python 侧的默认，捆包这行是**显式重复**而不是唯一依据。
+        这条仍然值得留：捆包若被改成 legacy，实际暴露的工具面与清单立刻分家，
+        而这种分家不会让任何东西编译失败。
         """
         import yaml
         patch = yaml.safe_load((PLUGIN / "cordis.patch.yml").read_text(encoding="utf-8"))

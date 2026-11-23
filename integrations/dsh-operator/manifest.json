@@ -13,6 +13,11 @@
     "operator_status",
     "operator_verify"
   ],
+  "legacy_tools": [
+    "operator_bench",
+    "operator_repair",
+    "operator_run"
+  ],
   "package_version": "0.7.2",
   "read_only_tools": [
     "operator_capabilities",

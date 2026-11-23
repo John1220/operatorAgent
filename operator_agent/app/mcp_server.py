@@ -208,6 +208,10 @@ def build_manifest() -> dict:
         'tool_version': TOOL_VERSION,
         'tools_hash': digest(rows),
         'host_tools': sorted(HOST_TOOLS),
+        # 定义了、但**不该**出现在正式路径上的工具。JS 侧要靠它验「legacy 入口没漏出去」，
+        # 不靠手抄一份排除名单 —— 那是又一份会漂的表。
+        'legacy_tools': sorted({tool['name'] for tool in _tool_definitions(host_mode=False)}
+                               - HOST_TOOLS),
         'read_only_tools': sorted(READ_ONLY_TOOLS),
         'bind_tools': sorted(BIND_TOOLS),
         'tools': rows,

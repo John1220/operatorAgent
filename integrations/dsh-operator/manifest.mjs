@@ -31,7 +31,7 @@ function load() {
       `operator-agent: 清单 schema 不受支持 (${body?.schema})，期望 ${MANIFEST_SCHEMA}。` +
       "Python 与 JS 不是同一套构建，拒绝继续。");
   }
-  for (const key of ["host_tools", "read_only_tools", "bind_tools", "tools"]) {
+  for (const key of ["host_tools", "legacy_tools", "read_only_tools", "bind_tools", "tools"]) {
     if (!Array.isArray(body[key])) {
       throw new Error(`operator-agent: 清单缺 ${key} 数组，拒绝继续。`);
     }

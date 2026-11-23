@@ -67,7 +67,7 @@ flowchart TB
 
 ## 用户入口与分工
 
-DSH 组合包的 MCP 环境默认设置 `OPERATOR_AGENT_WORKFLOW=host`，JS 条目默认启用 `hostModelBudget: {}`。此模式仅暴露 capabilities、prepare、context、verify、resume、status、cancel；隐藏并拒绝 run/repair/bench。现有独立 CLI 保留原行为。使用 legacy MCP 时须同时设置 `OPERATOR_AGENT_WORKFLOW=legacy` 和 `hostModelBudget: false`。改变 profile 配置会整体替换 config，必须保留所选模式与 MCP 连接字段。
+正式路径由 DSH 组合包选定：`cordis.patch.yml` 设 `OPERATOR_AGENT_WORKFLOW=host`，Python 侧 `host_workflow.DEFAULT_WORKFLOW` 仍是 `legacy`（独立 CLI 与裸跑保留原行为）。host 模式暴露 capabilities、prepare、normalize、context、verify、resume、status、cancel；run/repair/bench 既不出现在 `tools/list` 里，实际调用也会被 `host_workflow_only` 拒绝。使用 legacy MCP 须同时设 `OPERATOR_AGENT_WORKFLOW=legacy` 与 `hostModelBudget: false`。`integrations/dsh-operator/manifest.json`（构建期由 `--emit-manifest` 生成）记录 host 与 legacy 两侧的工具名，JS 侧读它而不是手抄；`tests/hygiene/test_manifest.py` 钉住「捆包必须选 host」，所以「正式路径只暴露宿主生成」这件事由**清单 + 守卫**保证，而不是靠谁记得配置。把默认值本身翻成 host 是一次专门的迁移（实测影响 ≈30 个用例），**尚未做**，原因记在 `host_workflow.DEFAULT_WORKFLOW` 的注释里。改变 profile 配置会整体替换 config，必须保留所选模式与 MCP 连接字段。
 
 1. DSH 理解用户与项目目标，调用 `operator_prepare` 冻结任务和 host_budget。
 2. `operator_context(run_dir, backend, phase=generate)` 返回权威任务事实、接口、生成规约、角色技能及原始模板。

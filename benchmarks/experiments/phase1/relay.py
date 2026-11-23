@@ -39,6 +39,14 @@ class Relay:
                     token=self.token,timeout=self.timeout)
 
     def _dispatch(self,request):
+        # 这个 harness 驱动的是 **legacy 内层模型面**（operator_run / repair / bench）。
+        # 显式声明模式，不蹭全局默认值：默认已经是 host，而且直接改 os.environ 会串到
+        # 同一 pytest 会话里的其他用例上。作用域只覆盖这一次分派。
+        from operator_agent.app.host_workflow import workflow_mode
+        with workflow_mode('legacy'):
+            return self._dispatch_in_legacy(request)
+
+    def _dispatch_in_legacy(self,request):
         if not isinstance(request,dict) or set(request)-{'jsonrpc','id','method','params'} or request.get('jsonrpc')!='2.0':
             raise ValueError('invalid JSON-RPC envelope')
         method=request.get('method')

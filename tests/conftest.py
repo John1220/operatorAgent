@@ -57,6 +57,25 @@ def pytest_configure(config):
                      output=os.environ["OPERATOR_AGENT_OUTPUT_DIR"])
 
 
+@pytest.fixture
+def legacy_workflow(monkeypatch):
+    """显式进入 **legacy 内层工作流**：无界 verify、repair、bench、Conductor 生成。
+
+    自 v0.9 起 `OPERATOR_AGENT_WORKFLOW` 默认是 `host`，所以测旧路径的用例必须自己
+    说出来。蹭默认值是危险的：默认值一改，那些用例会**静默地**变成在测另一条路径，
+    而且多数断言仍然通过 —— 只有在语义真的分岔的地方才红。
+    """
+    monkeypatch.setenv("OPERATOR_AGENT_WORKFLOW", "legacy")
+    yield
+
+
+@pytest.fixture
+def host_workflow(monkeypatch):
+    """显式进入 **host 工作流**：宿主生成、插件只冻结与判定。"""
+    monkeypatch.setenv("OPERATOR_AGENT_WORKFLOW", "host")
+    yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _assert_side_effects_are_redirectable():
     """守住这条机制本身: 变量若被改掉, 测试又会开始写仓库的 logs/ 与 output/。"""

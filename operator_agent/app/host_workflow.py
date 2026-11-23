@@ -13,12 +13,55 @@ from ..core.run_contract import code_hash, digest
 from ..core.run_layout import write_once_artifact
 
 
-def enabled():
-    mode = os.environ.get('OPERATOR_AGENT_WORKFLOW', 'legacy')
-    if mode not in ('host', 'legacy'):
+#: 默认工作流。**仍然是 legacy**：正式路径靠捆包 `cordis.patch.yml` 设 `host`。
+#:
+#: 为什么没翻（2026-11-23 复核）：翻默认值的代价远大于「四个环境变量」的估算。
+#: 实测把默认改成 `host` 后，会挂的不止那些驱动 legacy 工具的用例 —— 还有一批
+#: 走无界 `operator_verify` 的用例（host 模式要求先 `prepare` 绑定 host task），
+#: 以及用 `setUpClass` 提前抓取工具面的类（函数级 fixture 到得太晚）。总影响面
+#: ≈30 个用例 / 9 个文件，且其中几处的修法互不相同。
+#:
+#: 想翻的时候，正确做法是一次专门的迁移：给每个用例显式声明它测的是哪条路径
+#: （`conftest.py` 已有 `legacy_workflow` / `host_workflow` 两个 fixture，
+#: 部分文件也已经声明了），并且单独验证进程类用例（worker 子进程会继承环境变量）。
+DEFAULT_WORKFLOW = 'legacy'
+
+WORKFLOWS = ('host', 'legacy')
+
+
+def mode():
+    """当前的 workflow 名。非法值当场拒绝，不静默降级。"""
+    value = os.environ.get('OPERATOR_AGENT_WORKFLOW', DEFAULT_WORKFLOW)
+    if value not in WORKFLOWS:
         from .hitl_tools import ToolError
-        raise ToolError('invalid_workflow', 'OPERATOR_AGENT_WORKFLOW must be host or legacy.')
-    return mode == 'host'
+        raise ToolError('invalid_workflow',
+                        f'OPERATOR_AGENT_WORKFLOW 只能是 {WORKFLOWS}，实际 {value!r}')
+    return value
+
+
+def enabled():
+    return mode() == 'host'
+
+
+@contextmanager
+def workflow_mode(name):
+    """在**限定作用域内**切到某个 workflow，退出时恢复。
+
+    为什么不是直接改全局 env：pytest 是一个进程跑完的，`os.environ[...] = 'legacy'`
+    会串到同一会话里后面所有用例上 —— 那正是本仓一直在防的「跨用例串味」。
+    legacy 的 harness 只需要在**它自己那次分派期间**是 legacy。
+    """
+    if name not in WORKFLOWS:
+        raise ValueError(f'workflow 只能是 {WORKFLOWS}，实际 {name!r}')
+    previous = os.environ.get('OPERATOR_AGENT_WORKFLOW')
+    os.environ['OPERATOR_AGENT_WORKFLOW'] = name
+    try:
+        yield name
+    finally:
+        if previous is None:
+            os.environ.pop('OPERATOR_AGENT_WORKFLOW', None)
+        else:
+            os.environ['OPERATOR_AGENT_WORKFLOW'] = previous
 
 
 @contextmanager

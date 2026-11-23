@@ -219,7 +219,9 @@ test("server 的 instructions 真的到达 MCP 客户端（宿主据此渲染 mc
     command: python,
     args: ["-m", "operator_agent.app.mcp_server"],
     cwd: REPO_ROOT,
-    env: { PATH: process.env.PATH, HOME: process.env.HOME },
+    // 这条钉的是 **legacy 契约**（含 run/repair/bench），所以显式打开 legacy。
+    // v0.9 起默认是 host —— 不显式声明就等于在测另一套工具面。
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, OPERATOR_AGENT_WORKFLOW: "legacy" },
   }));
   try {
     const text = client.getInstructions() ?? "";
@@ -233,6 +235,37 @@ test("server 的 instructions 真的到达 MCP 客户端（宿主据此渲染 mc
       "operator_bench", "operator_cancel", "operator_capabilities", "operator_context", "operator_prepare",
       "operator_repair", "operator_run", "operator_status", "operator_verify",
     ]);
+  } finally {
+    await client.close();
+  }
+});
+
+test("host 模式暴露的工具面就是清单里的 host_tools（不多不少）", async (t) => {
+  const python = findPython();
+  if (!python) return t.skip("找不到能 import 判定层的 python（设 OPERATOR_AGENT_PYTHON）");
+
+  // 期望值从**清单**来，不是手抄一遍：这条验的正是「Python 侧构建期声明的工具面」
+  // 与「server 在 host 模式下真正暴露的工具面」是不是同一件事。
+  const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
+
+  const [{ Client }, { StdioClientTransport }] = await Promise.all([
+    fromApp("@modelcontextprotocol/client/dist/index.mjs"),
+    fromApp("@modelcontextprotocol/client/dist/stdio.mjs"),
+  ]);
+  const client = new Client({ name: "contract", version: "0" }, { capabilities: {} });
+  await client.connect(new StdioClientTransport({
+    command: python,
+    args: ["-m", "operator_agent.app.mcp_server"],
+    cwd: REPO_ROOT,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, OPERATOR_AGENT_WORKFLOW: "host" },
+  }));
+  try {
+    const { tools } = await client.listTools();
+    assert.deepEqual(tools.map((x) => x.name).sort(), [...manifest.host_tools].sort());
+    // legacy 的生成入口在正式路径上不该出现：那是第二条生成路径。
+    for (const legacy of manifest.legacy_tools) {
+      assert.ok(!tools.some((x) => x.name === legacy), `${legacy} 不该出现在 host 面上`);
+    }
   } finally {
     await client.close();
   }
