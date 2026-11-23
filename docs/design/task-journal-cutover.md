@@ -3,6 +3,33 @@
 状态：**权威层已完成并有守卫；尚未接任何写入方。** 本文只记「接下来怎么切」，不重复
 设计理由——那些在 `operator_agent/core/task_journal.py` 的模块文档里。
 
+## 进度（2026-11-24，接手先读这一节）
+
+三提交计划里**前两个已合并**，第三个（迁移 0.8.2 完整优化流程）未开始。
+
+| 提交 | 内容 |
+|---|---|
+| `48f3bd2` | 工具契约收齐：两处 DSH 验收输入补 `operator`、精度词表收敛成一份、`tool_version` 12→13 |
+| `091f813` | journal 状态转换：`admit()` 让 `append` 与 `fold` 共用顺序判据（终态不可回退、Job 事件要求 active） |
+| `8e8f9c0` | 旧任务只读恢复：`legacy_task_view()` 按各自身份读回契约 / 两本账 / 交付源码，A4 真实产物做回归 |
+
+接下来两件事，按此顺序：
+
+1. **接 journal 的写入方**（本文下面的五步）。第一步是 `ToolCall`——它是
+   verify / profile / bench 三者共用的底座，改一个覆盖三条路径。
+2. **profile 搬完**：`ncu_profile` / `gpu_lease` / `profile_budget` 已搬；
+   还差把租约接进 `HostTaskBudget.reserve`，判据是
+   `tests/unit/profile/test_gpu_lease_across_tasks.py` 里那 4 条 skip
+   **自动转绿**（它们按源码探针跳过，租约一接上就不跳了）。
+
+### 已知噪声，别当回归
+
+- 3 条需要 `ps` 或嵌套沙箱的用例在本机会红（`test_supervisor_kills_blocked_worker…`、
+  `test_cancel_cleans_owned_sessions…`、`test_the_c_arm_runs_inside_a_repo_blind_sandbox`）。
+- `test_remaining_deadline_interrupts_blocked_model_request` 在全量负载下偶发超时，单跑不复现。
+- `tests/acceptance` 已改成按能力探针跳过；跑之前先 `python -m benchmarks.experiments.s5.s5_rebuild_deps`
+  重建依赖树，否则 118 条会 skip。
+
 ## 已经定下的决定
 
 | 决定 | 取值 | 理由 |
