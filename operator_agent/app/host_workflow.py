@@ -151,6 +151,84 @@ def context(run_dir, *, phase='generate', backend='ssh', verification_round=None
                 model_calls=0, context_owner='host')
 
 
+def legacy_task_view(run_dir):
+    """旧版本任务的**只读**恢复：把已经发生过的事实读出来，不重建任何东西。
+
+    为什么不能重建：v0.9 的 `build_task` 要求显式 `operator` / `precision`（判据层
+    不再从自然语言推关键词），而旧任务的 `declaration.json` 里没有这两个字段。用新
+    规则去解释旧声明，得到的不是「这个任务」，而是「按今天的规则它应该是什么」——
+    那会把一个已有冻结契约、已花预算、已交付源码的任务判成非法。
+
+    所以这里只读，且只读三样东西：**它当初评的是什么（契约）**、**花了多少（两本账）**、
+    **交付了哪份源码**。三者各自按自己的身份对齐，不能要求它们一致：
+
+      * 契约按 `contract_hash` 对齐；
+      * 两本预算账按**预算自己的** `task_id` 对齐 —— 它与 `run.json.task_id` 是两个
+        不同的 ID（A4 实测：`56362c1f` vs `1ed2cb08e5c74b6cbe3ced1550e56b0f`）。
+        要求三个 ID 全相等会把这份真实产物误判成损坏。
+    """
+    from ..core.contract import load_dict
+    from ..core.run_contract import digest
+    run = Path(run_dir).resolve()
+    try:
+        recorded_run = json.loads((run/'run.json').read_text(encoding='utf-8'))
+        recorded_contract = json.loads((run/'contract.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError) as error:
+        raise ValueError(f'not a readable run directory: {error}') from error
+
+    # 契约：用既有读取器重算，并与运行记录比对。重算不出来就说重算不出来。
+    recomputed = None
+    try:
+        recomputed = load_dict(recorded_contract['contract']).hash
+    except (KeyError, TypeError, ValueError):
+        recomputed = None
+    claimed = recorded_run.get('contract_hash')
+    ledger = json.loads((run/'host-task.json').read_text(encoding='utf-8')) if (run/'host-task.json').is_file() else {}
+    records = ledger.get('records') or []
+    purposes = [row.get('purpose') for row in records]
+    exploration = purposes.count('explore')
+    final = purposes.count('final')
+    model = (json.loads((run/'host-model-budget.json').read_text(encoding='utf-8'))
+             if (run/'host-model-budget.json').is_file() else {})
+    selection = (json.loads((run/'final-selection.json').read_text(encoding='utf-8'))
+                 if (run/'final-selection.json').is_file() else {})
+    return {
+        'ok': True,
+        'read_only': True,
+        'run_dir': str(run),
+        'why_read_only': ('这个任务是在要求显式声明的版本之前冻结的（声明里没有 operator / '
+                          'precision）。本层不按新规则重新解释旧声明，只读出已发生的事实。'),
+        'tool_version_recorded': recorded_run.get('tool_version'),
+        'contract': {
+            'recorded_hash': claimed,
+            'recomputed_hash': recomputed,
+            'matches_run_record': bool(claimed) and recomputed == claimed,
+        },
+        'verification_budget': {
+            'ledger_task_id': ledger.get('task_id'),
+            'exploration_completed': exploration,
+            'final_completed': final,
+            'records': len(records),
+        },
+        'model_ledger': {
+            'calls': len(model.get('calls') or model.get('records') or []),
+            'failed': len([row for row in (model.get('calls') or model.get('records') or [])
+                           if isinstance(row, dict)
+                           and str(row.get('status') or row.get('outcome') or '').lower()
+                           in ('failed', 'error')]),
+        },
+        'delivery': {
+            'source_hash': selection.get('actual_source'),
+            'recommended_round': selection.get('recommended_round'),
+            'override': selection.get('override'),
+            'policy': selection.get('policy'),
+        },
+        'next': ('这是只读视图：可以查回「当初评了什么、花了多少、交付了哪份源码」。'
+                 '要继续推进这个任务，请用产生它的那个版本的 operator-agent；'
+                 '不要修改原 declaration.json —— 它是这份冻结契约的记录，改了就没有对照物了。'),
+    }
+
+
 def resume(run_dir, *, backend='ssh', verification_round=None):
     """Read the existing task without resetting policy, time or reservations.
 
@@ -163,7 +241,14 @@ def resume(run_dir, *, backend='ssh', verification_round=None):
     from ..execute.host_task_budget import HostTaskBudget, host_task_enabled
     if Path(run_dir).is_symlink():
         raise ToolError('host_task_required', 'Resume an ordinary prepared host task directory.')
-    run, task, contract = prepared_task(run_dir)
+    try:
+        run, task, contract = prepared_task(run_dir)
+    except ToolError as error:
+        # 旧版本的声明没有 `operator` / `precision`。用它本来就没有的字段去重建，
+        # 得到的是「按今天的规则它应该是什么」，不是它。改走只读视图。
+        if error.code in ('explicit_declaration_required', 'unknown_parameter'):
+            return legacy_task_view(run_dir)
+        raise
     if not host_task_enabled(run):
         raise ToolError('host_task_required', 'Resume requires the existing bounded host task.')
     budget = HostTaskBudget(run, contract.hash).snapshot(readonly=True)
