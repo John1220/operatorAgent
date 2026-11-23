@@ -13,7 +13,7 @@
 | `48f3bd2` | 工具契约收齐：两处 DSH 验收输入补 `operator`、精度词表收敛成一份、`tool_version` 12→13 |
 | `091f813` | journal 状态转换：`admit()` 让 `append` 与 `fold` 共用顺序判据（终态不可回退、Job 事件要求 active） |
 | `8e8f9c0` | 旧任务只读恢复：`legacy_task_view()` 按各自身份读回契约 / 两本账 / 交付源码，A4 真实产物做回归 |
-| 本轮的 `feat(journal)` | **落地顺序第 1 步**：`ToolCall` 接 journal（详见下面第 1 步的「已完成」） |
+| `cefe7f9` | **落地顺序第 1 步**：`ToolCall` 接 journal（详见下面第 1 步的「已完成」） |
 
 接下来两件事，按此顺序：
 
