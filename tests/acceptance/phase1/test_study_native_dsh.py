@@ -1,3 +1,17 @@
+
+def _process_introspection_usable():
+    """`ps` 能不能跑？后台 worker 的进程组/后代发现全靠它。
+
+    宿主自己跑在受限沙箱里时 `ps` 会被拒绝（`Operation not permitted`），
+    于是 `task_process_groups` 静默降级成「只知道worker这一组」，孙进程逃逸 ——
+    这条用例会以「清理不干净」的样子失败，而真正缺的是进程可见性。
+    """
+    try:
+        return subprocess.run(['ps', '-axo', 'pid='], capture_output=True,
+                              timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
 """Actual native DSH A and delegated DSH B share frozen wire controls.
 
 All HTTP is IPv4 loopback and all execution uses CPU FakeBackend. Scripted
@@ -11,6 +25,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -30,7 +45,8 @@ SKETCH=dict(algorithm='matmul',tiling=dict(block_m=64,block_n=64,block_k=32),
             memory_plan={},pipeline=[],optimization_hints=[])
 READY=(sys.platform=='darwin' and bool(shutil.which('node')) and
        (s5_arm_env.DSH_ROOT/'dsh/lib/bin.js').is_file() and
-       s5_arm_env.MCP_CLIENT.is_file() and Path(s5_seatbelt.SANDBOX).is_file())
+       s5_arm_env.MCP_CLIENT.is_file() and Path(s5_seatbelt.SANDBOX).is_file()
+       and _process_introspection_usable())
 
 
 def terminal(value):

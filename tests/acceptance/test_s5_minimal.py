@@ -5,6 +5,17 @@ from benchmarks.experiments.s5 import s5_formal_run as flow, s5_minimal_tasks as
 from benchmarks.experiments.s5.s5_outcomes import classify,fatal
 from operator_agent.app.hitl_tools import prepare
 
+#: 这一组驱动的是 s5 的验证管线，它对**归档依赖树**有硬依赖：目录在 ≠ 当前解释器能用
+#: （归档那份 numpy 是 cpython-39，换 3.12 跑会走到「不要从源码目录导入」）。
+#: 所以按**探针**跳过，而不是让 20 条用例各自以「输出不是 JSON」的形式红。
+import pytest as _pytest  # noqa: E402
+from benchmarks.experiments.s5 import s5_runtime as _s5_runtime  # noqa: E402
+if not _s5_runtime.available():
+    pytestmark = _pytest.mark.skipif(
+        True, reason='s5 runtime deps 不可用: ' + '; '.join(_s5_runtime.deps_problems())
+        + '。冻结的那棵树是按 Python 3.9 建的，用当前解释器重建一次即可：'
+        + 'python -m benchmarks.experiments.s5.s5_rebuild_deps')
+
 
 def test_new_tasks_have_disjoint_primary_specs_and_correct_operands(tmp_path):
     from benchmarks.experiments.s5.s5_task_manifest import manifest

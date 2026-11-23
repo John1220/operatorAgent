@@ -9,6 +9,17 @@ from benchmarks.experiments.s5 import s5_preflight_plan, s5_three_group_service_
 from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
 
+#: 这一组驱动的是 s5 的验证管线，它对**归档依赖树**有硬依赖：目录在 ≠ 当前解释器能用
+#: （归档那份 numpy 是 cpython-39，换 3.12 跑会走到「不要从源码目录导入」）。
+#: 所以按**探针**跳过，而不是让 20 条用例各自以「输出不是 JSON」的形式红。
+import pytest as _pytest  # noqa: E402
+from benchmarks.experiments.s5 import s5_runtime as _s5_runtime  # noqa: E402
+if not _s5_runtime.available():
+    pytestmark = _pytest.mark.skipif(
+        True, reason='s5 runtime deps 不可用: ' + '; '.join(_s5_runtime.deps_problems())
+        + '。冻结的那棵树是按 Python 3.9 建的，用当前解释器重建一次即可：'
+        + 'python -m benchmarks.experiments.s5.s5_rebuild_deps')
+
 DSH_READY = bool(shutil.which('node')) and (DSH_ROOT / 'dsh' / 'lib' / 'bin.js').is_file()
 DECLARATION = dict(operator='layernorm', request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',
                    dsl='python', precision='fp32')

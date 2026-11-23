@@ -14,7 +14,17 @@ from benchmarks.experiments.s5 import s5_seatbelt as jail
 from benchmarks.experiments.s5 import s5_arm_env, s5_runtime
 from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
 
-READY = sys.platform == 'darwin' and Path(jail.SANDBOX).is_file() and s5_runtime.available()
+# 就绪判据必须是**探针**而不是「文件在不在」：sandbox-exec 存在但宿主本身跑在沙箱里时，
+# 嵌套的 sandbox_apply 会被拒绝，这一整组用例会以各种不相干的理由失败。
+# 依赖树同理：目录在 ≠ 当前解释器能用（归档的那份扩展是 cpython-39）。
+_SANDBOX_OK, _SANDBOX_WHY = s5_runtime.sandbox_probe()
+_DEPS_PROBLEMS = s5_runtime.deps_problems()
+READY = sys.platform == 'darwin' and _SANDBOX_OK and not _DEPS_PROBLEMS
+SKIP_REASON = ('; '.join(filter(None, [
+    '' if sys.platform == 'darwin' else '需要 macOS',
+    _SANDBOX_WHY,
+    '; '.join(_DEPS_PROBLEMS),
+])) or 's5 运行前提不满足')
 
 
 @pytest.fixture(scope='module')

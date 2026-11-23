@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import functools
 import os
 from pathlib import Path
 import re
@@ -86,8 +87,38 @@ def python_path(root=ROOT, deps=None):
 
 
 def available(deps=None):
+    """依赖树可用吗 —— **包含解释器兼容性**，不只是「目录在不在」。
+
+    只查存在性是不够的：`DEFAULT_DEPS` 里的 numpy 扩展冻结在 Python 3.9 上，
+    目录明明在、`is_dir()` 明明为真，但一导入就炸。用这种半吊子判据当 skip 守卫，
+    结果就是守卫放行、用例全红，而红的理由看起来像判定层坏了。
+    """
     deps = deps_dir() if deps is None else Path(deps)
-    return deps.is_dir() and not deps.is_symlink()
+    return deps.is_dir() and not deps.is_symlink() and not deps_problems(deps)
+
+
+@functools.lru_cache(maxsize=None)
+def sandbox_probe():
+    """`sandbox-exec` 现在**真的能应用策略**吗？→ (bool, 原因)。
+
+    文件存在只是一半。宿主自己跑在沙箱里时，嵌套的 `sandbox_apply` 会被拒绝
+    （`Operation not permitted`），于是需要 Seatbelt 的那批用例会以各种不相干的
+    理由失败。探一次比让它们各自失败强。
+    """
+    executable = Path('/usr/bin/sandbox-exec')
+    if not executable.is_file():
+        return False, 'sandbox-exec 不存在（非 macOS？）'
+    try:
+        probe = subprocess.run([str(executable), '-p', '(version 1)(allow default)',
+                                '/usr/bin/true'],
+                               capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, f'sandbox-exec 起不来: {error}'
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout or '').strip().splitlines()
+        return False, ('sandbox-exec 无法应用策略（嵌套沙箱？）: '
+                       + (detail[-1][:160] if detail else f'exit {probe.returncode}'))
+    return True, ''
 
 
 def materialize(from_site, dest=None):

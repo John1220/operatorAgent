@@ -8,11 +8,14 @@ import sys
 import pytest
 
 from benchmarks.experiments.s5 import s5_plugin_env as env, s5_plugin_probe as probe
-from benchmarks.experiments.s5 import s5_seatbelt
+from benchmarks.experiments.s5 import s5_runtime, s5_seatbelt
 from benchmarks.experiments.s5.s5_development_service import encoded
 from operator_agent.core.run_contract import digest
 
-READY=sys.platform=='darwin'and Path(s5_seatbelt.SANDBOX).is_file()
+# 同 seatbelt 组：探针而不是存在性。存在性放行、实际用不了，是最难查的那种红。
+_SANDBOX_OK,_SANDBOX_WHY=s5_runtime.sandbox_probe()
+READY=sys.platform=='darwin'and _SANDBOX_OK
+SKIP_REASON=('; '.join(filter(None,[''if sys.platform=='darwin'else'需要 macOS',_SANDBOX_WHY]))or's5 运行前提不满足')
 
 
 class Relay:
@@ -33,7 +36,7 @@ def build(arm,root,runtime):
             contract='a'*64,backend='mock',timeout=70))
 
 
-@pytest.mark.skipif(not READY,reason='macOS Seatbelt required')
+@pytest.mark.skipif(not READY,reason=SKIP_REASON)
 @pytest.mark.parametrize('arm',['A','C'])
 def test_actual_read_matrix_core_import_and_cli_are_hidden(tmp_path,runtime,arm):
     built=build(arm,tmp_path/'participant',runtime)
@@ -63,7 +66,7 @@ def test_actual_read_matrix_core_import_and_cli_are_hidden(tmp_path,runtime,arm)
     assert read.returncode!=0
 
 
-@pytest.mark.skipif(not READY,reason='macOS Seatbelt required')
+@pytest.mark.skipif(not READY,reason=SKIP_REASON)
 def test_profile_runtime_drift_and_missing_boundary_refuse(tmp_path,runtime,monkeypatch):
     built=build('A',tmp_path/'participant',runtime)
     broken=copy.deepcopy(built);broken.pop('isolation')
@@ -125,7 +128,7 @@ def test_python_read_literals_include_multihop_link_and_framework_files(tmp_path
     assert not any(path.is_dir() and not path.is_symlink() for path in files)
 
 
-@pytest.mark.skipif(not READY,reason='macOS Seatbelt required')
+@pytest.mark.skipif(not READY,reason=SKIP_REASON)
 def test_venv_stdlib_works_but_ambient_site_packages_remain_hidden(tmp_path,runtime):
     built=build('C',tmp_path/'participant',runtime)
     code=('import json,pathlib,sys,importlib.util\n'
@@ -155,7 +158,7 @@ def test_plugin_timeout_must_be_explicit_without_public_verifier(tmp_path,runtim
 
 @pytest.fixture(scope='module')
 def actual_proof(tmp_path_factory):
-    if not READY:pytest.skip('macOS Seatbelt required')
+    if not READY:pytest.skip(SKIP_REASON)
     root=tmp_path_factory.mktemp('s5-plugin-proof')/'acceptance'
     # The historical S5 dependency tree is a CPython 3.9 artifact. Freeze this
     # test interpreter's NumPy instead of injecting that ABI into Python 3.12.
