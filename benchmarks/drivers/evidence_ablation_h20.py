@@ -718,8 +718,13 @@ def main() -> int:
     if aborted:
         print(f"⚠️ 这一跑**被截断**: {aborted}", flush=True)
 
+    # 落盘目录与 `ArtifactStore` 用同一条约定 (见 conftest 的说明): 设了
+    # `OPERATOR_AGENT_OUTPUT_DIR` 就跟随它。写死 `ROOT/output` 会让自检在
+    # 受限文件系统或重定向运行里直接 PermissionError, 而不是报出真实读数。
+    base = Path(os.environ.get("OPERATOR_AGENT_OUTPUT_DIR", "").strip()
+                or ROOT / "output")
     out = Path(args.out) if args.out else (
-        ROOT / "output" / f"evidence_ablation_{time.strftime('%Y%m%d-%H%M%S')}.json")
+        base / f"evidence_ablation_{time.strftime('%Y%m%d-%H%M%S')}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {"date": time.strftime("%Y-%m-%d %H:%M:%S"), "tree": tree,
                "mode": "dry-run" if args.dry_run else "real",

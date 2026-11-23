@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from benchmarks.drivers import workload_search_h20 as driver
 from operator_agent.core import run_contract as rc
+from operator_agent.decide.input_fidelity import MAX_STORAGE_BYTES
 
 
 def args(tmp_path,*argv):
@@ -30,7 +31,9 @@ def test_local_plan_allocates_no_inputs_or_transport(tmp_path,monkeypatch):
     assert plan['budget_accounting']['unit']=='candidate_verification_dispatch_per_input_group'
     assert plan['budget_accounting']['fixed_dispatch_sequence_unchanged']
     assert plan['controls']['max_rpcs']==512 and plan['controls']['wall_clock_s']==1800
-    assert plan['input_storage_limit']==256*1024*1024
+    # 对着常量断言而不是写死数字：限额由 input_fidelity 单点定义（v0.8 已从
+    # 256 MiB 放宽到 1 GiB），抄一份字面量只会让这条守卫在下次调限额时撒谎。
+    assert plan['input_storage_limit']==MAX_STORAGE_BYTES
     assert not plan['retry_windows'] and not plan['adaptive']
     assert not json.loads((root/'summary.json').read_text())['completed']
 

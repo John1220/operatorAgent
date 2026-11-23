@@ -79,7 +79,7 @@ def test_larger_workload_plan_is_bounded_fixed_and_keeps_original_candidate_and_
     assert [r["input_storage_bytes"] for r in plan["workloads"]] == [240*1024**2, 192*1024**2]
     assert all(r["input_storage_bytes"] + plan["scalar_wire_bytes"] < plan["input_storage_scalar_limit"]
                for r in plan["workloads"])
-    assert plan["input_storage_scalar_limit"] == 256*1024**2
+    assert plan["input_storage_scalar_limit"] == driver.MAX_STORAGE_BYTES
     assert plan["candidate_hash"] == code_hash(code)
     assert plan["min_speedup"] == driver.task("offline").constraints.min_speedup == 1.05
     assert plan["rpc_timeout"] == 180 and plan["adaptive_workload_selection"] is False
@@ -105,12 +105,18 @@ def test_duplicate_workloads_fail_before_any_backend_or_output_side_effects(tmp_
 
 
 def test_programmatic_workload_selection_cannot_bypass_bounds(monkeypatch):
-    args = SimpleNamespace(resume_only=False, workload=["8192x16384"])
+    # 越界探针贴着当前限额算出来，而不是写死形状：限额从 256 MiB 放宽到 1 GiB 后，
+    # 原来写死的 8192x16384（fp16 下正好 256 MiB）不再越界，这条守卫会静默变成
+    # 「什么都不测」还报绿。这里取满宽的一整行字节数，再多要一行。
+    cols = 16384
+    rows = driver.MAX_STORAGE_BYTES // (2 * cols) + 1
+    oversized = f"{rows}x{cols}"
+    args = SimpleNamespace(resume_only=False, workload=[oversized])
     with pytest.raises(ValueError): selected_workloads(args)
     args.resume_only = True
     with pytest.raises(ValueError, match="mutually exclusive"): selected_workloads(args)
     # Exercise the byte check independently of argparse's fixed whitelist.
-    monkeypatch.setattr(driver, "EXTENDED_WORKLOADS", ((8192, 16384),))
+    monkeypatch.setattr(driver, "EXTENDED_WORKLOADS", ((rows, cols),))
     args.resume_only = False
     with pytest.raises(ValueError, match="storage/scalar limit"): selected_workloads(args)
 
