@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Optional, TextIO
 
 from .. import __version__
+from ..core.task_declaration import SUPPORTED_PRECISIONS
 from ..app.hitl_tools import (CANDIDATE_ORIGINS, TOOL_VERSION, ToolError, autonomous_status, cancel_task, bench, normalize_declaration,
                          capabilities, prepare, repair, run_autonomous, verify)
 from ..execute.fake_backend.config import PROFILES, SCENARIOS
@@ -296,7 +297,7 @@ def _tool_definitions(host_mode=None) -> list[dict]:
                                                  "relu / attention / fused_layernorm_residual 等）。"
                                                  "**必填** —— 不再从 request 的关键词推断。"
                                                  "拿不准就先调 operator_normalize 起草一份")},
-                    "precision": {"type": "string", "enum": ["fp32", "fp16"],
+                    "precision": {"type": "string", "enum": list(SUPPORTED_PRECISIONS),
                                   "description": ("精度。**必填** —— 不再从 request 的关键词推断。"
                                                   "拿不准就先调 operator_normalize 起草一份")},
                     "hardware": {"type": "string", "description": "默认 mock_gpu"},
@@ -400,7 +401,7 @@ def _tool_definitions(host_mode=None) -> list[dict]:
                     "run_dir": {"type": "string"},
                     "operator": {"type": "string",
                                  "description": "算子类型（闭合词表）；**必填**，不从 request 推断"},
-                    "precision": {"type": "string", "enum": ["fp32", "fp16"],
+                    "precision": {"type": "string", "enum": list(SUPPORTED_PRECISIONS),
                                   "description": "精度；**必填**，不从 request 推断"},
                     "hardware": {"type": "string"},
                     "dsl": {"type": "string"},

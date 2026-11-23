@@ -27,7 +27,7 @@
     "operator_status"
   ],
   "schema": "dsh-operator-manifest-v1",
-  "tool_version": 12,
+  "tool_version": 13,
   "tools": [
     {
       "host": true,

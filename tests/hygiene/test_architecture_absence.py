@@ -163,6 +163,43 @@ class TestOneAuthorityForTheDeclarationVocabulary:
         assert caught.value.code == "unsupported_schema_version"
 
 
+class TestTheDrafterOnlyProposesWhatTheToolAccepts:
+    """`normalize` 说「可用」的提案，`prepare` 必须真的收得下。
+
+    两张精度表分开的后果实测过：`normalize` 对 `relu bf16` / `relu int8` 都返回
+    `state.ok=true`，提案里就带着 bf16 / int8，而公开的 prepare schema 只收 fp32/fp16。
+    宿主照着提案回填，当场违反工具契约 —— 而两边都自称是对的。
+    """
+
+    #: 形状按算子给：matmul 要 3 维，其余二维。形状错会让 prepare 因别的原因拒绝，
+    #: 那样这条用例就测不到它想测的东西。
+    PROMPTS = (('relu bf16', [[4, 8]]), ('relu int8', [[4, 8]]),
+               ('relu fp16', [[4, 8]]), ('matmul fp32', [[4, 8, 8]]),
+               ('layernorm fp16', [[4, 8]]), ('softmax fp32', [[4, 8]]))
+
+    def test_every_proposal_marked_ok_survives_prepare(self, tmp_path):
+        from operator_agent.app import hitl_tools as tools
+        for prompt, shapes in self.PROMPTS:
+            draft = tools.normalize_declaration({'request': prompt, 'shapes': shapes})
+            proposed = dict(draft['proposed'])
+            if not draft['state']['ok']:
+                # 拒绝也要**可归因**：得说出是哪一格的取值不支持。
+                assert draft['state']['unsupported_fields'], prompt
+                continue
+            proposed.pop('schema_version', None)
+            prepared = tools.prepare(proposed, tmp_path / prompt.replace(' ', '-'))
+            assert prepared['ok'] is True, prompt
+
+    def test_the_two_vocabularies_are_one_list(self):
+        """工具 schema 的精度枚举与本层的清单是同一份值，不是抄的。"""
+        from operator_agent.app import mcp_server
+        from operator_agent.core.task_declaration import SUPPORTED_PRECISIONS
+        prepare = next(tool for tool in mcp_server._tool_definitions(host_mode=True)
+                       if tool['name'] == 'operator_prepare')
+        assert prepare['inputSchema']['properties']['precision']['enum'] == list(
+            SUPPORTED_PRECISIONS)
+
+
 class TestTheWorkflowSwitchBehavesAsDocumented:
     """默认值是一条架构决定，所以它要被钉住 —— 钉的是**现实**，不是愿望。
 

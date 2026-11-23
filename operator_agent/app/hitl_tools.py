@@ -77,7 +77,9 @@ from ..execute.fake_backend.config import tool_context
 #: 10: 显式 fake 后端、run 场景/模型配置与 test_only 执行上下文。
 #: 11: host workflow 的领域材料、跨调用验证预算和预留的独立终评。
 #: 12: 宿主模型预算政策、收据与不重置原任务的恢复入口。
-TOOL_VERSION = 12
+#: 13: `operator_prepare` 的 `operator` / `precision` 变成**必填**（判据层不再从
+#:     `request` 推关键词）；新增 `operator_normalize`；`request` 降级为审计字段。
+TOOL_VERSION = 13
 
 #: 允许进 `declaration` 的键（§6.3 的白名单）。**没列在这里的一律拒绝** ——
 #: 「先收下、以后再判断」是这一层最不能有的形状：它等于给未来开了一个没说出口的口子。

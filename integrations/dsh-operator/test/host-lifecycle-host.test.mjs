@@ -67,7 +67,7 @@ function writable(dir) {
   for (const item of readdirSync(dir, { withFileTypes: true })) if (item.isDirectory()) writable(join(dir, item.name));
 }
 function prepare(runDir, maxCalls = 8, tokens = 1024, total = 8192) {
-  return { tool: "mcp__operator__operator_prepare", args: { request: "relu fp32", shapes: [[4, 8]], precision: "fp32",
+  return { tool: "mcp__operator__operator_prepare", args: { operator: "relu", request: "relu fp32", shapes: [[4, 8]], precision: "fp32",
     dsl: "python", hardware: "mock_gpu", run_dir: runDir,
     host_budget: { wall_clock_s: 120, max_verifications: 3, max_model_calls: maxCalls,
       max_output_tokens_per_call: tokens, total_output_token_reservations: total } } };

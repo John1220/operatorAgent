@@ -80,7 +80,8 @@ def test_mcp_schema_declares_finite_positive_budget_options():
         assert properties[key]['default'] == value
     assert properties['wall_clock_s']['exclusiveMinimum'] == 0
     assert properties['max_llm_calls']['minimum'] == properties['oracle_total']['minimum'] == 1
-    assert ht.TOOL_VERSION == 12
+    # 13: prepare 的 operator/precision 变必填、新增 operator_normalize
+    assert ht.TOOL_VERSION == 13
 
 
 def test_cli_forwards_all_three_budget_options(tmp_path, monkeypatch, capsys):

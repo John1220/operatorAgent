@@ -58,7 +58,13 @@ DOCUMENTED_DEFAULTS = {
     "complexity": "medium",
 }
 
-_PRECISIONS = {p.value: p for p in Precision}
+#: **受支持**的精度。注意这不等于 `Precision` 枚举：枚举里有 bf16/int8，但本层没有
+#: 可用的正确性 profile，也不在公开工具契约里。两张表分开的后果是 `normalize` 会把
+#: bf16 标成可用、宿主照着回填、`prepare` 再拒 —— 所以这里只留一份，工具 schema 与
+#: 本模块都从它生成。
+SUPPORTED_PRECISIONS = ('fp32', 'fp16')
+
+_PRECISIONS = {name: Precision(name) for name in SUPPORTED_PRECISIONS}
 _COMPLEXITIES = {c.value: c for c in TaskComplexity}
 
 #: 硬件 → (compute_units, warp_size)。这是**确定的事实查表**, 不是对请求的解释:
@@ -294,13 +300,21 @@ def field_state(raw: dict) -> dict:
     if not isinstance(raw, dict):
         return {"ok": False, "error": "bad_declaration",
                 "detail": "declaration 必须是一个对象"}
+    missing = [k for k in ("request", "shapes", "operator", "precision") if not raw.get(k)]
+    unknown = sorted(k for k in raw if k not in ALLOWED_DECLARATION_KEYS)
+    # 取值也要在这里拦：只报「缺不缺」会放过 bf16/int8 这类**有值但不支持**的提案，
+    # 宿主照着回填，prepare 再拒 —— 契约就分家了。
+    bad_values = []
+    operator = str(raw.get("operator") or "").strip().lower()
+    if operator and operator not in SourceSpec._KNOWN_KERNEL_TYPES:
+        bad_values.append(operator)
+    precision = str(raw.get("precision") or "").strip().lower()
+    if precision and precision not in _PRECISIONS:
+        bad_values.append(precision)
     return {
-        "ok": not (sorted(k for k in raw if k not in ALLOWED_DECLARATION_KEYS)
-                   or [k for k in REQUIRED_SEMANTIC_FIELDS if not str(raw.get(k, "")).strip()]
-                   or not raw.get("shapes")),
+        "ok": not (missing or unknown or bad_values),
         "schema_version": DECLARATION_SCHEMA,
-        "missing_fields": [k for k in ("request", "shapes", "operator", "precision")
-                           if not raw.get(k)],
-        "unsupported_fields": sorted(k for k in raw
-                                     if k not in ALLOWED_DECLARATION_KEYS),
+        "missing_fields": missing,
+        "unsupported_fields": sorted(unknown + bad_values),
+        "supported_precisions": list(SUPPORTED_PRECISIONS),
     }

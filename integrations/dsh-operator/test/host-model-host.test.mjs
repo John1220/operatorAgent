@@ -148,7 +148,8 @@ export function apply(ctx, config) {
         assert.ok(prepare?.function.parameters.properties.host_budget.properties.max_model_calls,
           "MCP prepare must expose the frozen model policy");
         respondTool(response, "mcp__operator__operator_prepare", {
-          request: "relu fp32", shapes: [[4, 8]], hardware: "mock_gpu", dsl: "python", precision: "fp32",
+          operator: "relu", request: "relu fp32", shapes: [[4, 8]], hardware: "mock_gpu", dsl: "python",
+          precision: "fp32",
           run_dir: runDir, host_budget: { wall_clock_s: 120, max_verifications: 3,
             max_model_calls: scenario.maxModelCalls, max_output_tokens_per_call: 128,
             total_output_token_reservations: 128 },
