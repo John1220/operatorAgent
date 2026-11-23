@@ -166,13 +166,19 @@ _METRIC_KEYS = (
 class ToolError(ValueError):
     """可归因的拒绝。`code` 是给机器读的稳定 token，`detail` 是给人读的原话。"""
 
-    def __init__(self, code: str, detail: str = ""):
+    def __init__(self, code: str, detail: str = "", *, extra: Optional[dict] = None):
         self.code = code
         self.detail = detail or code
+        # `extra` 是**给机器读的结构化补充**：缺哪些字段、哪些不受支持、哪些取了默认值。
+        # 此前这些只折进 `detail` 那句中文里，宿主只能正字串 —— 而它本来就是结构化的，
+        # 折成文本等于要求每个调用方另写一个解析器。
+        self.extra = dict(extra or {})
         super().__init__(f"{code}: {self.detail}")
 
     def as_dict(self) -> dict:
-        return {"ok": False, "error": self.code, "detail": self.detail}
+        payload = {"ok": False, "error": self.code, "detail": self.detail}
+        payload.update(self.extra)
+        return payload
 
 
 # ── 小工具 ────────────────────────────────────────────────────────────────
@@ -263,7 +269,11 @@ def build_task(declaration: dict) -> TaskSchema:
     try:
         decl, _assumptions = parse_declaration(declaration)
     except DeclarationError as error:
-        raise ToolError(error.code, error.detail) from error
+        # 拒绝要**可行动**：缺哪些字段、哪些不支持，是结构化的，就按结构化交出去，
+        # 不要只折进 detail 那句中文让宿主去正字串。
+        extra = {key: value for key, value in error.as_dict().items()
+                 if key not in ('ok', 'error', 'detail')}
+        raise ToolError(error.code, error.detail, extra=extra) from error
 
     compute_units, warp_size = hardware_profile(decl.hardware)
     fused_ops, semantic_parameters = unresolved_semantics(decl.request, decl.operator)

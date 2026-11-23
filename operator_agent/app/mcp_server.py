@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Optional, TextIO
 
 from .. import __version__
-from ..app.hitl_tools import (CANDIDATE_ORIGINS, TOOL_VERSION, ToolError, autonomous_status, cancel_task, bench,
+from ..app.hitl_tools import (CANDIDATE_ORIGINS, TOOL_VERSION, ToolError, autonomous_status, cancel_task, bench, normalize_declaration,
                          capabilities, prepare, repair, run_autonomous, verify)
 from ..execute.fake_backend.config import PROFILES, SCENARIOS
 
@@ -116,6 +116,10 @@ HOST_INSTRUCTIONS = """\
 插件只提供冻结契约、领域知识、确定性诊断、执行与验证，不调用内部模型。
 DSH 中工具名为 mcp__operator__*。
 
+声明的语义字段 `operator` / `precision` 必须由你显式给出 —— 本层不做关键词推断，
+缺了会以 `explicit_declaration_required` 拒绝并返回 `missing_fields`。拿不准就先调
+operator_normalize 起草一份，核过每个字段后再交给 operator_prepare；提案不冻结任何东西。
+
 流程：operator_prepare 冻结任务及有限验证预算；operator_context(phase=generate,
 backend=实际后端) 取得权威任务事实、ABI、生成规约和指导材料；结合用户意图生成完整
 kernel 源码，调用 operator_verify(code=..., candidate_origin=outer)。代码生成前必须取得
@@ -160,14 +164,16 @@ operator_cancel(run_dir, invocation_id) 取消在飞验证，随后查 status �
 """
 
 HOST_TOOLS = frozenset(('operator_prepare', 'operator_resume', 'operator_context', 'operator_verify',
-                        'operator_status', 'operator_cancel', 'operator_capabilities'))
+                        'operator_status', 'operator_cancel', 'operator_capabilities',
+                        'operator_normalize'))
 
 #: 不消耗模型预算的工具：只读，或只做本地状态迁移。
 #: JS 的模型门靠它区分「这次调用要不要预留额度」。这张表此前是 JS 里的第三个手抄
 #: 副本（`host-model-budget.mjs` 的 `READ_ONLY`）—— 与工具面同源、随清单发出去，
 #: 才能保证「工具面变了，门也跟着变」。
 READ_ONLY_TOOLS = frozenset(('operator_capabilities', 'operator_status',
-                             'operator_resume', 'operator_context'))
+                             'operator_resume', 'operator_context',
+                             'operator_normalize'))
 
 #: 会把会话绑定到某个任务的工具。绑定之后其余工具才被允许 —— JS 侧的三处
 #: 「BINDS / BIND_TOOLS」都是这张表的手抄副本。
@@ -281,13 +287,14 @@ def _tool_definitions(host_mode=None) -> list[dict]:
                     "shapes": _SHAPES,
                     "run_dir": {"type": "string", "description": "回合目录（绝对路径更好；调用方拥有布局）"},
                     # `operator` / `precision` 没有默认值：本层不做关键词推断，缺了就拒绝。
-                    # 拿不准就先调 `operator_normalize` 起草一份，核过再回填。
                     "operator": {"type": "string",
                                  "description": ("算子类型（闭合词表：matmul / softmax / layernorm / "
                                                  "relu / attention / fused_layernorm_residual 等）。"
-                                                 "**必填** —— 不再从 request 的关键词推断")},
+                                                 "**必填** —— 不再从 request 的关键词推断。"
+                                                 "拿不准就先调 operator_normalize 起草一份")},
                     "precision": {"type": "string", "enum": ["fp32", "fp16"],
-                                  "description": "精度。**必填** —— 不再从 request 的关键词推断"},
+                                  "description": ("精度。**必填** —— 不再从 request 的关键词推断。"
+                                                  "拿不准就先调 operator_normalize 起草一份")},
                     "hardware": {"type": "string", "description": "默认 mock_gpu"},
                     "dsl": {"type": "string", "description": "默认 python（真机上是 triton）"},
                     "min_speedup": {"type": "number", "description": "性能门槛"},
@@ -505,6 +512,25 @@ def _tool_definitions(host_mode=None) -> list[dict]:
         'type': 'string', 'enum': ['explore', 'final'], 'default': 'explore',
         'description': 'host task 的探索验证或预留的独立终评；final 需相同源码已完整 L2 通过。'}
     if host_mode:
+        definitions.insert(0, {
+            'name': 'operator_normalize',
+            'description': (
+                "把自然语言**起草**成一份它将要提交的声明，交给宿主核对。不冻结、不落盘、"
+                "不跑 GPU、不调 LLM。返回 `proposed`（一份显式字段的声明）、`state`（缺什么 / "
+                "不支持什么）、`next`。**提案不会自己变成契约**：必须由宿主核过、必要时改过，"
+                "再以显式字段回填给 `operator_prepare`。拿不准某任务的 operator/precision 时用它。"),
+            'inputSchema': {'type': 'object', 'additionalProperties': False,
+                'required': ['request', 'shapes'],
+                'properties': {
+                    'request': {'type': 'string', 'description': '自然语言请求'},
+                    'shapes': _SHAPES,
+                    'hardware': {'type': 'string'},
+                    'dsl': {'type': 'string'},
+                    'framework': {'type': 'string'},
+                    'min_speedup': {'type': 'number'},
+                    'notes': {'type': 'string'},
+                }},
+        })
         definitions.append({
             'name': 'operator_resume',
             'description': '恢复原 host 任务的身份、预算与候选引用；不重置截止/额度，不调用模型。根据 next_action/next_context 继续或报告停止。',
@@ -653,6 +679,8 @@ def _call_tool(name: str, arguments: dict) -> dict:
         if code_file:
             code = Path(code_file).read_bytes().decode("utf-8")
         return _text_result(repair(run_dir, code, **args))
+    if name == "operator_normalize":
+        return _text_result(normalize_declaration(dict(arguments or {})))
     if name == "operator_status":
         return _text_result(autonomous_status(**dict(arguments or {})))
     if name == "operator_cancel":

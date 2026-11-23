@@ -70,6 +70,68 @@ class TestTheManifestDoesNotRot:
         assert set(committed["read_only_tools"]) <= set(committed["host_tools"])
 
 
+class TestTheDescriptionsOnlyNameToolsThatExist:
+    """工具描述里提到的工具必须真的存在。
+
+    这条是**我自己踩出来的**：`operator_prepare` 的 schema 曾经写着「拿不准就先调
+    `operator_normalize` 起草一份」，而那个工具并不存在。宿主照着描述做会直接失败，
+    而且没有任何东西会响 —— 描述是写给模型读的契约，读到不存在的工具名是一种
+    不会被执行的错误。
+    """
+
+    #: 描述里出现、但**不是**工具名的 `operator_*` 词。
+    NOT_TOOLS = {"operator_agent"}
+
+    @staticmethod
+    def _strings(node):
+        """schema 里所有字符串（描述、字段描述、枚举……）。"""
+        if isinstance(node, str):
+            yield node
+        elif isinstance(node, dict):
+            for value in node.values():
+                yield from TestTheDescriptionsOnlyNameToolsThatExist._strings(value)
+        elif isinstance(node, list):
+            for item in node:
+                yield from TestTheDescriptionsOnlyNameToolsThatExist._strings(item)
+
+    def test_every_named_tool_can_actually_be_called(self):
+        """整个 inputSchema 一起扫，不止工具描述 —— 字段描述同样会被模型读到。"""
+        tools = mcp_server._tool_definitions(host_mode=True)
+        # 「提到」不等于「可调」：`candidate_origin` 的描述要解释「inner_fixer 是
+        # operator_repair 的内层模型改的」，那是在讲归因词汇，不是叫模型去调。
+        # 所以判据是「这个名字在**某个**模式里真的被定义过」，而不是「在 host 面里」。
+        defined = {tool["name"] for mode in (True, False)
+                   for tool in mcp_server._tool_definitions(host_mode=mode)}
+        mentioned = set()
+        for tool in tools:
+            for text in self._strings(tool.get("inputSchema", {})):
+                mentioned.update(re.findall(r"\boperator_[a-z_]+", text))
+            mentioned.update(re.findall(r"\boperator_[a-z_]+", tool.get("description", "")))
+        dangling = sorted(mentioned - defined - self.NOT_TOOLS)
+        assert dangling == [], (
+            f"工具描述里提到了不存在的工具 {dangling} —— 模型会照着调，然后失败")
+
+    def test_the_instructions_point_at_the_drafter(self):
+        """`instructions` 是宿主读的第一段契约，同样会提到工具名，同样会漂。"""
+        imported = set(re.findall(r"\boperator_[a-z_]+", mcp_server.INSTRUCTIONS))
+        defined = {tool["name"] for mode in (True, False)
+                   for tool in mcp_server._tool_definitions(host_mode=mode)}
+        dangling = sorted(imported - defined - self.NOT_TOOLS)
+        assert dangling == [], f"instructions 里提到了不存在的工具 {dangling}"
+
+    def test_the_operator_field_points_at_the_drafter(self):
+        """缺 `operator` / `precision` 时该去哪儿起草，字段描述里得说清楚。
+
+        宿主是在读 `operator` 这一格时才发现自己不知道填什么的，入口就该在那里；
+        只写在工具描述里，读者已经错过那一屏了。
+        """
+        prepare = next(tool for tool in mcp_server._tool_definitions(host_mode=True)
+                       if tool["name"] == "operator_prepare")
+        for field in ("operator", "precision"):
+            described = prepare["inputSchema"]["properties"][field]["description"]
+            assert "operator_normalize" in described, f"{field} 的描述没给起草入口"
+
+
 class TestThereIsNoSecondCopyOfTheToolList:
     def test_the_js_budget_gate_reads_the_manifest(self):
         loader = (PLUGIN / "manifest.mjs").read_text(encoding="utf-8")

@@ -7,6 +7,7 @@
     "operator_cancel",
     "operator_capabilities",
     "operator_context",
+    "operator_normalize",
     "operator_prepare",
     "operator_resume",
     "operator_status",
@@ -16,6 +17,7 @@
   "read_only_tools": [
     "operator_capabilities",
     "operator_context",
+    "operator_normalize",
     "operator_resume",
     "operator_status"
   ],
@@ -39,8 +41,13 @@
     },
     {
       "host": true,
+      "name": "operator_normalize",
+      "schema_hash": "f595ede40e08d6e27a1bef790ed65a289bd6d5e219945fc81297c0d08b303178"
+    },
+    {
+      "host": true,
       "name": "operator_prepare",
-      "schema_hash": "18ff5bf840ffe5909c366542f8d58d3b398f3dfec21c7a8057ef97d14e1b2de5"
+      "schema_hash": "f7d5c927fc3324fd6ca9bb5fe3909d60118bec94bd585085063c13641a8c353b"
     },
     {
       "host": true,
@@ -58,5 +65,5 @@
       "schema_hash": "54967be0079cc37c10fd2a1edd6e9fb756261b4c0b4f4fb1c134418a9e945c3b"
     }
   ],
-  "tools_hash": "20fe1e0eb01f0800b01c0ef9532304410c209ed5bcae7d2b6fc446375a2b1dee"
+  "tools_hash": "ef3e4b9fdbea25e87dd76aa05deae62dde9f441091b3798fc84b25b8bb1aafb1"
 }
