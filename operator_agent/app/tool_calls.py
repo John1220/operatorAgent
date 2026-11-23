@@ -14,13 +14,16 @@ import time
 from ..execute.task_clock import monotonic
 import uuid
 
-from ..app.autonomous import _atomic_json
 from ..execute import exec_guard
 from ..execute.fake_backend.config import tool_context
 from ..execute.task_cancellation import (cancellation, launch_identity, partial_artifacts,
                                 publish_json, read_json, request_cancel, stop_event)
 
 LONG_TOOLS = frozenset(('operator_verify', 'operator_repair', 'operator_bench'))
+
+#: 三个长工具各自的 Job 类型。词表在 `core.task_journal`，这里只做名字映射。
+JOB_OPERATION = {'operator_verify': 'verify', 'operator_bench': 'bench',
+                 'operator_repair': 'repair'}
 _REPAIR_CONTEXT = None
 _HOST_CONTEXT = None
 
@@ -48,6 +51,85 @@ def _start_call_worker(directory):
     return exec_guard.start_task_worker([sys.executable, '-m', 'operator_agent.app.tool_calls',
         str(directory)], cwd=str(Path(__file__).resolve().parents[2]),
         log_path=directory/'execution.log')
+
+
+class _JobJournal:
+    """这一次 invocation 的 Job 事件：queued → started → finished。
+
+    两条边界是刻意的：
+
+    * **账本不存在就不写**。缺账本时补一条 `task_prepared`，等于替一个没有契约记录的
+      目录伪造「已准备」——那是这套东西里最贵的一种谎。旧目录照旧跑，只是没有账。
+    * **账本拒绝时不抛给调用方**。任务封账、账本损坏时，调用仍然执行（拒绝执行是另一件
+      事，得有另一个决定），但拒绝的理由如实挂在 `status['journal']` 与响应体上，
+      不静默变成空操作。
+    """
+
+    def __init__(self, run, invocation, operation, status):
+        from ..core import task_journal
+        self.run = Path(run)
+        self.invocation = invocation
+        self.operation = operation
+        self.status = status
+        self.mode = 'journal'
+        self.error = None
+        try:
+            events = task_journal.read_events(self.run)
+        except task_journal.JournalError as exc:
+            self.mode, self.error = 'refused', f'{exc.code}: {exc.detail}'
+            self._publish()
+            return
+        if not events:
+            self.mode = 'absent'
+            self._publish()
+            return
+        try:
+            if task_journal.fold(events)['task']['phase'] == 'prepared':
+                # 第一个 Job 的发起方把任务从「已准备」推到「进行中」。
+                task_journal.append(self.run, 'task_activated')
+        except task_journal.JournalError as exc:
+            self.mode, self.error = 'refused', f'{exc.code}: {exc.detail}'
+        self._publish()
+
+    def _publish(self):
+        self.status['journal'] = dict(mode=self.mode, **({'error': self.error} if self.error else {}))
+
+    def _append(self, kind, **fields):
+        from ..core import task_journal
+        if self.mode != 'journal':
+            return
+        try:
+            task_journal.append(self.run, kind, job_id=self.invocation,
+                                invocation=self.invocation,
+                                operation=self.operation, **fields)
+        except task_journal.JournalError as exc:
+            # 一条写不进去，后面的也不必再试 —— 账本在这里已经不可用。
+            self.mode, self.error = 'refused', f'{exc.code}: {exc.detail}'
+            self._publish()
+
+    def queued(self):
+        self._append('job_queued', tool=self.status['tool'], stage='starting',
+                     pid=self.status['pid'], pid_identity=self.status['pid_identity'],
+                     started_at=self.status['started_at'])
+
+    def started(self):
+        """派发开始。**在起 worker 之前**写：起不来也是一次「开始了、没成」，
+        而不是一条从来没有下文的排队记录 —— 后者会让读者永远等一个不会结束的 Job。"""
+        self._append('job_started')
+
+    def finished(self, receipt, *, cleanup=None, stopped_reason='', finished_at=None):
+        """终态事件。**在 cleanup 之后**写：这条事件的意思是「这次调用结束了」，
+        所以它落地时 worker 必须已经收完 —— 读者按它判断能不能再发下一次。"""
+        fields = dict(outcome=receipt['outcome'], result=receipt['result'],
+                      stopped_reason=stopped_reason or '',
+                      finished_at=finished_at or time.time())
+        if receipt.get('result_reason'):
+            fields['result_reason'] = receipt['result_reason']
+        if isinstance(cleanup, dict):
+            fields['cleanup'] = dict(cleanup)
+        if self.status.get('worker_pid'):
+            fields['worker_pid'] = self.status['worker_pid']
+        self._append('job_finished', **fields)
 
 
 class ToolCall:
@@ -130,20 +212,25 @@ class ToolCall:
         self.process = None
         self.groups = exec_guard.OwnedGroups()
         self._last_discovery = 0.
-        self._write_status()
+        self.operation = JOB_OPERATION[name]
+        self.journal = _JobJournal(self.run, self.invocation_id, self.operation, self.status)
+        self.journal.queued()
+        self.journal.started()
         try:
             self.process = _start_call_worker(self.directory)
             self.groups.add(self.process.pid)
             self.status.update(stage='executing', worker_pid=self.process.pid)
-            self._write_status()
         except OSError as exc:
             self.status.update(phase='failed', error='worker_start_failed', detail=str(exc),
-                               finished_at=time.time())
+                               finished_at=time.time(),
+                               # 没有 worker 起过：没有东西要被回收，也不该被读成「清理状态未知」
+                               # （那会让「这次调用结束了没有」永远没有答案）。
+                               cleanup=dict(worker_reaped=False, status='worker_not_started',
+                                            remote_execution='unknown', provider_call='unknown'))
             self.response = _error('worker_start_failed', str(exc))
+            self.receipt = dict(outcome='failed', result='none',
+                                result_reason='', stopped_reason='worker_start_failed')
             self._finish()
-
-    def _write_status(self):
-        _atomic_json(self.directory/'run-status.json', self.status)
 
     def cancel(self):
         return request_cancel(self.directory, self.invocation_id)
@@ -172,7 +259,6 @@ class ToolCall:
                 self._last_discovery = monotonic()
                 if self.repair_policy:
                     self.status['budget'] = self._repair_snapshot()
-                    self._write_status()
             return None
         cleanup = (exec_guard.stop_task_worker(self.process, self.groups, graceful_s=12)
                    if reason and self.graceful_remote else
@@ -184,11 +270,9 @@ class ToolCall:
                        provider_call='unknown')
         result = read_json(self.directory/'worker-result.json') or {}
         finished = result.get('finished_monotonic')
-        valid = (result.get('invocation_id') == self.invocation_id
-                 and type(finished) in (float, int) and finished <= monotonic()
-                 and finished >= self.started_monotonic
-                 and isinstance(result.get('response'), dict))
-        if valid and (event_at is None or finished <= event_at):
+        fault = self._receipt_fault(result)
+        accepted = fault is None and (event_at is None or finished <= event_at)
+        if accepted:
             self.response = result['response']
             # Tool refusal is a completed call, not a cancelled/abandoned result.
             self.status.update(phase='done', stopped_reason='tool_returned')
@@ -199,28 +283,75 @@ class ToolCall:
         elif reason == 'budget_wall_clock':
             self.status.update(phase='done', stopped_reason=reason)
             self.response = _error('task_budget_exhausted', 'The task wall-clock budget expired.',
-                                  passed=False, phase='done', stopped_reason=reason)
+                                  passed=False, phase='done', stopped_reason=reason,
+                                  **self._result_facts(fault, 'stopped_before_receipt'))
         elif reason:
             self.status.update(phase='cancelled', stopped_reason='user_cancelled')
             self.response = _error('task_cancelled', 'The owning supervisor stopped this call.',
-                                   phase='cancelled', stopped_reason='user_cancelled')
+                                   phase='cancelled', stopped_reason='user_cancelled',
+                                   **self._result_facts(fault, 'stopped_before_receipt'))
         else:
             self.status.update(phase='failed', stopped_reason='worker_failed')
-            self.response = _error('worker_failed', 'Worker exited without a terminal result.')
+            # 这里以前只报一句 failed。worker 退出了、回执读不到，**不等于它会话失败** ——
+            # 远端那次执行很可能已经跑完。说清楚「结果未知」比猜一个结论诚实。
+            self.response = _error('worker_failed', 'Worker exited without a terminal result.',
+                                   execution_may_have_completed=True,
+                                   **self._result_facts(fault, 'receipt_absent'))
+        self.receipt = self._classify(fault=fault, accepted=accepted)
         if self.host_budget and cleanup.get('worker_reaped') is True:
-            rejected = not (valid and (event_at is None or finished <= event_at))
-            if rejected:
+            if not accepted:
+                # `reject_completed` 只在**读到并否掉**一个回执时用（它确实迟到了）。
+                # 读不到回执时账不动：worker 可能已经把证据落完，是我们没看见。
                 self.host_budget.settle_owner(self.invocation_id,
-                    outcome='cancelled' if self.status['phase']=='cancelled' else 'failed',
-                    reject_completed=True)
+                    outcome='cancelled' if self.receipt['outcome']=='cancelled' else 'failed',
+                    reject_completed=fault is None)
         if self.repair_policy and 'budget' not in self.status:
             self.status['budget'] = self._repair_snapshot()
-        elif self.repair_policy and not (valid and (event_at is None or finished <= event_at)):
+        elif self.repair_policy and not accepted:
             self.status['budget'] = self._repair_snapshot()
         self.status.update(cleanup=cleanup, cancellation=cancellation(self.directory, self.invocation_id),
             finished_at=time.time(), partial_artifacts=partial_artifacts(self.run))
         self._finish()
         return self.response
+
+    def _receipt_fault(self, result):
+        """worker 的终态回执哪里不合格；合格返回 None。**只判回执，不判结果好坏。**"""
+        if not result:
+            return 'receipt_absent'
+        if result.get('invocation_id') != self.invocation_id:
+            return 'invocation_mismatch'
+        finished = result.get('finished_monotonic')
+        if (type(finished) not in (float, int) or finished > monotonic()
+                or finished < self.started_monotonic):
+            return 'invalid_timestamp'
+        if not isinstance(result.get('response'), dict):
+            return 'receipt_absent'
+        return None
+
+    @staticmethod
+    def _result_facts(fault, stopped):
+        """`result` 说的是「回执到账了没有」，与 `outcome` 正交。"""
+        if fault is None:
+            return dict(result_state='received')
+        return dict(result_state='unknown', result_reason=stopped)
+
+    def _classify(self, *, fault, accepted):
+        """这次调用怎么记账。账不变，记录变诚实：分类只影响写下来的两个词。"""
+        if accepted:
+            return dict(outcome='completed', result='received', result_reason='')
+        if self.status['phase'] == 'cancelled':
+            outcome = 'cancelled'
+        else:
+            outcome = 'failed'          # 截止时间停的也按 failed 结：账不退款
+        if fault is None:
+            # 回执读到了，只是落在停止之后：执行确实产出了结果，只是没赶上这次调用。
+            return dict(outcome=outcome, result='received', result_reason='')
+        if self.status.get('error') == 'worker_start_failed':
+            # 没有任何 worker 起过：这不是「未知」，是「没有」。
+            return dict(outcome='failed', result='none', result_reason='')
+        if self.status['phase'] == 'failed':
+            return dict(outcome='failed', result='unknown', result_reason=fault)
+        return dict(outcome=outcome, result='unknown', result_reason='stopped_before_receipt')
 
     def _finish(self):
         body = json.loads(self.response['content'][0]['text'])
@@ -246,9 +377,14 @@ class ToolCall:
         if self.status['phase'] in ('cancelled', 'failed'):
             body.update(cleanup=self.status.get('cleanup'))
             body.setdefault('partial_artifacts', partial_artifacts(self.run))
+        if self.journal.mode == 'refused':
+            # 账本写不进去是**这一条调用**的异常，不静默：调用方要能看出事后查不到它。
+            body['task_journal'] = dict(mode='refused', error=self.journal.error)
         self.response['content'][0]['text'] = json.dumps(body, ensure_ascii=False, sort_keys=True)
         publish_json(self.directory/'result.json', self.response)
-        self._write_status()
+        self.journal.finished(self.receipt, cleanup=self.status.get('cleanup'),
+                              stopped_reason=self.status.get('stopped_reason') or '',
+                              finished_at=self.status.get('finished_at'))
 
     def close(self):
         """Shutdown path: request first, then acknowledge with the same owner."""

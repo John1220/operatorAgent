@@ -11,11 +11,27 @@ import time
 import pytest
 
 from operator_agent.app import autonomous, tool_calls
+from operator_agent.core import task_journal
 from operator_agent.execute import backend_ownership as ownership, exec_guard
 from operator_agent.execute.task_cancellation import launch_identity, request_cancel
 
 ROOT = Path(__file__).resolve().parents[2]
 INVOCATION = 'a' * 32
+
+
+def seed_task(run):
+    """这条目录的任务账本由 prepare 建立；这里只要一次调用的现场，所以直接落一条。
+
+    不再写 `run-status.json`：它已经不是任何东西的权威，写一份在那里只会让
+    「这次调用到底怎么结束的」有两个答案。
+    """
+    task_journal.append(run, 'task_prepared', task_id='fixture-task')
+    return run
+
+
+def call_facts(run, invocation):
+    """这次调用在账本里的终态记录。"""
+    return task_journal.invocation_view(run/'tool-calls'/invocation, invocation)
 
 # Runs inside the actual production worker entry point. Only the trusted work
 # dispatcher and owned backend are doubles; process signalling and receipts are real.
@@ -65,6 +81,7 @@ def test_foreground_defaults_close_owned_sessions_before_terminal_result(
         tmp_path, monkeypatch, name, persistent, event):
     monkeypatch.delenv('OPERATOR_AGENT_S4_GRACEFUL_CLEANUP', raising=False)
     (tmp_path / 'declaration.json').write_text('{}')
+    seed_task(tmp_path)
     script = WORKER + '''
 from operator_agent.app import mcp_server, tool_calls
 mcp_server.handle_message = lambda request: block(Path(sys.argv[1]))
@@ -85,13 +102,18 @@ sys.exit(tool_calls.main([sys.argv[1]]))
             assert call.cancel()['accepted']
         response = wait_for(call.poll)
         body = json.loads(response['content'][0]['text'])
-        status = json.loads((call.directory / 'run-status.json').read_text())
+        status = call_facts(tmp_path, call.invocation_id)
         expected = 'user_cancelled' if event == 'cancel' else 'budget_wall_clock'
         assert status['stopped_reason'] == expected
         assert status['cleanup']['worker_reaped'] is True
         assert status['cleanup']['remote_execution'] == 'quiescent'
         assert status['cleanup']['provider_call'] == 'unknown'
         assert status['cleanup']['all_descendants_proven'] is False
+        # 终态必须写清「结果回来了没有」：这是被外部停掉的调用，不是失败的调用。
+        assert (status['outcome'], status['result']) == (
+            'cancelled' if event == 'cancel' else 'failed', 'unknown')
+        assert status['result_reason'] == 'stopped_before_receipt'
+        assert not (call.directory / 'run-status.json').exists()
         assert (call.directory / 'backend-closed').is_file()
         assert not (call.directory / 'worker-result.json').exists()
         assert body['error'] == ('task_cancelled' if event == 'cancel' else 'task_budget_exhausted')

@@ -556,3 +556,46 @@ test("new user turn can automatically prepare a fresh task but cannot refill old
   assert.equal(b.state().records.length, 1);
   assert.equal(readFileSync(join(a.dir, MODEL_BUDGET_FILE), "utf8"), old);
 });
+
+function seedCall(dir, invocation, events) {
+  const call = join(dir, "tool-calls", invocation);
+  mkdirSync(call, { recursive: true, mode: 0o700 });
+  writeFileSync(join(call, "launch.json"), JSON.stringify({ invocation_id: invocation, kind: "tool_call" }));
+  writeFileSync(join(dir, "journal.jsonl"), events.map((event, index) => JSON.stringify({
+    schema: "operator-task-journal-v2", rev: index + 1, task_id: "a".repeat(32),
+    job_id: invocation, invocation, operation: "verify", ...event })).join("\n") + "\n");
+}
+
+test("a settled tool call lets the closed task release its directory", async t => {
+  const task = fixture(t), host = fakeHost(); t.after(host.dispose);
+  await host.emitTool(task.body);
+  await host.dispatch(provider().next);
+  seedCall(task.dir, "c".repeat(32), [
+    { kind: "job_queued", pid: process.pid },
+    { kind: "job_started", stage: "executing" },
+    { kind: "job_finished", outcome: "completed", result: "received",
+      cleanup: { worker_reaped: true, status: "reaped" } },
+  ]);
+  await host.emitTool({ ...task.body, host_task: { ...task.body.host_task, terminal: true } }, "operator_verify");
+  host.native({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+  host.native({ type: "turn/start", data: { turn: 2 } });
+  host.native({ type: "user/message", data: { role: "user", source: { kind: "user" } } });
+  assert.equal(host.guard(PREFIX + "operator_prepare", { run_dir: join(task.dir, "next") }), undefined,
+    "a settled call no longer blocks the next task");
+});
+
+test("an in-flight tool call keeps the closed task from releasing its directory", async t => {
+  const task = fixture(t), host = fakeHost(); t.after(host.dispose);
+  await host.emitTool(task.body);
+  await host.dispatch(provider().next);
+  seedCall(task.dir, "d".repeat(32), [
+    { kind: "job_queued", pid: process.pid },
+    { kind: "job_started", stage: "executing" },
+  ]);
+  await host.emitTool({ ...task.body, host_task: { ...task.body.host_task, terminal: true } }, "operator_verify");
+  host.native({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+  host.native({ type: "turn/start", data: { turn: 2 } });
+  host.native({ type: "user/message", data: { role: "user", source: { kind: "user" } } });
+  assert.match(host.guard(PREFIX + "operator_prepare", { run_dir: join(task.dir, "next") }),
+    /未结算调用|未回收/);
+});

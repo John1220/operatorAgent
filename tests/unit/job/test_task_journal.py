@@ -306,3 +306,48 @@ def test_replay_refuses_an_out_of_order_stream(tmp_path):
     with pytest.raises(j.JournalError) as caught:
         j.fold(j.read_events(tmp_path))
     assert caught.value.code == 'journal_bad_transition'
+
+
+DECL = dict(operator='relu', request='relu fp32', shapes=[[4, 8]], precision='fp32',
+            dsl='python')
+
+
+def test_prepare_records_the_task_once_and_keeps_its_identity(tmp_path):
+    """`task_prepared` 只有 prepare 一个写者，且重复 prepare 不追加第二条。
+
+    重复时不追加，是因为这条事件断言的是「这个目录有契约」——它要么发生过，
+    要么没发生过，不该按调用次数增长。
+    """
+    from operator_agent.app import hitl_tools as ht
+    ht.prepare(DECL, tmp_path)
+    events = j.read_events(tmp_path)
+    assert [event['kind'] for event in events] == ['task_prepared']
+    recorded = json.loads((tmp_path/'run.json').read_text())['task_id']
+    assert events[0]['task_id'] == recorded and recorded
+    ht.prepare(DECL, tmp_path)
+    assert len(j.read_events(tmp_path)) == 1
+    # 后面的写者不必各自去读 run.json：缺省就从流里继承同一个身份。
+    j.append(tmp_path, 'task_activated')
+    queued = j.append(tmp_path, 'job_queued', job_id='job-1', operation='verify',
+                     invocation='inv-1')
+    assert queued['task_id'] == recorded
+
+
+def test_prepare_refuses_a_closed_task_directory(tmp_path):
+    """封账之后再准备 = 想在同一目录开第二段工作。那件事的正确做法是新目录。"""
+    from operator_agent.app import hitl_tools as ht
+    ht.prepare(DECL, tmp_path)
+    j.append(tmp_path, 'task_closed', outcome='completed', reason='passed')
+    with pytest.raises(ht.ToolError) as caught:
+        ht.prepare(DECL, tmp_path)
+    assert caught.value.code == 'task_closed'
+
+
+def test_prepare_refuses_on_an_unreadable_journal(tmp_path):
+    """账本读不动时不再往里写：那种流已经不能当权威，继续写只会让「哪份是对的」更说不清。"""
+    from operator_agent.app import hitl_tools as ht
+    j.path_for(tmp_path).write_text('{"schema": "operator-task-journal-v2", "rev": 1, "kin',
+                                    encoding='utf-8')
+    with pytest.raises(ht.ToolError) as caught:
+        ht.prepare(DECL, tmp_path)
+    assert caught.value.code == 'task_journal_unusable'

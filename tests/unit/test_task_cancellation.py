@@ -18,6 +18,7 @@ pytestmark = pytest.mark.serial
 
 from operator_agent.execute.task_clock import monotonic
 from operator_agent.app import autonomous, hitl_tools as ht
+from operator_agent.core import task_journal
 from operator_agent.execute import exec_guard
 from operator_agent.execute.task_cancellation import (cancellation, launch_identity, publish_json,
                                              request_cancel, stop_event)
@@ -200,6 +201,31 @@ def test_lost_owner_and_reused_status_pid_are_explicit_unknown(tmp_path, monkeyp
     status = ht.autonomous_status(run, identity)
     assert status['phase'] == 'lost' and status['cleanup']['status'] == 'cleanup_unknown'
     assert not (run/'cancel-request.json').exists()
+
+
+def test_a_tool_call_owner_is_read_from_the_task_journal(tmp_path, monkeypatch):
+    """tool-call 目录没有状态文件了：owner 与相位必须从任务账本读出来。
+
+    这一条钉的是「换了一个来源，判据没变」：账本说 running + 监督者 PID 已换人
+    ⇒ 仍然是 `lost`，不是「还在跑」。
+    """
+    run = tmp_path/'run'
+    run.mkdir()
+    identity = 'b'*32
+    call = run/'tool-calls'/identity
+    call.mkdir(parents=True)
+    launch_identity(call, identity, kind='tool_call', tool='operator_verify')
+    task_journal.append(run, 'task_prepared', task_id='fixture-task')
+    task_journal.append(run, 'task_activated')
+    task_journal.append(run, 'job_queued', job_id=identity, invocation=identity,
+                        operation='verify', pid=os.getpid(), pid_identity='old-owner-start')
+    task_journal.append(run, 'job_started', job_id=identity, invocation=identity,
+                        operation='verify', worker_pid=4242)
+    monkeypatch.setattr(exec_guard, 'process_identity', lambda pid: 'different-process-start')
+    response = request_cancel(call, identity)
+    assert response['phase'] == 'lost' and not response['accepted']
+    assert response['reason'] == 'owner_unavailable'
+    assert not (call/'cancel-request.json').exists()
 
 
 def test_cleanup_signal_failure_and_failed_discovery_remain_unknown(monkeypatch):

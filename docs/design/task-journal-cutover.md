@@ -1,6 +1,7 @@
 # 任务状态收口：journal 切流计划
 
-状态：**权威层已完成并有守卫；尚未接任何写入方。** 本文只记「接下来怎么切」，不重复
+状态：**权威层已完成并有守卫；写入方已接两个**（`prepare` 发 `task_prepared`，
+`ToolCall` 发 `task_activated` + `job_*`）。本文只记「接下来怎么切」，不重复
 设计理由——那些在 `operator_agent/core/task_journal.py` 的模块文档里。
 
 ## 进度（2026-11-24，接手先读这一节）
@@ -12,11 +13,11 @@
 | `48f3bd2` | 工具契约收齐：两处 DSH 验收输入补 `operator`、精度词表收敛成一份、`tool_version` 12→13 |
 | `091f813` | journal 状态转换：`admit()` 让 `append` 与 `fold` 共用顺序判据（终态不可回退、Job 事件要求 active） |
 | `8e8f9c0` | 旧任务只读恢复：`legacy_task_view()` 按各自身份读回契约 / 两本账 / 交付源码，A4 真实产物做回归 |
+| 本轮的 `feat(journal)` | **落地顺序第 1 步**：`ToolCall` 接 journal（详见下面第 1 步的「已完成」） |
 
 接下来两件事，按此顺序：
 
-1. **接 journal 的写入方**（本文下面的五步）。第一步是 `ToolCall`——它是
-   verify / profile / bench 三者共用的底座，改一个覆盖三条路径。
+1. **接 journal 的写入方**（本文下面的五步）。**第 1 步已做完**；剩第 2–5 步。
 2. **profile 搬完**：`ncu_profile` / `gpu_lease` / `profile_budget` 已搬；
    还差把租约接进 `HostTaskBudget.reserve`，判据是
    `tests/unit/profile/test_gpu_lease_across_tasks.py` 里那 4 条 skip
@@ -27,6 +28,11 @@
 - 3 条需要 `ps` 或嵌套沙箱的用例在本机会红（`test_supervisor_kills_blocked_worker…`、
   `test_cancel_cleans_owned_sessions…`、`test_the_c_arm_runs_inside_a_repo_blind_sandbox`）。
 - `test_remaining_deadline_interrupts_blocked_model_request` 在全量负载下偶发超时，单跑不复现。
+- `tests/acceptance/phase1/test_rehearsal.py` 在**与别的套件同进程连跑**时偶发一次
+  `result['phase'] == 'failed'`（八格 worker 里有格子超时）；单跑与第二次连跑都不复现。
+  断它之前先单跑一遍。
+- `tests/hygiene/.../test_no_credential_shaped_content` 是**真红**：`tests/unit/resume/
+  test_legacy_resume.py:16` 里写死了本机 A4 产物的绝对路径。与本次切流无关。
 - `tests/acceptance` 已改成按能力探针跳过；跑之前先 `python -m benchmarks.experiments.s5.s5_rebuild_deps`
   重建依赖树，否则 118 条会 skip。
 
@@ -65,14 +71,21 @@ job_finished(outcome='failed', result='unknown', result_reason='receipt_absent')
 
 并且**不再** `reject_completed`。账不变，记录变诚实。
 
+> **已修（第 1 步）**：终态现在分两支。回执读不到 ⇒ `result=unknown` +
+> `result_reason ∈ {receipt_absent, invocation_mismatch, invalid_timestamp}`，
+> 结算用 `reject_completed=False`（`settlement_basis='worker_reaped'`，已完成记录不动）；
+> 回执读到了、只是落在停止之后 ⇒ `result=received` + `outcome=cancelled|failed`，
+> 这一支才用 `reject_completed=True`。`result=none` 只用于「根本没有 worker 起过」。
+
 ## 实测影响面
 
 | 面 | 数量 | 位置 |
 |---|---|---|
-| Python 状态写入方 | 4 | `tool_calls` / `autonomous` / `task_cancellation` / `hitl_tools` |
-| JS 状态读取方 | 2 | `index.mjs` / `host-model-budget.mjs:89` |
-| 直接构造 `ToolCall` 的测试 | 6 个文件 | 见下「逐文件」 |
-| 引用这两个状态文件的测试/脚本 | 8 单测 + 2 JS + 5 benchmark | — |
+| Python 状态写入方 | **1 条路径**（原 4） | `autonomous`（含 `hitl_tools.run_autonomous` 的启动态）—— `tool_calls` 已切走 |
+| Python 状态读取方 | 2 | `hitl_tools.autonomous_status`（跑旧目录时）、`task_cancellation.call_status`（兜底） |
+| JS 状态读取方 | 1 | `host-model-budget.mjs` 的 `cleanupPending`（只在目录没有账本时读旧文件） |
+| 直接构造 `ToolCall` 的测试 | 6 个文件 | 见下「逐文件」；本轮只改了 `test_owned_cleanup_defaults.py` |
+| 引用这两个状态文件的测试/脚本 | 8 单测 + 2 JS + 5 benchmark | benchmark 那 5 处等第 3 步一起搬 |
 
 ## 落地顺序（每步独立可绿）
 
@@ -88,6 +101,43 @@ job_finished(outcome='failed', result='unknown', result_reason='receipt_absent')
 
 验收：新 journal 事件流与旧的 `run-status.json` 内容在语义上逐项对齐（相位、结果、
 退出原因），并且 `grep -rn "run-status.json" operator_agent/` 只剩读者、没有写者。
+
+#### 已完成（2026-11-24）
+
+写者：
+
+| 位置 | 事件 |
+|---|---|
+| `hitl_tools._record_prepared` | `task_prepared`（幂等；账本读不动时拒绝准备） |
+| `tool_calls._JobJournal` | `task_activated`（相位是 prepared 时）+ `job_queued` / `job_started` / `job_finished` |
+
+读者（同一个投影，不再解析写入方维护的文件）：
+`task_journal.invocation_view()` → `hitl_tools.autonomous_status`（tool-call 目录）
+与 `task_cancellation.call_status`（取消前的相位/owner 判据）。
+`host-model-budget.mjs` 的 `cleanupPending` 也改读 `journal.jsonl`——**读者**不是第二写者，
+但那一格决定「旧任务能不能放行」，留着读死文件会让任务永远关不上。
+
+`job_started` **在起 worker 之前**写：起不来也是一次「开始了、没成」，而不是一条永远
+没有下文的排队记录。
+
+`job_finished` 带 `cleanup`，并且**在 worker 收完之后**才写：所以「终态存在」本身
+就是「这一次调用已经收干净」。`worker_start_failed` 那一支记 `result=none` +
+`cleanup.status='worker_not_started'`（没有 worker 要收，也不是「未知」）。
+
+三处权威层的动作（趁还没有存量流）：`OPERATIONS` 加 `repair`（它同样是一次
+有始有终的监督调用）；`RESULT_REASONS` 加 `stopped_before_receipt`（被外部停掉、
+回执没等到——与 worker 自己没了要分开）；`task_id` 缺省时从事件流继承（身份只由
+prepare 建立一次）。
+
+**两处与原文不一致，都是有意的：**
+
+1. **autonomous 那条路仍写 `run-status.json`。** 它不是同一件事：那个文件里有每秒跳
+   一次的预算 ticker 与 `stage`，是**活进程的现场**，不是任务状态；把它改成 append-only
+   事件流会把「现场」错当成「转移」。在它切过来之前，那条路仍然只有一个写者
+   （`run-status.json` 自己），**没有双写**。全局 grep 的验收因此推到那一步；
+   到时候 `autonomous_status` 的 lost 判据要一起搬，不能只换写方。
+2. `task_closed` 仍没有写入方。它是「谁有权断言整段工作结束了」这个问题，不该由
+   第 1 步顺手发明。
 
 ### 2. Python 侧加 `journal_append` 入口，JS 改调它
 

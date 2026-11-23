@@ -49,6 +49,32 @@ def cancellation(run, invocation):
     return value
 
 
+def call_status(directory, invocation):
+    """一次调用现在是什么状态：**任务账本优先**，旧状态文件只在账本里没有它时兜底。
+
+    旧文件是这次切流要消灭的那个形状（多个写者各自维护一份状态）。读者仍要能看懂
+    已经存在的旧运行，所以兜底留着；但新调用不写它，所以账本有答案时必须用账本 ——
+    否则「用的是哪份」又变成一个取决于目录年龄的问题。
+    """
+    directory = Path(directory)
+    from ..core import task_journal
+    try:
+        view = task_journal.invocation_view(directory, invocation)
+    except task_journal.JournalError:
+        view = None          # 账本读不动：当作没有状态，让调用方去问存活证据
+    if view is not None:
+        return dict(invocation_id=invocation, phase=view['phase'],
+                    stopped_reason=view.get('stopped_reason') or '',
+                    cleanup=view.get('cleanup'), pid=view.get('pid'),
+                    pid_identity=view.get('pid_identity'), source='task_journal',
+                    journal_phase=view['journal_phase'], result=view.get('result'),
+                    result_reason=view.get('result_reason') or '')
+    legacy = read_json(directory/'run-status.json') or {}
+    if legacy.get('invocation_id') not in (None, invocation):
+        raise ValueError('status invocation mismatch')
+    return dict(legacy, source='legacy_status_file') if legacy else {}
+
+
 def request_cancel(run_dir, invocation):
     """Write one request; never send a signal, mutate status or refund budgets."""
     if not valid_invocation(invocation):
@@ -61,9 +87,7 @@ def request_cancel(run_dir, invocation):
         if not launch or launch.get('invocation_id') != invocation:
             raise ValueError('invocation mismatch or legacy run without cancellation identity')
         run = child
-    status = read_json(run/'run-status.json') or {}
-    if status.get('invocation_id') not in (None, invocation):
-        raise ValueError('status invocation mismatch')
+    status = call_status(run, invocation)
     context = ({'execution_context': launch['execution_context']}
                if isinstance(launch.get('execution_context'), dict) else {})
     if status.get('phase') in TERMINAL:

@@ -38,6 +38,15 @@ Job A 写 `completed` 之后，Job B 的 `job_queued` 被拒，`rev` 停在 4。
    `append` 与 `fold` 里都要被拒；拒绝时 `rev` 保持不变。
 
 投影**不缓存**：`fold` 每次从事件流现算。事件是「一次任务的转移」，量级在数十条。
+
+## 谁在写（切流进度）
+
+    prepare            → task_prepared      （一次准备建立起这条流）
+    ToolCall 监督者     → task_activated + job_*   （verify / bench / repair 共用这一处）
+
+`task_closed` 还没有写入方：把它交给「谁有权断言整段工作结束了」这个问题，
+在那之前任务保持打开是正确的默认。autonomous 那条路仍只写它自己的 `run-status.json`
+—— 那不是双写，因为它还没接进这条流；接它的时候必须**整条**换掉，不能并存。
 """
 from __future__ import annotations
 
@@ -75,10 +84,15 @@ OUTCOMES = ('completed', 'failed', 'cancelled')
 RESULT_STATES = ('none', 'received', 'unknown')
 
 #: `unknown` 的细分。diagnosis 用，不进相位。
-RESULT_REASONS = ('receipt_absent', 'invocation_mismatch', 'invalid_timestamp')
+RESULT_REASONS = ('receipt_absent', 'invocation_mismatch', 'invalid_timestamp',
+                  # 执行被外部停掉（取消或截止），回执**在停之前没落地**。
+                  # 与 `receipt_absent` 的区别只是「为什么没等到」：一个是 worker 自己
+                  # 没了，一个是我们把它停了。两者都不等于「执行失败」。
+                  'stopped_before_receipt')
 
 #: 一次调用做的是什么。将来 profile 也走这套事件，只是这里不同。
-OPERATIONS = ('verify', 'bench', 'profile')
+#: `repair` 也是 Job：它同样是一次监督者拥有的、有始有终的执行。
+OPERATIONS = ('verify', 'bench', 'profile', 'repair')
 
 #: 只有这些 Kind 需要 `job_id`。
 NEEDS_JOB = JOB_EVENTS
@@ -251,8 +265,11 @@ def append(run, kind: str, *, task_id: str = '', job_id: str = '',
         projection = fold(events) if events else None
         current = projection['task']['phase'] if projection else 'absent'
         event = dict(schema=SCHEMA, rev=last_rev(events) + 1, kind=kind,
-                     at=time.time(), task_id=task_id or '', job_id=job_id or '',
-                     invocation=invocation or '', **fields)
+                     # 任务身份由 prepare 建立；后面的写者不必各自去读一遍 `run.json`，
+                     # 缺省就从事件流里继承 —— 它本来就写在这条流的每一条上。
+                     at=time.time(),
+                     task_id=task_id or (projection['task']['task_id'] if projection else ''),
+                     job_id=job_id or '', invocation=invocation or '', **fields)
         validate(event)
         # 形状过了还不够：**序列**是否成立由 admit 判，`fold` 用的是同一份。
         admit(current, (projection['jobs'] if projection else {}), event)
@@ -269,11 +286,21 @@ def append(run, kind: str, *, task_id: str = '', job_id: str = '',
 def _job_row(event: dict) -> dict:
     kind = event['kind']
     if kind == 'job_queued':
-        return dict(phase='queued')
-    if kind == 'job_started':
-        return dict(phase='running')
-    return dict(phase=event['outcome'], outcome=event['outcome'],
-                result=event['result'], result_reason=event.get('result_reason', ''))
+        row = dict(phase='queued')
+    elif kind == 'job_started':
+        row = dict(phase='running')
+    else:
+        row = dict(phase=event['outcome'], outcome=event['outcome'],
+                   result=event['result'], result_reason=event.get('result_reason', ''))
+    # 终态之外的事实**按需**带出来：事件里没有的键就不出现在投影里。
+    # 这样旧事件（只写了最小字段的）投影形状不变，新事件多带的现场也不丢。
+    for key in ('stopped_reason', 'tool', 'pid', 'pid_identity', 'worker_pid',
+                'stage', 'started_at', 'finished_at'):
+        if key in event:
+            row[key] = event[key]
+    if isinstance(event.get('cleanup'), dict):
+        row['cleanup'] = dict(event['cleanup'])
+    return row
 
 
 def fold(events: Iterable) -> dict:
@@ -341,3 +368,49 @@ def is_open(projection: dict) -> bool:
     存活证据。见 `docs` 里「相位停在非终止处」那条。
     """
     return projection.get('task', {}).get('phase') in ('prepared', 'active')
+
+
+#: Job 相位 → 监督者状态词表。**这是给读者用的旧词**，不是第二种权威：
+#: 它由上面的投影算出来，读者不再各自解析一个文件。旧文件把「排队」和「执行中」
+#: 都叫 `running`（靠 `stage` 区分），这里保持同一个口径。
+CALL_PHASES = {'queued': 'running', 'running': 'running',
+               'completed': 'done', 'failed': 'failed', 'cancelled': 'cancelled'}
+
+
+def task_root(directory) -> Path:
+    """一次调用的目录属于哪个任务目录。
+
+    `tool-calls/<invocation>/` 是 prepare 目录的子目录；其余情况（autonomous 的
+    运行根）自己就是任务目录。认的是**布局**，不是目录名里猜出来的东西。
+    """
+    directory = Path(directory)
+    return directory.parent.parent if directory.parent.name == 'tool-calls' else directory
+
+
+def invocation_view(directory, invocation: str = '') -> dict | None:
+    """一次调用在账本里的样子；账本里没有它就返回 None。
+
+    读者（status / cancel）用这个，而不是去拼一个由写入方维护的状态文件：
+    同一个问题的答案只能有一个来源。
+
+    返回的 `phase` 用监督者的旧词（running / done / failed / cancelled），`stage`
+    再区分排队与执行中；`journal_phase` 保留账本自己的词。两套词并存是有意的 ——
+    迁移期读者要能对上旧口径，但它不给任何人第二个可以写的地方。
+    """
+    directory = Path(directory)
+    invocation = invocation or directory.name
+    events = read_events(task_root(directory))
+    if not events:
+        return None
+    projection = fold(events)
+    for job_id, row in projection['jobs'].items():
+        if row.get('invocation') != invocation:
+            continue
+        phase = row['phase']
+        view = dict(row, job_id=job_id, journal_phase=phase,
+                    phase=CALL_PHASES.get(phase, phase),
+                    stage={'queued': 'starting', 'running': 'executing'}.get(phase),
+                    terminal=phase in _JOB_TERMINAL,
+                    task=dict(projection['task']), rev=projection['rev'])
+        return view
+    return None

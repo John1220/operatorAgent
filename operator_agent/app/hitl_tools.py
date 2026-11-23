@@ -579,6 +579,31 @@ def prepare(declaration: dict, run_dir: str | Path, *, now: Optional[float] = No
         raise ToolError('invalid_host_budget', str(error)) from error
 
 
+def _record_prepared(run: Path, task_id: str, contract_hash: str) -> None:
+    """在任务账本里写下「这个目录被准备过」——**一次**，且只在这里写。
+
+    为什么是 prepare 而不是别的写者：`task_prepared` 断言的是「这里有契约」。
+    谁都可以在缺账本时补一条，那条流就不再能回答「这个目录当初被准备过吗」。
+    所以重复 prepare 不追加（幂等），别人的 Job 事件也不许替它补。
+
+    账本坏掉（半行、断号、不认的 schema）时**拒绝准备**：那种流已经不能作为
+    这条任务的权威，继续往里写只会让「哪份是对的」更说不清。
+    """
+    from ..core import task_journal as journal
+    try:
+        events = journal.read_events(run)
+    except journal.JournalError as error:
+        raise ToolError('task_journal_unusable',
+                        f'已有账本无法读取（{error.code}），拒绝在它上面继续准备') from error
+    if not events:
+        journal.append(run, 'task_prepared', task_id=task_id, contract_hash=contract_hash)
+        return
+    phase = journal.fold(events)['task']['phase']
+    if phase == 'closed':
+        raise ToolError('task_closed',
+                        '这个任务目录已经封账（task_closed）；要继续推进请用新的任务目录')
+
+
 def _prepare_unlocked(declaration: dict, run_dir: str | Path, *, now: Optional[float] = None) -> dict:
     """把一份声明冻结成「可复算的回合」：契约 + 输入 + 身份，落进 run 目录。"""
     task = build_task(declaration)
@@ -612,6 +637,7 @@ def _prepare_unlocked(declaration: dict, run_dir: str | Path, *, now: Optional[f
         "task_id": getattr(task, "task_id", ""),
         "contract_hash": contract.hash,
     })
+    _record_prepared(run, getattr(task, "task_id", ""), contract.hash)
 
     assumptions = declaration_assumptions(declaration)
     notes = []
@@ -1688,6 +1714,44 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
     }
 
 
+def _call_directories(run: Path) -> list:
+    """`tool-calls/` 下已发出过的调用目录。
+
+    用 `launch.json` 认，不用状态文件认：状态文件已经不是权威了，
+    拿它当「这条调用存在过」的凭据，会让下一次迁移又把这条判据搬一遍。
+    """
+    directory = run/'tool-calls'
+    return sorted(p for p in directory.glob('*')
+                  if p.is_dir() and (p/'launch.json').is_file())
+
+
+def _journal_call_status(directory: Path) -> Optional[dict]:
+    """一次调用在任务账本里的样子，拼成与旧状态文件同形的 dict。
+
+    账本里没有这条 invocation 时返回 None —— 那种目录要么是账本之前的老调用
+    （仍可读它当年写的状态文件），要么根本没开始过。两种都不该由这里替它编。"""
+    from ..execute.task_cancellation import read_json
+    launch = read_json(directory/'launch.json') or {}
+    invocation = launch.get('invocation_id') or directory.name
+    from ..core import task_journal
+    view = task_journal.invocation_view(directory, invocation)
+    if view is None:
+        return None
+    status = dict(kind='tool_call', phase=view['phase'], stage=view['stage'],
+                  tool=view.get('tool') or launch.get('tool'),
+                  invocation_id=view.get('invocation') or invocation,
+                  run_dir=str(task_journal.task_root(directory)),
+                  pid=view.get('pid'), pid_identity=view.get('pid_identity'),
+                  started_at=view.get('started_at'), finished_at=view.get('finished_at'),
+                  stopped_reason=view.get('stopped_reason') or '',
+                  cleanup=view.get('cleanup'), journal_phase=view['journal_phase'],
+                  result_state=view.get('result') or 'none',
+                  result_reason=view.get('result_reason') or '')
+    if isinstance(launch.get('execution_context'), dict):
+        status['execution_context'] = launch['execution_context']
+    return status
+
+
 def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) -> dict:
     """Query autonomous/foreground invocation; missing owners are explicitly lost."""
     run = Path(run_dir)
@@ -1696,12 +1760,12 @@ def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) 
         from .host_workflow import prepared_task
         _, _, contract = prepared_task(run)
         budget = HostTaskBudget(run, contract.hash).snapshot()
-        calls = sorted((run/'tool-calls').glob('*/run-status.json'))
+        calls = _call_directories(run)
         latest = next((record for record in reversed(budget['records'])
             if record['status']=='completed' and record.get('source') and record.get('report')
             and record.get('accepted_by_supervisor') is not False), None)
         return dict(ok=True, workflow='host', phase=budget['phase'], run_dir=str(run),
-            host_task=budget, calls=[autonomous_status(p.parent) for p in calls],
+            host_task=budget, calls=[autonomous_status(p) for p in calls],
             last_correct_candidate=budget.get('last_correct_candidate'),
             latest_verification=({key:latest.get(key) for key in ('id','source_hash','source','report',
                 'evidence','full_l2_passed','validity')} if latest else None),
@@ -1715,13 +1779,25 @@ def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) 
             if (read_json(run/'launch.json') or {}).get('invocation_id') != invocation_id:
                 return dict(ok=False, error='invocation_mismatch', detail='No matching invocation.')
     status_path = run / STATUS_FILE
-    if not status_path.is_file():
-        calls = sorted((run/'tool-calls').glob('*/run-status.json'))
-        if calls and invocation_id is None:
-            return dict(ok=True, phase='tool_calls', calls=[autonomous_status(p.parent) for p in calls])
-        return {"ok": False, "error": "run_not_started",
-                "detail": f"{status_path} 不存在（还没调用 operator_run）"}
-    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status = None
+    if (read_json(run/'launch.json') or {}).get('kind') == 'tool_call':
+        # 一次调用的状态来自任务账本的投影。旧目录（账本之前）没有这条记录，
+        # 仍然读它当年写下的状态文件 —— 只读，不当权威。
+        from ..core.task_journal import JournalError
+        try:
+            status = _journal_call_status(run)
+        except JournalError as error:
+            return dict(ok=False, error='task_journal_unusable',
+                        detail=f'{error.code}: {error.detail}', run_dir=str(run))
+    if status is None:
+        if not status_path.is_file():
+            calls = _call_directories(run)
+            if calls and invocation_id is None:
+                return dict(ok=True, phase='tool_calls',
+                            calls=[autonomous_status(p) for p in calls])
+            return {"ok": False, "error": "run_not_started",
+                    "detail": f"{status_path} 不存在（还没调用 operator_run）"}
+        status = json.loads(status_path.read_text(encoding="utf-8"))
     if not status.get('pid'):
         owner = read_json(run/'supervisor.json') or {}
         if owner.get('invocation_id') == status.get('invocation_id'):
