@@ -250,6 +250,17 @@ def submit(plan, *, arm, candidate_text, output_dir):
             env['OPERATOR_AGENT_REQUIRED_GPU'] = str(plan['gpu_index'])
             env['OPERATOR_AGENT_REQUIRED_GPU_UUID'] = plan['gpu_uuid']
             env['OPERATOR_AGENT_REQUIRED_GPU_NAME'] = plan['gpu_name']
+        # 起子进程之前先确认这棵树在当前解释器下能用：否则 numpy 会以
+        # 「不要从源码目录导入」的形式炸掉，而症状是一句「输出不是 JSON」——
+        # 看起来像判定层出错，实际是依赖树与解释器版本对不上。
+        problems = s5_runtime.deps_problems()
+        if problems:
+            return _finish(output_dir, dict(
+                status='unknown', full_l2_passed=None,
+                reason='runtime deps unusable: ' + '; '.join(problems),
+                source_sha256=source_sha256, backend=plan['backend'],
+                wall_seconds=round(time.monotonic() - started, 3)), plan)
+
         proc = subprocess.run(_command(plan, task_dir, candidate), capture_output=True,
                               text=True, timeout=plan['timeout'], env=env,
                               cwd=str(Path(__file__).resolve().parents[3]))

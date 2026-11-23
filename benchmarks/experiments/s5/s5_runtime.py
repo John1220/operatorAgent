@@ -32,6 +32,31 @@ def deps_dir():
     return Path(override).resolve() if override else DEFAULT_DEPS
 
 
+def deps_problems(path=None):
+    """归档依赖树**在当前解释器下**能不能用？返回问题清单，空 list 表示能用。
+
+    为什么要有这个：`DEFAULT_DEPS` 里的 numpy 扩展是 `cpython-39-darwin.so`
+    （冻结在 Python 3.9 上）。用 3.12 跑时它会走到 numpy 的「不要从源码目录导入」
+    分支，于是**每一个** s5 验收用例都以 `verification output was not JSON (exit 1)`
+    的样子失败 —— 看起来像判定层坏了，实际上是依赖树与解释器版本对不上。
+    这个检查把那件事变成一个**点名的**原因。
+    """
+    target = Path(path or deps_dir())
+    if not target.is_dir():
+        return [f'runtime deps 目录不存在: {target}']
+    tag = f'cpython-{sys.version_info.major}{sys.version_info.minor}'
+    extensions = [item for item in target.rglob('*.so') if item.is_file()]
+    if not extensions:
+        return [f'runtime deps 里没有任何 .so 扩展（纯源码树？）: {target}']
+    matching = [item for item in extensions if tag in item.name]
+    if not matching:
+        found = sorted({re.search(r'cpython-\d+', item.name).group(0)
+                        for item in extensions if re.search(r'cpython-\d+', item.name)})
+        return [f'runtime deps 的扩展是 {found}，当前解释器要 {tag} —— '
+                f'这棵树在 {sys.version_info.major}.{sys.version_info.minor} 下不可用: {target}']
+    return []
+
+
 def tree_digest(path):
     """Hash a directory tree by relative name and file contents (no symlinks)."""
     path = Path(path)
