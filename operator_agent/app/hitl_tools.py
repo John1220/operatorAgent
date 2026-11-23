@@ -46,6 +46,9 @@ import numpy as np
 
 from ..core.backend_caps import Cap
 from ..core.contract import freeze_from_task
+from ..core.task_declaration import (ALLOWED_DECLARATION_KEYS, DECLARATION_SCHEMA,
+                                     DeclarationError, complexity_of, field_state,
+                                     hardware_profile, parse_declaration, precision_of)
 from ..decide.failure_route import Route, classify
 from ..generate.generation_spec import generation_spec_identity
 from ..generate.generation_context import candidate_summary
@@ -55,8 +58,8 @@ from ..core.report import build_report
 from ..decide.tool_evidence import RoundEvidence, verification_data
 from ..decide import verdict_cache
 from ..core.execution_audit import install_level_recorder
-from ..core.schemas import (ConstraintSpec, KernelArtifact, Precision, TaskSchema,
-                      VerificationLevel, VerificationResult)
+from ..core.schemas import (ConstraintSpec, KernelArtifact, SourceSpec, TargetSpec,
+                      TaskSchema, VerificationLevel, VerificationResult)
 from ..decide.verifier import Verifier
 from ..execute.fake_backend.config import tool_context
 
@@ -78,17 +81,22 @@ TOOL_VERSION = 12
 
 #: 允许进 `declaration` 的键（§6.3 的白名单）。**没列在这里的一律拒绝** ——
 #: 「先收下、以后再判断」是这一层最不能有的形状：它等于给未来开了一个没说出口的口子。
-ALLOWED_KEYS = frozenset({
-    "request",        # 自然语言请求（必填）
-    "shapes",         # 形状分布（必填）：matmul 是 [M,N,K]，逐元素/归一化是 [M,N]
-    "hardware",       # 默认 mock_gpu
-    "dsl",            # 默认 python
-    "precision",      # 默认取 IntentParser 的规则结果
-    "min_speedup",    # 性能门槛（任务级决定，§10.2 同款）
-    "required_caps",  # 执行侧必须有的能力（如 real_device）
-    "framework",      # 默认 pytorch
-    "notes",          # 人给的备注，只进产物不进判据
-})
+#: 声明白名单的**唯一权威**在 `core.task_declaration`。工具层再抄一份就是第二张会漂
+#: 的表 —— 「工具说收 A、实现只认 B」正是这次要治的病。这里只做别名，语义在 core：
+#:
+#:   request        自然语言请求（必填）——**只进产物与审计，不参与判据推导**
+#:   shapes         形状分布（必填）：matmul 是 [M,N,K]，逐元素/归一化是 [M,N]
+#:   operator       算子类型（必填，闭合词表）——不再从 request 的关键词推断
+#:   precision      精度（必填，fp32/fp16）——同上，不再从 request 推断
+#:   hardware       默认 mock_gpu
+#:   dsl            默认 python
+#:   min_speedup    性能门槛（任务级决定，§10.2 同款）
+#:   required_caps  执行侧必须有的能力（如 real_device）
+#:   framework      默认 pytorch
+#:   complexity     默认 medium（**成文默认**，不再是关键词推断的复杂度）
+#:   schema_version 声明版本；认不出的版本直接拒绝
+#:   notes          人给的备注，只进产物不进判据
+ALLOWED_KEYS = ALLOWED_DECLARATION_KEYS
 
 #: 明确禁止的键。列出来是为了让拒绝**可归因**（而不是只说「未知键」）：
 #: 这些每一个都对应本仓「不许有开关」的清单（设计 §3.5 / §6.3）。
@@ -242,41 +250,132 @@ def _required_caps(declaration: dict) -> tuple:
 
 
 def build_task(declaration: dict) -> TaskSchema:
-    """声明 → TaskSchema。**纯函数**：同一份声明任何时候都得到同一份判据。"""
-    from ..decide.correctness_profiles import AttentionScopeError
+    """声明 → TaskSchema。**纯映射**：不读 `request` 的字面内容。
+
+    这一层此前会拿 `request` 再跑一次规则版 `IntentParser`，再用声明覆盖其中几项；
+    没被覆盖的字段就继承了关键词猜测 —— 「宿主以为声明的是 A、冻结契约实际是 B」。
+    现在语义字段（`operator` / `precision`）必须显式，`request` 只进产物与审计。
+    关键词解析退到 `normalize_declaration`，那里只产出**提案**，冻结不了任何东西。
+    """
+    from ..decide.correctness_profiles import (AttentionScopeError, unresolved_semantics,
+                                               with_default_correctness)
     _check_keys(declaration)
     try:
-        parsed, _ = _quiet(IntentParser().parse, declaration["request"])   # 规则分支，零 LLM
-    except AttentionScopeError as error:
-        raise ToolError("attention_scope", str(error)) from error
-    precision = declaration.get("precision")
-    constraints = replace(
-        parsed.constraints,
-        precision=Precision(precision) if precision else parsed.constraints.precision,
-        min_speedup=float(declaration.get("min_speedup", parsed.constraints.min_speedup)),
-        shapes=_shapes(declaration),
+        decl, _assumptions = parse_declaration(declaration)
+    except DeclarationError as error:
+        raise ToolError(error.code, error.detail) from error
+
+    compute_units, warp_size = hardware_profile(decl.hardware)
+    fused_ops, semantic_parameters = unresolved_semantics(decl.request, decl.operator)
+    task = TaskSchema(
+        source=SourceSpec(kernel_type=decl.operator,
+                          complexity=complexity_of(decl),
+                          framework=decl.framework,
+                          fused_ops=list(fused_ops),
+                          semantic_parameters=dict(semantic_parameters)),
+        target=TargetSpec(hardware=decl.hardware, dsl=decl.dsl,
+                          compute_units=compute_units, warp_size=warp_size,
+                          required_caps=_required_caps(declaration)),
+        constraints=ConstraintSpec(precision=precision_of(decl),
+                                   min_speedup=decl.min_speedup,
+                                   max_error=1e-5, shapes=decl.shapes),
     )
-    target = replace(
-        parsed.target,
-        hardware=str(declaration.get("hardware") or "mock_gpu"),
-        dsl=str(declaration.get("dsl") or "python"),
-        required_caps=_required_caps(declaration),
-    )
-    source = replace(
-        parsed.source,
-        framework=str(declaration.get("framework") or parsed.source.framework),
-    )
-    # The public declaration may override precision/framework after rule parsing.
-    # Recompute the parser's default suite against the final task, so FP16
-    # LayerNorm receives its calibrated v2 profile rather than stale FP32 v1.
-    from ..decide.correctness_profiles import with_default_correctness
-    constraints = replace(constraints, correctness_profile=None, correctness_suite=None,
-                          reference_contract=None)
     try:
-        return with_default_correctness(replace(parsed, source=source, target=target,
-                                                constraints=constraints))
+        return with_default_correctness(task)
     except AttentionScopeError as error:
         raise ToolError("attention_scope", str(error)) from error
+
+
+def declaration_assumptions(declaration: dict) -> tuple:
+    """哪些字段其实没被声明、取了成文默认值。`prepare` 把它回显给宿主。
+
+    刻意**不**塞进 `TaskSchema`：那会改变契约哈希，让「默认值有没有被用到」污染判据。
+    所以这份清单进响应与产物，不进判据。
+    """
+    try:
+        _, assumptions = parse_declaration(declaration)
+    except DeclarationError:
+        return ()
+    return assumptions
+
+
+def draft_from_request(request: str, *, parser=None) -> dict:
+    """从自然语言**起草**一份声明，供宿主确认。**不冻结任何东西。**
+
+    这是关键词解析器唯一的落脚点，职责是「提案」而不是「权威」：返回的 dict 必须
+    由调用方（宿主）核过、必要时改过，再以显式字段回填给 `parse_declaration`。
+    没有回填这一步，声明就不完整 —— 提案不会自己变成契约。
+    """
+    if parser is None:
+        parser = IntentParser()
+    # 解析器是按「人盯屏幕」写的，会往 stdout 打进度。提案函数不该污染调用方的 stdout：
+    # MCP 那一侧整个 stdout 必须是**一行 JSON**。
+    task, _out = _quiet(parser.parse, request)
+    draft = {
+        "schema_version": DECLARATION_SCHEMA,
+        "request": request,
+        "operator": task.source.kernel_type,
+        "precision": task.constraints.precision.value,
+        "dsl": task.target.dsl,
+        "hardware": task.target.hardware,
+        "framework": task.source.framework,
+        "min_speedup": task.constraints.min_speedup,
+        "complexity": task.source.complexity.value,
+    }
+    if task.target.required_caps:
+        draft["required_caps"] = [c.value for c in task.target.required_caps]
+    return draft
+
+
+def declaration_from_request(request: str, **explicit) -> dict:
+    """**宿主侧**辅助：起草 + 应用显式覆盖 → 一份完整声明 dict。
+
+    这是给「自己就拥有自然语言」的调用方用的 —— CLI、benchmark 驱动、实验脚本。
+    推断发生在这里（宿主侧），产出的仍是**显式字段**，交给 `parse_declaration`。
+    判据层看不到这个函数，也不需要在 `request` 里找任何东西。
+
+    与 `normalize_declaration` 的区别：那个把提案交回给人核；这个直接把提案定下来，
+    只用于「调用方本来就知道自己在干什么」的场景。
+    """
+    draft = draft_from_request(request)
+    for key in ("operator", "precision", "dsl", "hardware", "framework",
+                "min_speedup", "complexity", "shapes"):
+        if explicit.get(key) not in (None, ""):
+            draft[key] = explicit[key]
+    return draft
+
+
+def normalize_declaration(payload: dict) -> dict:
+    """把自然语言**起草**成一份声明，交给宿主确认。**不冻结、不落盘。**
+
+    这是关键词解析器唯一还活着的落脚点，职责从「生产契约」退成「提出候选值」：
+    `proposed` 必须被宿主核过、必要时改过，再以显式字段回填给 `prepare`。没有回填
+    这一步声明就不完整 —— 提案不会自己变成契约。
+    """
+    raw = (payload.get("declaration")
+           if isinstance(payload, dict) and isinstance(payload.get("declaration"), dict)
+           else payload)
+    if not isinstance(raw, dict):
+        raise ToolError("bad_declaration", "payload 必须是对象，或 {declaration: {...}}")
+    request = raw.get("request")
+    if not isinstance(request, str) or not request.strip():
+        raise ToolError("request_required", "起草需要非空的 request")
+    if not raw.get("shapes"):
+        raise ToolError("shapes_required", "起草需要 shapes：契约拥有输入是这一层的前提")
+    proposed = _quiet(draft_from_request, request)[0]
+    proposed["shapes"] = raw["shapes"]
+    for key in ("hardware", "dsl", "framework", "min_speedup", "notes"):
+        # 宿主自己给了的字段以宿主为准；解析器只在缺失处提案。
+        if raw.get(key) not in (None, ""):
+            proposed[key] = raw[key]
+    return {
+        "ok": True,
+        "schema_version": DECLARATION_SCHEMA,
+        "proposed": proposed,
+        "state": field_state(proposed),
+        "next": ("核过 proposed 的每一个字段，再把这些显式字段回填给 operator_prepare；"
+                 "提案本身不冻结任何东西"),
+    }
 
 
 def _case_summary(case) -> dict:
@@ -502,17 +601,21 @@ def _prepare_unlocked(declaration: dict, run_dir: str | Path, *, now: Optional[f
         "contract_hash": contract.hash,
     })
 
+    assumptions = declaration_assumptions(declaration)
     notes = []
     if contract.correctness_profile is None:
         notes.append("任务没有可信的正确性 profile（L2 会按未声明处理，可能判 unknown）")
-    if str(task.target.hardware) != str(declaration.get("hardware") or "mock_gpu"):
-        notes.append("hardware 与声明不一致（不应发生）")
+    for assumption in assumptions:
+        notes.append(f"{assumption.field}={assumption.value!r} 取自成文默认值（声明未给出）")
 
     return {
         "ok": True,
         "run_dir": str(run),
         "run_id": run.name,
         "contract_hash": contract.hash,
+        # 哪些字段其实没被声明、取了成文默认值。默认值可以存在，但必须**可见** ——
+        # 静默默认正是「宿主以为 A、契约是 B」的另一条通道。
+        "assumptions": [a.as_dict() for a in assumptions],
         "generation_spec": generation_spec_identity(),
         "cases": [_case_summary(c) for c in contract.cases],
         "required_cases": list(contract.required_cases),

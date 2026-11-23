@@ -18,7 +18,7 @@ from operator_agent.execute import s5_shared_budget as shared
 from operator_agent.app.hitl_tools import prepare
 
 TASK_ID='vertical-mcp-fixture-01'
-DECLARATION=dict(request='layernorm fp32',shapes=[[7,33]],hardware='mock_gpu',
+DECLARATION=dict(operator='layernorm', request='layernorm fp32',shapes=[[7,33]],hardware='mock_gpu',
                  dsl='python',precision='fp32')
 TASK=('Use the operator MCP tool to verify the supplied Python kernel against '
       'the prepared mock task. Use the tool result in the final reply.')

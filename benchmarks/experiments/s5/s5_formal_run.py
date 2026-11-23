@@ -137,7 +137,8 @@ def check_task_inputs(row, contract):
 
 
 def declaration(row):
-    return dict(request='%s %s triton' % (row['kernel_type'], row['precision']),
+    return dict(operator=row['kernel_type'],
+                request='%s %s triton' % (row['kernel_type'], row['precision']),
                 shapes=[list(row['shape'])], hardware='nvidia_gpu', dsl='triton',
                 precision=row['precision'], min_speedup=1.0)
 

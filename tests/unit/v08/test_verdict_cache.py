@@ -8,7 +8,7 @@ from operator_agent.app import hitl_tools as ht
 from operator_agent.core.run_contract import code_hash, protocol_identity
 from operator_agent.decide import verdict_cache
 
-DECL = dict(request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
+DECL = dict(operator='relu', request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
 CORRECT = 'import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n'
 WRONG = 'import numpy as np\ndef kernel(X):\n    return X.copy()\n'
 
@@ -247,7 +247,7 @@ def test_reference_identity_is_queried_once_per_verification_not_per_case():
                                       Cap.SAME_DEVICE_BASELINE, Cap.REFERENCE_IDENTITY,
                                       Cap.GPU_PINNING})
     verifier = Verifier(backend)
-    task = build_task(dict(request='fp16 32768x6144 residual add layernorm',
+    task = build_task(dict(operator='fused_layernorm_residual', request='fp16 32768x6144 residual add layernorm',
                            shapes=[[32768, 6144]], precision='fp16', dsl='triton',
                            hardware='nvidia_gpu', min_speedup=1.5))
     assert verifier.reference_preflight(task) is None
@@ -273,7 +273,7 @@ def test_a_failed_reference_preflight_is_never_cached():
                                       Cap.SAME_DEVICE_BASELINE, Cap.REFERENCE_IDENTITY,
                                       Cap.GPU_PINNING})
     verifier = Verifier(backend)
-    task = build_task(dict(request='fp16 32768x6144 residual add layernorm',
+    task = build_task(dict(operator='fused_layernorm_residual', request='fp16 32768x6144 residual add layernorm',
                            shapes=[[32768, 6144]], precision='fp16', dsl='triton',
                            hardware='nvidia_gpu', min_speedup=1.5))
     first = verifier.reference_preflight(task)

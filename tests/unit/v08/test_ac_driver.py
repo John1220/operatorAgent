@@ -82,7 +82,7 @@ def test_a_c_arm_with_its_plugin_passes(monkeypatch):
 
 # ── ② supervisor 独立终评：final 的前置是同源码的一次完整 L2 ──────────────────
 
-DECLARATION = {"request": "fp16 relu 256x256", "shapes": [[256, 256]],
+DECLARATION = {"operator": 'relu', "request": "fp16 relu 256x256", "shapes": [[256, 256]],
                "hardware": "mock_gpu", "dsl": "python", "precision": "fp16",
                "min_speedup": 1.0}
 BUDGET = dict(wall_clock_s=600, max_verifications=3, max_model_calls=3,

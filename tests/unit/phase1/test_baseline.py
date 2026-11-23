@@ -19,7 +19,7 @@ def config(tmp_path, *, scenario='success', max_calls=4, oracle_total=20, max_ro
                   total_output_tokens=max_calls*40960, wall_clock_s=30)
     started = monotonic()
     return dict(schema='phase1-cell-config-v1', cell_id='task-01-A', arm='A',
-        plan_hash='a'*64, run_dir=str(tmp_path/'run'), declaration=dict(
+        plan_hash='a'*64, run_dir=str(tmp_path/'run'), declaration=dict(operator='relu', precision='fp32', 
             request='relu', shapes=[[4, 8]], dsl='python'), backend='fake',
         fake=dict(scenario=scenario, profile='small', llm='fake'), connection={},
         budget=dict(wall_clock_s=30, max_llm_calls=max_calls, oracle_total=oracle_total),

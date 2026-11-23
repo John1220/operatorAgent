@@ -14,7 +14,7 @@ from benchmarks.experiments.s5.s5_development_service import DevelopmentService
 from benchmarks.experiments.s5.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
 from operator_agent.app.hitl_tools import prepare
 
-DECL = dict(request='layernorm fp32', shapes=[[7,33]], hardware='mock_gpu',
+DECL = dict(operator='layernorm', request='layernorm fp32', shapes=[[7,33]], hardware='mock_gpu',
             dsl='python', precision='fp32')
 
 
@@ -83,7 +83,7 @@ def test_actual_schema_instructions_and_immutable_feedback(relay):
     ('operator_verify',dict(run_dir='task',code='x',host='host')),
     ('operator_verify',dict(run_dir='task',code='x',backend='ssh')),
     ('operator_verify',dict(run_dir='task',code='x',stop_after='L3')),
-    ('operator_prepare',dict(run_dir='task',request='changed',shapes=[[1,2]])),
+    ('operator_prepare',dict(operator='unknown', precision='fp32', run_dir='task',request='changed',shapes=[[1,2]])),
 ])
 def test_refused_calls_never_use_development_quota(relay,name,args):
     r,svc,config=relay

@@ -136,14 +136,22 @@ def test_a_declaration_that_cannot_be_prepared_cannot_be_frozen(tmp_path):
     assert any('does not build a task' in problem for problem in ac_plan.validate(broken))
 
 
-def test_a_typo_operator_name_is_not_allowed_to_become_unknown(tmp_path):
+def test_a_typo_operator_name_is_refused_at_the_door(tmp_path):
+    """拼错的算子名**当场拒绝**，而不是退化成 `kernel_type='unknown'` 继续跑。
+
+    旧行为是「解析器从 request 里抽出 'unknown'，没有 profile，一路走到冻结之后才由
+    『没有可信 profile』间接暴露」—— 一个拼写错误可以活到很晚。`operator` 现在是
+    闭合词表里的显式字段，所以它停在门口，并且错误名字点名（`unsupported_operator`）。
+
+    注意这里改的是 `operator` 而不是 `request`：改 request 的措辞现在**什么都不影响**，
+    那正是这次收敛的目标。
+    """
     plan = frozen(tmp_path)
     drifted = json.loads(json.dumps(plan))
-    drifted['tasks'][2]['declaration']['request'] = 'fp16 not_an_operator 16384x6144'
+    drifted['tasks'][2]['declaration']['operator'] = 'not_an_operator'
     drifted['hash'] = ac_plan.digest({k: v for k, v in drifted.items() if k != 'hash'})
-    # 拼错算子时 build_task 不报错，而是给出 kernel_type='unknown'，没有 profile。
     problems = ac_plan.validate(drifted)
-    assert any("kernel_type 'unknown'" in problem for problem in problems)
+    assert any('unsupported_operator' in problem for problem in problems), problems
 
 
 def test_only_one_slot_is_a_held_out_family(tmp_path):

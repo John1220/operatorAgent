@@ -116,7 +116,8 @@ def freeze(output, *, gpu_index=2, layernorm_followup=False):
     for item in source_cases:
         seed_path = seeds / item['seed_file']
         seed = seed_path.read_bytes()
-        declaration = dict(request='%s %s triton' % (item['kernel_type'], item['precision']),
+        declaration = dict(operator=item['kernel_type'],
+            request='%s %s triton' % (item['kernel_type'], item['precision']),
             shapes=[item['shape']], hardware='nvidia_gpu', dsl='triton',
             precision=item['precision'], min_speedup=1.0)
         row = dict(case_id=item['case_id'], kernel_type=item['kernel_type'],

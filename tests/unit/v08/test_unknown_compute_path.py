@@ -84,7 +84,7 @@ def test_an_oversized_context_drops_template_text_and_says_so(monkeypatch):
 
     # generate 体 34.1 KB，其中模板正文 8.9 KB：上限压到 30 KB 就只会裁这一块。
     monkeypatch.setattr(H, "MAX_CONTEXT_BYTES", 30_000)
-    task = build_task({"request": "fp16 4096x4096x4096 matmul, triton",
+    task = build_task({"operator": 'matmul', "request": "fp16 4096x4096x4096 matmul, triton",
                        "hardware": "nvidia_gpu", "dsl": "triton",
                        "precision": "fp16", "shapes": [[4096, 4096, 4096]]})
     ctx = H.build_host_context(task, freeze_from_task(task), backend="ssh", phase="generate")
@@ -105,7 +105,7 @@ def test_a_context_that_cannot_fit_after_trimming_still_fails_closed(monkeypatch
     from operator_agent.generate import host_context as H
 
     monkeypatch.setattr(H, "MAX_CONTEXT_BYTES", 8_000)
-    task = build_task({"request": "fp16 4096x4096x4096 matmul, triton",
+    task = build_task({"operator": 'matmul', "request": "fp16 4096x4096x4096 matmul, triton",
                        "hardware": "nvidia_gpu", "dsl": "triton",
                        "precision": "fp16", "shapes": [[4096, 4096, 4096]]})
     with pytest.raises(ValueError, match="byte limit"):
@@ -117,7 +117,7 @@ def test_a_normal_context_is_not_marked_truncated():
     from operator_agent.core.contract import freeze_from_task
     from operator_agent.generate.host_context import build_host_context
 
-    task = build_task({"request": "fp16 4096x4096x4096 matmul, triton",
+    task = build_task({"operator": 'matmul', "request": "fp16 4096x4096x4096 matmul, triton",
                        "hardware": "nvidia_gpu", "dsl": "triton",
                        "precision": "fp16", "shapes": [[4096, 4096, 4096]]})
     ctx = build_host_context(task, freeze_from_task(task), backend="ssh", phase="generate")

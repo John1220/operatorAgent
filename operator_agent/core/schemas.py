@@ -183,6 +183,11 @@ class SourceSpec:
         "conv2d",
         # 新架构算子 (带 reference_source 才有意义; 不带时内建参考表查不到)
         "csa_compress", "csa_kv_compress",
+        # 已注册的融合族。它有受信任的 correctness profile、参考实现与 case 生成器
+        # (`decide/correctness_profiles.py` 的 REGISTERED_FUSED_KERNEL_TYPES),
+        # 此前只是**没进这张词表** —— 于是「已知类型」与「系统真能跑的算子」两张表
+        # 对不上。结构化声明要求 operator 落在闭合词表里，这个不一致就浮出来了。
+        "fused_layernorm_residual",
     })
 
     def validate(self) -> list[str]:

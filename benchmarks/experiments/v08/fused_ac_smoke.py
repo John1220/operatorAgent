@@ -28,7 +28,7 @@ from operator_agent.core.schemas import TilingStrategy, UnifiedSketch
 from operator_agent.generate.generation_context import build_generation_context
 from operator_agent.generate.prompt_manager import PromptManager
 
-DECL = dict(request="fp16 32768x6144 residual add layernorm", shapes=[[32768, 6144]],
+DECL = dict(operator='fused_layernorm_residual', request="fp16 32768x6144 residual add layernorm", shapes=[[32768, 6144]],
             precision="fp16", dsl="triton", hardware="nvidia_gpu", min_speedup=1.5)
 WIRE_MAX_TOKENS = 32768
 

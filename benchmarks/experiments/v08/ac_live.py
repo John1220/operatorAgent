@@ -754,7 +754,7 @@ def main(argv=None):
                       final_reserve=plan['budget']['final_reserve'])
     else:
         pinned_gpu = None
-        declaration = dict(request='fp32 4096x4096x4096 matmul, triton',
+        declaration = dict(operator='matmul', request='fp32 4096x4096x4096 matmul, triton',
                            shapes=[[4096, 4096, 4096]], hardware='nvidia_gpu', dsl='triton',
                            precision='fp32', min_speedup=1.0)
     # 缺省预算只在**没有** --plan 时生效；给了计划就必须用计划里的冻结值，

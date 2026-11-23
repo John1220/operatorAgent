@@ -8,7 +8,7 @@ import pytest
 from benchmarks.experiments.s5 import s5_verify_remote as service
 from benchmarks.experiments.s5.s5_vertical_validation import BAD_FIXTURE, GOOD_FIXTURE
 
-DECLARATION = dict(request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',
+DECLARATION = dict(operator='layernorm', request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',
                    dsl='python', precision='fp32')
 
 

@@ -13,7 +13,7 @@ from operator_agent.decide.verifier import Verifier
 
 
 def setup(root):
-    task = build_task(dict(request='matmul fp32', shapes=[[8, 8, 8]],
+    task = build_task(dict(operator='matmul', precision='fp32', request='matmul fp32', shapes=[[8, 8, 8]],
                            dsl='python', min_speedup=0))
     inputs = freeze_from_task(task).cases[0].materialize()
     verifier = Verifier(MockGPU())
@@ -97,7 +97,7 @@ def test_audit_write_failure_does_not_release_an_unaudited_success(tmp_path, mon
 
 
 def test_library_verification_without_sink_has_no_implicit_phase_credit(tmp_path):
-    task = build_task(dict(request='matmul fp32', shapes=[[8, 8, 8]], dsl='python'))
+    task = build_task(dict(operator='matmul', precision='fp32', request='matmul fp32', shapes=[[8, 8, 8]], dsl='python'))
     verifier = Verifier(MockGPU())
     result = verifier.verify('def kernel(A,B): return A@B', task,
         freeze_from_task(task).cases[0].materialize(), stop_after=VerificationLevel.L1_COMPILE)

@@ -184,7 +184,7 @@ def test_optimize_context_carries_the_diagnosis_and_other_phases_do_not():
     from operator_agent.generate.host_context import build_host_context
 
     code = 'import numpy as np\ndef kernel(X):\n    return X.copy()\n'
-    task = build_task(dict(request='relu fp32', shapes=[[4, 8]], precision='fp32',
+    task = build_task(dict(operator='relu', request='relu fp32', shapes=[[4, 8]], precision='fp32',
                            dsl='python', hardware='mock_gpu'))
     contract = freeze_from_task(task)
     metrics = dict(perf())

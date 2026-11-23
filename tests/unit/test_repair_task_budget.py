@@ -14,7 +14,7 @@ from operator_agent.app import tool_calls
 from operator_agent.core.schemas import VerificationLevel as Level, VerificationResult
 
 
-DECL = dict(request='matmul fp32', shapes=[[8, 8, 8]], min_speedup=1)
+DECL = dict(operator='matmul', precision='fp32', request='matmul fp32', shapes=[[8, 8, 8]], min_speedup=1)
 CODE = 'def kernel(A, B):\n    return A @ B\n'
 LIMITS = dict(wall_clock_s=12.5, max_llm_calls=3, oracle_total=5)
 

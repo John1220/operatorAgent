@@ -40,12 +40,12 @@ SUBJECT = ('performance parity of plugin-arm (C) vs bare-arm (A) delivered kerne
 #: 交付时的契约哈希（见 PAIRS.contract_hash，validate 会重算核对）。
 TASKS = [
     dict(task_id='matmul-4096-fp32',
-         declaration=dict(request='fp32 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
+         declaration=dict(operator='matmul', request='fp32 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
                           precision='fp32', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0),
          baseline_context='cuBLAS IEEE fp32 (library); historical candidate ~0.37x, context only',
          mask=None),
     dict(task_id='attention-prefill-4096',
-         declaration=dict(request='fp16 attention prefill 1x16x4096x128', shapes=[[1, 16, 4096, 128]],
+         declaration=dict(operator='attention', request='fp16 attention prefill 1x16x4096x128', shapes=[[1, 16, 4096, 128]],
                           precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0),
          baseline_context='SDPA fp16 (library); historical candidate 0.8608x valid, context only',
          mask='nocausal'),

@@ -40,7 +40,7 @@ def model(value):
     if value is None:return None
     # Reuse the connected adapter's closed endpoint/credential-reference schema.
     config=dict(backend='fake',entry_b='dsh',model=value,
-        tasks=[dict(task_id='schema-check',declaration=dict(request='relu fp32',shapes=[[4,8]],dsl='python'))])
+        tasks=[dict(task_id='schema-check',declaration=dict(operator='relu', precision='fp32', request='relu fp32',shapes=[[4,8]],dsl='python'))])
     result=connected_plan._normalize(config)['model']
     if result['temperature']!=sampling.POLICY['temperature']:
         raise ValueError('model temperature must equal the registered wire policy')

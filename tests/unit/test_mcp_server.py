@@ -127,9 +127,15 @@ class TestToolSurface(unittest.TestCase):
             self.assertFalse(schema.get("additionalProperties", True), name)
             self.assertTrue(tool.get("description"), name)
 
-    def test_prepare_requires_exactly_request_shapes_run_dir(self):
+    def test_prepare_requires_the_semantic_fields_not_just_the_request(self):
+        """`operator` / `precision` 必须在 required 里。
+
+        判据层不做关键词推断之后，把它们降成可选就等于允许「缺了就猜」—— 那正是
+        「宿主以为声明的是 A、冻结契约实际是 B」的入口。`request` 仍然必填，但它是
+        **审计字段**：缺了它没有可复盘的原话，缺了 operator 就没有判据。
+        """
         self.assertEqual(set(self.tools["operator_prepare"]["inputSchema"]["required"]),
-                         {"request", "shapes", "run_dir"})
+                         {"request", "shapes", "operator", "precision", "run_dir"})
 
     def test_no_schema_parameter_can_relax_the_judgement(self):
         """与 hitl_tools 的白名单同一条纪律：schema 里出现这些名字就是开了口子。"""
@@ -162,7 +168,7 @@ class TestToolCalls(unittest.TestCase):
         run = Path(tempfile.mkdtemp(prefix="mcp-round-")) / "run"
         replies = conversation([
             {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-                "name": "operator_prepare", "arguments": {
+                "name": "operator_prepare", "arguments": {"operator": 'matmul', "precision": 'fp32', 
                     "request": "把 64x64x64 的 fp32 矩阵乘法写成算子",
                     "shapes": [[64, 64, 64]], "run_dir": str(run), "min_speedup": 0.5}}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
@@ -180,7 +186,7 @@ class TestToolCalls(unittest.TestCase):
     def test_a_refusal_is_iserror_with_the_reason_visible(self):
         replies = conversation([{
             "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-                "name": "operator_prepare", "arguments": {
+                "name": "operator_prepare", "arguments": {"operator": 'unknown', "precision": 'fp32', 
                     "request": "x", "shapes": [[64, 64, 64]],
                     "run_dir": tempfile.mkdtemp(prefix="mcp-bad-"), "max_error": 1.0}},
         }])
@@ -201,7 +207,7 @@ class TestToolCalls(unittest.TestCase):
         try:
             replies = conversation([{
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
-                    "name": "operator_run", "arguments": {
+                    "name": "operator_run", "arguments": {"operator": 'matmul', "precision": 'fp32', 
                         "request": "把 64x64x64 的 fp32 矩阵乘法写成算子",
                         "shapes": [[64, 64, 64]],
                         "run_dir": tempfile.mkdtemp(prefix="mcp-run-"),
@@ -264,7 +270,7 @@ class TestAsyncVerify(unittest.TestCase):
     超时对分钟级 attention L2）。分离式提交让请求不再挂着等执行。
     """
 
-    DECL = dict(request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
+    DECL = dict(operator='relu', request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
     CORRECT = 'import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n'
 
     def _prepare(self):

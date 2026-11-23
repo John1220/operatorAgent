@@ -22,6 +22,7 @@ def declaration(*shape, precision='fp16'):
     dims = [int(value) for value in shape]
     label = "x".join(str(value) for value in dims)
     return {"request": f"{precision} attention prefill {label}",
+            "operator": "attention",
             "shapes": [dims], "hardware": "nvidia_gpu", "dsl": "triton",
             "precision": precision, "min_speedup": 1.0}
 
@@ -80,10 +81,12 @@ def test_the_refusal_reaches_the_cli_as_one_json_receipt(tmp_path):
 
 def test_the_other_profiles_are_not_touched():
     """只收紧 attention：layernorm / matmul 的默认套件与容差一个字节都不动。"""
-    for request, profile in (("layernorm fp16 triton nvidia", "builtin-layernorm-fp16-cuda-v2"),
-                             ("fp16 4096x4096x4096 matmul, triton", "builtin-l2-v1")):
+    for request, operator, profile in (
+            ("layernorm fp16 triton nvidia", "layernorm", "builtin-layernorm-fp16-cuda-v2"),
+            ("fp16 4096x4096x4096 matmul, triton", "matmul", "builtin-l2-v1")):
         from operator_agent.app.hitl_tools import build_task
-        task = build_task({"request": request, "hardware": "nvidia_gpu", "dsl": "triton",
+        task = build_task({"request": request, "operator": operator,
+                           "hardware": "nvidia_gpu", "dsl": "triton",
                            "precision": "fp16", "shapes": [[4096, 4096, 4096]]
                            if "matmul" in request else [[16384, 6144]]})
         assert task.constraints.correctness_profile == profile

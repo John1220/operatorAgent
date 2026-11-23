@@ -8,7 +8,7 @@ from benchmarks.experiments.v08 import failure_replay as fr
 
 def _case(tmp_path, expected=None):
     case = dict(schema='v08-failure-replay-case-v1', case_id='c',
-                declaration=dict(request='fp16 8x8 relu', shapes=[[8, 8]],
+                declaration=dict(operator='relu', request='fp16 8x8 relu', shapes=[[8, 8]],
                                  precision='fp16', dsl='triton', hardware='nvidia_gpu'),
                 expected=expected or dict(levels=dict(L1=True, L2=False),
                                           producer='triton.compiler.errors.CompilationError',

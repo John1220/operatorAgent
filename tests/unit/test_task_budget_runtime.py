@@ -57,7 +57,7 @@ def launch(tmp_path, monkeypatch, server, **budget):
     monkeypatch.setenv('LLM_MODEL', 'local-budget-fixture')
     monkeypatch.setenv('LLM_API_KEY', 'synthetic-budget-fixture-key')
     run = tmp_path/'run'
-    response = ht.run_autonomous(dict(request='matmul fp32', dsl='python',
+    response = ht.run_autonomous(dict(operator='matmul', precision='fp32', request='matmul fp32', dsl='python',
         shapes=[[8, 8, 8]], min_speedup=0), run, backend='mock', **budget)
     end = time.monotonic()+30
     while time.monotonic() < end:

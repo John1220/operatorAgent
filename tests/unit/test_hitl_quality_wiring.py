@@ -16,7 +16,7 @@ from operator_agent.core.tolerance import effective_atol
 
 @pytest.mark.parametrize('operator', ('layernorm', 'softmax', 'relu'))
 def test_prepare_uses_the_trusted_single_input_profile_not_legacy_affine_names(tmp_path, operator):
-    declaration = dict(request=operator+' fp32', precision='fp32', shapes=[[7,33]])
+    declaration = dict(operator=operator, request=operator+' fp32', precision='fp32', shapes=[[7,33]])
     prepared = ht.prepare(declaration, tmp_path/operator)
     assert set(prepared['inputs']) == {'X'}
     assert prepared['generation_spec'] == generation_spec_identity()
@@ -30,7 +30,7 @@ def test_prepare_uses_the_trusted_single_input_profile_not_legacy_affine_names(t
 
 def test_mcp_repair_receives_diagnosis_and_returns_compact_evidence(tmp_path, monkeypatch):
     run = tmp_path/'prepared'
-    declaration = dict(request='layernorm fp32 triton', precision='fp32', dsl='triton', shapes=[[7,33]])
+    declaration = dict(operator='layernorm', request='layernorm fp32 triton', precision='fp32', dsl='triton', shapes=[[7,33]])
     ht.prepare(declaration, run)
     task = ht.build_task(declaration)
     atol, rtol, rho = effective_atol('fp32', task.constraints.max_error)
@@ -88,7 +88,7 @@ def test_mcp_repair_receives_diagnosis_and_returns_compact_evidence(tmp_path, mo
 
 def test_real_cpu_layernorm_public_verify_preserves_full_suite(tmp_path):
     run = tmp_path/'cpu'
-    ht.prepare(dict(request='layernorm fp32', precision='fp32', shapes=[[7,33]]), run)
+    ht.prepare(dict(operator='layernorm', request='layernorm fp32', precision='fp32', shapes=[[7,33]]), run)
     source = ('import numpy as np\ndef kernel(X):\n'
               '    z = X - X.mean(axis=-1, keepdims=True)\n'
               '    return z / np.sqrt((z*z).mean(axis=-1, keepdims=True)+1e-5)\n')

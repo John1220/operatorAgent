@@ -65,7 +65,7 @@ class _Server:
 
 
 def declaration(**over):
-    base = {"request": "把 64x64x64 的 fp32 矩阵乘法写成算子",
+    base = {"operator": 'matmul', "precision": 'fp32', "request": "把 64x64x64 的 fp32 矩阵乘法写成算子",
             "shapes": [[64, 64, 64]], "min_speedup": 0.5}
     base.update(over)
     return base

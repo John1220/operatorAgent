@@ -19,7 +19,7 @@ from operator_agent.core.run_contract import code_hash
                     reason='installed DSH Desktop or MCP client unavailable')
 def test_actual_mcp_verify_feedback_through_headless(tmp_path):
     run=(tmp_path/'run').resolve()
-    prepare({'request':'layernorm fp32','shapes':[[7,33]],'precision':'fp32'},run)
+    prepare({"operator": 'layernorm', 'request':'layernorm fp32','shapes':[[7,33]],'precision':'fp32'},run)
     path=tmp_path/'ledger.sqlite'
     shared.create(path,task_id='fixture',max_calls=2,max_output_tokens=1024,
                   total_output_tokens=2048,wall_clock_s=120)

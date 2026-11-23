@@ -15,7 +15,8 @@ CODE = 'import numpy as np\ndef kernel(X):\n    return X.copy()\n'
 
 
 def task(dsl='python', operator='relu'):
-    return build_task(dict(request=operator+' fp32', shapes=[[4, 8]], precision='fp32',
+    return build_task(dict(operator=operator, request=operator+' fp32', shapes=[[4, 8]],
+                           precision='fp32',
                            dsl=dsl, hardware='mock_gpu' if dsl == 'python' else 'nvidia_gpu'))
 
 
@@ -346,7 +347,7 @@ def test_suite_intent_names_every_tested_scalar_value():
     from operator_agent.core.contract import freeze_from_task
     from operator_agent.generate.host_context import _suite_intent
 
-    attention = dict(request='fp16 attention prefill 1x16x4096x128',
+    attention = dict(operator='attention', request='fp16 attention prefill 1x16x4096x128',
                      shapes=[[1, 16, 4096, 128]], hardware='nvidia_gpu', dsl='triton',
                      precision='fp16', min_speedup=1.0)
     intent = _suite_intent(freeze_from_task(build_task(attention)))
@@ -365,7 +366,7 @@ def test_suite_intent_names_tested_layouts_even_without_scalars():
     from operator_agent.core.contract import freeze_from_task
     from operator_agent.generate.host_context import _suite_intent
 
-    softmax = dict(request='fp16 softmax 16384x6144', shapes=[[16384, 6144]],
+    softmax = dict(operator='softmax', request='fp16 softmax 16384x6144', shapes=[[16384, 6144]],
                    hardware='nvidia_gpu', dsl='triton', precision='fp16', min_speedup=1.0)
     intent = _suite_intent(freeze_from_task(build_task(softmax)))
     assert intent['tested_layouts'] == ['contiguous', 'strided']

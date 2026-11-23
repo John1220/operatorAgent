@@ -19,7 +19,7 @@ from operator_agent.decide import reference_contract as rc
 from operator_agent.decide.bench_cases import cases_from_shapes, known_layouts
 from operator_agent.decide.correctness import as_suite
 
-DECLARATION = dict(request="fp16 32768x6144 residual add layernorm",
+DECLARATION = dict(operator='fused_layernorm_residual', request="fp16 32768x6144 residual add layernorm",
                    shapes=[[32768, 6144]], precision="fp16", dsl="triton",
                    hardware="nvidia_gpu", min_speedup=1.0)
 

@@ -13,7 +13,7 @@ from operator_agent.app.host_workflow import context
 from operator_agent.core.run_contract import code_hash
 
 
-DECL = dict(request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
+DECL = dict(operator='relu', request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
 WRONG = 'import numpy as np\ndef kernel(X):\n    return X.copy()\n'
 CORRECT = 'import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n'
 

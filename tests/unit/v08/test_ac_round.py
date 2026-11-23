@@ -10,7 +10,7 @@ from benchmarks.experiments.v08.ac_round import a_cell, arm_prompt
 BUDGET = dict(cells=8, max_model_calls=30, max_output_tokens_per_call=8192,
               total_output_token_reservations=245760, max_verifications=8,
               wall_clock_s=2400, final_reserve=1)
-DECL = dict(request='fp16 relu 256x256', shapes=[[256, 256]], hardware='mock_gpu',
+DECL = dict(operator='relu', request='fp16 relu 256x256', shapes=[[256, 256]], hardware='mock_gpu',
             dsl='python', precision='fp16', min_speedup=1.0)
 GOOD = "import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n"
 
@@ -172,7 +172,7 @@ def test_the_prompt_abi_includes_scalars_like_the_plugin_does():
     """
     from benchmarks.experiments.v08.ac_round import calling_convention
 
-    attention = dict(request='fp16 attention prefill 1x16x4096x128', shapes=[[1, 16, 4096, 128]],
+    attention = dict(operator='attention', request='fp16 attention prefill 1x16x4096x128', shapes=[[1, 16, 4096, 128]],
                      hardware='nvidia_gpu', dsl='triton', precision='fp16', min_speedup=1.0)
     conv = calling_convention(attention)
     assert conv['signature'] == 'def kernel(K, Q, V, causal):'
@@ -276,7 +276,7 @@ def test_failed_cell_early_return_still_meters_dispatches(tmp_path, monkeypatch)
     monkeypatch.setattr(ac_live, 'select_gpu', lambda *a, **k: {})
     monkeypatch.setattr(ac_live, '_assert_tool_surface', lambda *a, **k: None)
 
-    declaration = dict(request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
+    declaration = dict(operator='relu', request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python')
     budget = dict(max_model_calls=20, max_output_tokens_per_call=40960,
                   total_output_token_reservations=819200, max_verifications=8,
                   wall_clock_s=2400, final_reserve=1)

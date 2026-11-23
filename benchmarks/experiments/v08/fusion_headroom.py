@@ -27,7 +27,7 @@ from operator_agent.decide.noise_preflight import PROTOCOL
 
 SCHEMA = "v08-fusion-headroom-plan-v1"
 SHAPE = (32768, 6144)
-DECLARATION = dict(request="fp16 32768x6144 residual add layernorm",
+DECLARATION = dict(operator='fused_layernorm_residual', request="fp16 32768x6144 residual add layernorm",
                    shapes=[list(SHAPE)], precision="fp16", dsl="triton",
                    hardware="nvidia_gpu", min_speedup=1.0)
 KERNEL_PATH = Path(__file__).resolve().parent / "kernels" / "fused_ln_residual.py"

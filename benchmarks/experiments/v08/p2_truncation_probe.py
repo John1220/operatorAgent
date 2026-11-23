@@ -25,7 +25,7 @@ from operator_agent.core.interface_contract import broadcast_calling_convention
 from operator_agent.generate.generation_context import build_generation_context
 from operator_agent.generate.prompt_manager import PromptManager
 
-DECL = dict(request='fp16 16384x6144 layernorm', shapes=[[16384, 6144]],
+DECL = dict(operator='layernorm', request='fp16 16384x6144 layernorm', shapes=[[16384, 6144]],
             precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0)
 
 

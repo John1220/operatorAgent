@@ -24,7 +24,7 @@ from operator_agent.app import hitl_tools
 from operator_agent.execute import s5_verify_client as client, s5_shared_budget as shared
 from operator_agent.core.run_contract import code_hash
 
-DECLARATION = dict(request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',
+DECLARATION = dict(operator='layernorm', request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',
                    dsl='python', precision='fp32')
 READY = bool(shutil.which('node')) and (DSH_ROOT / 'dsh/lib/bin.js').is_file() and s5_runtime.available()
 

@@ -198,18 +198,30 @@ def _tool_definitions() -> list[dict]:
             "inputSchema": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["request", "shapes", "run_dir"],
+                "required": ["request", "shapes", "operator", "precision", "run_dir"],
                 "properties": {
-                    "request": {"type": "string", "description": "自然语言请求"},
+                    "request": {"type": "string",
+                                "description": "自然语言请求：**只进产物与审计，不参与判据推导**"},
                     "shapes": _SHAPES,
                     "run_dir": {"type": "string", "description": "回合目录（绝对路径更好；调用方拥有布局）"},
+                    # `operator` / `precision` 没有默认值：本层不做关键词推断，缺了就拒绝。
+                    # 拿不准就先调 `operator_normalize` 起草一份，核过再回填。
+                    "operator": {"type": "string",
+                                 "description": ("算子类型（闭合词表：matmul / softmax / layernorm / "
+                                                 "relu / attention / fused_layernorm_residual 等）。"
+                                                 "**必填** —— 不再从 request 的关键词推断")},
+                    "precision": {"type": "string", "enum": ["fp32", "fp16"],
+                                  "description": "精度。**必填** —— 不再从 request 的关键词推断"},
                     "hardware": {"type": "string", "description": "默认 mock_gpu"},
                     "dsl": {"type": "string", "description": "默认 python（真机上是 triton）"},
-                    "precision": {"type": "string", "enum": ["fp32", "fp16"]},
                     "min_speedup": {"type": "number", "description": "性能门槛"},
                     "required_caps": {"type": "array", "items": {"type": "string"},
                                       "description": "执行侧必须具备的能力，如 real_device"},
                     "framework": {"type": "string", "description": "默认 pytorch"},
+                    "complexity": {"type": "string",
+                                   "enum": ["low", "medium", "high"],
+                                   "description": "默认 medium（成文默认，不再是关键词推断）"},
+                    "schema_version": {"type": "string", "description": "声明版本，目前只有 task-declaration-v1"},
                     "notes": {"type": "string", "description": "只进产物，不进判据"},
                 },
             },
@@ -294,11 +306,15 @@ def _tool_definitions() -> list[dict]:
                             "否则立刻拒绝而不是假装在跑。"),
             "inputSchema": {
                 "type": "object", "additionalProperties": False,
-                "required": ["request", "shapes", "run_dir"],
+                "required": ["request", "shapes", "operator", "precision", "run_dir"],
                 "properties": {
                     "request": {"type": "string"},
                     "shapes": _SHAPES,
                     "run_dir": {"type": "string"},
+                    "operator": {"type": "string",
+                                 "description": "算子类型（闭合词表）；**必填**，不从 request 推断"},
+                    "precision": {"type": "string", "enum": ["fp32", "fp16"],
+                                  "description": "精度；**必填**，不从 request 推断"},
                     "hardware": {"type": "string"},
                     "dsl": {"type": "string"},
                     "precision": {"type": "string", "enum": ["fp32", "fp16"]},

@@ -22,7 +22,7 @@ from operator_agent.execute import exec_guard
 from operator_agent.execute.task_cancellation import (cancellation, launch_identity, publish_json,
                                              request_cancel, stop_event)
 
-DECL = dict(request='matmul fp32', dsl='python', shapes=[[8, 8, 8]], min_speedup=0)
+DECL = dict(operator='matmul', precision='fp32', request='matmul fp32', dsl='python', shapes=[[8, 8, 8]], min_speedup=0)
 REPO = Path(__file__).resolve().parents[2]
 
 

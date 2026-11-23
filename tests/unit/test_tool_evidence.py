@@ -18,7 +18,7 @@ SOURCE = 'def kernel(A, B):\r\n    # 原始源码\r\n    return A @ B\r\n'
 
 def prepared(tmp_path):
     run = tmp_path / 'run'
-    ht.prepare(dict(request='matmul fp32', shapes=[[8, 8, 8]]), run)
+    ht.prepare(dict(operator='matmul', precision='fp32', request='matmul fp32', shapes=[[8, 8, 8]]), run)
     return run
 
 
@@ -211,7 +211,7 @@ def test_repair_keeps_initial_final_and_each_verified_source_with_complete_resul
     monkeypatch.setattr(ht, '_llm_problem', lambda: None)
     monkeypatch.setattr(llm_client, 'LLMClient', lambda **kw: Replies([reply(FIXED)]))
     run = tmp_path/'layernorm'
-    ht.prepare(dict(request='layernorm fp32', shapes=[[2, 3]]), run)
+    ht.prepare(dict(operator='layernorm', precision='fp32', request='layernorm fp32', shapes=[[2, 3]]), run)
     payload = ht.repair(run, ORIGINAL, stop_after='L2')
     full = json.loads(Path(payload['evidence']).read_text())
     assert Path(payload['source']).read_text() == ORIGINAL
@@ -229,7 +229,7 @@ def test_repair_keeps_initial_final_and_each_verified_source_with_complete_resul
 def test_conductor_history_retains_admitted_source_but_refusal_is_hash_only(tmp_path):
     from operator_agent.core.run_layout import run_layout
     from operator_agent.decide.tool_evidence import persist_conductor_round
-    task = ht.build_task(dict(request='matmul fp32', shapes=[[8, 8, 8]]))
+    task = ht.build_task(dict(operator='matmul', precision='fp32', request='matmul fp32', shapes=[[8, 8, 8]]))
     layout = run_layout(str(tmp_path/'autonomous'))
     first = persist_conductor_round(layout, task, SOURCE, outcomes(), 1, admitted=True)
     files = {Path(first[key]): Path(first[key]).read_bytes() for key in ('source', 'evidence', 'report')}

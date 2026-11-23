@@ -22,7 +22,7 @@ def launch(tmp_path, monkeypatch, *, scenario='success', **options):
     for name in ('LLM_BASE_URL', 'LLM_API_KEY', 'LLM_API_KEY_FILE'):
         monkeypatch.delenv(name, raising=False)
     run = tmp_path/'run'
-    started = ht.run_autonomous(dict(request='relu', shapes=[[4, 8]], dsl='python'),
+    started = ht.run_autonomous(dict(operator='relu', precision='fp32', request='relu', shapes=[[4, 8]], dsl='python'),
         run, backend='fake', fake={'scenario': scenario}, max_rounds=2,
         wall_clock_s=options.pop('wall_clock_s', 25), **options)
     assert started['execution_context']['test_only'] is True
@@ -73,7 +73,7 @@ def test_fake_model_call_budget_stops_before_coder(tmp_path, monkeypatch):
 def test_matmul_fixture_uses_normal_full_correctness_suite(tmp_path, monkeypatch):
     monkeypatch.delenv('LLM_BASE_URL', raising=False)
     run = tmp_path/'run'
-    ht.run_autonomous(dict(request='matmul fp32', shapes=[[8, 8, 8]], dsl='python'),
+    ht.run_autonomous(dict(operator='matmul', precision='fp32', request='matmul fp32', shapes=[[8, 8, 8]], dsl='python'),
                       run, backend='fake', wall_clock_s=25)
     status = wait_for(run, lambda s: s.get('phase') in ('done', 'failed', 'lost'))
     assert status['phase'] == 'done'

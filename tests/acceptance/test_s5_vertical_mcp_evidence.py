@@ -16,7 +16,7 @@ TOOL='mcp__operator__operator_verify'
 @pytest.fixture(scope='module')
 def evidence(tmp_path_factory):
     run=tmp_path_factory.mktemp('mcp-evidence')/'run'
-    prepared=prepare({'request':'layernorm fp32','shapes':[[7,33]],'precision':'fp32'},run)
+    prepared=prepare({"operator": 'layernorm', 'request':'layernorm fp32','shapes':[[7,33]],'precision':'fp32'},run)
     args=dict(run_dir=str(run),code=GOOD_FIXTURE,backend='mock',stop_after='L2')
     payload=run_tool_call('operator_verify',args)
     call_dir=Path(payload['tool_call_dir'])

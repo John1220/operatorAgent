@@ -91,21 +91,15 @@ class IntentParser:
 
     @staticmethod
     def _prepare_correctness(task, request):
-        # Do not let an omitted LLM field erase explicitly requested non-default
-        # semantics. This is conservative detection, NOT full NL interpretation.
+        # 未解析语义的检测只有一处实现（`correctness_profiles.unresolved_semantics`）：
+        # 结构化声明路径与这条规则解析路径共用它，免得两份正则各自漂移。
+        from ..decide.correctness_profiles import unresolved_semantics
         source = replace(task.source, fused_ops=list(task.source.fused_ops),
                          semantic_parameters=dict(task.source.semantic_parameters))
-        if (task.source.kernel_type not in REGISTERED_FUSED_KERNEL_TYPES
-                and re.search(r"融合|\bfused\b|乘加|\b(?:matmul|gemm|relu|softmax|layernorm)\s*\+|"
-                              r"\+\s*(?:relu|softmax|layernorm|add|bias)\b", request, re.I)):
-            # 已注册的融合族（residual+LayerNorm）有受信任 profile，不再是"未解析融合"；
-            # 其余任何融合标记仍按未知语义处理（fail closed）。
-            source.fused_ops = source.fused_ops or ["unresolved_fusion"]
-        if re.search(r"\b(?:eps|epsilon|affine|normalized_shape|dim|axis|bias|weight)\s*[:=]|"
-                     r"\b(?:affine|transpose|log_softmax)\b|"
-                     r"\b[a-z][a-z0-9]*_(?:softmax|relu|layernorm|matmul)\b|"
-                     r"log softmax|转置|归一化轴|带偏置|带权重", request, re.I):
-            source.semantic_parameters["unresolved_request"] = request
+        fused, parameters = unresolved_semantics(request, task.source.kernel_type)
+        if fused:
+            source.fused_ops = source.fused_ops or fused
+        source.semantic_parameters.update(parameters)
         return with_default_correctness(replace(task, source=source))
 
     def _llm_parse(self, request: str) -> TaskSchema:
@@ -225,13 +219,15 @@ class IntentParser:
 
     @staticmethod
     def _hardware_cu(hw: str) -> int:
-        cu_map = {"nvidia_gpu": 128, "mock_gpu": 64, "ascend": 64}
-        return cu_map.get(hw, 64)
+        # 映射表只有一处权威（`core.task_declaration.HARDWARE_PROFILES`）:
+        # 结构化声明路径也要用同一张表，两处各存一份就是两张会漂的表。
+        from ..core.task_declaration import hardware_profile
+        return hardware_profile(hw)[0]
 
     @staticmethod
     def _hardware_warp(hw: str) -> int:
-        warp_map = {"nvidia_gpu": 32, "mock_gpu": 32, "ascend": 16}
-        return warp_map.get(hw, 32)
+        from ..core.task_declaration import hardware_profile
+        return hardware_profile(hw)[1]
 
 
 class TestInputGenerator:

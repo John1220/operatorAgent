@@ -152,7 +152,7 @@ def test_client_representation_does_not_include_file_credential(monkeypatch, tmp
 
 def prepare_run(tmp_path):
     run = tmp_path / "run"
-    hitl_tools.prepare({"request": "matmul fp32", "shapes": [[2, 2, 2]]}, run)
+    hitl_tools.prepare({"operator": 'matmul', "precision": 'fp32', "request": "matmul fp32", "shapes": [[2, 2, 2]]}, run)
     return run
 
 

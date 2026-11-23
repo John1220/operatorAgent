@@ -30,7 +30,7 @@ WRONG = "def kernel(A, B):\n    return (A @ B) * 0.9\n"
 
 
 def declaration(**over):
-    base = {
+    base = {"operator": 'matmul', "precision": 'fp32', 
         "request": "把 64x64x64 的 fp32 矩阵乘法写成算子",
         "shapes": [[64, 64, 64]],
         "min_speedup": 0.5,       # 64³ 在本机 CPU 上的比值在噪声带里，门槛只为让判定稳定

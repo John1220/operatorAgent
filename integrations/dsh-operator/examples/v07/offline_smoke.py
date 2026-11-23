@@ -121,7 +121,7 @@ def main():
     client = Client(args.entry, output)
     started = None
     try:
-        started = client.call('run', dict(request='relu', shapes=[[4, 8]], dsl='python',
+        started = client.call('run', dict(operator='relu', precision='fp32', request='relu', shapes=[[4, 8]], dsl='python',
             run_dir=str(run), backend='fake', fake=dict(scenario='timeout' if args.scenario=='cancel'
                 else args.scenario, profile='small', llm='fake'), max_rounds=2,
             wall_clock_s=30, max_llm_calls=8, oracle_total=20))

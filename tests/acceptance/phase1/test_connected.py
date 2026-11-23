@@ -58,7 +58,7 @@ def freeze(tmp_path,server,**budget):
     config=dict(backend='fake',entry_b='core',
         model=dict(base_url=server.url,id='phase1-local',transport='local_fixture',
                    api_key_env='PHASE1_FIXTURE_KEY',temperature=.2),
-        tasks=[dict(task_id='matmul',declaration=dict(request='matmul fp32',precision='fp32',
+        tasks=[dict(task_id='matmul',declaration=dict(operator='matmul', request='matmul fp32',precision='fp32',
                     shapes=[[8,8,8]],dsl='python'))],max_rounds=1,
         final_wall_clock_s=30,budget=dict(wall_clock_s=30,max_llm_calls=8,oracle_total=20,**budget))
     connected_plan.freeze(tmp_path/'frozen',config)

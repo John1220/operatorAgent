@@ -13,7 +13,7 @@ import pytest
 
 from benchmarks.experiments.v08 import p2_seed
 
-DECL = dict(request='relu fp32', shapes=[[8, 16]], precision='fp32', dsl='python', min_speedup=1.0)
+DECL = dict(operator='relu', request='relu fp32', shapes=[[8, 16]], precision='fp32', dsl='python', min_speedup=1.0)
 BUDGET = dict(wall_clock_s=300, max_llm_calls=1, oracle_total=2)
 GOOD = "import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n"
 BAD = "import numpy as np\ndef kernel(X):\n    return np.minimum(X, 0)\n"

@@ -129,7 +129,7 @@ def tasks():
     """Fresh JSON values for all four fixed fp16/Triton task contracts."""
     result=[]
     for task_id,kernel,shape in TASKS:
-        declaration=dict(request=kernel+' fp16',precision='fp16',dsl='triton',
+        declaration=dict(operator=kernel,request=kernel+' fp16',precision='fp16',dsl='triton',
                          shapes=[list(shape)],min_speedup=1.,hardware='nvidia_gpu')
         _,contract=check(declaration,'ssh')
         result.append(dict(task_id=task_id,declaration=declaration,kernel_type=kernel,

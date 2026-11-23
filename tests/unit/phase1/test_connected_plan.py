@@ -20,7 +20,7 @@ def config():
     return dict(backend='fake', entry_b='core', model=dict(
         base_url='http://127.0.0.1:43210/v1', id='local-model',
         api_key_env='PHASE1_TEST_KEY', temperature=.2, transport='local_fixture'),
-        tasks=[dict(task_id='relu', declaration=dict(
+        tasks=[dict(task_id='relu', declaration=dict(operator='relu', 
             request='relu fp32', shapes=[[4, 8]], precision='fp32', dsl='python'))],
         budget=dict(wall_clock_s=30., max_llm_calls=4, oracle_total=20),
         max_rounds=2, final_wall_clock_s=20.)

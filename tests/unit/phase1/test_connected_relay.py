@@ -14,7 +14,7 @@ from operator_agent.app import mcp_server
 
 def config(tmp_path, backend='fake'):
     return dict(run_dir=str(tmp_path/'cell/work'),backend=backend,
-        declaration=dict(request='relu fp32',shapes=[[4,8]],dsl='python' if backend=='fake' else 'triton'),
+        declaration=dict(operator='relu', precision='fp32', request='relu fp32',shapes=[[4,8]],dsl='python' if backend=='fake' else 'triton'),
         model=dict(base_url='http://127.0.0.1:17123/v1',id='frozen-model',api_key_env='PHASE1_TEST_KEY'),
         gpu=dict(index=2,uuid='GPU-frozen',name='Frozen GPU'),
         connection={} if backend=='fake' else dict(host='frozen-host',port=2222,user='worker',

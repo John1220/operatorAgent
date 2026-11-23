@@ -36,7 +36,7 @@ def sha(path):
 
 
 def declaration(n):
-    return dict(request='matmul fp16 triton', shapes=[[n,n,n]], hardware='nvidia_gpu',
+    return dict(operator='matmul', request='matmul fp16 triton', shapes=[[n,n,n]], hardware='nvidia_gpu',
                 dsl='triton', precision='fp16', min_speedup=1.0, required_caps=['real_device'])
 
 

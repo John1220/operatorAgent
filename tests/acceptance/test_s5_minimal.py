@@ -68,7 +68,7 @@ def test_missing_unknown_and_duplicates_never_create_positive_inference():
 def test_repeated_runs_have_separate_evidence_and_budgets(tmp_path,monkeypatch):
     from benchmarks.experiments.s5 import s5_verify_remote, s5_arm_env
     from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
-    decl=dict(request='layernorm fp32',shapes=[[7,33]],hardware='mock_gpu',dsl='python',precision='fp32')
+    decl=dict(operator='layernorm', request='layernorm fp32',shapes=[[7,33]],hardware='mock_gpu',dsl='python',precision='fp32')
     sha=s5_verify_remote.freeze(tmp_path/'services/case',declaration=decl,backend='mock')
     p=dict(schema=flow.SCHEMA,implementation=flow.runtime_identity(),hash='repeat-test',repeats=2,
        budget=dict(max_calls=1,max_output_tokens=2048,total_output_tokens=2048,wall_clock_s=120),

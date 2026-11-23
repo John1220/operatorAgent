@@ -94,6 +94,8 @@ def _parser() -> argparse.ArgumentParser:
     pre.add_argument("--declaration", help="声明 JSON 文件（与上面的参数二选一/覆盖）")
     pre.add_argument("--shapes", action="append", default=[],
                      help="形状，可重复；如 --shapes 64,64,64")
+    pre.add_argument("--operator", default=None,
+                     help="算子类型（闭合词表）；不给则由 request 在**本层**起草")
     pre.add_argument("--hardware", default=None)
     pre.add_argument("--dsl", default=None)
     pre.add_argument("--precision", default=None)
@@ -128,6 +130,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--request", help="自然语言请求")
     run.add_argument("--declaration", help="声明 JSON 文件")
     run.add_argument("--shapes", action="append", default=[])
+    run.add_argument("--operator", default=None,
+                     help="算子类型（闭合词表）；不给则由 request 在**本层**起草")
     run.add_argument("--hardware", default=None)
     run.add_argument("--dsl", default=None)
     run.add_argument("--precision", default=None)
@@ -232,6 +236,8 @@ def _declaration_from_args(args) -> dict:
             parts = [p for p in item.replace("x", ",").split(",") if p.strip()]
             shapes.append([int(p) for p in parts])
         decl["shapes"] = shapes
+    if getattr(args, "operator", None) is not None:
+        decl["operator"] = args.operator
     for key, value in (("hardware", args.hardware), ("dsl", args.dsl),
                        ("precision", args.precision),
                        ("min_speedup", args.min_speedup),
@@ -240,6 +246,15 @@ def _declaration_from_args(args) -> dict:
             decl[key] = value
     if args.require_cap:
         decl["required_caps"] = list(args.require_cap)
+    # CLI 是**宿主适配层**：自然语言理解发生在这里，不发生在冻结路径里。
+    # 补出来的值以显式字段写进声明（落在 declaration.json，可审计）—— `build_task`
+    # 只认显式字段，它不知道这些值是怎么来的，也不需要知道。
+    missing = [k for k in ("operator", "precision") if k not in decl]
+    if missing and decl.get("request"):
+        from .hitl_tools import draft_from_request
+        draft = draft_from_request(decl["request"])
+        for key in missing:
+            decl[key] = draft[key]
     return decl
 
 

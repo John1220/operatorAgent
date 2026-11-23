@@ -20,7 +20,7 @@ import os
 import uuid
 from pathlib import Path
 
-DECLARATION = dict(request="fp16 32768x6144 residual add layernorm",
+DECLARATION = dict(operator='fused_layernorm_residual', request="fp16 32768x6144 residual add layernorm",
                    shapes=[[32768, 6144]], precision="fp16", dsl="triton",
                    hardware="nvidia_gpu", min_speedup=1.0)
 

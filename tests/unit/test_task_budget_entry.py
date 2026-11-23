@@ -22,7 +22,7 @@ def launcher(monkeypatch):
 
 
 def declaration():
-    return dict(request='relu fp32', shapes=[[7, 33]], precision='fp32')
+    return dict(operator='relu', request='relu fp32', shapes=[[7, 33]], precision='fp32')
 
 
 @pytest.mark.parametrize('options, expected', [({}, DEFAULT), (EXPLICIT, EXPLICIT)])

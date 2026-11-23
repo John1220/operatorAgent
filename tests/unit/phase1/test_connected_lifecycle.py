@@ -16,7 +16,7 @@ from operator_agent.execute.task_budget import TaskBudgetConfig
 from operator_agent.execute.task_clock import monotonic
 
 CODE='import numpy as np\ndef kernel(X):\n    return np.maximum(X,0)\n'
-DECLARATION=dict(request='relu fp32',precision='fp32',dsl='python',shapes=[[4,8]])
+DECLARATION=dict(operator='relu', request='relu fp32',precision='fp32',dsl='python',shapes=[[4,8]])
 
 
 def replace_json(path,value):

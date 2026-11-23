@@ -3,7 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from operator_agent.app.hitl_tools import build_task
+from operator_agent.app.hitl_tools import build_task, declaration_from_request
 from operator_agent.core.contract import freeze_from_task
 from operator_agent.core.run_contract import digest, protocol_identity
 from operator_agent.execute.fake_backend import FakeConfig, execution_context
@@ -95,8 +95,8 @@ def freeze(output, *, fake=None, budget=None, max_rounds=2, final_wall_clock_s=3
     TaskBudgetConfig(wall_clock_s=final_wall_clock_s)
     tasks = []
     for task_id, request, shape in FIXTURES:
-        declaration = dict(request=request, shapes=[shape], dsl='python',
-                           precision='fp32', min_speedup=1.)
+        declaration = declaration_from_request(
+            request, shapes=[shape], dsl='python', precision='fp32', min_speedup=1.)
         contract = freeze_from_task(build_task(declaration))
         tasks.append(dict(task_id=task_id, declaration=declaration, contract_hash=contract.hash))
     plan = dict(schema=SCHEMA, plan_id='phase1-offline-rehearsal-v1',
@@ -146,7 +146,8 @@ def validate(plan, *, check_implementation=True):
     if not isinstance(tasks, list) or len(tasks) != 4:
         raise ValueError('four fixture tasks are required')
     for row, (task_id, request, shape) in zip(tasks, FIXTURES):
-        expected = dict(request=request, shapes=[shape], dsl='python', precision='fp32', min_speedup=1.)
+        expected = declaration_from_request(
+            request, shapes=[shape], dsl='python', precision='fp32', min_speedup=1.)
         if row.get('task_id') != task_id or row.get('declaration') != expected:
             raise ValueError('fixture task mismatch')
         if freeze_from_task(build_task(expected)).hash != row.get('contract_hash'):

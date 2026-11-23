@@ -23,7 +23,8 @@ GPU3_UUID = 'GPU-634bbc76-9ab6-220a-48a8-27247d7acbe2'
 
 
 def _declaration(rows, cols):
-    return dict(request=f'fp16 {rows}x{cols} layernorm', shapes=[[rows, cols]],
+    return dict(operator='layernorm',
+                request=f'fp16 {rows}x{cols} layernorm', shapes=[[rows, cols]],
                 precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0)
 
 

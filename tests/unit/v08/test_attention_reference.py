@@ -121,7 +121,7 @@ from operator_agent.decide.correctness_profiles import expected_output_elements
 from operator_agent.decide.reference_contract import check_observed
 from operator_agent.execute.remote_executor import SSHExecutor
 
-_ATTENTION_DECLARATION = {
+_ATTENTION_DECLARATION = {"operator": 'attention', 
     "request": "fp16 attention prefill 1x16x1024x128",
     "shapes": [[1, 16, 1024, 128]],
     "hardware": "nvidia_gpu", "dsl": "triton", "precision": "fp16", "min_speedup": 1.0,

@@ -499,7 +499,8 @@ def _c_script(declaration, budget, run_dir, code, backend='fake', ssh=None):
     """
     return [
         dict(tool='mcp__operator__operator_prepare',
-             args=dict(request=declaration['request'], shapes=declaration['shapes'],
+             args=dict(operator=declaration['operator'],
+                       request=declaration['request'], shapes=declaration['shapes'],
                        hardware=declaration['hardware'], dsl=declaration['dsl'],
                        precision=declaration['precision'], min_speedup=declaration.get('min_speedup', 1.0),
                        run_dir=str(run_dir),

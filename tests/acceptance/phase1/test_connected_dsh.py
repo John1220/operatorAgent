@@ -117,7 +117,7 @@ def test_installed_dsh_runs_frozen_operator_and_polls_terminal_through_real_mcp(
     with Fixture() as model:
         config=dict(backend='fake',entry_b='dsh',model=dict(base_url=model.base_url,
             id='phase1-dsh-fixture',api_key_env='PHASE1_DSH_FIXTURE_KEY',transport='local_fixture'),
-            tasks=[dict(task_id='matmul',declaration=dict(request='matmul fp32',dsl='python',
+            tasks=[dict(task_id='matmul',declaration=dict(operator='matmul', request='matmul fp32',dsl='python',
                 precision='fp32',shapes=[[8,8,8]],min_speedup=0))],
             budget=dict(wall_clock_s=90.,max_llm_calls=30,oracle_total=20),
             max_rounds=1,final_wall_clock_s=30.)

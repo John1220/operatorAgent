@@ -24,14 +24,14 @@ WINDOW_DEGRADATION_MARGIN = 10.0
 
 TASKS = [dict(
     task_id='matmul-4096',
-    declaration=dict(request='fp16 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
+    declaration=dict(operator='matmul', request='fp16 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
                      precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0),
     why='the only shape measured in a decidable window: 0.203% band on 2026-11-07',
     measured_headroom_pct=7.7,
     measured_baseline_gap='naive triton reaches 92.3% of peak and 0.99x of the torch baseline',
 ), dict(
     task_id='matmul-4096-fp32',
-    declaration=dict(request='fp32 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
+    declaration=dict(operator='matmul', request='fp32 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
                      precision='fp32', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0),
     # pair 1 证明 fp16 4096³ 已贴着峰值 (余量 7.7%), 门槛 2.5% 在噪声边缘;
     # fp32 版本同窗口实测: 探针带宽 0.10%, 朴素实现只到 33.8% 峰值 (余量 66.2%),
@@ -41,7 +41,7 @@ TASKS = [dict(
     measured_baseline_gap='naive triton fp32 runs at 0.3545x of the torch baseline',
 ), dict(
     task_id='attention-prefill-1024',
-    declaration=dict(request='fp16 attention prefill 1x16x1024x128',
+    declaration=dict(operator='attention', request='fp16 attention prefill 1x16x1024x128',
                      shapes=[[1, 16, 1024, 128]],
                      precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0),
     # 前两个任务都贴着峰值（fp16 余量 7.7%）或只差一个配置（fp32 余量 66.2% 但基线 0.35x）。
@@ -67,7 +67,7 @@ TASKS = [dict(
     ],
 ), dict(
     task_id='attention-prefill-4096',
-    declaration=dict(request='fp16 attention prefill 1x16x4096x128',
+    declaration=dict(operator='attention', request='fp16 attention prefill 1x16x4096x128',
                      shapes=[[1, 16, 4096, 128]],
                      precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0),
     # S=1024 的核只有 96 µs，而 launch 地板是 20 µs：地板占 17.3% > 10%，测量档位

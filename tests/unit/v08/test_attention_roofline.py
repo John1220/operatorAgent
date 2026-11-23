@@ -62,7 +62,7 @@ def test_prepare_freezes_an_attention_contract_with_scalars(tmp_path):
     from operator_agent.app.hitl_tools import prepare
 
     run = tmp_path/'run'
-    payload = prepare(dict(request='fp16 attention prefill 1x16x1024x128',
+    payload = prepare(dict(operator='attention', request='fp16 attention prefill 1x16x1024x128',
                            shapes=[[1, 16, 1024, 128]], hardware='nvidia_gpu',
                            dsl='triton', precision='fp16'), run)
     assert payload['ok'] is True

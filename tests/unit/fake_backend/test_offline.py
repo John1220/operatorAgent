@@ -21,7 +21,7 @@ from operator_agent.execute.task_budget import TaskBudgetConfig
 
 CODE = 'import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n'
 FIXED = 'import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0).copy()\n'
-DECL = dict(request='relu', shapes=[[4, 8]], dsl='python', min_speedup=0.)
+DECL = dict(operator='relu', precision='fp32', request='relu', shapes=[[4, 8]], dsl='python', min_speedup=0.)
 
 
 def test_full_pipeline_uses_no_device_probe_or_model_transport(tmp_path, monkeypatch):

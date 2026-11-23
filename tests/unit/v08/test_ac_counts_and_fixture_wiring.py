@@ -112,7 +112,7 @@ def test_the_feedback_reply_carries_the_L2_verdicts(tmp_path):
     from operator_agent.app import hitl_tools as ht
     from benchmarks.experiments.phase1.native import VerificationService
 
-    decl = dict(request='fp16 64x64 residual add layernorm', shapes=[[64, 64]],
+    decl = dict(operator='fused_layernorm_residual', request='fp16 64x64 residual add layernorm', shapes=[[64, 64]],
                 precision='fp16', dsl='python', hardware='mock_gpu', min_speedup=0.0)
     run = tmp_path / 'run'
     prepared = ht.prepare(decl, run, host_budget=dict(
@@ -136,9 +136,9 @@ def test_the_case_count_in_the_prompt_comes_from_the_contract():
     """融合任务 32 条、matmul 15 条：写死会让另一族的 prompt 报错数。"""
     from benchmarks.experiments.v08.ac_live import repair_workflow
 
-    fused = dict(request='fp16 32768x6144 residual add layernorm', shapes=[[32768, 6144]],
+    fused = dict(operator='fused_layernorm_residual', request='fp16 32768x6144 residual add layernorm', shapes=[[32768, 6144]],
                  precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.5)
-    matmul = dict(request='fp16 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
+    matmul = dict(operator='matmul', request='fp16 4096x4096x4096 matmul, triton', shapes=[[4096, 4096, 4096]],
                   precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0)
     ssh = dict(host='h', port=1, user='u', key='/k')
     for declaration, expected in ((fused, 32), (matmul, 15)):

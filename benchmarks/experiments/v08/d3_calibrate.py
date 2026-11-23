@@ -26,7 +26,7 @@ import sys
 import time
 from pathlib import Path
 
-ATTENTION_DECL = dict(request='fp16 attention prefill 1x16x4096x128',
+ATTENTION_DECL = dict(operator='attention', request='fp16 attention prefill 1x16x4096x128',
                       shapes=[[1, 16, 4096, 128]], hardware='nvidia_gpu',
                       dsl='triton', precision='fp16', min_speedup=1.0)
 ATTENTION_SOURCE_HASH = 'abb98d4d8159584348513e823c877ea569ae9f0418ec64ec32d8d9dd2d9275ba'
@@ -188,6 +188,7 @@ def async_chain(*, host, work_dir, root, ac_root, gpu_env, entry):
     try:
         client.initialize()
         prep = client.call('operator_prepare', dict(
+            operator=ATTENTION_DECL['operator'],
             request=ATTENTION_DECL['request'], shapes=ATTENTION_DECL['shapes'],
             run_dir=str(run), hardware='nvidia_gpu', dsl='triton', precision='fp16'))
         facts['contract_hash'] = prep.get('contract_hash')

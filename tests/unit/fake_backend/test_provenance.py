@@ -9,7 +9,7 @@ from operator_agent.app import hitl_tools as ht, tool_calls
 from operator_agent.execute import task_cancellation
 
 CODE = 'import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n'
-DECL = dict(request='relu', shapes=[[4, 8]], dsl='python', min_speedup=0.)
+DECL = dict(operator='relu', precision='fp32', request='relu', shapes=[[4, 8]], dsl='python', min_speedup=0.)
 
 
 def assert_context(value, model='not_used'):

@@ -220,7 +220,7 @@ def test_repair_entry_routes_inner_calls_to_shared_ledger(tmp_path, monkeypatch)
             VerificationLevel.L1_COMPILE,False,'offline')],log='',initial_full_l2_passed=None,
             final_full_l2_passed=None,candidate_records=[],selected_source_hash=ht.code_hash(code))
     monkeypatch.setattr(repair_loop,'repair',loop)
-    run=tmp_path/'run'; ht.prepare({'request':'matmul fp32','shapes':[[8,8,8]],'precision':'fp32'},run)
+    run=tmp_path/'run'; ht.prepare({"operator": 'matmul', 'request':'matmul fp32','shapes':[[8,8,8]],'precision':'fp32'},run)
     result=ht.repair(run,'def kernel(A, B):\n    return A @ B\n',max_llm_calls=3,oracle_total=5)
     assert result['ok'], result
     data=shared.snapshot(ledger_path)

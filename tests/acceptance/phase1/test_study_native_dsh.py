@@ -148,7 +148,7 @@ def test_real_native_and_delegated_dsh_use_the_same_pre_reservation_wire_policy(
         cfg=dict(backend='fake',entry_a='dsh_native',entry_b='dsh',sampling=sampling.policy(),
             model=dict(base_url=model.base_url,id='local-study',api_key_env='STUDY_FIXTURE_KEY',
                 transport='local_fixture',temperature=.1),
-            tasks=[dict(task_id='matmul',declaration=dict(request='matmul fp32',precision='fp32',
+            tasks=[dict(task_id='matmul',declaration=dict(operator='matmul', request='matmul fp32',precision='fp32',
                 dsl='python',shapes=[[8,8,8]],min_speedup=0))],max_rounds=1,
             budget=dict(wall_clock_s=CELL_WALL_CLOCK_S,max_llm_calls=30,oracle_total=20),final_wall_clock_s=30.)
         connected_plan.freeze(tmp_path/'frozen',cfg)

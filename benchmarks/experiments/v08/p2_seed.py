@@ -42,7 +42,7 @@ from operator_agent.execute.task_clock import monotonic
 
 #: 本地纯函数标定过的 layernorm v2 声明（build_task 产出 kernel_type=layernorm、
 #: correctness_profile=builtin-layernorm-fp16-cuda-v2、shape 16384×6144）。
-DECL = dict(request='fp16 16384x6144 layernorm', shapes=[[16384, 6144]],
+DECL = dict(operator='layernorm', request='fp16 16384x6144 layernorm', shapes=[[16384, 6144]],
             precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0)
 CONTRACT_HASH = '642b52781c88fb890fb7f96110fda1fa42b71574438a3c7f6c8175721499cee7'
 

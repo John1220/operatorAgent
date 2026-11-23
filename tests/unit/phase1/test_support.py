@@ -10,7 +10,7 @@ from operator_agent import TestInputGenerator
 
 
 def declaration(op='layernorm',precision='fp16',dsl='python'):
-    return dict(request=op+' '+precision,precision=precision,dsl=dsl,
+    return dict(operator=op, request=op+' '+precision, precision=precision, dsl=dsl,
         shapes=[[4,8,4]] if op=='matmul' else [[4,8]])
 
 

@@ -22,7 +22,7 @@ from operator_agent.execute import s5_shared_budget as shared
 from operator_agent.app.hitl_tools import prepare
 from operator_agent.core.run_contract import digest
 
-DECLARATION = dict(request='layernorm fp32', shapes=[[7,33]], hardware='mock_gpu',
+DECLARATION = dict(operator='layernorm', request='layernorm fp32', shapes=[[7,33]], hardware='mock_gpu',
                    dsl='python', precision='fp32')
 FORBIDDEN_TEXT = 'PRIVATE_CANARY_MUST_NOT_REACH_DSH'
 

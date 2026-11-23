@@ -262,7 +262,7 @@ def run(python,plugin,output,*,dsh=False):
         require(required <= {t['name'] for t in tools},'installed MCP tools incomplete')
         cap=mcp.tool('operator_capabilities',{})
         dump(root/'mcp-capabilities.json',cap)
-        declaration=dict(request='relu fp32',shapes=[[4,8]],dsl='python',precision='fp32')
+        declaration=dict(operator='relu', request='relu fp32',shapes=[[4,8]],dsl='python',precision='fp32')
         verify_dir=root/'verification'
         prepared=mcp.tool('operator_prepare',dict(declaration,run_dir=str(verify_dir)))
         code='import numpy as np\ndef kernel(X):\n    return np.maximum(X,0)\n'

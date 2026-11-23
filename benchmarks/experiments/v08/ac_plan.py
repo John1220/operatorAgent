@@ -100,7 +100,7 @@ ARM_SURFACES = dict(
 #: 只能是**参与过的族里没被用过的配置**，必须如实标注，不能写成"未参与规则开发"。
 TASKS = [
     dict(task_id='matmul-4096-fp32',
-         declaration=dict(request='fp32 4096x4096x4096 matmul, triton',
+         declaration=dict(operator='matmul', request='fp32 4096x4096x4096 matmul, triton',
                           shapes=[[4096, 4096, 4096]], precision='fp32', dsl='triton',
                           hardware='nvidia_gpu', min_speedup=1.0),
          held_out='no',
@@ -109,7 +109,7 @@ TASKS = [
          performance_probe=dict(required=True, measured_band_pct=0.1,
                                 receipt='output/v08-candidates-20261107/gate-fp32.json')),
     dict(task_id='attention-prefill-4096',
-         declaration=dict(request='fp16 attention prefill 1x16x4096x128',
+         declaration=dict(operator='attention', request='fp16 attention prefill 1x16x4096x128',
                           shapes=[[1, 16, 4096, 128]], precision='fp16', dsl='triton',
                           hardware='nvidia_gpu', min_speedup=1.0),
          mask='nocausal',
@@ -120,7 +120,7 @@ TASKS = [
          performance_probe=dict(required=True, measured_band_pct=0.1,
                                 receipt='output/v08-attention-20261108/c5/gate-attention-4096-20261108.json')),
     dict(task_id='softmax-16384x6144-fp16',
-         declaration=dict(request='fp16 softmax 16384x6144', shapes=[[16384, 6144]],
+         declaration=dict(operator='softmax', request='fp16 softmax 16384x6144', shapes=[[16384, 6144]],
                           precision='fp16', dsl='triton', hardware='nvidia_gpu',
                           min_speedup=1.0),
          held_out='family',
@@ -132,7 +132,7 @@ TASKS = [
                                       'the band, or this task contributes no performance '
                                       'observation. v0.7.2 softmax L3 was uninformative'))),
     dict(task_id='matmul-2048x16384x2048-fp16',
-         declaration=dict(request='fp16 2048x16384x2048 matmul, triton',
+         declaration=dict(operator='matmul', request='fp16 2048x16384x2048 matmul, triton',
                           shapes=[[2048, 16384, 2048]], precision='fp16', dsl='triton',
                           hardware='nvidia_gpu', min_speedup=1.0),
          held_out='configuration',
@@ -154,7 +154,7 @@ TASK_IDS = tuple(row['task_id'] for row in TASKS)
 #: 达标 = 完整 L2 + 独立 L3 valid + speedup >= 1.5 + 单核融合静态核验（见 fusion_check）。
 FUSED_TASK = dict(
     task_id='fused-layernorm-residual-32768x6144-fp16',
-    declaration=dict(request='fp16 32768x6144 residual add layernorm',
+    declaration=dict(operator='fused_layernorm_residual', request='fp16 32768x6144 residual add layernorm',
                      shapes=[[32768, 6144]], precision='fp16', dsl='triton',
                      hardware='nvidia_gpu', min_speedup=1.5),
     held_out='family',
@@ -173,7 +173,7 @@ FUSED_TASK = dict(
 #: 完整 L2 + 独立终评 L2 —— 不比性能、不查融合结构（修的是既有实现）。
 REPAIR_TASK = dict(
     task_id='matmul-4096-fp16-strided-repair',
-    declaration=dict(request='fp16 4096x4096x4096 matmul, triton',
+    declaration=dict(operator='matmul', request='fp16 4096x4096x4096 matmul, triton',
                      shapes=[[4096, 4096, 4096]], precision='fp16', dsl='triton',
                      hardware='nvidia_gpu', min_speedup=1.0),
     held_out='no',

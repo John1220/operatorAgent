@@ -20,7 +20,7 @@ WRONG = 'import numpy as np\ndef kernel(X):\n    return X.copy()\n'
 
 def prepared(tmp_path, limits=None):
     run = tmp_path/'task'
-    value = ht.prepare(dict(request='relu fp32', shapes=[[4, 8]], precision='fp32'), run)
+    value = ht.prepare(dict(operator='relu', request='relu fp32', shapes=[[4, 8]], precision='fp32'), run)
     hb.initialize_host_task(run,value['contract_hash'],limits)
     return run,hb.HostTaskBudget(run,value['contract_hash'])
 
@@ -36,7 +36,7 @@ def verification(budget,code):
     # host-workflow integration (which independently reserves its own calls).
     run=budget.run/'verification-fixture'
     if not run.exists():
-        ht.prepare(dict(request='relu fp32',shapes=[[4,8]],precision='fp32'),run)
+        ht.prepare(dict(operator='relu', request='relu fp32',shapes=[[4,8]],precision='fp32'),run)
     return ht.verify(run,code,backend='fake',stop_after='L2',candidate_origin='outer')
 
 
@@ -188,7 +188,7 @@ except HostTaskBudgetError as error:
 
 def test_legacy_prepared_run_is_not_implicitly_enabled(tmp_path):
     run=tmp_path/'legacy'
-    ht.prepare(dict(request='relu fp32',shapes=[[4,8]],precision='fp32'),run)
+    ht.prepare(dict(operator='relu', request='relu fp32',shapes=[[4,8]],precision='fp32'),run)
     assert hb.host_task_enabled(run) is False
     ht.verify(run,CORRECT,backend='fake',stop_after='L2')
     assert hb.host_task_enabled(run) is False
@@ -200,7 +200,7 @@ def test_parent_directory_alias_does_not_break_evidence_binding(tmp_path):
     alias=tmp_path/'alias'
     alias.symlink_to(actual,target_is_directory=True)
     run=alias/'task'
-    value=ht.prepare(dict(request='relu fp32',shapes=[[4,8]],precision='fp32'),run)
+    value=ht.prepare(dict(operator='relu', request='relu fp32',shapes=[[4,8]],precision='fp32'),run)
     hb.initialize_host_task(run,value['contract_hash'])
     budget=hb.HostTaskBudget(run,value['contract_hash'])
     snap,_=checked(budget)

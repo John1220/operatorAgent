@@ -10,7 +10,7 @@ from benchmarks.experiments.s5.s5_vertical_headless import DSH_ROOT
 from benchmarks.experiments.s5.s5_vertical_validation import GOOD_FIXTURE
 
 DSH_READY = bool(shutil.which('node')) and (DSH_ROOT / 'dsh' / 'lib' / 'bin.js').is_file()
-DECLARATION = dict(request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',
+DECLARATION = dict(operator='layernorm', request='layernorm fp32', shapes=[[7, 33]], hardware='mock_gpu',
                    dsl='python', precision='fp32')
 
 

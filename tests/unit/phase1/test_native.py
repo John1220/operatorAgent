@@ -14,7 +14,7 @@ from operator_agent.execute.task_clock import monotonic
 
 GOOD='def kernel(A, B):\n    return A @ B\n'
 BAD='def kernel(A, B):\n    return (A @ B)*0\n'
-DECLARATION=dict(request='matmul fp32',dsl='python',precision='fp32',shapes=[[4,4,4]])
+DECLARATION=dict(operator='matmul', request='matmul fp32',dsl='python',precision='fp32',shapes=[[4,4,4]])
 
 
 @pytest.fixture

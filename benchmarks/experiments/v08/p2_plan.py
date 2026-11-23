@@ -14,7 +14,7 @@ from operator_agent.core.run_contract import code_hash, digest
 from operator_agent.decide.noise_preflight import PROTOCOL
 
 SHAPE = (32768, 6144)
-DECLARATION = dict(request='fp16 32768x6144 layernorm', shapes=[list(SHAPE)],
+DECLARATION = dict(operator='layernorm', request='fp16 32768x6144 layernorm', shapes=[list(SHAPE)],
                    precision='fp16', dsl='triton', hardware='nvidia_gpu', min_speedup=1.0)
 CONTRACT_HASH = 'cc9122d1dd0f926e8c5060f03b0f4ea0cdff20d2347db658a03285e8bc6a22b0'
 SEED_SOURCE_HASH = 'cb851b67bc11530fe4da0b7043f5aaf2fb296c95dedd4b529409bff60d65ee96'

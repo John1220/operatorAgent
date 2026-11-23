@@ -5,6 +5,8 @@ operator families. Unsupported declarations remain unknown before any execution.
 """
 from dataclasses import replace
 
+import re
+
 import numpy as np
 
 from ..decide.bench_cases import BenchCaseError
@@ -25,6 +27,34 @@ OPERATORS = ("relu", "matmul", "softmax", "layernorm")
 #: 不再打 `unresolved_fusion` 标记 —— 那标记是给"没注册的融合"用的。
 REGISTERED_FUSED_KERNEL_TYPES = ("fused_layernorm_residual",)
 SCOPE = "内建二维算子有限 L2 子域；layernorm 为无 affine、末轴归一化、eps=1e-5；不是全域证明"
+
+#: 请求里出现、而 `kernel_type` 无法蕴含的语义标记。
+#: 这两条正则**不是解释器**：它们不推断任何参数值，只回答「这里有没有未解析的语义」，
+#: 答「有」就按 fail closed 处理（打标记 ⇒ 下游不给正确性资格）。
+#: 从 `build_task` 里退出关键词解析之后，这一条仍须生效，所以它是本模块的公开函数：
+#: 规则解析器与结构化声明路径**共用同一份实现**，不再各写一份。
+_FUSION_MARKER = (r"融合|\bfused\b|乘加|\b(?:matmul|gemm|relu|softmax|layernorm)\s*\+"
+                  r"|\+\s*(?:relu|softmax|layernorm|add|bias)\b")
+_SEMANTIC_MARKER = (r"\b(?:eps|epsilon|affine|normalized_shape|dim|axis|bias|weight)\s*[:=]|"
+                    r"\b(?:affine|transpose|log_softmax)\b|"
+                    r"\b[a-z][a-z0-9]*_(?:softmax|relu|layernorm|matmul)\b|"
+                    r"log softmax|转置|归一化轴|带偏置|带权重")
+
+
+def unresolved_semantics(request: str, kernel_type: str) -> tuple:
+    """→ (fused_ops 标记, semantic_parameters 增量)。检测器，不是解释器。
+
+    已注册的融合族（residual+LayerNorm）有受信任 profile，不算「未解析融合」；
+    其余任何融合标记都按未知语义处理。认不出来就说认不出来，不填默认值。
+    """
+    fused = []
+    parameters = {}
+    if (kernel_type not in REGISTERED_FUSED_KERNEL_TYPES
+            and re.search(_FUSION_MARKER, request or "", re.I)):
+        fused = ["unresolved_fusion"]
+    if re.search(_SEMANTIC_MARKER, request or "", re.I):
+        parameters["unresolved_request"] = request
+    return fused, parameters
 
 #: attention 的显式 case 清单。它**不走** axis 交叉生成器：S 必须是真实规模
 #: (1000/4096 不是边界对齐值), 而 causal 是 case 级标量而非形状轴。
