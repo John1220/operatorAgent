@@ -162,7 +162,8 @@ class TestStopReasonIsRecorded(unittest.TestCase):
 
     #: 轮次的组成部分 —— 出口可能住在其中任何一个里。Stage3 从 _run_round 里搬出了
     #: 轮首两道门与收尾两段, 出口跟着走。少列一个方法, 它里面的出口就会漏计。
-    _ROUND_PARTS = ("_run_round", "_round_enter_or_stop", "_round_close_out")
+    _ROUND_PARTS = ("_run_round", "_round_enter_or_stop", "_round_close_out",
+                    "_repair_or_stop")
 
     def test_every_exit_from_a_round_has_a_reason_attached(self):
         """防腐: 轮次里每个「终止优化循环」的出口, 紧邻上方必须是 `_record_stop(...)`。

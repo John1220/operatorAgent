@@ -2844,166 +2844,127 @@ class Conductor:
             for r in verify_results
         )
         if l1_l2_failed:
-            # §8 路由: 先分类再动作。性能不达标≠bug (走搜索), 基础设施≠进度,
-            # 编译过、仅数值错 → **修不重写** (§19.3, 外部实测省 92.8% token)。
-            from ..decide.failure_route import ROUTE_DEBUG_FIX, ROUTE_HOLD, ROUTE_RETRY, classify
-            route = classify(verify_results)
-            print(f"  [Route] §8 分类: kind={route.kind} route={route.route}"
-                  f"{' · fix_not_rewrite' if route.fix_not_rewrite else ''}"
-                  f" — {route.reason}")
-            if route.route == ROUTE_RETRY:
-                # 基础设施失败: 退避重试, 不计进度、不进负样本库 (§8 表)
-                self._record_stop(state.artifact, round_num, "infra_retry",
-                                  route.reason)
-                return _ROUND_STOP
-            # ROUTE_HOLD 仍走 Fixer (既有控制流: 「那一轮仍然走 Fixer」),
-            # 只是下面的写入侧按 reference_hold 跳过沉淀 —— 不在这里 continue。
-            if round_num < self.max_optimize_rounds:
-                # L1 编译失败可能是缺依赖: 分析代码 import 并按需补装
-                l1_result = next((r for r in verify_results
-                                  if r.level == VerificationLevel.L1_COMPILE and not r.passed), None)
-                # §21 拦下的候选**根本没被送进编译**, 为它跑一次远端依赖分析
-                # (SSH 往返) 毫无意义 —— 那正是「不进编译」想省的机时。
-                if l1_result and not (l1_result.metrics or {}).get("agent_action_refused") \
-                        and Cap.DEP_ANALYSIS in self.backend.capabilities:
-                    deps = self.backend.analyze_dependencies(state.current_code)
-                    if deps:
-                        print(f"\n[Conductor] 代码依赖: {deps}, 尝试按需补装...")
-                        if Cap.ENV_PROVISION in self.backend.capabilities:
-                            self.backend.ensure_environment(required_pips=deps)
+            return self._repair_or_stop(
+                state, round_num, verify_results,
+                action_ctx=_action_ctx,
+                code_before_this_round=_code_before_this_round,
+                fix_action_record=_fix_action_record,
+                fix_evidence_record=_fix_evidence_record)
 
-                failed_results = [r for r in verify_results if not r.passed]
-                # 「本级判不出」的那一轮对这张核没有作出任何判定 (参考自己产 NaN/Inf)。
-                # 它仍然走 Fixer —— 控制流这一片不动, 省一轮 LLM 是另一次要带 A/B 的改动
-                # (doc 58 §4.2 剩下的那半)。这里先接的是**写入侧**: 那一轮的 Reflexion
-                # 会写出一份指向错误对象的教训, 而那份教训在同任务的后续轮次里被检索到。
-                reference_hold = failure_class(failed_results) == FAILURE_CLASS_REFERENCE
-                if reference_hold:
-                    print("\n[Conductor] 本轮失败归为「本级判不出」(参考侧没有可比对象): "
-                          "不沉淀教训、不进负样本库")
-                print(f"\n[Fixer] L1/L2 验证失败，启动错误修复...")
-                # 修订起点 (arXiv:2609.35140v1 行 214)。有已验证的祖先就不从这一版出发:
-                # 它没通过正确性验证, 在它上面继续叠就是「在坏的后代上盖一层」—— 那正是
-                # 这句规则要挡的漂移。但**错误信息仍然取这一版的**: 那是「上一次改动坏在哪」
-                # 的唯一证据, 换成祖先的错误信息就什么都修不了。
-                # `!= current_code` 那半句管的是同一份文本这次没过 (验证非确定: 共享卡、
-                # 容差边界) 的场合 —— 那时起点没变, 少了它就印一句「退回」的谎话。
-                # 它的证人是 `tests/unit/test_verified_parent_retreat.py` 里用假 Verifier 造的
-                # 那个现场; 没有那一条时这个条件构造不出反例, 就会被当成死文字删掉 (M4)。
-                repair_base = state.current_code
-                if state.verified_parent is not None and state.verified_parent != state.current_code:
-                    repair_base = state.verified_parent
-                    print(f"  [Conductor] 修订起点退回第 {state.verified_parent_round} 轮那份 "
-                          f"L1/L2 已验证的实现 (本轮这一版没有通过正确性验证)")
-                try:
-                    # §21.3: 结构化证据那一段 (**唯一拼装点** = `_fix_evidence`),
-                    # 默认开。关掉时传空串 ⇒ 只少那一段（其余段两臂同值，见构造参数注释）。
-                    _evidence = ""
-                    if self.structured_evidence:
-                        _evidence, _rec = self._fix_evidence(
-                            task=state.task, route=route, verify_results=failed_results,
-                            current_code=state.current_code,
-                            parent_code=_code_before_this_round,
-                            gate_ctx=_action_ctx,
-                        )
-                        _fix_evidence_record.update(_rec)
-                    # §21.1 生产者侧: 修复这一步现在**同时**取回模型交上来的动作信封。
-                    # `run` 保留给不关心信封的调用方, 而这里用的是带信封的那一个 ——
-                    # 于是「动作是谁写的」在内侧就分得开。
-                    _outcome = self._call_generator(self.fixer, self.fixer.run_with_action,
-                        repair_base, state.task, failed_results,
-                        _test_inputs=state.input_sets,
-                        fix_not_rewrite=route.fix_not_rewrite,
-                        structured_evidence=_evidence,
-                        error_shape=(getattr(route, "error_shape", "") or ""),
-                    )
-                    if _outcome.asked:
-                        # 模型交的是**不改候选**的意图 (解释 / 请求观测): 这一轮没有候选。
-                        # 响应它一次 (答或拒), 再要一次补丁 —— 有界: 第二次还是提问就停。
-                        # 「一直问」不设上限就是一条白烧 token 的环 (§21.1 的预算账)。
-                        _outcome = self._answer_ask_and_retry(
-                            _outcome, repair_base=repair_base, task=state.task,
-                            failed_results=failed_results, route=route,
-                            evidence=_evidence,
-                            record=_fix_action_record,
-                            test_inputs=state.input_sets,
-                        )
-                    fixed_code, fix_note = _outcome.code, _outcome.summary
-                    # 信封交给**下一轮**的判据点 (它就是这份候选的来路)。只有改候选的
-                    # 那几类值得传（提问类在上面已经被响应掉了）。
-                    self._pending_action_envelope = (
-                        _outcome.envelope if _outcome.envelope.usable else None)
-                    _fix_action_record.update(_outcome.as_dict())
-                except Exception as e:
-                    print(f"\n[Conductor] Fixer 修复失败 ({e})，停止迭代")
-                    state.snapshot_target_dir = self._flush_snapshot(
-                        task=state.task,
-                        artifact_dir=state.snapshot_target_dir,
-                        round_done=round_num,
-                        current_sketch=state.current_sketch,
+        # ── 收尾: 参考天花板 / 停滞 / 资格门 / 出口判定 (§10.4), 见 _round_close_out ──
+        return self._round_close_out(
+            state, round_num,
+            _esc_decision=_esc_decision, _measure_s=_measure_s, _space=_space,
+            bandit_arm=bandit_arm, l3_result=l3_result)
+
+    def _repair_or_stop(self, state, round_num, verify_results, *, action_ctx,
+                        code_before_this_round, fix_action_record,
+                        fix_evidence_record):
+        """L1/L2 失败 ⇒ §8 分类后修复或停机。**这一支的所有路径都 return**。
+
+        从 `_run_round` 里整块搬出来, 语句顺序一字未动: 下面几处注释各自记录了
+        「挪了位置就破掉判据」的实测 (升级门必须在停滞出口之前、`_record_stop` 必
+        须在 break 的相邻三行内)。这个分支天然终结, 所以抽取不需要回传任何状态。
+        """
+        # §8 路由: 先分类再动作。性能不达标≠bug (走搜索), 基础设施≠进度,
+        # 编译过、仅数值错 → **修不重写** (§19.3, 外部实测省 92.8% token)。
+        from ..decide.failure_route import ROUTE_DEBUG_FIX, ROUTE_HOLD, ROUTE_RETRY, classify
+        route = classify(verify_results)
+        print(f"  [Route] §8 分类: kind={route.kind} route={route.route}"
+              f"{' · fix_not_rewrite' if route.fix_not_rewrite else ''}"
+              f" — {route.reason}")
+        if route.route == ROUTE_RETRY:
+            # 基础设施失败: 退避重试, 不计进度、不进负样本库 (§8 表)
+            self._record_stop(state.artifact, round_num, "infra_retry",
+                              route.reason)
+            return _ROUND_STOP
+        # ROUTE_HOLD 仍走 Fixer (既有控制流: 「那一轮仍然走 Fixer」),
+        # 只是下面的写入侧按 reference_hold 跳过沉淀 —— 不在这里 continue。
+        if round_num < self.max_optimize_rounds:
+            # L1 编译失败可能是缺依赖: 分析代码 import 并按需补装
+            l1_result = next((r for r in verify_results
+                              if r.level == VerificationLevel.L1_COMPILE and not r.passed), None)
+            # §21 拦下的候选**根本没被送进编译**, 为它跑一次远端依赖分析
+            # (SSH 往返) 毫无意义 —— 那正是「不进编译」想省的机时。
+            if l1_result and not (l1_result.metrics or {}).get("agent_action_refused") \
+                    and Cap.DEP_ANALYSIS in self.backend.capabilities:
+                deps = self.backend.analyze_dependencies(state.current_code)
+                if deps:
+                    print(f"\n[Conductor] 代码依赖: {deps}, 尝试按需补装...")
+                    if Cap.ENV_PROVISION in self.backend.capabilities:
+                        self.backend.ensure_environment(required_pips=deps)
+
+            failed_results = [r for r in verify_results if not r.passed]
+            # 「本级判不出」的那一轮对这张核没有作出任何判定 (参考自己产 NaN/Inf)。
+            # 它仍然走 Fixer —— 控制流这一片不动, 省一轮 LLM 是另一次要带 A/B 的改动
+            # (doc 58 §4.2 剩下的那半)。这里先接的是**写入侧**: 那一轮的 Reflexion
+            # 会写出一份指向错误对象的教训, 而那份教训在同任务的后续轮次里被检索到。
+            reference_hold = failure_class(failed_results) == FAILURE_CLASS_REFERENCE
+            if reference_hold:
+                print("\n[Conductor] 本轮失败归为「本级判不出」(参考侧没有可比对象): "
+                      "不沉淀教训、不进负样本库")
+            print(f"\n[Fixer] L1/L2 验证失败，启动错误修复...")
+            # 修订起点 (arXiv:2609.35140v1 行 214)。有已验证的祖先就不从这一版出发:
+            # 它没通过正确性验证, 在它上面继续叠就是「在坏的后代上盖一层」—— 那正是
+            # 这句规则要挡的漂移。但**错误信息仍然取这一版的**: 那是「上一次改动坏在哪」
+            # 的唯一证据, 换成祖先的错误信息就什么都修不了。
+            # `!= current_code` 那半句管的是同一份文本这次没过 (验证非确定: 共享卡、
+            # 容差边界) 的场合 —— 那时起点没变, 少了它就印一句「退回」的谎话。
+            # 它的证人是 `tests/unit/test_verified_parent_retreat.py` 里用假 Verifier 造的
+            # 那个现场; 没有那一条时这个条件构造不出反例, 就会被当成死文字删掉 (M4)。
+            repair_base = state.current_code
+            if state.verified_parent is not None and state.verified_parent != state.current_code:
+                repair_base = state.verified_parent
+                print(f"  [Conductor] 修订起点退回第 {state.verified_parent_round} 轮那份 "
+                      f"L1/L2 已验证的实现 (本轮这一版没有通过正确性验证)")
+            try:
+                # §21.3: 结构化证据那一段 (**唯一拼装点** = `_fix_evidence`),
+                # 默认开。关掉时传空串 ⇒ 只少那一段（其余段两臂同值，见构造参数注释）。
+                _evidence = ""
+                if self.structured_evidence:
+                    _evidence, _rec = self._fix_evidence(
+                        task=state.task, route=route, verify_results=failed_results,
                         current_code=state.current_code,
-                        pending_fix=None,
-                        iteration_history=state.artifact.iteration_history,
-                        best_gflops=state.best_gflops,
-                        rounds_without_improvement=state.rounds_without_improvement,
-                        optimization_history=state.optimization_history,
-                        applied_recipes=state.applied_recipes,
-                        disabled_recipes=state.disabled_recipes,
-                        all_verification_results=state.all_verification_results,
-                        search_objective=state.search_objective.snapshot() if state.search_objective else None,
+                        parent_code=code_before_this_round,
+                        gate_ctx=action_ctx,
                     )
-                    self._record_stop(state.artifact, round_num, "fix_error", "Fixer 修复抛异常, 停止迭代")
-
-                    return _ROUND_STOP
-                if not _outcome.code:
-                    # 响应过、又要过一次补丁，第二次**还是**提问 ⇒ 这一轮没有候选。
-                    # 停（不是「拿上一次的代码继续跑」）：模型已经明说它不改候选，
-                    # 再拿旧候选上去验证就是 harness 替它改了它的声明。
-                    print(f"\n[Conductor] 连续两次收到「不改候选」的动作信封 "
-                          f"({_outcome.envelope.kind})，本轮没有候选 —— 停止迭代")
-                    self._pending_action_envelope = None
-                    # 「紧邻 break 的三行内必须有 _record_stop」是 `test_stop_reason`
-                    # 的计数守卫 —— 详情写多行会把它顶出窗口, 于是那条守卫就漏了这一处。
-                    self._record_stop(state.artifact, round_num, "ask_turns_exhausted",
-                                      f"连续两次收到不改候选的意图 "
-                                      f"({_outcome.envelope.kind})，响应后仍无补丁")
-                    return _ROUND_STOP
-                print(f"  修复说明: {fix_note}")
-                state.pending_fix = fixed_code
-
-                # ---- Reflexion: 修复后让 Fixer 产出结构化教训并沉淀 ----
-                reflexion = None
-                try:
-                    # 判不出那一轮不产 Reflexion: 那一步是让模型回答「这次失败的根因
-                    # 是什么、下次怎么避免」, 而这一轮根本没有失败可归因 —— 让它回答就是
-                    # 让它编一个候选侧的根因, 再把那份编出来的教训 `add()` 进语料。
-                    if not reference_hold:
-                        reflexion = self.fixer.produce_reflexion()
-                    if reflexion is not None:
-                        self.failure_db.add(reflexion)
-                        state.reflexion_pending.append(reflexion)
-                        lessons_cnt = len(reflexion.lessons)
-                        cause = reflexion.root_cause or "N/A"
-                        print(f"  [Reflexion] 已入库: 根因={cause[:60]}, lessons={lessons_cnt}条")
-                except Exception as _rx_err:
-                    # Reflexion 失败不影响主流程, 只记录不中断
-                    reflexion = None
-                    print(f"  [Reflexion] 跳过沉淀: {_rx_err}")
-
-                # 第三个位置带的是**那条记录本身或 None**, 不是「已经沉淀过了」这个
-                # 声称。原先写死 True, 而唯一的循环内沉淀是 produce_reflexion() ——
-                # 它只在修好时返回记录, 于是「修不好的那类失败」被 815-821 的兜底
-                # 当成「已经记过了」跳过, 永远进不了负样本库 (doc 49 §7.14 / #56)。
-                state.fix_attempts.append((failed_results, fix_note, reflexion))
-
-                # ── 可复现性 Harness: Fixer 修复后走 continue 前也要落快照 (否则 crash 就丢了修复代码) ──
+                    fix_evidence_record.update(_rec)
+                # §21.1 生产者侧: 修复这一步现在**同时**取回模型交上来的动作信封。
+                # `run` 保留给不关心信封的调用方, 而这里用的是带信封的那一个 ——
+                # 于是「动作是谁写的」在内侧就分得开。
+                _outcome = self._call_generator(self.fixer, self.fixer.run_with_action,
+                    repair_base, state.task, failed_results,
+                    _test_inputs=state.input_sets,
+                    fix_not_rewrite=route.fix_not_rewrite,
+                    structured_evidence=_evidence,
+                    error_shape=(getattr(route, "error_shape", "") or ""),
+                )
+                if _outcome.asked:
+                    # 模型交的是**不改候选**的意图 (解释 / 请求观测): 这一轮没有候选。
+                    # 响应它一次 (答或拒), 再要一次补丁 —— 有界: 第二次还是提问就停。
+                    # 「一直问」不设上限就是一条白烧 token 的环 (§21.1 的预算账)。
+                    _outcome = self._answer_ask_and_retry(
+                        _outcome, repair_base=repair_base, task=state.task,
+                        failed_results=failed_results, route=route,
+                        evidence=_evidence,
+                        record=fix_action_record,
+                        test_inputs=state.input_sets,
+                    )
+                fixed_code, fix_note = _outcome.code, _outcome.summary
+                # 信封交给**下一轮**的判据点 (它就是这份候选的来路)。只有改候选的
+                # 那几类值得传（提问类在上面已经被响应掉了）。
+                self._pending_action_envelope = (
+                    _outcome.envelope if _outcome.envelope.usable else None)
+                fix_action_record.update(_outcome.as_dict())
+            except Exception as e:
+                print(f"\n[Conductor] Fixer 修复失败 ({e})，停止迭代")
                 state.snapshot_target_dir = self._flush_snapshot(
                     task=state.task,
                     artifact_dir=state.snapshot_target_dir,
                     round_done=round_num,
                     current_sketch=state.current_sketch,
                     current_code=state.current_code,
-                    pending_fix=state.pending_fix,
+                    pending_fix=None,
                     iteration_history=state.artifact.iteration_history,
                     best_gflops=state.best_gflops,
                     rounds_without_improvement=state.rounds_without_improvement,
@@ -3013,18 +2974,73 @@ class Conductor:
                     all_verification_results=state.all_verification_results,
                     search_objective=state.search_objective.snapshot() if state.search_objective else None,
                 )
-                return _ROUND_CONTINUE
-            print(f"\n[Conductor] L1/L2 验证失败且已达最大轮次，停止迭代")
-            state.snapshot_target_dir = self._snap(state, round_num)
-            self._record_stop(state.artifact, round_num, "l1_l2_failed", "L1/L2 失败且已达最大轮次")
+                self._record_stop(state.artifact, round_num, "fix_error", "Fixer 修复抛异常, 停止迭代")
 
-            return _ROUND_STOP
+                return _ROUND_STOP
+            if not _outcome.code:
+                # 响应过、又要过一次补丁，第二次**还是**提问 ⇒ 这一轮没有候选。
+                # 停（不是「拿上一次的代码继续跑」）：模型已经明说它不改候选，
+                # 再拿旧候选上去验证就是 harness 替它改了它的声明。
+                print(f"\n[Conductor] 连续两次收到「不改候选」的动作信封 "
+                      f"({_outcome.envelope.kind})，本轮没有候选 —— 停止迭代")
+                self._pending_action_envelope = None
+                # 「紧邻 break 的三行内必须有 _record_stop」是 `test_stop_reason`
+                # 的计数守卫 —— 详情写多行会把它顶出窗口, 于是那条守卫就漏了这一处。
+                self._record_stop(state.artifact, round_num, "ask_turns_exhausted",
+                                  f"连续两次收到不改候选的意图 "
+                                  f"({_outcome.envelope.kind})，响应后仍无补丁")
+                return _ROUND_STOP
+            print(f"  修复说明: {fix_note}")
+            state.pending_fix = fixed_code
 
-        # ── 收尾: 参考天花板 / 停滞 / 资格门 / 出口判定 (§10.4), 见 _round_close_out ──
-        return self._round_close_out(
-            state, round_num,
-            _esc_decision=_esc_decision, _measure_s=_measure_s, _space=_space,
-            bandit_arm=bandit_arm, l3_result=l3_result)
+            # ---- Reflexion: 修复后让 Fixer 产出结构化教训并沉淀 ----
+            reflexion = None
+            try:
+                # 判不出那一轮不产 Reflexion: 那一步是让模型回答「这次失败的根因
+                # 是什么、下次怎么避免」, 而这一轮根本没有失败可归因 —— 让它回答就是
+                # 让它编一个候选侧的根因, 再把那份编出来的教训 `add()` 进语料。
+                if not reference_hold:
+                    reflexion = self.fixer.produce_reflexion()
+                if reflexion is not None:
+                    self.failure_db.add(reflexion)
+                    state.reflexion_pending.append(reflexion)
+                    lessons_cnt = len(reflexion.lessons)
+                    cause = reflexion.root_cause or "N/A"
+                    print(f"  [Reflexion] 已入库: 根因={cause[:60]}, lessons={lessons_cnt}条")
+            except Exception as _rx_err:
+                # Reflexion 失败不影响主流程, 只记录不中断
+                reflexion = None
+                print(f"  [Reflexion] 跳过沉淀: {_rx_err}")
+
+            # 第三个位置带的是**那条记录本身或 None**, 不是「已经沉淀过了」这个
+            # 声称。原先写死 True, 而唯一的循环内沉淀是 produce_reflexion() ——
+            # 它只在修好时返回记录, 于是「修不好的那类失败」被 815-821 的兜底
+            # 当成「已经记过了」跳过, 永远进不了负样本库 (doc 49 §7.14 / #56)。
+            state.fix_attempts.append((failed_results, fix_note, reflexion))
+
+            # ── 可复现性 Harness: Fixer 修复后走 continue 前也要落快照 (否则 crash 就丢了修复代码) ──
+            state.snapshot_target_dir = self._flush_snapshot(
+                task=state.task,
+                artifact_dir=state.snapshot_target_dir,
+                round_done=round_num,
+                current_sketch=state.current_sketch,
+                current_code=state.current_code,
+                pending_fix=state.pending_fix,
+                iteration_history=state.artifact.iteration_history,
+                best_gflops=state.best_gflops,
+                rounds_without_improvement=state.rounds_without_improvement,
+                optimization_history=state.optimization_history,
+                applied_recipes=state.applied_recipes,
+                disabled_recipes=state.disabled_recipes,
+                all_verification_results=state.all_verification_results,
+                search_objective=state.search_objective.snapshot() if state.search_objective else None,
+            )
+            return _ROUND_CONTINUE
+        print(f"\n[Conductor] L1/L2 验证失败且已达最大轮次，停止迭代")
+        state.snapshot_target_dir = self._snap(state, round_num)
+        self._record_stop(state.artifact, round_num, "l1_l2_failed", "L1/L2 失败且已达最大轮次")
+
+        return _ROUND_STOP
 
     def _workload_progress(self, state, round_record):
         """Progress/recipe effects use the SAME score and previous winner as reward."""
