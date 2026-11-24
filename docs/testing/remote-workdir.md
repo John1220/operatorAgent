@@ -45,6 +45,7 @@ H20 的根分区（`/`）只剩个位数 GB，`/data3` 还有 3.3T：
 
 `/data3/operator-work` 已建好并验证可写。
 
-**`/root/operator_agent` 保留**：它不是某个任务的产物，而是 `REMOTE_WORK_DIR` 的旧默认值
-（`~/operator_agent`）—— 一个 5.3 G 的 uv 环境加 19 个 `profile-profile-*` 目录。
-要不要一起清、或者把它挪到 `/data3` 再指过去，等确认后再动。
+`/root/operator_agent` **也删了**（确认后）：它不是某个任务的产物，而是 `REMOTE_WORK_DIR`
+的旧默认值（`~/operator_agent`）—— 一个 5.3 G 的 uv 环境加 19 个 `profile-profile-*` 目录。
+删完之后 `/root` 下再没有 `operator*`，`/` 从 95%/9.2 G 变成 **89%/21 G**（总计释放约 11 G）。
+代价是：以后若有人用**默认** `~/operator_agent` 跑远程验证，会重新 provision 一遍（几分钟）。
