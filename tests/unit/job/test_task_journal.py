@@ -351,3 +351,77 @@ def test_prepare_refuses_on_an_unreadable_journal(tmp_path):
     with pytest.raises(ht.ToolError) as caught:
         ht.prepare(DECL, tmp_path)
     assert caught.value.code == 'task_journal_unusable'
+
+
+def test_a_retry_after_a_refusal_continues_the_same_stream(tmp_path):
+    """被拒之后重试：`rev` 必须**接着**走，不是从断点重来。
+
+    这一条钉的是「拒绝不留痕」和「拒绝不占号」同时成立：被拒的事件不许写进流
+    （否则它就成了唯一真相），也不许让下一条拿到同一个号（否则两条事件同号）。
+    """
+    _prepare(tmp_path)
+    _activate(tmp_path)
+    _finish(tmp_path, 'job-a')
+    before = j.fold(j.read_events(tmp_path))
+
+    # 迟到的终态被拒（终态不可回退）……
+    with pytest.raises(j.JournalError) as caught:
+        _job(tmp_path, 'job-a', kind='job_started')
+    assert caught.value.code == 'journal_job_closed'
+    # ……重试同一个动作仍然被拒，rev 与投影都不动。
+    with pytest.raises(j.JournalError) as again:
+        _job(tmp_path, 'job-a', kind='job_started')
+    assert again.value.code == 'journal_job_closed'
+    after = j.fold(j.read_events(tmp_path))
+    assert after['rev'] == before['rev'] and after['history'] == before['history']
+
+    # 换一条合法的动作：号码紧接在被拒之后，没有空洞。
+    _job(tmp_path, 'job-b')
+    assert j.fold(j.read_events(tmp_path))['rev'] == before['rev'] + 1
+
+
+def test_retrying_a_terminal_event_does_not_overwrite_the_first_answer(tmp_path):
+    """重复上报同一条终态是常态（监督者重试）。第一次的答案必须留住。
+
+    终态**不可回退**也包括「不许被同一件事的第二次说法覆盖」：先 completed，
+    后到的 failed 若被接受，投影就同时背着两个结论，而流里没有任何东西说哪个算数。
+    """
+    _prepare(tmp_path)
+    _activate(tmp_path)
+    _finish(tmp_path, 'job-a', outcome='completed', result='received')
+    row = j.fold(j.read_events(tmp_path))['jobs']['job-a']
+    with pytest.raises(j.JournalError) as caught:
+        _job(tmp_path, 'job-a', kind='job_finished', outcome='failed', result='received')
+    assert caught.value.code == 'journal_job_closed'
+    same = j.fold(j.read_events(tmp_path))['jobs']['job-a']
+    assert same == row
+
+
+def test_concurrent_retries_of_one_job_queue_exactly_once(tmp_path):
+    """同一条 `job_queued` 被并发重试：只许进去一次，`rev` 仍然连续。
+
+    真实来源是「父进程不确定上一次发没发出去」——重试是正常动作，不是异常。
+    这里要的是「重复的尝试既不加序号，也不留第二条排队记录」。
+    """
+    _prepare(tmp_path)
+    _activate(tmp_path)
+    accepted, refused = [], []
+    barrier = threading.Barrier(4)
+
+    def writer(index):
+        barrier.wait()
+        try:
+            accepted.append(_job(tmp_path, 'job-a')['rev'])
+        except j.JournalError as error:       # noqa: BLE001 - 只有一类预期内的拒绝
+            refused.append(error)
+
+    threads = [threading.Thread(target=writer, args=(index,)) for index in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(accepted) == 1 and len(refused) == 3
+    assert {error.code for error in refused} == {'journal_job_exists'}
+    events = j.read_events(tmp_path)
+    assert [event['rev'] for event in events] == list(range(1, len(events) + 1))
+    assert [event['kind'] for event in events].count('job_queued') == 1
