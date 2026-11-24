@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 import { MANIFEST } from "./manifest.mjs";
 import { HostModelLedger, HostModelBudgetError } from "./host-model-ledger.mjs";
 import { recoverHostSession, newTaskReceipt, canAutoStartTask } from "./host-session-lifecycle.mjs";
+import { appendJournal } from "./journal.mjs";
 
 const PREFIX = "mcp__operator__";
 
@@ -121,6 +122,34 @@ export function installHostModelBudget(ctx, config = {}) {
     return event.kind === "job_finished"
       && (event.cleanup?.worker_reaped === true || event.cleanup?.status === "worker_not_started");
   }
+  // 事件提交只在两条前提下发生：目录**确实有账本**（没有就不写，绝不伪造「已准备」），
+  // 且 Python 入口可用。失败只记一行，不打断宿主 —— 账本写不进去是证据问题，
+  // 不是「现在该停下来」的理由。
+  function journalAppend(runDir, event) {
+    if (!existsSync(resolve(runDir, "journal.jsonl"))) return { ok: false, error: "journal_absent" };
+    const receipt = appendJournal(runDir, event);
+    if (!receipt.ok && receipt.error !== "journal_closed") {
+      ctx.logger?.error?.(`operator-tools: 任务账本追加 ${event.kind} 失败 ${receipt.error} ${receipt.detail ?? ""}`);
+    }
+    return receipt;
+  }
+  /**
+   * 宿主封账：任务账本里**唯一**有权说「整段工作结束了」的事件。
+   *
+   * 什么时候是「结束」由宿主决定（终评完成 / 额度用尽 / 截止到点 / 这一轮结束了），
+   * 而**怎么结束的**只用 `host-task.json` 与模型账本回答 —— 不去猜，也不读散文。
+   */
+  function closeTaskJournal(binding, why) {
+    if (!binding?.runDir) return;
+    let outcome = "failed", final = null;
+    try {
+      const task = read(resolve(binding.runDir, "host-task.json"));
+      final = Array.isArray(task.records) ? task.records.find(r => r.purpose === "final") : null;
+      if (final && final.status === "completed" && final.full_l2_passed === true) outcome = "completed";
+    } catch { outcome = "failed"; }
+    const reason = why || (final ? "host_closed_final_verification" : "host_closed");
+    journalAppend(binding.runDir, { kind: "task_closed", outcome, reason });
+  }
   function attach(id, body, restoring, execute) {
     const facts = boundFacts(body), old = sessions.get(id)?.binding;
     const ledger = new HostModelLedger(facts.runDir, facts);
@@ -157,6 +186,8 @@ export function installHostModelBudget(ctx, config = {}) {
             || facts.model.provider_output_cap_violation;
           if (!facts.cleanupPending && (facts.terminal || spent || readonly.ledger.clock({ readonly: true }).expired)) {
             next.phase = "discussion"; data.closed = readonly.taskId; execute = false;
+            data.closeReason = facts.terminal ? "host_closed_final_verification"
+              : spent ? "host_closed_model_budget" : "host_closed_deadline";
           }
         }
         data.binding = execute ? attach(id, next.binding, restoring, true) : readonly;
@@ -173,7 +204,18 @@ export function installHostModelBudget(ctx, config = {}) {
       if (!facts.cleanupPending && (facts.terminal || expired || facts.model.remaining_calls <= 0
           || facts.model.remaining_output_token_reservations <= 0 || facts.model.provider_output_cap_violation)) {
         next.phase = "discussion"; data.closed = data.binding.taskId;
+        data.closeReason = facts.terminal ? "host_closed_final_verification"
+          : expired ? "host_closed_deadline"
+          : facts.model.provider_output_cap_violation ? "host_closed_provider_cap"
+          : "host_closed_model_budget";
       }
+    }
+    // 封账只有这一个落点：相位**最终**成了 discussion。上面几条路（终评完成、额度用尽、
+    // 截止到点、会话生命周期在 turn/end 判定）都会走到这里，所以「一次任务只封一次账」
+    // 只需要记一个 taskId。
+    if (next.phase === "discussion" && data.binding && data.journalClosed !== data.binding.taskId) {
+      closeTaskJournal(data.binding, data.closeReason);
+      data.journalClosed = data.binding.taskId;
     }
     return previous;
   }
@@ -307,6 +349,7 @@ export function installHostModelBudget(ctx, config = {}) {
       try {
         remainingTime(b);
         record = b.ledger.reserve(id, b.lease.id, { requestId: randomUUID(), maxTokens: options.maxTokens, provider: options.provider, model: options.model });
+        journalAppend(b.runDir, { kind: "budget_reserved", budget: { model: b.ledger.summary() } });
         timer = setTimeout(() => native.agent.cancel({ kind: "user" }), Math.max(1, remainingTime(b))); timer.unref?.();
         for await (const chunk of next()) {
           if (chunk.type === "usage") usage = nativeUsage(chunk.usage);
@@ -316,8 +359,10 @@ export function installHostModelBudget(ctx, config = {}) {
       } finally {
         clearTimeout(timer);
         if (options.signal?.aborted) status = "cancelled";
-        if (record) try { b.ledger.finish(id, b.lease.id, record.id, { status, usage }); }
-        catch (error) { throw fail(id, error); }
+        if (record) try {
+          b.ledger.finish(id, b.lease.id, record.id, { status, usage });
+          journalAppend(b.runDir, { kind: "budget_settled", budget: { model: b.ledger.summary() } });
+        } catch (error) { throw fail(id, error); }
       }
     })();
   }));

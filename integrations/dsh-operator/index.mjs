@@ -20,6 +20,7 @@ import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { startModelRelay } from "./model-relay.mjs";
 import { installHostModelBudget } from "./host-model-budget.mjs";
 import { MANIFEST } from "./manifest.mjs";
+import { configureJournalRunner } from "./journal.mjs";
 
 /** 插件自身版本（package.json）；doctor 用它说明"配对的是哪一版". */
 const PLUGIN_VERSION = (() => {
@@ -380,6 +381,9 @@ export function formatStatus(payload, runDir = undefined) {
 }
 
 export function apply(ctx, config = {}) {
+  // 账本提交用与 `/op` 命令同一套 CLI 配置：换过 command/args 的安装，两条路一起换。
+  const journal = normalizeConfig(config, () => {});
+  configureJournalRunner({ command: journal.command, args: journal.args, timeoutMs: journal.timeoutMs });
   let hostBudget;
   if (config?.hostModelBudget !== undefined && config.hostModelBudget !== false) {
     ctx.inject(["llm", "tools", "agents", "sessionQuery"], async function operatorHostBudget(hostCtx) {

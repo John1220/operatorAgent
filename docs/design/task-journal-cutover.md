@@ -161,6 +161,27 @@ prepare 建立一次）。
 
 ### 2. Python 侧加 `journal_append` 入口，JS 改调它
 
+#### 已完成（2026-11-24）
+
+入口是 CLI 子命令 `operator-agent journal-append --run-dir <dir>`，事件走 stdin，
+回一条**已写入**的事件（含分配到的 `rev`）；拒绝回 `ok:false` + 稳定 `code`
+（退出码 2）。JS 侧 `integrations/dsh-operator/journal.mjs` 只做提交，不分配、不落盘。
+
+宿主（DSH 插件）现在提交两类事件，都**只在目录确实有账本时**提交：
+
+| 时机 | 事件 | 说明 |
+|---|---|---|
+| 相位最终成为 `discussion`（封账） | `task_closed` | 一次任务只提交一次；终态与停因从 `host-task.json` 与账本读出，不猜 |
+| 每次模型派发 / 结算 | `budget_reserved` / `budget_settled` | 载荷是 `{model: <账本快照>}`，与预算事件给 `fold` 的合并语义一致（快照，不是增量）|
+
+封账落在**一个**位置：「相位最终成了 discussion」那一刻。原因是关任务的判定有两个
+来源（预算分支与 `turn/end` 的生命周期规则），就地各写一份会出现「同一次关闭提交两条」
+或者「有一条路忘了提交」。只记 `taskId` 判重，两个来源都走它。
+
+失败语义：CLI 不在（`journal_unavailable`）或账本拒绝（`journal_closed` 等）都只是
+回执 —— 模型预算门不该因为一条事件写不进去就崩；但**只有** `journal_closed`
+（已经封过账）当作正常，其他错误一律进 `ctx.logger.error`。
+
 JS 不再自己 append。理由：`rev` = 「读当前最大值 + 1」，两侧各读各的会撞号；而
 `proper-lockfile` 用 `mkdir` 取目录锁，与 Python 的 `flock` **不是同一个互斥协议**，
 同名的 `.lock` 提供不了共同互斥。

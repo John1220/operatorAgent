@@ -13,6 +13,7 @@
     "host-model-budget.mjs",
     "host-model-ledger.mjs",
     "host-session-lifecycle.mjs",
+    "journal.mjs",
     "bin/setup.mjs",
     "cordis.patch.yml",
     "icon.svg",

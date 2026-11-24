@@ -201,6 +201,12 @@ def _parser() -> argparse.ArgumentParser:
     cancel.add_argument('--invocation-id', required=True)
     cancel.add_argument('--json-out')
 
+    japp = sub.add_parser('journal-append',
+                          help='（插件用）往任务账本追加一条事件：stdin 给 JSON，回一条已写入的事件')
+    japp.add_argument('--run-dir', required=True)
+    japp.add_argument('--event', help='事件 JSON；缺省从 stdin 读。kind 必填')
+    japp.add_argument('--json-out')
+
     led_new = sub.add_parser('ledger-new', help='在一个 run 目录里建一张六环节人时表（全部 unknown）')
     led_new.add_argument('--run-dir', required=True)
     led_new.add_argument('--json-out')
@@ -268,6 +274,40 @@ def _read_code(args) -> str:
     if args.code:
         return args.code
     return sys.stdin.read()
+
+
+def _journal_append(args):
+    """唯一的跨进程追加入口：**`rev` 的分配与落盘只在 `task_journal.append` 一处**。
+
+    为什么要一个 CLI 入口而不是让插件自己写文件：`rev` 是「读当前最大值 + 1」，两侧
+    各读各的会撞号；而且 JS 的目录锁（`mkdir`）与 Python 的 `flock` 不是同一个互斥
+    协议，同名的 `.lock` 提供不了共同互斥。所以写入这件事只有 Python 能做，插件提交。
+
+    拒绝时回 `ok:false` + 稳定 code（CLI 退出码 2），不静默变成空操作。
+    """
+    from ..core import task_journal as journal
+    raw = args.event if args.event is not None else sys.stdin.read()
+    try:
+        event = json.loads(raw or "")
+    except ValueError as exc:
+        return dict(ok=False, error='invalid_event', detail=f'事件不是合法 JSON: {exc}')
+    if not isinstance(event, dict) or not isinstance(event.get('kind'), str):
+        return dict(ok=False, error='invalid_event', detail='事件必须是带 kind 的对象')
+    fields = dict(event)
+    kind = fields.pop('kind')
+    job_id = fields.pop('job_id', '')
+    invocation = fields.pop('invocation', '')
+    task_id = fields.pop('task_id', '')
+    operation = fields.pop('operation', '')
+    if any(not isinstance(value, str) for value in (job_id, invocation, task_id, operation)):
+        return dict(ok=False, error='invalid_event',
+                    detail='job_id / invocation / task_id / operation 必须是字符串')
+    try:
+        written = journal.append(args.run_dir, kind, task_id=task_id, job_id=job_id,
+                                 invocation=invocation, operation=operation, **fields)
+    except journal.JournalError as exc:
+        return dict(ok=False, error=exc.code, detail=exc.detail, run_dir=args.run_dir)
+    return dict(ok=True, event=written, run_dir=args.run_dir)
 
 
 def _emit(payload: dict, json_out: str | None) -> None:
@@ -355,6 +395,8 @@ def main(argv=None) -> int:
             payload = autonomous_status(args.run_dir, args.invocation_id)
         elif args.action == 'cancel':
             payload = cancel_task(args.run_dir, args.invocation_id)
+        elif args.action == 'journal-append':
+            payload = _journal_append(args)
         elif args.action in ("ledger-new", "ledger-fill", "ledger-report"):
             payload = _ledger(args)
         else:

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { installHostModelBudget, recoverHostBinding } from "../host-model-budget.mjs";
+import { configureJournalRunner } from "../journal.mjs";
 import { HostModelLedger, MODEL_BUDGET_FILE } from "../host-model-ledger.mjs";
 
 const PREFIX = "mcp__operator__";
@@ -598,4 +599,75 @@ test("an in-flight tool call keeps the closed task from releasing its directory"
   host.native({ type: "user/message", data: { role: "user", source: { kind: "user" } } });
   assert.match(host.guard(PREFIX + "operator_prepare", { run_dir: join(task.dir, "next") }),
     /未结算调用|未回收/);
+});
+
+/** 一个假 CLI：记下每次 `journal-append` 的 stdin，再回一条成功。 */
+function journalStub(t) {
+  const dir = mkdtempSync(join(tmpdir(), "journal-calls-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const log = join(dir, "calls.jsonl"), script = join(dir, "cli.mjs");
+  writeFileSync(script, `
+import { appendFileSync } from "node:fs";
+const chunks = [];
+for await (const chunk of process.stdin) chunks.push(chunk);
+appendFileSync(${JSON.stringify(log)}, Buffer.concat(chunks).toString("utf8") + "\\n");
+process.stdout.write(JSON.stringify({ ok: true, event: { rev: 1 } }));
+`);
+  configureJournalRunner({ command: process.execPath, args: [script] });
+  t.after(() => configureJournalRunner({ command: "operator-agent", args: [] }));
+  return kind => existsSync(log)
+    ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean)
+        .map(line => JSON.parse(line)).filter(event => event.kind === kind)
+    : [];      // 一次都没调过 CLI ⇒ 没有文件，这正是「不该提交」时的形状
+}
+
+test("closing a task submits exactly one task_closed through the Python entry", async t => {
+  const task = fixture(t);
+  writeFileSync(join(task.dir, "journal.jsonl"), JSON.stringify({
+    schema: "operator-task-journal-v2", rev: 1, kind: "task_prepared",
+    task_id: task.body.host_task.task_id }) + "\n");
+  const submitted = journalStub(t);
+  const host = fakeHost(); t.after(host.dispose);
+  await host.emitTool(task.body);
+  await host.dispatch(provider().next);
+  await host.emitTool({ ...task.body, host_task: { ...task.body.host_task, terminal: true } }, "operator_verify");
+  host.native({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+  host.native({ type: "turn/start", data: { turn: 2 } });
+  await host.dispatch(provider().next);
+  const closed = submitted("task_closed");
+  assert.equal(closed.length, 1, "封账只提交一次");
+  assert.match(closed[0].reason, /^host_closed/);
+  assert.ok(["completed", "failed"].includes(closed[0].outcome), closed[0].outcome);
+});
+
+test("a run directory without a journal is never opened by the CLI", async t => {
+  const task = fixture(t);
+  const submitted = journalStub(t);
+  const host = fakeHost(); t.after(host.dispose);
+  await host.emitTool(task.body);
+  await host.dispatch(provider().next);
+  await host.emitTool({ ...task.body, host_task: { ...task.body.host_task, terminal: true } }, "operator_verify");
+  host.native({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
+  host.native({ type: "turn/start", data: { turn: 2 } });
+  await host.dispatch(provider().next);
+  assert.equal(submitted("task_closed").length, 0, "没有账本就不提交，也不伪造一条");
+  assert.equal(submitted("budget_settled").length, 0);
+});
+
+test("each model reservation and settlement lands as a budget snapshot", async t => {
+  const task = fixture(t);
+  writeFileSync(join(task.dir, "journal.jsonl"), JSON.stringify({
+    schema: "operator-task-journal-v2", rev: 1, kind: "task_prepared",
+    task_id: task.body.host_task.task_id }) + "\n");
+  const submitted = journalStub(t);
+  const host = fakeHost(); t.after(host.dispose);
+  await host.emitTool(task.body);
+  await host.dispatch(provider().next);
+  const reserved = submitted("budget_reserved"), settled = submitted("budget_settled");
+  assert.equal(reserved.length, 1, "一次派发一条预留");
+  assert.equal(settled.length, 1, "一次结算一条");
+  // 形状是**快照**（与预算事件留给 fold 的合并语义一致），不是增量。
+  assert.equal(reserved[0].budget.model.calls_reserved, 1);
+  assert.equal(settled[0].budget.model.calls_reserved, 1);
+  assert.equal(settled[0].budget.model.records[0].status, "answered");
 });
