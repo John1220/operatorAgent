@@ -141,6 +141,7 @@ def handshake(manifest, *, tools=None, version=None, tool_version=None):
 
 def test_manifest_is_the_installers_only_tool_list():
     assert 'operator_normalize' in MANIFEST['host_tools']
+    assert 'operator_profile' in MANIFEST['host_tools']
     assert installer.validate_manifest(MANIFEST) is MANIFEST
     assert not hasattr(installer,'TOOLS')
 

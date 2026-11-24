@@ -62,6 +62,7 @@ from ..decide.session_inputs import (PreparedInputs, prepare_inputs, PROTOCOL as
 # 按执行目标串行化 execute/benchmark, 防止并发任务共用同一 GPU 互相污染 benchmark
 _EXEC_LOCKS: dict[str, threading.Lock] = {}
 _EXEC_LOCKS_GUARD = threading.Lock()
+CLEANUP_GRACE_S = 20.0
 
 
 def _get_exec_lock(key: str) -> threading.Lock:
@@ -94,6 +95,46 @@ def _transport_failure(exc) -> dict:
         result.update(session_state=exc.session_state, session_phase=exc.session_phase,
                       request_id=exc.request_id, bytes_sent=exc.bytes_sent)
     return result
+
+
+def cleanup_profile_transport(path) -> str:
+    """Best-effort remote process-group cleanup from a profile transport record."""
+    path = Path(path)
+    if not path.is_file():
+        return 'not_started'
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError, UnicodeError):
+        return 'failed:unreadable_transport'
+    if not isinstance(data, dict):
+        return 'failed:unreadable_transport'
+    if data.get('cleanup'):
+        return data['cleanup']
+    remote_dir, host = data.get('remote_dir'), data.get('host')
+    if not isinstance(remote_dir, str) or not isinstance(host, str):
+        return 'failed:incomplete_transport'
+    pid = shlex.quote(f'{remote_dir}/pid')
+    command = (f'if [ -f {pid} ]; then kill -TERM -$(cat {pid}) 2>/dev/null || true; '
+               f'sleep 1; kill -KILL -$(cat {pid}) 2>/dev/null || true; fi; true')
+    ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=no']
+    if data.get('port'):
+        ssh += ['-p', str(data['port'])]
+    if data.get('key_path'):
+        ssh += ['-i', os.path.expanduser(str(data['key_path']))]
+    target = f'{data["user"]}@{host}' if data.get('user') else host
+    ssh += [target, command]
+    try:
+        subprocess.run(ssh, capture_output=True, text=True, timeout=15, check=True)
+        status = 'attempted'
+    except (OSError, subprocess.SubprocessError) as error:
+        status = f'failed:{type(error).__name__}'
+    data['cleanup'] = status
+    data['cleanup_at'] = time.time()
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True), encoding='utf-8')
+    except OSError:
+        pass
+    return status
 
 
 @dataclass
@@ -634,6 +675,8 @@ class SSHExecutor(Backend):
         self._gpu_info_cache: Optional[dict] = None
         # 固定的 GPU 卡号: None=未解析, -1=解析过但不固定, >=0=固定该卡
         self._gpu_pin: Optional[int] = None
+        self._absolute_work_dir: Optional[str] = None
+        self._profile_deadline: Optional[float] = None
         self._uv_path = "~/.local/bin/uv"   # ensure_environment 复用
         # 常驻会话 (默认关): 每次调用新起一个远端进程的固定开销实测 ≈4.5 s, 而测量本身
         # 只有毫秒级 (doc 62)。开着它省的是这笔固定开销, 一次性的那条路一行没动。
@@ -668,6 +711,7 @@ class SSHExecutor(Backend):
             # 于是「跨轮固定同一张卡」在那个平台上根本不发生 —— 不声明就是不说谎
             caps.add(Cap.GPU_PINNING)
             caps.add(Cap.REFERENCE_IDENTITY)
+            caps.add(Cap.NCU_PROFILE)
             caps.add(Cap.READONLY_QUALITY_PREFLIGHT)
             if self._persistent:
                 caps.add(Cap.NATIVE_CUDA_CALIBRATION)
@@ -694,7 +738,9 @@ class SSHExecutor(Backend):
         cmd.append(self._ssh_target())
         return cmd
 
-    def _ssh_exec(self, remote_cmd: str, stdin_data: Optional[str] = None) -> str:
+    def _ssh_exec(self, remote_cmd: str, stdin_data: Optional[str] = None,
+                  timeout: Optional[int] = None, *,
+                  beyond_business_deadline: bool = False) -> str:
         """执行远程命令并返回 stdout
 
         说明:
@@ -703,13 +749,17 @@ class SSHExecutor(Backend):
           因此 rc != 0 时我们先把 stderr/stdout 都拿到 (不直接抛错)，
           由上层 _ssh_exec_json 根据 stdout 自行解析，只有 JSON 解析失败才报错。
         """
+        active = None if beyond_business_deadline else self._profile_deadline
+        if active is not None:
+            remaining = max(1, int(active - time.monotonic()))
+            timeout = remaining if timeout is None else min(timeout, remaining)
         full_cmd = self._build_ssh_base() + [remote_cmd]
         proc = subprocess.run(
             full_cmd,
             input=stdin_data,
             capture_output=True,
             text=True,
-            timeout=self.timeout,
+            timeout=timeout if timeout is not None else self.timeout,
         )
         if proc.returncode == 0:
             return proc.stdout.strip()
@@ -860,6 +910,249 @@ class SSHExecutor(Backend):
             if line.startswith("{"):
                 return json.loads(line)
         raise ValueError(f"No JSON found in remote output: {output[:500]}")
+
+    def _ncu_exec(self, payload: dict, remote_cmd: str, *, timeout: int) -> str:
+        """SSH stdin -> NCU -> a fresh runner process, bypassing persistent sessions."""
+        return self._ssh_exec(remote_cmd, stdin_data=json.dumps(payload, ensure_ascii=False),
+                              timeout=timeout)
+
+    def _remote_size(self, remote_path: str, timeout: int = 30):
+        try:
+            output = self._ssh_exec(f'stat -c %s {shlex.quote(remote_path)}',
+                                    timeout=timeout)
+        except Exception:                        # noqa: BLE001 - size is an extra check
+            return None
+        text = output.strip().splitlines()[-1] if output.strip() else ''
+        return int(text) if text.isdigit() else None
+
+    def _scp_fetch(self, remote_path: str, local: Path, timeout: int = 120) -> None:
+        """Publish a fetched artifact only after completion and size verification."""
+        local = Path(local)
+        temporary = local.with_name(local.name + '.part')
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        scp_cmd = ["scp", "-o", "StrictHostKeyChecking=no"]
+        if self.port:
+            scp_cmd.extend(["-P", str(self.port)])
+        if self.key_path:
+            scp_cmd.extend(["-i", os.path.expanduser(self.key_path)])
+        scp_cmd.extend([f"{self._ssh_target()}:{shlex.quote(remote_path)}", str(temporary)])
+        active = self._profile_deadline
+        if active is not None:
+            timeout = max(1, min(timeout, int(active - time.monotonic())))
+        try:
+            subprocess.run(scp_cmd, capture_output=True, text=True, timeout=timeout, check=True)
+            expected = self._remote_size(remote_path)
+            actual = temporary.stat().st_size
+            if expected is not None and actual != expected:
+                raise OSError(f'remote size {expected} != fetched size {actual}')
+            os.replace(temporary, local)
+        except BaseException:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise
+
+    def _resolved_work_dir(self) -> str:
+        """Resolve the remote work directory once so cleanup never depends on `~`."""
+        if self._absolute_work_dir:
+            return self._absolute_work_dir
+        path = str(self.work_dir or '~/operator_agent')
+        if not path.startswith('~'):
+            self._absolute_work_dir = path
+            return path
+        from ..decide.quality_preflight import _remote_path
+        output = self._ssh_exec('cd ' + _remote_path(path) + ' && pwd')
+        resolved = output.strip().splitlines()[-1] if output.strip() else ''
+        if not resolved.startswith('/'):
+            raise RuntimeError('remote work dir did not resolve to an absolute path')
+        self._absolute_work_dir = resolved
+        return resolved
+
+    def _cleanup_profile(self, remote_dir: str, grace: Optional[float] = None) -> str:
+        """Terminate the remote NCU process group with a cleanup-only grace period."""
+        budget = CLEANUP_GRACE_S if grace is None else max(0.0, float(grace))
+        if budget <= 0:
+            return 'skipped:no_grace'
+        directory = shlex.quote(remote_dir)
+        command = (f'if [ -f {directory}/pid ]; then '
+                   f'kill -TERM -$(cat {directory}/pid) 2>/dev/null || true; sleep 1; '
+                   f'kill -KILL -$(cat {directory}/pid) 2>/dev/null || true; fi; true')
+        try:
+            self._ssh_exec(command, timeout=max(1, int(budget)),
+                           beyond_business_deadline=True)
+            return 'attempted'
+        except Exception as error:               # noqa: BLE001 - reported, not raised
+            return f'failed:{type(error).__name__}'
+
+    def cleanup_profile(self, artifact_dir) -> str:
+        return cleanup_profile_transport(Path(artifact_dir) / 'transport.json')
+
+    def profile(self, kernel_code: str, input_spec: dict, *, artifact_dir: Path,
+                timeout: int = 300, ncu_path: Optional[str] = None,
+                range_name: str = "candidate",
+                deadline: Optional[float] = None) -> dict:
+        """Capture one NCU report under a single absolute deadline."""
+        from .profiling.ncu_profile import METRICS
+        if self.platform != "nvidia":
+            return dict(ok=False, error='profile_unsupported',
+                        detail='NCU profile currently requires the NVIDIA runner',
+                        started_at=time.time(), finished_at=time.time())
+        self.require(Cap.NCU_PROFILE)
+        artifact_dir = Path(artifact_dir)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        started = time.time()
+        deadline = float(deadline) if deadline is not None else time.monotonic() + timeout
+        cleanup = None
+        cleanup_s = None
+        remote_dir = None
+        previous_deadline = self._profile_deadline
+        self._profile_deadline = deadline
+        try:
+            if deadline - time.monotonic() < 5:
+                return dict(ok=False, error='profile_timeout',
+                            detail='deadline exhausted before deployment',
+                            started_at=started, finished_at=time.time())
+            if not self._deployed and not self.deploy():
+                return dict(ok=False, error='deploy_failed',
+                            detail='remote runner deployment failed')
+            if deadline - time.monotonic() < 5:
+                return dict(ok=False, error='profile_timeout',
+                            detail='deadline exhausted during deployment',
+                            started_at=started, finished_at=time.time())
+            ncu = ncu_path or os.environ.get('REMOTE_NCU_PATH', '/usr/local/cuda/bin/ncu')
+            work_dir = self._resolved_work_dir()
+            token = secrets.token_hex(8)
+            remote_dir = f'{work_dir}/profile-{artifact_dir.name}-{token}'
+            self._ssh_exec(f'mkdir -p {shlex.quote(remote_dir)}')
+            transport = dict(
+                schema='operator-profile-transport-v1', host=self.host,
+                port=self.port, user=self.user, key_path=self.key_path, work_dir=work_dir,
+                remote_dir=remote_dir, pid_path=f'{remote_dir}/pid',
+                created_at=time.time())
+            try:
+                (artifact_dir / 'transport.json').write_text(
+                    json.dumps(transport, ensure_ascii=False, sort_keys=True),
+                    encoding='utf-8')
+            except OSError:
+                pass
+            payload = {"action": "profile", "code": kernel_code,
+                       "inputs_spec": input_spec,
+                       "result_path": f'{remote_dir}/result.json',
+                       "range_name": range_name, "warmup": 3, "decoy": True}
+            gpu = self._pinned_gpu()
+            exports = []
+            if type(gpu) is int:
+                exports.append(f'CUDA_VISIBLE_DEVICES={gpu}')
+                exports.append(f'OPERATOR_AGENT_GPU={gpu}')
+            export_cmd = ('export ' + ' '.join(exports) + '; ') if exports else ''
+            python_cmd = ('.venv/bin/python'
+                          if getattr(self, '_verified_python', None) == '.venv/bin/python'
+                          else '~/.local/bin/uv run python')
+            metrics = ','.join(METRICS)
+            report = f'{remote_dir}/report'
+            tmp_dir = shlex.quote(remote_dir + '/tmp')
+            inner = (
+                f'echo $$ > {shlex.quote(remote_dir + "/pid")}; '
+                f'cd {shlex.quote(work_dir)} || exit 1; {export_cmd}'
+                f'mkdir -p {tmp_dir}; export TMPDIR={tmp_dir}; '
+                f'exec {shlex.quote(ncu)} --target-processes all --nvtx '
+                f'--nvtx-include {shlex.quote(range_name + "/")} --metrics {metrics} '
+                f'--cache-control none --clock-control none -o {shlex.quote(report)} '
+                f'--csv --page raw {python_cmd} {shlex.quote(self.remote_runner_path)}'
+            )
+            command = (f'setsid bash -c {shlex.quote(inner)} '
+                       f'> {shlex.quote(remote_dir + "/raw.csv")} '
+                       f'2> {shlex.quote(remote_dir + "/ncu.log")}; '
+                       f'echo $? > {shlex.quote(remote_dir + "/rc")}')
+            remaining = max(1, deadline - time.monotonic())
+            try:
+                self._ncu_exec(payload, command, timeout=int(remaining))
+            except subprocess.TimeoutExpired:
+                cleanup_started = time.monotonic()
+                cleanup = self._cleanup_profile(remote_dir)
+                cleanup_s = time.monotonic() - cleanup_started
+                return dict(ok=False, error='profile_timeout',
+                            detail='NCU capture exceeded the task deadline',
+                            cleanup=cleanup, cleanup_s=cleanup_s,
+                            cleanup_grace_s=CLEANUP_GRACE_S,
+                            started_at=started, finished_at=time.time())
+            remaining = max(1, deadline - time.monotonic())
+            post = (f'{shlex.quote(ncu)} --version > '
+                    f'{shlex.quote(remote_dir + "/ncu-version.txt")} 2>&1; '
+                    f'{shlex.quote(ncu)} --import {shlex.quote(report + ".ncu-rep")} '
+                    f'--csv --page raw > {shlex.quote(remote_dir + "/reexport.csv")} '
+                    f'2>> {shlex.quote(remote_dir + "/ncu.log")}')
+            try:
+                self._ssh_exec(post, timeout=int(min(60, remaining)))
+            except subprocess.TimeoutExpired:
+                cleanup_started = time.monotonic()
+                cleanup = self._cleanup_profile(remote_dir)
+                cleanup_s = time.monotonic() - cleanup_started
+                return dict(ok=False, error='profile_timeout',
+                            detail='post-capture export exceeded the task deadline',
+                            cleanup=cleanup, cleanup_s=cleanup_s,
+                            cleanup_grace_s=CLEANUP_GRACE_S,
+                            started_at=started, finished_at=time.time())
+            required = ('raw.csv', 'report.ncu-rep', 'reexport.csv', 'result.json', 'rc')
+            optional = ('ncu.log', 'ncu-version.txt')
+            fetch_failed = []
+            for name in required + optional:
+                left = deadline - time.monotonic()
+                if left < 1:
+                    break
+                try:
+                    self._scp_fetch(f'{remote_dir}/{name}', artifact_dir / name,
+                                    timeout=int(min(120, left)))
+                except (OSError, subprocess.SubprocessError) as error:
+                    if name in required:
+                        fetch_failed.append(f'{name}:{type(error).__name__}')
+            missing = [name for name in required if not (artifact_dir / name).is_file()]
+            if fetch_failed:
+                return dict(ok=False, error='profile_fetch_failed',
+                            detail='required artifact fetch failed: ' + ', '.join(fetch_failed),
+                            missing=missing, remote_dir=remote_dir, cleanup=cleanup,
+                            started_at=started, finished_at=time.time())
+            rc_text = ((artifact_dir / 'rc').read_text().strip()
+                       if (artifact_dir / 'rc').is_file() else '')
+            version_text = ((artifact_dir / 'ncu-version.txt').read_text()
+                            if (artifact_dir / 'ncu-version.txt').is_file() else '')
+            version = next((line.strip() for line in version_text.splitlines()
+                            if 'NVIDIA Nsight Compute' in line or line.strip().startswith('Version')),
+                           None)
+            return dict(ok=(rc_text == '0' and not missing), rc=rc_text,
+                        missing=missing, remote_dir=remote_dir,
+                        cleanup=cleanup, cleanup_s=cleanup_s,
+                        cleanup_grace_s=CLEANUP_GRACE_S if cleanup is not None else None,
+                        ncu=ncu, ncu_version=version, gpu=gpu,
+                        command=['ncu', '--target-processes', 'all', '--nvtx',
+                                 '--nvtx-include', range_name + '/',
+                                 '--metrics', metrics, '--cache-control', 'none',
+                                 '--clock-control', 'none', '-o', 'report',
+                                 '--csv', '--page', 'raw'],
+                        started_at=started, finished_at=time.time(),
+                        artifact_dir=str(artifact_dir))
+        except subprocess.TimeoutExpired:
+            if remote_dir is not None and cleanup is None:
+                cleanup_started = time.monotonic()
+                cleanup = self._cleanup_profile(remote_dir)
+                cleanup_s = time.monotonic() - cleanup_started
+            return dict(ok=False, error='profile_timeout',
+                        detail=f'NCU run exceeded {timeout}s', cleanup=cleanup,
+                        cleanup_s=cleanup_s, started_at=started, finished_at=time.time())
+        except Exception as error:               # noqa: BLE001 - reported, not raised
+            if remote_dir is not None and cleanup is None:
+                cleanup_started = time.monotonic()
+                cleanup = self._cleanup_profile(remote_dir)
+                cleanup_s = time.monotonic() - cleanup_started
+            return dict(ok=False, error='profile_transport',
+                        detail=f'{type(error).__name__}: {error}', cleanup=cleanup,
+                        cleanup_s=cleanup_s, started_at=started, finished_at=time.time())
+        finally:
+            self._profile_deadline = previous_deadline
 
     # ── 常驻会话 (可选路径, 默认关闭) ──────────────────────────────
     def _session_server_path(self) -> str:
@@ -2084,6 +2377,18 @@ class RemoteExecutor(Backend):
     def deploy(self) -> bool:
         """把 runner 及其同级依赖同步到远端。只转发, 不再把「没东西可部署」当成「部署成功」"""
         return self.backend.deploy()
+
+    def profile(self, kernel_code: str, input_spec: dict, *, artifact_dir,
+                timeout: int = 300, ncu_path=None, range_name: str = "candidate",
+                deadline=None) -> dict:
+        with _get_exec_lock(self._lock_key()):
+            return self.backend.profile(kernel_code, input_spec, artifact_dir=artifact_dir,
+                                        timeout=timeout, ncu_path=ncu_path,
+                                        range_name=range_name, deadline=deadline)
+
+    def cleanup_profile(self, artifact_dir) -> str:
+        with _get_exec_lock(self._lock_key()):
+            return self.backend.cleanup_profile(artifact_dir)
 
     def compile(self, kernel_code: str) -> bool:
         return self.backend.compile(kernel_code)

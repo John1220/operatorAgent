@@ -1,4 +1,4 @@
-"""MCP stdio server：host 七工具与兼容的 legacy 工具面。
+"""MCP stdio server：host 工具面与兼容的 legacy 工具面。
 
 为什么是这个形态（`docs/dsh-plugin-evaluation.md` §6.2 / §9.6）：
 
@@ -42,7 +42,7 @@ from typing import Any, BinaryIO, Optional, TextIO
 from .. import __version__
 from ..core.task_declaration import SUPPORTED_PRECISIONS
 from ..app.hitl_tools import (CANDIDATE_ORIGINS, TOOL_VERSION, ToolError, autonomous_status, cancel_task, bench, normalize_declaration,
-                         capabilities, prepare, repair, run_autonomous, verify)
+                         capabilities, prepare, profile, repair, run_autonomous, verify)
 from ..execute.fake_backend.config import PROFILES, SCENARIOS
 
 SERVER_NAME = "operator"
@@ -133,8 +133,15 @@ backend=实际后端)，取得绑定该源码和验证结果的反馈，再自�
 route 与 eligibility 一起读；conflict.action=hold_for_measurement 时先恢复观测资格。
 validity=degraded/unknown 不支持性能提升或继续调参的结论。诊断是假设，不是通过凭据。
 
+需要瓶颈证据时，可对已完整通过 L2 且回包含 selected_gpu 的 verification_round 调用
+operator_profile(run_dir, verification_round, backend=ssh, host=实际目标)。它只做一次 NCU
+采集，绑定原源码/契约/用例/GPU，不占 L3 验证次数或独立终评；每任务最多 2 次、单次不超过
+300 秒，并与 L3 按 GPU 租约互斥。profile 的 cache/clock 不受控，不是性能提升结论；是否
+值得继续仍由独立 L3 判定。
+
 完整 L2 通过后，使用同一源码再次 operator_verify(verification_purpose=final) 完成独立
-终评；探索调用不能用掉预留的最终验证。默认简洁交付用户可用的源码或源码链接、验证结论和
+终评；探索调用不能用掉预留的最终验证。final 默认采用账本推荐的最快合格源码；只有给出
+override_reason 才显式送评其它源码。默认简洁交付用户可用的源码或源码链接、验证结论和
 报告链接；用户要求完整源码时给出完整源码。说明测试范围与未完成项，不逐段复述内部流程。
 ABI、工具参数、完整哈希、后端选路与预算细节保留在证据中，用户询问时再展开；
 预算耗尽、验证失败或证据不足时仍须说明原因与可采取的操作，不能省略影响结论的限制。
@@ -165,8 +172,8 @@ operator_cancel(run_dir, invocation_id) 取消在飞验证，随后查 status �
 """
 
 HOST_TOOLS = frozenset(('operator_prepare', 'operator_resume', 'operator_context', 'operator_verify',
-                        'operator_status', 'operator_cancel', 'operator_capabilities',
-                        'operator_normalize'))
+                        'operator_profile', 'operator_status', 'operator_cancel',
+                        'operator_capabilities', 'operator_normalize'))
 
 #: 不消耗模型预算的工具：只读，或只做本地状态迁移。
 #: JS 的模型门靠它区分「这次调用要不要预留额度」。这张表此前是 JS 里的第三个手抄
@@ -346,6 +353,8 @@ def _tool_definitions(host_mode=None) -> list[dict]:
                     "wait": {"type": "boolean", "default": True,
                              "description": "false = 异步提交：立即返回 invocation_id，operator_status 查终态"},
                     "target_gflops": {"type": "number"},
+                    "override_reason": {"type": "string",
+                        "description": "仅 verification_purpose=final：显式覆盖账本推荐源码的理由；省略则使用推荐源码"},
                 },
             },
         },
@@ -537,6 +546,31 @@ def _tool_definitions(host_mode=None) -> list[dict]:
                 }},
         })
         definitions.append({
+            'name': 'operator_profile',
+            'description': ('对已完整通过 L2 且回包含 selected_gpu 的候选做一次按需 NCU 采集。'
+                            '绑定 verification_round 的源码/契约/用例与 GPU；不改判定、不占 L3 次数或独立终评。'
+                            '单次 ≤300 秒，每任务最多 2 次，与 L3 按 GPU 租约互斥。'),
+            'inputSchema': {
+                'type': 'object', 'additionalProperties': False,
+                'required': ['run_dir', 'verification_round', 'host'],
+                'properties': {
+                    'run_dir': {'type': 'string'},
+                    'verification_round': {'type': 'integer', 'minimum': 1},
+                    'case_index': {'type': 'integer', 'minimum': 0, 'default': 0},
+                    'backend': {'type': 'string', 'enum': ['ssh'], 'default': 'ssh'},
+                    'host': {'type': 'string', 'description': 'backend=ssh 必需：主机名或 ~/.ssh/config 别名'},
+                    'port': {'type': 'integer'},
+                    'user': {'type': 'string'},
+                    'key_path': {'type': 'string', 'description': '私钥路径（引用；值不落库）'},
+                    'work_dir': {'type': 'string'},
+                    'timeout': {'type': 'integer', 'minimum': 1, 'maximum': 300, 'default': 300},
+                    'ncu_path': {'type': 'string', 'description': '远端 ncu 路径，默认 /usr/local/cuda/bin/ncu'},
+                    'wait': {'type': 'boolean', 'default': True,
+                             'description': 'false = 异步提交：立即返回 invocation_id，operator_status 查终态，operator_cancel 取消'},
+                },
+            },
+        })
+        definitions.append({
             'name': 'operator_resume',
             'description': '恢复原 host 任务的身份、预算与候选引用；不重置截止/额度，不调用模型。根据 next_action/next_context 继续或报告停止。',
             'inputSchema': {'type': 'object', 'additionalProperties': False,
@@ -660,7 +694,7 @@ def _call_tool(name: str, arguments: dict) -> dict:
     if name == 'operator_resume':
         from .host_workflow import resume
         return _text_result(resume(**dict(arguments or {})), compact=True)
-    if _host_mode() and name in ('operator_context', 'operator_verify'):
+    if _host_mode() and name in ('operator_context', 'operator_verify', 'operator_profile'):
         from ..execute.host_task_budget import host_task_enabled
         if not arguments.get('run_dir') or not host_task_enabled(arguments['run_dir']):
             raise ToolError('host_task_required', 'Use operator_prepare to start a bounded host task first.')
@@ -728,6 +762,13 @@ def _call_tool(name: str, arguments: dict) -> dict:
         if code_file:
             code = Path(code_file).read_bytes().decode("utf-8")
         return _text_result(verify(run_dir, code, **args))
+    if name == "operator_profile":
+        args = dict(arguments or {})
+        args.pop("wait", None)
+        run_dir = args.pop("run_dir", None)
+        if not run_dir:
+            raise ToolError("run_dir_required", "profile 需要 run_dir")
+        return _text_result(profile(run_dir, **args))
     if name == "operator_bench":
         args = dict(arguments or {})
         run_dir = args.pop("run_dir", None)

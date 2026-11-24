@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from operator_agent.execute import ncu_profile as np
+from operator_agent.execute.profiling import ncu_profile as np
 
 
 # 按仓库根定位而不是数层级：这个文件在 tests/unit/profile/ 下，数层级会在

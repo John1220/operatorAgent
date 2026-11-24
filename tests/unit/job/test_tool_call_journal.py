@@ -14,7 +14,7 @@ import pytest
 
 from operator_agent.app import hitl_tools as ht, tool_calls
 from operator_agent.core import task_journal as journal
-from operator_agent.execute import exec_guard
+from operator_agent.execute import exec_guard, profile_budget
 from operator_agent.execute.host_task_budget import HostTaskBudget, initialize_host_task
 from operator_agent.execute.task_cancellation import publish_json
 
@@ -204,6 +204,38 @@ def test_a_receipt_that_arrives_after_the_stop_is_recorded_as_received(tmp_path,
         assert body['result_state'] == 'received'
     finally:
         call.close()
+
+def test_profile_worker_is_settled_after_reaping_and_keeps_its_slot(tmp_path, monkeypatch):
+    _clock(monkeypatch)
+    run = tmp_path / 'run'
+    ht.prepare(DECL, run, host_budget=dict(wall_clock_s=600, max_verifications=3))
+    process = _process()
+
+    def start(directory):
+        launch = json.loads((directory / 'launch.json').read_text())
+        request = json.loads((directory / 'request.json').read_text())
+        assert request['profile_context']['invocation_id'] == launch['invocation_id']
+        profile_budget.ProfileBudget(run).reserve(
+            timeout_s=30, owner_invocation_id=launch['invocation_id'])
+        process.returncode = 1
+        return process
+
+    _supervised(monkeypatch, start)
+    call = tool_calls.ToolCall('operator_profile', dict(
+        run_dir=str(run), verification_round=1, backend='ssh', host='h20', timeout=30))
+    try:
+        response = call.poll()
+        body = json.loads(response['content'][0]['text'])
+        assert body['error'] == 'worker_failed'
+        assert body['profiles']['used'] == 1 and body['profiles']['in_flight'] == 0
+        entry = body['profiles']['entries'][0]
+        assert entry['status'] == 'failed' and entry['cleanup'] == 'not_started'
+        facts = journal.invocation_view(call.directory, call.invocation_id)
+        assert facts['operation'] == 'profile'
+        assert facts['journal_phase'] == 'failed'
+    finally:
+        call.close()
+
 
 def test_a_failed_dispatch_records_no_worker_to_reap(tmp_path, monkeypatch):
     """起不来 worker 时：`result=none`（不是「未知」），且写清没有东西要回收。

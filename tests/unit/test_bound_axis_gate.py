@@ -333,6 +333,8 @@ class TestBoundReadersAreRegistered(unittest.TestCase):
         "decide/measurement.py": "只当**尺的身份**比较, 不据此选轴; 认得 unknown —— "
                           "`l3_ruler_reading` 明确把 `unknown` 剔出读数 (两轮都 unknown "
                           "不许被读成「同一把尺」, 见那里的 docstring)",
+        "execute/host_task_budget.py": "把 L3 的 roofline bound_type 原样投影进性能事实; "
+                                       "不据此选轴, 'unknown' 原样保留",
     }
 
     def test_reader_set_matches_the_registry(self):

@@ -31,22 +31,32 @@
 2. **恢复语义** —— A4 真实产物的回归件在 `tests/unit/resume/`（7 条，本机跑真产物，
    缺产物时 skip）；journal 的乱序与重试用例齐了。**状态读写方两条路都切完了**
    （tool-call 见 `cefe7f9`；autonomous 见下面第 3 步的「已完成」）。
-3. **迁移 0.8.2 完整优化流程** —— **租约前置已接入，NCU 工具面尚未迁移**。
-   `HostTaskBudget.reserve` 现在在预留时取每 run + 机器级 GPU 租约，`finish` / `settle_owner`
+3. **迁移 0.8.2 完整优化流程** —— **NCU profile 执行链已接入并完成真机验收**。
+   `HostTaskBudget.reserve` 在预留时取每 run + 机器级 GPU 租约，`finish` / `settle_owner`
    在结算后按 owner 释放；跨任务同卡、不同卡、profile/L3 互斥与未声明卡冲突的 4 条用例
-   已直接运行并通过。`operator_profile` 仍未进入 host 工具面：当前分支缺远端 runner 的
-   `action=profile` 与 SSHExecutor 的 NCU 采集/清理链，不能只暴露一个空壳。`reserve` 也
-   还没有 v0.8.2 的 `final_selection` 参数。搬运源在 `codex/v0.8.2-profile-optimize`。
+   已直接运行并通过。远端 runner 的 `action=profile`、SSHExecutor 的 NCU 采集/清理、
+   `hitl_tools.profile`、`ToolCall` 监督和 host 工具清单（`tool_version=15`）均已接线。
+   `final_selection` 也已迁移：L3 性能事实、噪声带、可比窗口与最快合格候选由预算账本
+   投影；final 默认送评推荐源码，只有显式 `override_reason` 才覆盖。选择回执与预留
+   原子写入同一条 `budget_reserved` 快照，`status`/`resume` 只读该投影，不再写
+   `best.json` 或 `final-selection.json`。搬运源在 `codex/v0.8.2-profile-optimize`。
 
-接下来两件事，按此顺序：
+   **2026-11-24 H20 验收**：在 GPU3 上对 `relu fp16 128x128` 的 round 2（完整 L2
+   12/12）实跑 NCU 2025.3。回执只含 1 个 `_relu_kernel`，位于 `candidate` NVTX 范围，
+   `decoy_seen=false`，raw 与 re-export 逐字段一致；receipt/complete 及其余产物的
+   SHA256 均独立复核相同。随后用 8 秒绝对 deadline 实跑超时探针：返回
+   `profile_timeout`，`cleanup=attempted`、清理约 1.56 秒；两个 NCU 进程组均已确认
+   消失，失败仍占满第 2/2 个 profile 名额，run 与机器级 GPU 租约均释放。
+   真机暴露的两处接线问题也已修：能力判断走 `Cap.NCU_PROFILE`，NCU 使用每次采集
+   独立的 `TMPDIR`，避免共享 `/tmp` 的权限污染。小核 L3 读数仍受共享卡与 launch
+   地板影响，**不作为性能结论**。
 
-1. **接 journal 的写入方**（本文下面的五步）—— **五步全部落地**。写入方只有两处
-   （`prepare` 的任务层、`ToolCall` 的 Job 层）加宿主经 CLI 提交的两类事件；
-   读者一律读投影；预算状态、封账、迁移都有了归属。
-   剩下的只有第 5 步的**真机 replay 对账**（要 H20 窗口）。
-2. **profile 执行链搬完**：`ncu_profile` / `gpu_lease` / `profile_budget` 已搬，L3 租约
-   也已接入；下一步是移植远端 `action=profile`、SSHExecutor 的 NCU 采集/清理，以及
-   `hitl_tools.profile` + `ToolCall` 监督接线，最后再改 host 工具清单与 `tool_version`。
+接下来一件事：
+
+**v0.8.2 执行链迁移已完成**：`operator_profile` 真机验收与 `final_selection` 均已落地。
+journal 的真机 replay 对账已在本文第 5 步完成。尚未迁移的是源分支的 `seed_source` /
+`preflight_receipt` 封存及其专属 resume 状态机；当前无 seed 任务以首个合格 L3 作为
+窗口基线，正式增益在缺少 preflight 时仍明确返回 pending。
 
 ### 已知噪声，别当回归
 

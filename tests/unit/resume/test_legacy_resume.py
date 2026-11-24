@@ -13,7 +13,7 @@ import pytest
 
 from operator_agent.app import host_workflow
 
-A4 = Path('/Users/zh/op-agent-evidence/v082-4a-step4-a4-20261123/run')
+A4 = Path.home() / 'op-agent-evidence' / 'v082-4a-step4-a4-20261123' / 'run'
 
 pytestmark = pytest.mark.skipif(
     not (A4 / 'run.json').is_file(),

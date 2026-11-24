@@ -19,13 +19,14 @@ from ..execute.fake_backend.config import tool_context
 from ..execute.task_cancellation import (cancellation, launch_identity, partial_artifacts,
                                 publish_json, read_json, request_cancel, stop_event)
 
-LONG_TOOLS = frozenset(('operator_verify', 'operator_repair', 'operator_bench'))
+LONG_TOOLS = frozenset(('operator_verify', 'operator_profile', 'operator_repair', 'operator_bench'))
 
-#: 三个长工具各自的 Job 类型。词表在 `core.task_journal`，这里只做名字映射。
-JOB_OPERATION = {'operator_verify': 'verify', 'operator_bench': 'bench',
-                 'operator_repair': 'repair'}
+#: 长工具各自的 Job 类型。词表在 `core.task_journal`，这里只做名字映射。
+JOB_OPERATION = {'operator_verify': 'verify', 'operator_profile': 'profile',
+                 'operator_bench': 'bench', 'operator_repair': 'repair'}
 _REPAIR_CONTEXT = None
 _HOST_CONTEXT = None
+_PROFILE_CONTEXT = None
 
 
 def repair_context(run):
@@ -39,6 +40,13 @@ def host_context(run):
     """Supervisor-owned binding, never accepted as a public tool argument."""
     if _HOST_CONTEXT and Path(run).resolve() == Path(_HOST_CONTEXT['run_dir']):
         return dict(_HOST_CONTEXT)
+    return None
+
+
+def profile_context(run):
+    """Supervisor-owned profile identity/deadline; never accepted as a public argument."""
+    if _PROFILE_CONTEXT and Path(run).resolve() == Path(_PROFILE_CONTEXT['run_dir']):
+        return dict(_PROFILE_CONTEXT)
     return None
 
 
@@ -150,6 +158,7 @@ class ToolCall:
             arguments, persistent_default=name == 'operator_bench')
         self.repair_policy = None
         self.host_budget = None
+        self.profile_context = None
         self.deadline = None
         if name == 'operator_repair':
             from ..execute.task_budget import TaskBudgetConfig
@@ -179,6 +188,39 @@ class ToolCall:
             self.deadline = self.started_monotonic + self.repair_policy.wall_clock_s
         elif self.host_budget:
             self.deadline = self.started_monotonic + remaining
+        if name == 'operator_profile':
+            from ..execute.host_task_budget import (HostTaskBudget, HostTaskBudgetError,
+                                                    host_task_enabled)
+            from ..execute.profile_budget import ProfileBudget, ProfileBudgetError
+            if not host_task_enabled(self.run):
+                raise ToolError('host_task_required',
+                                'operator_profile requires a bounded host task')
+            from .host_workflow import prepared_task
+            _, _, contract = prepared_task(self.run)
+            try:
+                task_snapshot = HostTaskBudget(self.run, contract.hash).snapshot()
+                profile_snapshot = ProfileBudget(self.run).snapshot()
+            except (HostTaskBudgetError, ProfileBudgetError) as error:
+                raise ToolError(error.code, error.detail) from error
+            remaining = task_snapshot['remaining_s']
+            if task_snapshot['terminal'] or task_snapshot['expired'] or remaining < 60:
+                raise ToolError('profile_deadline',
+                                'the host task has less than 60 seconds available for a profile')
+            if task_snapshot['unfinished']:
+                raise ToolError('profile_task_busy',
+                                'settle the in-flight verification before profiling')
+            if profile_snapshot['in_flight']:
+                raise ToolError('profile_in_flight', 'another profile is still in flight')
+            if profile_snapshot['remaining'] <= 0:
+                raise ToolError('profile_budget', 'profile budget exhausted (2 per task)')
+            requested = arguments.get('timeout', 300)
+            requested = (float(requested) if type(requested) in (int, float)
+                         and requested > 0 else 300.0)
+            cap = min(300.0, requested, float(remaining))
+            self.profile_context = dict(
+                run_dir=str(self.run), invocation_id=self.invocation_id,
+                deadline=self.started_monotonic + cap + 20.0)
+            self.deadline = self.profile_context['deadline']
         self.directory = self.run/'tool-calls'/self.invocation_id
         self.directory.mkdir(parents=True)
         launch_identity(self.directory, self.invocation_id, kind='tool_call', tool=name,
@@ -199,6 +241,8 @@ class ToolCall:
         if self.host_budget:
             request['host_budget_context'] = dict(run_dir=str(self.run),
                 invocation_id=self.invocation_id, deadline=self.deadline)
+        if self.profile_context:
+            request['profile_context'] = dict(self.profile_context)
         publish_json(self.directory/'request.json', request)
         self.status = dict(phase='running', stage='starting', kind='tool_call', tool=name,
             pid=os.getpid(), invocation_id=self.invocation_id, started_at=time.time(),
@@ -305,6 +349,8 @@ class ToolCall:
                 self.host_budget.settle_owner(self.invocation_id,
                     outcome='cancelled' if self.receipt['outcome']=='cancelled' else 'failed',
                     reject_completed=fault is None)
+        if self.profile_context and cleanup.get('worker_reaped') is True:
+            self._settle_profile()
         if self.repair_policy and 'budget' not in self.status:
             self.status['budget'] = self._repair_snapshot()
         elif self.repair_policy and not accepted:
@@ -353,6 +399,29 @@ class ToolCall:
             return dict(outcome='failed', result='unknown', result_reason=fault)
         return dict(outcome=outcome, result='unknown', result_reason='stopped_before_receipt')
 
+    def _settle_profile(self):
+        """Settle an abandoned profile only after its worker was reaped."""
+        from ..execute.profile_budget import ProfileBudget, ProfileBudgetError
+        try:
+            ledger = ProfileBudget(self.run)
+            entry = next((row for row in ledger.snapshot()['entries']
+                          if row.get('owner_invocation_id') == self.invocation_id
+                          and row['status'] == 'reserved'), None)
+            if entry is None:
+                return
+            from ..execute.remote_executor import cleanup_profile_transport
+            transport = self.run / f'profile-{entry["id"]}' / 'transport.json'
+            remote_cleanup = (cleanup_profile_transport(transport)
+                              if transport.is_file() else 'not_started')
+            phase = self.status.get('phase')
+            ledger.settle_owner(
+                self.invocation_id,
+                outcome='cancelled' if phase == 'cancelled' else 'failed',
+                error=f'supervisor settled an abandoned profile worker ({phase})',
+                cleanup=remote_cleanup)
+        except (ProfileBudgetError, OSError, ValueError) as error:
+            self.status['profile_settlement_error'] = f'{type(error).__name__}: {error}'
+
     def _finish(self):
         body = json.loads(self.response['content'][0]['text'])
         body.update(invocation_id=self.invocation_id, tool_call_dir=str(self.directory),
@@ -360,6 +429,13 @@ class ToolCall:
         if self.host_budget:
             self.status['host_task'] = self.host_budget.snapshot()
             body['host_task'] = self.status['host_task']
+        if self.profile_context:
+            from ..execute.profile_budget import ProfileBudget, ProfileBudgetError
+            try:
+                self.status['profiles'] = ProfileBudget(self.run).snapshot()
+                body['profiles'] = self.status['profiles']
+            except ProfileBudgetError as error:
+                self.status['profiles_error'] = f'{error.code}: {error.detail}'
         if self.repair_policy:
             if 'budget' not in self.status:
                 self.status['budget'] = self._repair_snapshot()
@@ -436,6 +512,10 @@ def main(argv=None):
         import operator_agent.app.tool_calls as canonical
         context = request.get('host_budget_context')
         canonical._HOST_CONTEXT = dict(context) if isinstance(context, dict) else None
+    if request.get('name') == 'operator_profile':
+        import operator_agent.app.tool_calls as canonical
+        context = request.get('profile_context')
+        canonical._PROFILE_CONTEXT = dict(context) if isinstance(context, dict) else None
     if request.get('name') == 'operator_repair':
         # -m executes this file as __main__; publish to the canonical module used
         # by hitl_tools, rather than accepting context via public tool arguments.

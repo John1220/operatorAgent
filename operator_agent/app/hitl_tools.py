@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -55,6 +56,7 @@ from ..generate.generation_context import candidate_summary
 from ..core.run_contract import code_hash
 from ..app.intent_parser import IntentParser
 from ..core.report import build_report
+from ..core.run_layout import write_once_artifact
 from ..decide.tool_evidence import RoundEvidence, verification_data
 from ..decide import verdict_cache
 from ..core.execution_audit import install_level_recorder
@@ -62,6 +64,7 @@ from ..core.schemas import (ConstraintSpec, KernelArtifact, SourceSpec, TargetSp
                       TaskSchema, VerificationLevel, VerificationResult)
 from ..decide.verifier import Verifier
 from ..execute.fake_backend.config import tool_context
+from ..execute.host_task_budget import FINAL_SELECTION_SCHEMA
 
 #: 工具面的契约版本。**加/删工具或改回包形状就要 +1** —— 外层宿主会把这个数记进
 #: 自己的配置与报告，同一份 `tool_version` 必须指同一套语义。
@@ -79,7 +82,9 @@ from ..execute.fake_backend.config import tool_context
 #: 12: 宿主模型预算政策、收据与不重置原任务的恢复入口。
 #: 13: `operator_prepare` 的 `operator` / `precision` 变成**必填**（判据层不再从
 #:     `request` 推关键词）；新增 `operator_normalize`；`request` 降级为审计字段。
-TOOL_VERSION = 13
+#: 14: host 模式新增 `operator_profile`：有界 NCU 采集、独立预算与 GPU 租约互斥。
+#: 15: final 默认采用账本推荐源码；显式 override 与选择/交付投影随 journal 快照落账。
+TOOL_VERSION = 15
 
 #: 允许进 `declaration` 的键（§6.3 的白名单）。**没列在这里的一律拒绝** ——
 #: 「先收下、以后再判断」是这一层最不能有的形状：它等于给未来开了一个没说出口的口子。
@@ -133,6 +138,8 @@ _STOP_AFTER = {"L1": VerificationLevel.L1_COMPILE,
 CANDIDATE_ORIGINS = ("outer", "inner_fixer", "inner_coder")
 #: 未声明时记进回包与报告的值。
 UNDECLARED_ORIGIN = "undeclared"
+_PROFILE_DTYPE_BYTES = {'fp16': 2, 'float16': 2, 'bf16': 2, 'bfloat16': 2,
+                        'fp32': 4, 'float32': 4, 'int8': 1, 'int32': 4, 'int64': 8}
 
 
 def _origin_of(value: Any) -> str:
@@ -683,8 +690,46 @@ def _prepare_unlocked(declaration: dict, run_dir: str | Path, *, now: Optional[f
     }
 
 
+def _recommended_final(snapshot, run, submitted_code, override_reason):
+    best = snapshot.get('best_candidate') if isinstance(snapshot, dict) else None
+    best = best if isinstance(best, dict) else {}
+    recommended_hash = best.get('source_hash')
+    recommended_round = best.get('round')
+    recommended_source = best.get('source')
+    if not recommended_source and best.get('evidence'):
+        recommended_source = str(Path(best['evidence']).parent / 'candidate.py')
+    submitted_hash = (code_hash(submitted_code)
+                      if isinstance(submitted_code, str) and submitted_code.strip() else None)
+    if not (recommended_hash and recommended_source and Path(recommended_source).is_file()):
+        selection = dict(
+            schema=FINAL_SELECTION_SCHEMA, policy='no_ledger_recommendation',
+            recommended_source=recommended_hash, recommended_round=recommended_round,
+            submitted_source=submitted_hash, actual_source=submitted_hash,
+            override=False, override_reason=None, reason='no_recommendation',
+            created_at=time.time())
+        return submitted_code, selection
+    recommended_code = Path(recommended_source).read_text(encoding='utf-8')
+    if code_hash(recommended_code) != recommended_hash:
+        raise ToolError('final_selection_source', 'recommended source no longer matches its ledger hash')
+    if submitted_hash == recommended_hash:
+        actual, override, reason = submitted_code, False, 'submitted_matches_recommendation'
+    elif isinstance(override_reason, str) and override_reason.strip():
+        actual, override, reason = submitted_code, True, 'explicit_override'
+    else:
+        actual, override, reason = recommended_code, False, 'ledger_recommended_default'
+    selection = dict(
+        schema=FINAL_SELECTION_SCHEMA, policy='ledger_recommended_default',
+        recommended_source=recommended_hash, recommended_round=recommended_round,
+        recommended_role=best.get('role'), submitted_source=submitted_hash,
+        actual_source=code_hash(actual), override=override,
+        override_reason=(override_reason if override else None), reason=reason,
+        recommended_path=str(recommended_source), created_at=time.time())
+    return actual, selection
+
+
 # ── 动作 2: verify ───────────────────────────────────────────────────────
-def verify(run_dir: str | Path, code: str, *, verification_purpose='explore', **options) -> dict:
+def verify(run_dir: str | Path, code: str, *, verification_purpose='explore',
+           override_reason=None, **options) -> dict:
     from ..execute.host_task_budget import HostTaskBudget, HostTaskBudgetError, host_task_enabled
     run = Path(run_dir)
     if not host_task_enabled(run):
@@ -696,15 +741,24 @@ def verify(run_dir: str | Path, code: str, *, verification_purpose='explore', **
     _, _, contract = prepared_task(run)
     budget = HostTaskBudget(run, contract.hash)
     reservation = None
+    final_selection = None
     try:
         if not isinstance(code, str) or not code.strip():
             raise ToolError('code_required', 'verify needs candidate source.')
+        if override_reason is not None and not isinstance(override_reason, str):
+            raise ToolError('override_reason', 'override_reason must be a string.')
+        if verification_purpose == 'final':
+            code, final_selection = _recommended_final(
+                budget.snapshot(readonly=True), run, code, override_reason)
         from .tool_calls import host_context
         owner = host_context(run)
         reservation = budget.reserve(code_hash(code), purpose=verification_purpose,
-            owner_invocation_id=owner['invocation_id'] if owner else None)
+            owner_invocation_id=owner['invocation_id'] if owner else None,
+            final_selection=final_selection)
         result = _verify_candidate(run_dir, code, verification_purpose=verification_purpose,
                                    **options)
+        if final_selection is not None:
+            result['final_selection'] = final_selection
         snapshot = budget.finish(reservation['id'], result=result)
         result['host_task'] = snapshot
         result['verification_purpose'] = verification_purpose
@@ -715,6 +769,299 @@ def verify(run_dir: str | Path, code: str, *, verification_purpose='explore', **
         if reservation is not None:
             budget.finish(reservation['id'], outcome='failed')
         raise
+
+
+def _require_full_l2(verification: dict, contract, verification_round: int) -> None:
+    verdicts = [row for row in verification.get('verdicts') or []
+                if isinstance(row, dict) and row.get('level') == 'L2']
+    levels = verification.get('levels') or {}
+    if levels.get('L2') is not True or len(verdicts) != 1 or verdicts[0].get('passed') is not True:
+        raise ToolError('profile_l2_required',
+                        f'verification_round {verification_round} has no completed full L2 pass')
+    cases = (verdicts[0].get('metrics') or {}).get('correctness', {}).get('cases')
+    suite = getattr(contract, 'correctness_suite', None)
+    if suite is not None:
+        required = sorted(case.case_id for case in suite.cases)
+        if (not isinstance(cases, list) or not required
+                or any(not isinstance(case, dict) for case in cases)
+                or sorted(case.get('case_id') for case in cases) != required
+                or not all(case.get('verdict') == 'passed' for case in cases)):
+            raise ToolError('profile_l2_required',
+                            f'verification_round {verification_round} did not pass the full L2 suite')
+    elif not isinstance(cases, list) or not all(
+            isinstance(case, dict) and case.get('verdict') == 'passed' for case in cases):
+        raise ToolError('profile_l2_required',
+                        f'verification_round {verification_round} has no complete L2 case list')
+
+
+def _profile_logical_bytes(case) -> int:
+    total = 0
+    for tensor in case.tensors:
+        itemsize = _PROFILE_DTYPE_BYTES.get(str(tensor.dtype).lower())
+        if itemsize is None:
+            return 0
+        count = 1
+        for dim in tensor.shape:
+            count *= int(dim)
+        total += count * itemsize
+    return total
+
+
+def profile(run_dir: str | Path, verification_round: int, *, case_index: int = 0,
+            backend: str = 'ssh', host: Optional[str] = None, port: Optional[int] = None,
+            user: Optional[str] = None, key_path: Optional[str] = None,
+            work_dir: Optional[str] = None, timeout: int = 300,
+            ncu_path: Optional[str] = None) -> dict:
+    """Capture one on-demand NCU profile for an already-L2-passed candidate."""
+    from .host_workflow import _verification_materials, prepared_task
+    from ..execute.host_task_budget import HostTaskBudget, host_task_enabled
+    from ..execute.profile_budget import ProfileBudget, ProfileBudgetError
+    from ..execute.profiling import ncu_profile
+    from ..decide.bench_cases import case_spec
+    if backend != 'ssh':
+        raise ToolError('profile_backend',
+                        'operator_profile currently requires backend=ssh (real GPU NCU)')
+    if not isinstance(host, str) or not host.strip():
+        raise ToolError('host_required',
+                        'backend=ssh needs host (a ~/.ssh/config alias or hostname)')
+    if type(timeout) is not int or not 1 <= timeout <= 300:
+        raise ToolError('profile_timeout_setting', 'timeout must be an integer in [1, 300] seconds')
+    run, task, contract = prepared_task(run_dir)
+    if not host_task_enabled(run):
+        raise ToolError('host_task_required', 'operator_profile requires a bounded host task')
+    source, verification, directory = _verification_materials(
+        run, contract, backend, verification_round)
+    _require_full_l2(verification, contract, verification_round)
+    budget = HostTaskBudget(run, contract.hash).snapshot()
+    if budget['terminal']:
+        raise ToolError('profile_task_terminal', 'the host task already reached a terminal phase')
+    if budget['expired'] or budget['remaining_s'] < 1:
+        raise ToolError('profile_deadline', 'the host task deadline leaves no room for a profile')
+    if budget.get('unfinished'):
+        raise ToolError('profile_task_busy',
+                        'a verification is in flight on this task; wait for it to settle '
+                        'before starting an NCU replay')
+    if type(case_index) is not int or not 0 <= case_index < len(contract.cases):
+        raise ToolError('profile_case',
+                        f'case_index must be in [0, {len(contract.cases) - 1}]')
+    case = contract.cases[case_index]
+    spec = case_spec(case)
+    logical_bytes = _profile_logical_bytes(case)
+    l3 = [row for row in verification.get('verdicts') or []
+          if isinstance(row, dict) and row.get('level') == 'L3']
+    metrics = (l3[0].get('metrics') or {}) if len(l3) == 1 else {}
+    gpu = metrics.get('selected_gpu')
+    baseline_performance = {}
+    baseline_path = run / 'baseline.json'
+    if baseline_path.is_file():
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding='utf-8'))
+            baseline_performance = (baseline.get('performance') or {}) if isinstance(baseline, dict) else {}
+        except (OSError, ValueError, TypeError):
+            baseline_performance = {}
+    cache = ncu_profile.cache_conditions(metrics, baseline_performance)
+    if type(gpu) is not int:
+        raise ToolError('profile_gpu_unknown',
+                        'the verification receipt has no selected GPU; cannot guarantee the same card')
+    runtime = (((metrics.get('timing_receipt') or {}).get('calibration_identity') or {})
+               .get('runtime') or {})
+    gpu_uuid = runtime.get('gpu_uuid') if isinstance(runtime.get('gpu_uuid'), str) else None
+    arm = (metrics.get('arm_identity') or {}).get('candidate') or {}
+    gpu_name = (arm.get('name') if isinstance(arm.get('name'), str) and arm.get('name')
+                else 'NVIDIA H20')
+    ledger = ProfileBudget(run)
+    try:
+        profiles = ledger.snapshot()
+    except ProfileBudgetError as error:
+        raise ToolError(error.code, error.detail) from error
+    if profiles['in_flight']:
+        raise ToolError('profile_in_flight', 'another profile is still in flight')
+    if profiles['remaining'] <= 0:
+        raise ToolError('profile_budget', 'profile budget exhausted (2 per task)')
+    if float(budget['remaining_s']) < 60:
+        raise ToolError('profile_deadline',
+                        'the remaining task wall clock is too short for a profile (minimum 60 s)')
+    wall_cap = min(float(timeout), float(budget['remaining_s']))
+    deadline = time.monotonic() + wall_cap
+    from . import tool_calls as _tool_calls
+    owner_context = _tool_calls.profile_context(run)
+    owner = owner_context.get('invocation_id') if isinstance(owner_context, dict) else None
+    try:
+        reservation = ledger.reserve(timeout_s=wall_cap, owner_invocation_id=owner)
+    except ProfileBudgetError as error:
+        raise ToolError(error.code, error.detail) from error
+    profile_id = reservation['id']
+    profile_dir = run / f'profile-{profile_id}'
+    started = time.time()
+    required_env = {'OPERATOR_AGENT_REQUIRED_GPU': str(gpu),
+                    'OPERATOR_AGENT_REQUIRED_GPU_UUID': gpu_uuid or '',
+                    'OPERATOR_AGENT_REQUIRED_GPU_NAME': gpu_name or ''}
+    previous_env = {key: os.environ.get(key) for key in required_env}
+    settled = False
+    backend_obj = None
+    cleanup = None
+    cleanup_s = None
+    cleanup_grace_s = None
+
+    def failed(code, detail):
+        nonlocal settled
+        if not settled:
+            ledger.finish(profile_id, status='failed',
+                          wall_s=time.time() - started, error=f'{code}: {detail}',
+                          cleanup=cleanup, cleanup_s=cleanup_s,
+                          cleanup_grace_s=cleanup_grace_s)
+            settled = True
+        return ToolError(code, detail)
+
+    try:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        for key, value in required_env.items():
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+        (backend_obj, resolution), backend_log = _quiet(
+            _make_backend, backend, host=host, port=port, user=user,
+            key_path=key_path, work_dir=work_dir, timeout=int(wall_cap))
+        if Cap.NCU_PROFILE not in backend_obj.capabilities:
+            raise failed('profile_backend', 'the selected backend has no NCU profile path')
+        result = backend_obj.profile(source, spec, artifact_dir=profile_dir,
+                                     timeout=int(wall_cap), ncu_path=ncu_path,
+                                     deadline=deadline)
+        cleanup = result.get('cleanup')
+        cleanup_s = result.get('cleanup_s')
+        cleanup_grace_s = result.get('cleanup_grace_s')
+        if not result.get('ok'):
+            log = ((profile_dir / 'ncu.log').read_text(encoding='utf-8', errors='replace')
+                   if (profile_dir / 'ncu.log').is_file() else '')
+            if 'ERR_NVGPUCTRPERM' in log or 'permission' in log.lower():
+                raise failed('ncu_permission', 'NCU cannot read GPU performance counters under this identity')
+            if 'command not found' in log or 'No such file' in log:
+                raise failed('ncu_missing', result.get('detail') or 'ncu executable not found')
+            raise failed(result.get('error') or 'profile_failed',
+                         result.get('detail') or log[:400] or 'NCU run failed')
+        required_files = ('raw.csv', 'report.ncu-rep', 'reexport.csv', 'result.json', 'rc')
+        missing = [name for name in required_files if not (profile_dir / name).is_file()]
+        if missing:
+            raise failed('profile_report_missing',
+                         'missing NCU artifacts: ' + ', '.join(missing))
+        try:
+            launches = ncu_profile.parse_raw_csv((profile_dir / 'raw.csv').read_text(encoding='utf-8'))
+            reexport = ncu_profile.parse_raw_csv(
+                (profile_dir / 'reexport.csv').read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, ValueError) as error:
+            raise failed('profile_report_unreadable', str(error))
+        summary = ncu_profile.summarize(launches, range_name='candidate',
+                                        logical_bytes=logical_bytes or None)
+        if summary['decoy_seen']:
+            raise failed('profile_decoy_captured',
+                         f'decoy kernels reached the range: {summary["decoy_kernels"]}')
+        if not summary['range_ok']:
+            raise failed('profile_range_mismatch',
+                         'some captured launches are outside the candidate NVTX range')
+        comparison = ncu_profile.compare(launches, reexport)
+        if not comparison['match']:
+            raise failed('profile_reexport_mismatch',
+                         '; '.join(comparison['reasons'][:4]) or 're-export differs')
+        runner_path = profile_dir / 'result.json'
+        runner = json.loads(runner_path.read_text(encoding='utf-8'))
+        if runner.get('success') is not True:
+            raise failed('profile_runner_failed', runner.get('error') or 'candidate did not run')
+        files = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+                 for path in sorted(profile_dir.iterdir()) if path.is_file()}
+        receipt = dict(
+            schema='operator-profile-v1', tool_version=TOOL_VERSION,
+            created_at=time.time(), run_dir=str(run), contract_hash=contract.hash,
+            verification_round=verification_round, source_hash=code_hash(source),
+            source=str(directory / 'candidate.py'),
+            source_evidence=str(directory / 'result.json'),
+            case=dict(index=case_index, name=getattr(case, 'name', None),
+                      seed=int(case.seed),
+                      tensors=[tensor.to_dict() for tensor in case.tensors],
+                      digest=spec.get('digest'), logical_bytes=logical_bytes),
+            gpu=dict(index=gpu, uuid=gpu_uuid, name=gpu_name),
+            ncu=dict(path=result.get('ncu'), version=result.get('ncu_version'),
+                     args=result.get('command'), metrics=list(ncu_profile.METRICS),
+                     replay='kernel', cache_control='none', clock_control='none',
+                     nvtx_range='candidate'),
+            cache_conditions=cache,
+            launches=summary['launches'], totals=summary['totals'],
+            decoy_seen=summary['decoy_seen'], range_ok=summary['range_ok'],
+            reexport=dict(match=comparison['match'], reasons=comparison['reasons']),
+            runner=dict(success=runner.get('success'), warmup=runner.get('warmup'),
+                        decoy=runner.get('decoy'), checksum=runner.get('checksum')),
+            wall_s=time.time() - started, cleanup=cleanup, cleanup_s=cleanup_s,
+            cleanup_grace_s=cleanup_grace_s, profile_id=profile_id, hashes=files)
+        receipt_path = profile_dir / 'receipt.json'
+        write_once_artifact(receipt_path, json.dumps(receipt, ensure_ascii=False,
+                                                     sort_keys=True).encode('utf-8'))
+        members = dict(files)
+        members['receipt.json'] = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        binding = dict(source_hash=code_hash(source), contract_hash=contract.hash,
+                       verification_round=verification_round,
+                       case_digest=spec.get('digest'), profile_id=profile_id)
+        complete_path = profile_dir / 'complete.json'
+        write_once_artifact(complete_path, json.dumps(
+            dict(schema='operator-profile-complete-v1', evidence_complete=True,
+                 binding=binding, files_sha256=members),
+            ensure_ascii=False, sort_keys=True).encode('utf-8'))
+        ledger.finish(profile_id, status='completed', receipt=str(receipt_path),
+                      wall_s=time.time() - started, cleanup=cleanup, cleanup_s=cleanup_s,
+                      cleanup_grace_s=cleanup_grace_s)
+        settled = True
+        return dict(ok=True, workflow='host', run_dir=str(run),
+                    contract_hash=contract.hash, verification_round=verification_round,
+                    source_hash=code_hash(source), profile_id=profile_id,
+                    receipt=str(receipt_path), evidence=str(complete_path),
+                    case=receipt['case'], gpu=receipt['gpu'], ncu=receipt['ncu'],
+                    cache_conditions=cache,
+                    launches=summary['launches'], totals=summary['totals'],
+                    range_ok=receipt['range_ok'], decoy_seen=receipt['decoy_seen'],
+                    reexport=receipt['reexport'], hashes=members,
+                    cleanup=cleanup, cleanup_s=cleanup_s,
+                    cleanup_grace_s=cleanup_grace_s,
+                    profiles=ledger.snapshot(),
+                    host_task=HostTaskBudget(run, contract.hash).snapshot(),
+                    backend_resolution=resolution, model_calls=0, context_owner='host')
+    except ToolError as error:
+        if not settled:
+            ledger.finish(profile_id, status='failed', wall_s=time.time() - started,
+                          error=f'{getattr(error, "code", "profile_failed")}: '
+                                f'{getattr(error, "detail", str(error))}',
+                          cleanup=cleanup, cleanup_s=cleanup_s,
+                          cleanup_grace_s=cleanup_grace_s)
+            settled = True
+        raise
+    except Exception as error:                   # noqa: BLE001 - receipt must stay truthful
+        if not settled:
+            ledger.finish(profile_id, status='failed', wall_s=time.time() - started,
+                          error=f'profile_failed: {type(error).__name__}: {error}',
+                          cleanup=cleanup, cleanup_s=cleanup_s,
+                          cleanup_grace_s=cleanup_grace_s)
+            settled = True
+        raise ToolError('profile_failed', f'{type(error).__name__}: {error}') from error
+    finally:
+        if not settled:
+            cleanup = 'not_started'
+            cleanup_started = time.monotonic()
+            if backend_obj is not None and callable(getattr(backend_obj, 'cleanup_profile', None)):
+                try:
+                    cleanup = backend_obj.cleanup_profile(profile_dir)
+                except Exception as error:       # noqa: BLE001 - best effort
+                    cleanup = f'failed:{type(error).__name__}'
+            cleanup_s = time.monotonic() - cleanup_started
+            try:
+                ledger.finish(profile_id, status='cancelled',
+                              wall_s=time.time() - started,
+                              error=f'interrupted; cleanup={cleanup}',
+                              cleanup=cleanup, cleanup_s=cleanup_s)
+            except Exception:                    # noqa: BLE001 - keep the original failure
+                pass
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _environment_of(backend_obj) -> dict:
@@ -1847,6 +2194,10 @@ def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) 
         return dict(ok=True, workflow='host', phase=budget['phase'], run_dir=str(run),
             host_task=budget, calls=[autonomous_status(p) for p in calls],
             last_correct_candidate=budget.get('last_correct_candidate'),
+            baseline=budget.get('baseline'), best_candidate=budget.get('best_candidate'),
+            final_selection=budget.get('final_selection'),
+            candidates=budget.get('candidates'), noise_band=budget.get('noise_band'),
+            selection=budget.get('selection'), formal_delivery=budget.get('formal_delivery'),
             latest_verification=({key:latest.get(key) for key in ('id','source_hash','source','report',
                 'evidence','full_l2_passed','validity')} if latest else None),
             context_owner='host', model_calls='host_owned_see_verified_model_budget_receipt')

@@ -64,6 +64,8 @@ class Cap(str, Enum):
     DEP_ANALYSIS = "dep_analysis"
     #: 跨轮固定同一张卡 (依赖 nvidia-smi; 非 NVIDIA 平台上 `_pinned_gpu` 返回 None)
     GPU_PINNING = "gpu_pinning"
+    #: 真机上采集候选 NVTX 范围的 NCU 原始报告
+    NCU_PROFILE = "ncu_profile"
     #: `execute()` 回传**完整输出张量** (`ExecutionResult.output`), 而不是采样
     #: (`RemoteExecutionResult.output_sample`)。L2 的比对方式由它决定: 全量比对走
     #: `tolerance` 的 AND 形式并给出 matched_ratio, 采样比对只能覆盖前缀、
@@ -79,6 +81,7 @@ OPTIONAL_CAP_METHODS = {
     Cap.SAME_DEVICE_BASELINE: "benchmark_with_baselines",
     Cap.NATIVE_CUDA_CALIBRATION: "calibration_probe",
     Cap.READONLY_QUALITY_PREFLIGHT: "quality_preflight",
+    Cap.NCU_PROFILE: "profile",
     Cap.ENV_PROVISION: "ensure_environment",
     Cap.DEPLOY: "deploy",
     Cap.DEP_ANALYSIS: "analyze_dependencies",
@@ -287,6 +290,12 @@ class Backend(ABC):
 
     def quality_preflight(self):
         raise CapabilityMissing(Cap.READONLY_QUALITY_PREFLIGHT, self)
+
+    def profile(self, *args, **kwargs):
+        raise CapabilityMissing(Cap.NCU_PROFILE, self)
+
+    def cleanup_profile(self, *args, **kwargs):
+        raise CapabilityMissing(Cap.NCU_PROFILE, self)
 
     def close(self, grace: float = 10.0) -> dict:
         """Default providers own no persistent execution session to close.

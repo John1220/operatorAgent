@@ -41,7 +41,7 @@ PRODUCTION = sorted((REPO / "operator_agent").rglob("*.py"))
 #: 根本不发生; 不声明就是不说谎。
 _SSH_CAPS = {Cap.REAL_DEVICE, Cap.REMOTE_VERIFY, Cap.SAME_DEVICE_BASELINE,
              Cap.ENV_PROVISION, Cap.DEPLOY, Cap.DEP_ANALYSIS, Cap.GPU_PINNING, Cap.REFERENCE_IDENTITY,
-             Cap.NATIVE_CUDA_CALIBRATION, Cap.READONLY_QUALITY_PREFLIGHT}
+             Cap.NATIVE_CUDA_CALIBRATION, Cap.READONLY_QUALITY_PREFLIGHT, Cap.NCU_PROFILE}
 
 #: MockGPU 的 `get_hardware_info()` 返回写死的规格 (doc 49 §3.3 S8), 所以两种情形下
 #: 都**不该**出现「硬件信息是真探测的」这类能力 —— 词汇表里现在压根没有这一项。
@@ -66,6 +66,7 @@ def _facade(inner: Backend) -> RemoteExecutor:
 STUB_CALLS = {
     "calibration_probe": lambda b: b.calibration_probe(),
     "quality_preflight": lambda b: b.quality_preflight(),
+    "profile": lambda b: b.profile("code", {}, artifact_dir=None),
     "reference_identity": lambda b: b.reference_identity({}),
     "verify_function": lambda b: b.verify_function("code", {}, "matmul", 1e-3),
     "benchmark_with_baselines": lambda b: b.benchmark_with_baselines("code", {}, "matmul"),
@@ -84,7 +85,7 @@ REGISTRY = {
     "SSHExecutor(xpu)": ("SSHExecutor",
                          lambda: SSHExecutor(host="h", user="u", platform="xpu"),
                          _SSH_CAPS - {Cap.GPU_PINNING, Cap.REFERENCE_IDENTITY, Cap.NATIVE_CUDA_CALIBRATION,
-                                      Cap.READONLY_QUALITY_PREFLIGHT}),
+                                      Cap.READONLY_QUALITY_PREFLIGHT, Cap.NCU_PROFILE}),
     "SSHExecutor(one-shot)": ("SSHExecutor", lambda: SSHExecutor(host="h", user="u", persistent=False),
                              _SSH_CAPS - {Cap.NATIVE_CUDA_CALIBRATION}),
     # 空集是**故意**的: `get_hardware_info()` 无条件编造一整套 A100 量级数字

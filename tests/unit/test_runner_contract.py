@@ -31,6 +31,10 @@ RUNNERS = (
     ("run_kernel.py", REPO_ROOT / "remote_scripts" / "run_kernel.py"),
     ("run_kernel_xpu.py", REPO_ROOT / "remote_scripts" / "run_kernel_xpu.py"),
 )
+# NCU profile is intentionally NVIDIA-only; parity applies to shared actions.
+PLATFORM_ACTIONS = {
+    "run_kernel.py": {"profile"},
+}
 # 常驻服务端 (doc 62) 是线格式上的**第二个**远端分派现场: 它只认服务端专属 action
 # (`ping`/`shutdown`), 其余整条委托给 kernel runner 的 `run_action`。它必须一起进
 # 契约, 否则控制端发的 `shutdown` 会看起来「没有任何远端脚本派发」——
@@ -347,7 +351,8 @@ def _wire_payloads(source, label):
 
     # These are wire entry points, not module or action allowlists. A local
     # wrapper forwarding its parameter to one of them becomes an entry point.
-    wire_positions = {name: {0} for name in ('_ssh_exec_json', '_session_call', '_call_locked', 'call')}
+    wire_positions = {name: {0} for name in ('_ssh_exec_json', '_ncu_exec',
+                                               '_session_call', '_call_locked', 'call')}
     while True:
         changed = False
         for scope, nodes in owned.items():
@@ -445,11 +450,13 @@ class TestRunnerContractParity(unittest.TestCase):
 
     def test_both_runners_dispatch_the_same_action_set(self):
         a, b = (CONTRACTS[label] for label, _ in RUNNERS)
+        only_a = a.actions - b.actions - PLATFORM_ACTIONS.get(a.label, set())
+        only_b = b.actions - a.actions - PLATFORM_ACTIONS.get(b.label, set())
         self.assertEqual(
-            a.actions, b.actions,
+            set(), only_a | only_b,
             f"action 集合不一致\n"
-            f"  只有 {a.label} 派发: {sorted(a.actions - b.actions)}\n"
-            f"  只有 {b.label} 派发: {sorted(b.actions - a.actions)}")
+            f"  只有 {a.label} 派发: {sorted(only_a)}\n"
+            f"  只有 {b.label} 派发: {sorted(only_b)}")
 
     def test_same_action_consumes_the_same_payload_keys(self):
         a, b = (CONTRACTS[label] for label, _ in RUNNERS)

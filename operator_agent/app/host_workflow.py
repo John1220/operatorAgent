@@ -267,10 +267,15 @@ def resume(run_dir, *, backend='ssh', verification_round=None):
         if type(verification_round) is not int or verification_round not in completed:
             raise ToolError('verification_required', 'Resume needs a completed verification_round.')
         selected = verification_round
+    elif budget.get('final_verification') and not budget['unfinished']:
+        final_evidence = budget['final_verification'].get('evidence')
+        if final_evidence:
+            evidence = Path(final_evidence)
+            if evidence.parent.parent == run and evidence.parent.name.startswith('verify-'):
+                selected = int(evidence.parent.name[7:])
     elif budget['can_reserve_final'] and not budget['can_reserve_exploration']:
-        # When exploration is spent, return the accepted source eligible for
-        # final rather than the last unsuccessful experiment.
-        evidence = Path(budget['last_correct_candidate']['evidence'])
+        recommended = budget.get('best_candidate') or budget['last_correct_candidate']
+        evidence = Path(recommended['evidence'])
         if evidence.parent.parent == run and evidence.parent.name.startswith('verify-'):
             selected = int(evidence.parent.name[7:])
     if selected is None and completed:
@@ -314,10 +319,15 @@ def resume(run_dir, *, backend='ssh', verification_round=None):
                        source_hash=record['source_hash'],purpose=record['purpose'])
                   for record in budget['records'] if record['status']=='reserved']
     return dict(ok=True, workflow='host', resumed=True, run_dir=str(run),
-        task_id=budget['task_id'], contract_hash=contract.hash, phase=budget['phase'],host_task=compact_budget,
+        task_id=budget['task_id'], contract_hash=contract.hash, phase=budget['phase'],
+        stop_reason=budget['stop_reason'], host_task=compact_budget,
         latest_completed_verification=completed[-1] if completed else None,
         selected_verification=selected, incomplete_verifications=sorted(incomplete),
         candidate=candidate, last_correct_candidate=budget['last_correct_candidate'],
+        baseline=budget.get('baseline'), best_candidate=budget.get('best_candidate'),
+        final_selection=budget.get('final_selection'),
+        candidates=budget.get('candidates'), noise_band=budget.get('noise_band'),
+        selection=budget.get('selection'), formal_delivery=budget.get('formal_delivery'),
         next_context=next_context, next_action=next_action, model_calls=0, context_owner='host',
         unfinished_model_calls=model_unfinished,
         unfinished_owners=unfinished[:16],unfinished_owners_truncated=len(unfinished)>16,

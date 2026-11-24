@@ -1888,6 +1888,90 @@ def get_gpu_info(reference_contract=None) -> dict:
     return {"name": "CPU (no CUDA)", "device": "cpu"}
 
 
+def _write_profile_result(result: dict, result_path: str) -> dict:
+    if result_path:
+        directory = os.path.dirname(os.path.abspath(result_path))
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(result_path, 'w', encoding='utf-8') as handle:
+            json.dump(result, handle, ensure_ascii=False)
+    return result
+
+
+def run_profile(code: str, inputs: dict, *, inputs_spec=None, result_path: str = '',
+                range_name: str = 'candidate', warmup: int = 3,
+                decoy: bool = True) -> dict:
+    """Run one candidate call inside one NVTX range for an NCU capture."""
+    try:
+        import torch
+        import triton
+    except Exception as error:                   # pragma: no cover - remote only
+        return _write_profile_result(
+            dict(success=False, mode='profile',
+                 error=f'torch unavailable: {type(error).__name__}: {error}'), result_path)
+    result = dict(success=False, mode='profile')
+    side = None
+    try:
+        if not torch.cuda.is_available():
+            result['error'] = 'CUDA is not available on the remote runner'
+            return _write_profile_result(result, result_path)
+        device = torch.device('cuda')
+        if inputs_spec is not None:
+            preloaded = materialize_seed_inputs(inputs_spec)
+            if seed_input_digest(preloaded) != inputs_spec.get('digest'):
+                result['error'] = 'profile input seed digest mismatch'
+                return _write_profile_result(result, result_path)
+            real_inputs = preloaded
+        else:
+            real_inputs = _deserialize_inputs(inputs)
+        module = _load_module(code)
+        kernel = getattr(module, 'kernel', None)
+        if not callable(kernel):
+            result['error'] = 'candidate module has no callable kernel()'
+            return _write_profile_result(result, result_path)
+        torch_inputs = _device_inputs(real_inputs, device, contiguous=True)
+        with shield_torch(), torch.no_grad():
+            for _ in range(max(0, int(warmup))):
+                kernel(**torch_inputs)
+            torch.cuda.synchronize()
+        if decoy:
+            with torch.no_grad():
+                side = torch.ones(1024, device=device, dtype=torch.float32)
+                _ = side + 1.0
+                torch.cuda.synchronize()
+        pushed = False
+        try:
+            torch.cuda.nvtx.range_push(range_name)
+            pushed = True
+            with shield_torch(), torch.no_grad():
+                output = kernel(**torch_inputs)
+                torch.cuda.synchronize()
+        finally:
+            if pushed:
+                torch.cuda.nvtx.range_pop()
+        if decoy:
+            with torch.no_grad():
+                _ = side + 2.0
+                torch.cuda.synchronize()
+        checksum = None
+        if isinstance(output, torch.Tensor):
+            flat = output.reshape(-1)
+            checksum = dict(first=float(flat[0].item()), last=float(flat[-1].item()),
+                            dtype=str(output.dtype), shape=[int(x) for x in output.shape])
+        result.update(success=True, range=range_name, warmup=max(0, int(warmup)),
+                      decoy=bool(decoy), checksum=checksum,
+                      inputs={name: [int(x) for x in value.shape]
+                              for name, value in real_inputs.items()
+                              if hasattr(value, 'shape')},
+                      device=torch.cuda.get_device_name(0),
+                      gpu_uuid=str(torch.cuda.get_device_properties(0).uuid),
+                      torch=torch.__version__, triton=triton.__version__)
+        return _write_profile_result(result, result_path)
+    except Exception as error:
+        result['error'] = f'profile error: {type(error).__name__}: {error}'
+        return _write_profile_result(result, result_path)
+
+
 def run_action(payload: dict) -> dict:
     """按 `action` 分派一次请求, 返回结果载荷。
 
@@ -1932,6 +2016,13 @@ def run_action(payload: dict) -> dict:
                             reference_source=payload.get("reference_source", ""),
                             reference_contract=payload.get("reference_contract"),
                             preloaded_inputs=preloaded)
+    elif action == "profile":
+        result = run_profile(payload.get("code", ""), payload.get("inputs", {}),
+                             inputs_spec=payload.get("inputs_spec"),
+                             result_path=payload.get("result_path", ""),
+                             range_name=payload.get("range_name", "candidate"),
+                             warmup=int(payload.get("warmup", 3)),
+                             decoy=bool(payload.get("decoy", True)))
     elif action in ("benchmark", "benchmark_with_baselines"):
         if payload.get("reference_contract") is not None:
             try:
