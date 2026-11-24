@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  HostModelBudgetError, HostModelLedger, MODEL_BUDGET_FILE, MODEL_BUDGET_SCHEMA,
+  HostModelBudgetError, HostModelLedger, MODEL_BUDGET_FILE, MODEL_BUDGET_SCHEMA, bootIdentity,
 } from "../host-model-ledger.mjs";
 
 const TASK = "a".repeat(32);
@@ -27,9 +27,13 @@ const code = expected => error => error instanceof HostModelBudgetError && error
 
 /** 预算状态住在任务账本里：落一条 `budget_opened`，形状与 Python 写的相同。 */
 function seedBudget(dir, state) {
-  writeFileSync(join(dir, "journal.jsonl"), JSON.stringify({
-    schema: "operator-task-journal-v2", rev: 1, kind: "budget_opened",
-    task_id: state.task_id, budget: { host_task: state } }) + "\n", { mode: 0o600 });
+  const rows = [
+    { schema: "operator-task-journal-v2", rev: 1, kind: "task_prepared", task_id: state.task_id },
+    { schema: "operator-task-journal-v2", rev: 2, kind: "budget_opened",
+      task_id: state.task_id, budget: { host_task: state } },
+  ];
+  writeFileSync(join(dir, "journal.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n",
+    { mode: 0o600 });
 }
 
 /** 改写预算状态 = 追加一条新快照（账本只追加，不改历史）。 */
@@ -278,6 +282,27 @@ test("stale or concurrent locks fail closed and are never automatically cleared"
   assert.throws(() => ledger().bind("s"), code("host_model_locked"));
   assert.ok(existsSync(lock));
   assert.ok(!existsSync(join(dir, MODEL_BUDGET_FILE)));
+});
+
+test("explicit repair removes only a verified dead-owner lock", t => {
+  const { dir, ledger } = fixture(t);
+  const lock = join(dir, ".host-model-budget.lock");
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, "owner.json"), canonical({ pid: 99999999, nonce: "stale-fixture",
+    task_id: TASK, contract_hash: CONTRACT, boot_id: bootIdentity() }) + "\n", { mode: 0o600 });
+  const receipt = ledger().repairStaleLock({ checkedDeadPid: 99999999 });
+  assert.equal(receipt.removed, true);
+  assert.equal(existsSync(lock), false);
+});
+
+test("explicit repair refuses a live or mismatched lock owner", t => {
+  const { dir, ledger } = fixture(t);
+  const lock = join(dir, ".host-model-budget.lock");
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, "owner.json"), canonical({ pid: process.pid, nonce: "live-fixture",
+    task_id: TASK, contract_hash: CONTRACT, boot_id: bootIdentity() }) + "\n", { mode: 0o600 });
+  assert.throws(() => ledger().repairStaleLock({ checkedDeadPid: process.pid }), code("host_model_locked"));
+  assert.ok(existsSync(lock));
 });
 
 test("old policies without model limits are unsupported rather than granted defaults", t => {

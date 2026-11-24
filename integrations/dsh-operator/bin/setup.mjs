@@ -17,7 +17,7 @@
  *   npx dsh-operator-agent-setup --python ~/.local/share/operator-agent/v0.7.2/venv/bin/python
  *   npx dsh-operator-agent-setup --python <exe> --dry-run     # 只打印，不写文件
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, copyFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, copyFileSync, realpathSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -32,7 +32,7 @@ export const PYTHON_VERSION = MANIFEST.package_version;
 /** PyPI 上的分布名（import 名仍是 operator_agent，命令名仍是 operator-agent / operator-agent-mcp）。 */
 export const DIST_NAME = "dsh-operator-agent";
 
-/** host 模式暴露的七个工具。少了任何一个都说明 Python 侧不是这一版。 */
+/** host 模式工具面只从构建期 manifest 取。少了任何一个都说明 Python 侧不是这一版。 */
 export const TOOLS = MANIFEST.host_tools;
 
 export const BEGIN = "# BEGIN operator-agent host installer v1";
@@ -150,7 +150,7 @@ function pythonBin(python) {
   return join(dirname(python), "operator-agent-mcp");
 }
 
-/** 起一次真实 MCP 握手：能列出七个工具才算环境可用，而不是只看文件在不在。 */
+/** 起一次真实 MCP 握手：能列出 manifest 里的 host 工具才算环境可用。 */
 export function checkPython(python) {
   for (const name of ["operator-agent", "operator-agent-mcp"]) {
     const path = join(dirname(python), name);
@@ -169,7 +169,7 @@ export function checkPython(python) {
   const listed = replies.find((reply) => reply.id === 2);
   const names = (listed?.result?.tools || []).map((tool) => tool.name).sort();
   if (JSON.stringify(names) !== JSON.stringify(TOOLS)) {
-    throw new Error(`Python 侧暴露的工具不是 v0.7.2 的七个（实际：${names.join(", ") || "无"}）`);
+    throw new Error(`Python 侧暴露的工具不是 manifest 的 host 工具面（实际：${names.join(", ") || "无"}）`);
   }
   const init = replies.find((reply) => reply.id === 1);
   return init?.result?.serverInfo?.version || "unknown";
@@ -186,23 +186,47 @@ function locateUvx() {
   return path && existsSync(path) ? path : null;
 }
 
-/** 写 profile：备份 → 回执 → 原子替换 → 读回自检。两种 runtime 共用。 */
-function writeProfile({ patch, dshHome, next, python, profile, runtime }) {
+/** 写 profile：备份 → 回执 → 原子替换 → 读回自检；失败恢复原 patch。 */
+export function writeProfile({ patch, dshHome, next, python, profile, runtime }) {
   const receipt = receiptDir(dshHome);
   mkdirSync(receipt, { recursive: true, mode: 0o700 });
-  if (existsSync(patch)) copyFileSync(patch, join(receipt, "cordis.patch.yml.bak"));
+  const original = existsSync(patch) ? readFileSync(patch) : null;
+  if (original !== null) copyFileSync(patch, join(receipt, "cordis.patch.yml.bak"));
   writeFileSync(join(receipt, "receipt.json"),
     `${JSON.stringify({ runtime, python, profile, patch, dry_run: false }, null, 2)}\n`, { mode: 0o600 });
 
   const temp = `${patch}.tmp-${process.pid}`;
   mkdirSync(dirname(patch), { recursive: true });
-  writeFileSync(temp, next, { mode: 0o600 });
-  renameSync(temp, patch);
-  process.stdout.write(`✓ 已写入 ${patch}\n  备份与回执：${receipt}\n`);
+  let modified = false;
+  try {
+    writeFileSync(temp, next, { mode: 0o600 });
+    renameSync(temp, patch);
+    modified = true;
+    process.stdout.write(`✓ 已写入 ${patch}\n  备份与回执：${receipt}\n`);
 
-  const written = readFileSync(patch, "utf8");
-  for (const marker of [BEGIN, END, "mcp-operator", "operator-tools"]) {
-    if (!written.includes(marker)) throw new Error(`写入后自检失败：缺少 ${marker}`);
+    const written = readFileSync(patch, "utf8");
+    if (written !== next) throw new Error("写入后自检失败：配置在写入后被其他进程修改");
+    for (const marker of [BEGIN, END, "mcp-operator", "operator-tools"]) {
+      if (!written.includes(marker)) throw new Error(`写入后自检失败：缺少 ${marker}`);
+    }
+  } catch (error) {
+    if (modified) {
+      try {
+        if (!readFileSync(patch).equals(Buffer.from(next, "utf8"))) {
+          error.message += "；检测到并发修改，未自动覆盖";
+        } else if (original === null) {
+          unlinkSync(patch);
+        } else {
+          const restore = `${patch}.restore-${process.pid}`;
+          writeFileSync(restore, original, { mode: 0o600 });
+          renameSync(restore, patch);
+        }
+      } catch (restoreError) {
+        error.message += `；恢复原 patch 失败：${restoreError.message}`;
+      }
+    }
+    error.exitCode = 2;
+    throw error;
   }
   process.stdout.write("✓ 自检通过。重开 DSH，在插件页确认两个组件运行中，然后输入 /op doctor\n");
   process.stdout.write("  注意：插件包本身仍需通过 DSH 的插件页（或 dsh plugin add）安装；本命令只负责运行时与配置。\n");
@@ -285,6 +309,6 @@ if (invokedAsScript()) {
     process.exitCode = main(process.argv.slice(2));
   } catch (error) {
     process.stderr.write(`✗ ${error.message}\n`);
-    process.exitCode = 1;
+    process.exitCode = Number.isInteger(error.exitCode) ? error.exitCode : 1;
   }
 }

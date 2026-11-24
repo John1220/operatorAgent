@@ -31,11 +31,12 @@
 2. **恢复语义** —— A4 真实产物的回归件在 `tests/unit/resume/`（7 条，本机跑真产物，
    缺产物时 skip）；journal 的乱序与重试用例齐了。**状态读写方两条路都切完了**
    （tool-call 见 `cefe7f9`；autonomous 见下面第 3 步的「已完成」）。
-3. **迁移 0.8.2 完整优化流程** —— **未开始**。`operator_profile` 在本分支 0 处；
-   `HostTaskBudget.reserve` 里没有租约（4 条 L3 用例仍按源码探针 skip）；
-   `reserve` 也还没有 v0.8.2 的 `final_selection` 参数。搬运源在
-   `codex/v0.8.2-profile-optimize`（`reserve` 里 `acquire_lease`／`finish`、`settle`
-   里 `release_lease`，`hitl_tools` 的 `operator_profile` 在 `HOST_TOOLS` 内）。
+3. **迁移 0.8.2 完整优化流程** —— **租约前置已接入，NCU 工具面尚未迁移**。
+   `HostTaskBudget.reserve` 现在在预留时取每 run + 机器级 GPU 租约，`finish` / `settle_owner`
+   在结算后按 owner 释放；跨任务同卡、不同卡、profile/L3 互斥与未声明卡冲突的 4 条用例
+   已直接运行并通过。`operator_profile` 仍未进入 host 工具面：当前分支缺远端 runner 的
+   `action=profile` 与 SSHExecutor 的 NCU 采集/清理链，不能只暴露一个空壳。`reserve` 也
+   还没有 v0.8.2 的 `final_selection` 参数。搬运源在 `codex/v0.8.2-profile-optimize`。
 
 接下来两件事，按此顺序：
 
@@ -43,10 +44,9 @@
    （`prepare` 的任务层、`ToolCall` 的 Job 层）加宿主经 CLI 提交的两类事件；
    读者一律读投影；预算状态、封账、迁移都有了归属。
    剩下的只有第 5 步的**真机 replay 对账**（要 H20 窗口）。
-2. **profile 搬完**：`ncu_profile` / `gpu_lease` / `profile_budget` 已搬；
-   还差把租约接进 `HostTaskBudget.reserve`，判据是
-   `tests/unit/profile/test_gpu_lease_across_tasks.py` 里那 4 条 skip
-   **自动转绿**（它们按源码探针跳过，租约一接上就不跳了）。
+2. **profile 执行链搬完**：`ncu_profile` / `gpu_lease` / `profile_budget` 已搬，L3 租约
+   也已接入；下一步是移植远端 `action=profile`、SSHExecutor 的 NCU 采集/清理，以及
+   `hitl_tools.profile` + `ToolCall` 监督接线，最后再改 host 工具清单与 `tool_version`。
 
 ### 已知噪声，别当回归
 

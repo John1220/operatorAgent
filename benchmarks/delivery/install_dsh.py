@@ -6,6 +6,7 @@ are private, and a failed configuration check restores the pre-install patch.
 """
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -22,7 +23,8 @@ else:
 DEFAULT_DSH = Path('/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js')
 BEGIN = '# BEGIN operator-agent host installer v1'
 END = '# END operator-agent host installer v1'
-TOOLS = sorted('operator_'+x for x in ('prepare','context','verify','resume','status','cancel','capabilities'))
+MANIFEST_SCHEMA = 'dsh-operator-manifest-v1'
+_HASH = re.compile(r'[0-9a-f]{64}\Z')
 
 
 def configs(python):
@@ -70,21 +72,110 @@ def private(path,data):
     with os.fdopen(fd,'wb') as stream:stream.write(data)
 
 
-def check_python(python):
+def _digest(value):
+    raw=json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(',',':'),allow_nan=False)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def validate_manifest(manifest):
+    """Validate the build handshake without importing the target Python package."""
+    if not isinstance(manifest,dict) or manifest.get('schema')!=MANIFEST_SCHEMA:
+        raise ValueError('plugin archive lacks a supported dsh-operator manifest')
+    for key in ('host_tools','legacy_tools','read_only_tools','bind_tools','tools'):
+        if not isinstance(manifest.get(key),list):
+            raise ValueError('plugin manifest lacks '+key)
+    host=manifest['host_tools']
+    if any(not isinstance(name,str) or not name for name in host) or host!=sorted(set(host)):
+        raise ValueError('plugin manifest host_tools must be unique sorted tool names')
+    rows=manifest['tools']
+    if any(not isinstance(row,dict) or set(row)!={'name','host','schema_hash'} for row in rows):
+        raise ValueError('plugin manifest tools have an invalid shape')
+    names=[row.get('name') for row in rows]
+    if any(not isinstance(name,str) or not name for name in names) \
+            or len(names)!=len(set(names)) or set(names)!=set(host):
+        raise ValueError('plugin manifest tools and host_tools differ')
+    normalized=[]
+    for row in rows:
+        if row.get('host') is not True or not isinstance(row.get('schema_hash'),str) \
+                or _HASH.fullmatch(row['schema_hash']) is None:
+            raise ValueError('plugin manifest tool row is invalid: '+str(row.get('name')))
+        normalized.append(dict(name=row['name'],host=True,schema_hash=row['schema_hash']))
+    normalized.sort(key=lambda row:row['name'])
+    if manifest.get('tools_hash')!=_digest(normalized):
+        raise ValueError('plugin manifest tools_hash does not match its tool rows')
+    for key in ('read_only_tools','bind_tools'):
+        values=manifest[key]
+        if any(not isinstance(name,str) for name in values) or not set(values)<=set(host):
+            raise ValueError('plugin manifest '+key+' contains an unknown tool')
+    legacy=manifest['legacy_tools']
+    if any(not isinstance(name,str) for name in legacy) or set(legacy)&set(host):
+        raise ValueError('plugin manifest legacy_tools overlaps the host surface')
+    if not isinstance(manifest.get('package_version'),str) or not manifest['package_version']:
+        raise ValueError('plugin manifest package_version is missing')
+    if type(manifest.get('tool_version')) is not int or manifest['tool_version']<1:
+        raise ValueError('plugin manifest tool_version is invalid')
+    return manifest
+
+
+def _reply(replies,number):
+    for reply in replies:
+        if reply.get('id')==number:
+            if 'error' in reply:
+                raise ValueError('MCP handshake failed: '+str(reply['error']))
+            return reply
+    raise ValueError('MCP handshake is missing reply '+str(number))
+
+
+def check_python(python,manifest):
+    validate_manifest(manifest)
     for name in ('operator-agent','operator-agent-mcp'):
         if not (python.parent/name).is_file():raise ValueError('Python environment lacks '+name)
     env={k:v for k,v in os.environ.items() if k in ('HOME','PATH','LANG','SYSTEMROOT')}
     env['OPERATOR_AGENT_WORKFLOW']='host'
     requests=[dict(jsonrpc='2.0',id=1,method='initialize',params=dict(protocolVersion='2025-11-25',
         capabilities={},clientInfo=dict(name='operator-installer',version='1'))),
-        dict(jsonrpc='2.0',id=2,method='tools/list',params={})]
+        dict(jsonrpc='2.0',id=2,method='tools/list',params={}),
+        dict(jsonrpc='2.0',id=3,method='tools/call',
+             params=dict(name='operator_capabilities',arguments={}))]
     result=subprocess.run([str(python),'-I','-m','operator_agent.app.mcp_server'],
         input=''.join(json.dumps(x)+'\n' for x in requests),capture_output=True,text=True,
         env=env,cwd=tempfile.gettempdir(),timeout=20,check=True)
     replies=[json.loads(x) for x in result.stdout.splitlines()]
-    names=sorted(x['name'] for x in next(x['result']['tools'] for x in replies if x.get('id')==2))
-    if names!=TOOLS:raise ValueError('Python does not expose the seven v0.7.2 host tools')
-    return next(x['result']['serverInfo']['version'] for x in replies if x.get('id')==1)
+    init=_reply(replies,1)
+    listed=_reply(replies,2)
+    called=_reply(replies,3)
+    version=init['result']['serverInfo']['version']
+    if version!=manifest['package_version']:
+        raise ValueError('Python package version differs from plugin manifest: '
+                         f'{version} != {manifest["package_version"]}')
+    tools=listed['result']['tools']
+    names=sorted(tool['name'] for tool in tools)
+    expected=manifest['host_tools']
+    if names!=expected:
+        raise ValueError('Python host tools differ from plugin manifest: '
+                         f'missing={sorted(set(expected)-set(names))}, '
+                         f'unexpected={sorted(set(names)-set(expected))}')
+    actual_rows=[]
+    for tool in sorted(tools,key=lambda row:row['name']):
+        actual_rows.append(dict(name=tool['name'],host=True,schema_hash=_digest(tool['inputSchema'])))
+    expected_rows=sorted(manifest['tools'],key=lambda row:row['name'])
+    if actual_rows!=expected_rows:
+        changed=[row['name'] for row in actual_rows
+                 if row['schema_hash']!=next(item['schema_hash'] for item in expected_rows
+                                             if item['name']==row['name'])]
+        raise ValueError('Python tool schemas differ from plugin manifest: '+', '.join(changed))
+    if called['result'].get('isError') is True:
+        raise ValueError('operator_capabilities refused the installer handshake')
+    try:
+        capabilities=json.loads(called['result']['content'][0]['text'])
+    except (KeyError,IndexError,TypeError,json.JSONDecodeError) as error:
+        raise ValueError('operator_capabilities returned an unreadable receipt') from error
+    if capabilities.get('ok') is not True or capabilities.get('version')!=manifest['package_version']:
+        raise ValueError('operator_capabilities package identity differs from plugin manifest')
+    if capabilities.get('tool_version')!=manifest['tool_version']:
+        raise ValueError('Python tool contract differs from plugin manifest: '
+                         f'{capabilities.get("tool_version")} != {manifest["tool_version"]}')
+    return version
 
 
 def install(args):
@@ -97,14 +188,17 @@ def install(args):
     artifact=archive_identity(plugin)
     if not {'host-model-budget.mjs','host-model-ledger.mjs','host-session-lifecycle.mjs'} <= artifact['files'].keys():
         raise ValueError('plugin archive lacks the v0.7.2 host model budget modules')
+    manifest=validate_manifest(artifact.get('manifest'))
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}',args.profile):raise ValueError('invalid profile name')
-    version=check_python(python)
+    version=check_python(python,manifest)
     home=Path(args.dsh_home or os.environ.get('DSH_HOME',str(Path.home()/'.dsh'))).expanduser().absolute()
     profile=home/'profiles'/args.profile;patch=profile/'cordis.patch.yml'
     entries=configs(python)
     if args.dry_run:
         print(json.dumps(dict(dry_run=True,python_version=version,plugin=str(plugin),
-            profile=str(profile),plugin_sha256=artifact['sha256'],entries=entries),ensure_ascii=False,indent=2))
+            profile=str(profile),plugin_sha256=artifact['sha256'],entries=entries,
+            tool_version=manifest['tool_version'],tools_hash=manifest['tools_hash'],
+            tools=manifest['host_tools']),ensure_ascii=False,indent=2))
         return
     configure_only=getattr(args,'configure_only',False)
     if args.profile.lower()=='desktop' and not configure_only:
@@ -167,8 +261,10 @@ console.log(JSON.stringify(entries.filter(x=>['mcp-operator','operator-tools'].i
             if a.get('disabled') is True or a.get('config')!=e['config']:
                 raise ValueError('DSH composition differs for '+e['id'])
         receipt=dict(installed=True,profile=str(profile),python_version=version,
-            plugin=str(plugin),plugin_sha256=artifact['sha256'],tools=TOOLS,config_backup=str(root),model_calls=0,gpu_executions=0,
-            config_check_scope=check_scope,
+            plugin=str(plugin),plugin_sha256=artifact['sha256'],tools=manifest['host_tools'],
+            tool_version=manifest['tool_version'],tools_hash=manifest['tools_hash'],
+            manifest_sha256=artifact['files'].get('manifest.json'),config_backup=str(root),
+            model_calls=0,gpu_executions=0,config_check_scope=check_scope,
             completed_at=datetime.now(timezone.utc).isoformat())
         private(root/'result.json',(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n').encode())
         print('安装与路径配置检查通过。在 DSH 执行 /op capabilities 核对版本；直接发送新任务需求即可试跑。')

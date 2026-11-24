@@ -5,18 +5,21 @@
  * 这里不碰网络、不碰 GPU、不调模型；只测纯函数。
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { formatDoctor, locate, PAIRED_PYTHON, EXPECTED_TOOL_VERSION } from "../index.mjs";
-import { patchText, entries, entriesUvx, parseArgs, BEGIN, END } from "../bin/setup.mjs";
+import { MANIFEST } from "../manifest.mjs";
+import { patchText, entries, entriesUvx, parseArgs, writeProfile, BEGIN, END } from "../bin/setup.mjs";
 
 const healthy = () => ({
   pluginVersion: "0.2.3", command: "operator-agent", cliFound: true, cliPath: "/opt/venv/bin/operator-agent",
   mcpFound: true, mcpPath: "/opt/venv/bin/operator-agent-mcp", workflow: "host",
+  mcpOk: true, mcpVersion: PAIRED_PYTHON,
+  mcpTools: MANIFEST.host_tools.map(name => ({ name })), mcpSchemaDrift: [],
   capabilitiesOk: true, capabilities: {
     version: PAIRED_PYTHON, tool_version: EXPECTED_TOOL_VERSION,
     runtime: { python: "3.12.16", torch_installed: false, triton_installed: false },
@@ -57,6 +60,13 @@ test("unset workflow env is informational, because the patch injects it", () => 
   assert.match(text, /插件进程未设置/);
 });
 
+test("MCP handshake and schema drift are visible failures", () => {
+  const handshake = formatDoctor({ ...healthy(), mcpOk: false, mcpError: "exit 2: boom" });
+  assert.match(handshake, /MCP 握手失败 · exit 2: boom/);
+  const drift = formatDoctor({ ...healthy(), mcpSchemaDrift: ["operator_prepare"] });
+  assert.match(drift, /MCP schema 与 manifest 不一致 · operator_prepare/);
+});
+
 test("locate resolves PATH entries and refuses missing absolute paths", () => {
   const dir = mkdtempSync(join(tmpdir(), "op-doctor-"));
   const bin = join(dir, "operator-agent");
@@ -65,6 +75,9 @@ test("locate resolves PATH entries and refuses missing absolute paths", () => {
   assert.equal(locate("operator-agent", dir), bin);
   assert.equal(locate("/definitely/not/here/operator-agent"), null);
   assert.equal(locate("operator-agent", dir), bin);
+  const notExecutable = join(dir, "not-executable");
+  writeFileSync(notExecutable, "plain file", { mode: 0o600 });
+  assert.equal(locate(notExecutable), null);
 });
 
 test("patchText appends a managed block and keeps the user's own lines", () => {
@@ -124,4 +137,38 @@ test("uvx 形态把版本钉死，并同时配置 MCP 与 /op 两条记录", () 
 test("uvx 与 --python/--wheel 互斥", () => {
   assert.throws(() => parseArgs(["--runtime", "uvx", "--python", "/x/python"]), /不能同时使用/);
   assert.throws(() => parseArgs(["--runtime", "docker"]), /path 或 uvx/);
+});
+
+test("writeProfile restores the exact original patch after a post-write failure", t => {
+  const dshHome = mkdtempSync(join(tmpdir(), "op-setup-"));
+  t.after(() => rmSync(dshHome, { recursive: true, force: true }));
+  const patch = join(dshHome, "profiles", "test", "cordis.patch.yml");
+  const original = "# keep this comment\n- id: my-model\n  config: {model: custom}\n";
+  mkdirSync(join(dshHome, "profiles", "test"), { recursive: true });
+  writeFileSync(patch, original, { mode: 0o600 });
+  assert.throws(() => writeProfile({ patch, dshHome, next: "broken", python: "/x/python",
+    profile: "test", runtime: "path" }), error => error.exitCode === 2 && /缺少/.test(error.message));
+  assert.equal(readFileSync(patch, "utf8"), original);
+});
+
+test("writeProfile removes a newly created patch when post-write validation fails", t => {
+  const dshHome = mkdtempSync(join(tmpdir(), "op-setup-new-"));
+  t.after(() => rmSync(dshHome, { recursive: true, force: true }));
+  const patch = join(dshHome, "profiles", "test", "cordis.patch.yml");
+  assert.throws(() => writeProfile({ patch, dshHome, next: "broken", python: "/x/python",
+    profile: "test", runtime: "path" }), error => error.exitCode === 2);
+  assert.equal(existsSync(patch), false);
+});
+
+test("writeProfile keeps a valid managed block and its receipt", t => {
+  const dshHome = mkdtempSync(join(tmpdir(), "op-setup-ok-"));
+  t.after(() => rmSync(dshHome, { recursive: true, force: true }));
+  const patch = join(dshHome, "profiles", "test", "cordis.patch.yml");
+  const original = "# user config\n- id: my-model\n";
+  const next = patchText(original, entries("/x/bin/python"));
+  mkdirSync(join(dshHome, "profiles", "test"), { recursive: true });
+  writeFileSync(patch, original, { mode: 0o600 });
+  writeProfile({ patch, dshHome, next, python: "/x/bin/python", profile: "test", runtime: "path" });
+  assert.equal(readFileSync(patch, "utf8"), next);
+  assert.ok(existsSync(join(dshHome, "operator-install-receipts")));
 });

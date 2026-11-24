@@ -9,15 +9,93 @@
  * 失败**不抛**：CLI 不在、账本拒绝，都不该让模型预算门崩掉。调用方按回执决定要不要
  * 报出来 —— 静默吞掉和崩溃都不可接受。
  */
-import { execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const JOURNAL_FILE = "journal.jsonl";
 export const JOURNAL_SCHEMA = "operator-task-journal-v2";
 const BOUND_BYTES = 4 * 1024 * 1024;
+const TASK_EVENTS = new Set(["task_prepared", "task_activated", "task_closed"]);
+const JOB_EVENTS = new Set(["job_queued", "job_started", "job_finished"]);
+const BUDGET_EVENTS = new Set(["budget_opened", "budget_reserved", "budget_settled"]);
+const KINDS = new Set([...TASK_EVENTS, ...JOB_EVENTS, ...BUDGET_EVENTS]);
+const OUTCOMES = new Set(["completed", "failed", "cancelled"]);
+const RESULTS = new Set(["none", "received", "unknown"]);
+const RESULT_REASONS = new Set(["receipt_absent", "invocation_mismatch", "invalid_timestamp", "stopped_before_receipt"]);
+const OPERATIONS = new Set(["verify", "bench", "profile", "repair"]);
+const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 
-/** 读整条流。没有账本 ⇒ 空流（那是状态，不是错误）；坏账本 ⇒ 抛。 */
+function validateSequence(events) {
+  let phase = "absent", taskId = "", budgetTaskId = "";
+  const jobs = new Map();
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index], line = index + 1, kind = event.kind;
+    if (event.rev !== line) throw new Error(`journal_gap: 第 ${line} 行 rev=${event.rev}`);
+    if (typeof event.task_id !== "string" || !event.task_id) {
+      throw new Error(`journal_task_missing: 第 ${line} 行没有 task_id`);
+    }
+    if (!taskId) taskId = event.task_id;
+    if (event.task_id !== taskId) throw new Error(`journal_task_mismatch: 第 ${line} 行属于另一个任务`);
+    if (!KINDS.has(kind)) throw new Error(`journal_unknown_kind: 第 ${line} 行 kind=${kind}`);
+    const snapshotTaskId = event.budget?.host_task?.task_id;
+    if (snapshotTaskId !== undefined) {
+      if (typeof snapshotTaskId !== "string" || !snapshotTaskId) {
+        throw new Error(`journal_budget_mismatch: 第 ${line} 行预算快照缺 task_id`);
+      }
+      if (!budgetTaskId) budgetTaskId = snapshotTaskId;
+      if (snapshotTaskId !== budgetTaskId) {
+        throw new Error(`journal_budget_mismatch: 第 ${line} 行预算快照属于另一个账本`);
+      }
+    }
+    if (phase === "closed") throw new Error(`journal_closed: 第 ${line} 行出现在封账之后`);
+    if (kind === "task_prepared") {
+      if (phase !== "absent") throw new Error(`journal_already_prepared: 第 ${line} 行重复 prepare`);
+      phase = "prepared";
+      continue;
+    }
+    if (kind === "task_activated") {
+      if (phase !== "prepared" && phase !== "active") {
+        throw new Error(`journal_not_prepared: 第 ${line} 行 activate 早于 prepare`);
+      }
+      phase = "active";
+      continue;
+    }
+    if (kind === "task_closed") {
+      if (!OUTCOMES.has(event.outcome)) throw new Error(`journal_unknown_outcome: 第 ${line} 行`);
+      phase = "closed";
+      continue;
+    }
+    if (JOB_EVENTS.has(kind)) {
+      if (phase !== "active") throw new Error(`journal_not_activated: 第 ${line} 行 Job 早于 activate`);
+      if (typeof event.job_id !== "string" || !event.job_id || !OPERATIONS.has(event.operation)) {
+        throw new Error(`journal_bad_job: 第 ${line} 行缺少 job_id 或 operation`);
+      }
+      const job = jobs.get(event.job_id);
+      if (job && TERMINAL.has(job)) throw new Error(`journal_job_closed: 第 ${line} 行 Job 已终态`);
+      if (kind === "job_queued") {
+        if (job) throw new Error(`journal_job_exists: 第 ${line} 行重复排队`);
+        jobs.set(event.job_id, "queued");
+      } else if (!job) {
+        throw new Error(`journal_job_unknown: 第 ${line} 行 Job 从未排队`);
+      } else if (kind === "job_started") {
+        if (job !== "queued") throw new Error(`journal_bad_transition: 第 ${line} 行 start 不接 queued`);
+        jobs.set(event.job_id, "running");
+      } else {
+        if (job !== "running") throw new Error(`journal_bad_transition: 第 ${line} 行 finish 不接 running`);
+        if (!OUTCOMES.has(event.outcome) || !RESULTS.has(event.result)) {
+          throw new Error(`journal_bad_result: 第 ${line} 行终态不完整`);
+        }
+        if (event.result === "unknown" && !RESULT_REASONS.has(event.result_reason)) {
+          throw new Error(`journal_missing_result_reason: 第 ${line} 行未知结果缺原因`);
+        }
+        jobs.set(event.job_id, event.outcome);
+      }
+    }
+  }
+}
+
+/** 读整条流。没有账本 ⇒ 空流；坏账本或非法序列 ⇒ 抛。 */
 export function readJournal(runDir) {
   const path = join(runDir, JOURNAL_FILE);
   let stat;
@@ -35,7 +113,7 @@ export function readJournal(runDir) {
   }
   if (stat.size > BOUND_BYTES) throw new Error("journal_unusable: 账本超过大小上限");
   const text = readFileSync(path, "utf8");
-  return text.split("\n").filter(line => line.trim()).map((line, index) => {
+  const events = text.split("\n").filter(line => line.trim()).map((line, index) => {
     let event;
     try {
       event = JSON.parse(line);
@@ -47,6 +125,8 @@ export function readJournal(runDir) {
     }
     return event;
   });
+  validateSequence(events);
+  return events;
 }
 
 /**
@@ -63,37 +143,91 @@ export function readHostTask(runDir) {
   return state;
 }
 
+const baseEnv = Object.fromEntries(["HOME", "PATH", "LANG", "SYSTEMROOT"]
+  .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
 let runner = {
   command: process.env.OPERATOR_AGENT_CLI || "operator-agent",
   args: [],
   timeoutMs: 20000,
+  env: baseEnv,
 };
+const queues = new Map(), pending = new Map();
+const MAX_PENDING = 64;
 
-/** 由插件入口注入它自己的 CLI 配置（与 `/op` 命令用的是同一套 command/args/timeout）。 */
+/** 由插件入口注入与 `/op` 相同的 command/args/timeout 和已清洗 env。 */
 export function configureJournalRunner(next = {}) {
   runner = { ...runner, ...next };
 }
 
-/** 提交一条事件。返回 `{ok:true,event}` 或 `{ok:false,error,detail}`。 */
-export function appendJournal(runDir, event) {
-  if (typeof runDir !== "string" || !runDir) return { ok: false, error: "journal_run_dir" };
-  const { command, args, timeoutMs } = runner;
-  let out;
-  try {
-    out = execFileSync(command, [...args, "journal-append", "--run-dir", runDir],
-      { input: JSON.stringify(event), encoding: "utf8", timeout: timeoutMs });
-  } catch (error) {
-    // 账本拒绝时 CLI 退出码是 2，stdout 里仍有结构化回包 —— 那才是要读的东西。
-    out = typeof error?.stdout === "string" ? error.stdout.trim() : "";
-    if (!out) {
-      return { ok: false, error: "journal_unavailable", detail: String(error?.message ?? error) };
+function submit(runDir, event, config) {
+  return new Promise(resolve => {
+    let stdout = "", stderr = "", settled = false, timer;
+    const finish = receipt => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(receipt);
+    };
+    let child;
+    try {
+      child = spawn(config.command, [...config.args, "journal-append", "--run-dir", runDir],
+        { env: config.env, stdio: ["pipe", "pipe", "pipe"] });
+    } catch (error) {
+      finish({ ok: false, error: "journal_unavailable", detail: String(error?.message ?? error) });
+      return;
     }
+    timer = setTimeout(() => child.kill(), config.timeoutMs);
+    child.stdout.on("data", chunk => {
+      stdout += chunk;
+      if (stdout.length > 1024 * 1024) child.kill();
+    });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    child.stdin.on("error", error => finish({
+      ok: false, error: "journal_unavailable", detail: String(error?.message ?? error) }));
+    child.on("error", error => finish({
+      ok: false, error: "journal_unavailable", detail: String(error?.message ?? error) }));
+    child.on("close", () => {
+      const out = stdout.trim();
+      if (!out) {
+        finish({ ok: false, error: "journal_unavailable",
+          detail: stderr.trim() || `journal CLI exited without a receipt` });
+        return;
+      }
+      try {
+        const body = JSON.parse(out);
+        if (body?.ok) finish({ ok: true, event: body.event });
+        else finish({ ok: false, error: body?.error || "journal_refused", detail: body?.detail });
+      } catch {
+        finish({ ok: false, error: "journal_unreadable", detail: out.slice(0, 400) });
+      }
+    });
+    child.stdin.end(JSON.stringify(event));
+  });
+}
+
+/** 按任务串行提交；同一任务的预留、结算、封账不会乱序。 */
+export function appendJournal(runDir, event) {
+  if (typeof runDir !== "string" || !runDir) {
+    return Promise.resolve({ ok: false, error: "journal_run_dir" });
   }
-  try {
-    const body = JSON.parse(out);
-    if (body?.ok) return { ok: true, event: body.event };
-    return { ok: false, error: body?.error || "journal_refused", detail: body?.detail };
-  } catch {
-    return { ok: false, error: "journal_unreadable", detail: String(out).slice(0, 400) };
+  if ((pending.get(runDir) ?? 0) >= MAX_PENDING) {
+    return Promise.resolve({ ok: false, error: "journal_queue_full" });
   }
+  const config = { ...runner, args: [...runner.args], env: { ...runner.env } };
+  const previous = queues.get(runDir) ?? Promise.resolve();
+  const current = previous.catch(() => {}).then(() => submit(runDir, event, config));
+  queues.set(runDir, current);
+  pending.set(runDir, (pending.get(runDir) ?? 0) + 1);
+  current.finally(() => {
+    const left = (pending.get(runDir) ?? 1) - 1;
+    if (left) pending.set(runDir, left);
+    else pending.delete(runDir);
+    if (queues.get(runDir) === current) queues.delete(runDir);
+  }).catch(() => {});
+  return current;
+}
+
+/** 卸载或封账前等待已入队提交全部落账。 */
+export async function drainJournal() {
+  while (queues.size) await Promise.all([...queues.values()].map(queue => queue.catch(() => {})));
 }

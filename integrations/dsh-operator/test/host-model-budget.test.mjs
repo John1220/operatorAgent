@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { installHostModelBudget, recoverHostBinding } from "../host-model-budget.mjs";
-import { configureJournalRunner } from "../journal.mjs";
+import { configureJournalRunner, drainJournal } from "../journal.mjs";
 import { HostModelLedger, MODEL_BUDGET_FILE } from "../host-model-ledger.mjs";
 
 const PREFIX = "mcp__operator__";
@@ -19,9 +19,12 @@ const hash = value => createHash("sha256").update(value).digest("hex");
 
 /** 预算状态住在任务账本里：落一条 `budget_opened`，与 Python 写的形状一致。 */
 function seedBudget(dir, state) {
-  writeFileSync(join(dir, "journal.jsonl"), JSON.stringify({
-    schema: "operator-task-journal-v2", rev: 1, kind: "budget_opened",
-    task_id: state.task_id, budget: { host_task: state } }) + "\n");
+  const rows = [
+    { schema: "operator-task-journal-v2", rev: 1, kind: "task_prepared", task_id: state.task_id },
+    { schema: "operator-task-journal-v2", rev: 2, kind: "budget_opened",
+      task_id: state.task_id, budget: { host_task: state } },
+  ];
+  writeFileSync(join(dir, "journal.jsonl"), rows.map(row => JSON.stringify(row)).join("\n") + "\n");
 }
 
 /** 改写预算状态 = 追加一条新快照（账本只追加，不改历史）。 */
@@ -61,7 +64,8 @@ function fixture(t, overrides = {}, taskId = TASK, directory) {
     state: () => JSON.parse(readFileSync(join(dir, MODEL_BUDGET_FILE), "utf8")) };
 }
 
-function fakeHost({ events = [], inheritedEventCount = 0, sessionId = "session-1", header = {} } = {}) {
+function fakeHost({ events = [], inheritedEventCount = 0, sessionId = "session-1", header = {},
+  observeErrors = [] } = {}) {
   const handlers = new Map();
   const guards = [];
   let currentController;
@@ -75,18 +79,23 @@ function fakeHost({ events = [], inheritedEventCount = 0, sessionId = "session-1
       return () => list.splice(list.indexOf(callback), 1);
     },
     tools: { guard(callback) { guards.push(callback); return () => guards.splice(guards.indexOf(callback), 1); } },
-    logger: { error: value => errors.push(value) },
+    logger: { error: value => errors.push(value), warn: value => errors.push(value) },
     sessionQuery: { async observeSession(id) {
       assert.equal(id, sessionId); observed += 1;
+      if (observeErrors.length) throw observeErrors.shift();
       return { events, inheritedEventCount, header, [Symbol.dispose]() { disposed += 1; } };
     } },
   };
   const dispose = installHostModelBudget(ctx, {});
   const emit = (name, ...args) => (handlers.get(name) ?? []).map(handler => handler(...args));
   let seq = Math.max(0, ...events.map(event => event.seq ?? 0));
-  const ready = Promise.all(emit("agent/created", { agent, signal: new AbortController().signal }));
-  // Restore errors remain observable through request(), without an unhandled promise.
-  ready.catch(() => {});
+  let ready;
+  const restoreReady = () => {
+    ready = Promise.all(emit("agent/created", { agent, signal: new AbortController().signal }));
+    ready.catch(() => {});
+    return ready;
+  };
+  restoreReady();
   const native = event => {
     const value = { ...event, seq: ++seq };
     events.push(value);
@@ -141,7 +150,8 @@ function fakeHost({ events = [], inheritedEventCount = 0, sessionId = "session-1
       throw error;
     }
   };
-  return { agent, ctx, events, errors, emit, emitTool, request, stream, dispatch, dispose, ready, native, newTask,
+  return { agent, ctx, events, errors, emit, emitTool, request, stream, dispatch, dispose, native, newTask,
+    get ready() { return ready; }, restore: restoreReady,
     guard: (name, arguments_ = {}, callId) => guards.map(guard => guard({ name, arguments: arguments_, agent, callId })).find(Boolean),
     observations: () => ({ observed, disposed }) };
 }
@@ -359,6 +369,22 @@ test("delegated and forked sessions cannot create or resume a task under a fresh
     }
     assert.equal(child.guard(PREFIX + "operator_status", { run_dir: task.dir }), undefined);
   }
+});
+
+test("a transient session observation failure can be retried before binding", async t => {
+  const submitted = journalStub(t);
+  const task = fixture(t);
+  const host = fakeHost({ observeErrors: [new Error("temporary observe failure")] });
+  t.after(host.dispose);
+  await assert.rejects(() => host.request(), /temporary observe failure/);
+  await host.restore();
+  await host.emitTool(task.body);
+  await host.dispatch(provider().next);
+  await drainJournal();
+  assert.equal(host.observations().observed, 2);
+  const settled = submitted("budget_settled").pop();
+  assert.ok(settled, JSON.stringify({ submitted: ["budget_reserved", "budget_settled"].flatMap(submitted), errors: host.errors }));
+  assert.equal(settled.budget.model.records.length, 1);
 });
 
 test("binding failure blocks later native dispatch instead of observer errors being ignored", async t => {
@@ -580,9 +606,13 @@ function seedCall(dir, invocation, events) {
   writeFileSync(join(call, "launch.json"), JSON.stringify({ invocation_id: invocation, kind: "tool_call" }));
   const path = join(dir, "journal.jsonl");
   const existing = existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean) : [];
-  const appended = events.map((event, index) => JSON.stringify({
-    schema: "operator-task-journal-v2", rev: existing.length + index + 1, task_id: "a".repeat(32),
-    job_id: invocation, invocation, operation: "verify", ...event }));
+  const rows = existing.some(line => JSON.parse(line).kind === "task_activated") ? [] : [
+    { schema: "operator-task-journal-v2", kind: "task_activated", task_id: "a".repeat(32) },
+  ];
+  rows.push(...events.map(event => ({ schema: "operator-task-journal-v2", task_id: "a".repeat(32),
+    job_id: invocation, invocation, operation: "verify", ...event })));
+  const appended = rows.map((event, index) => JSON.stringify({
+    ...event, rev: existing.length + index + 1 }));
   writeFileSync(path, [...existing, ...appended].join("\n") + "\n");
 }
 
@@ -632,8 +662,10 @@ for await (const chunk of process.stdin) chunks.push(chunk);
 appendFileSync(${JSON.stringify(log)}, Buffer.concat(chunks).toString("utf8") + "\\n");
 process.stdout.write(JSON.stringify({ ok: true, event: { rev: 1 } }));
 `);
-  configureJournalRunner({ command: process.execPath, args: [script] });
-  t.after(() => configureJournalRunner({ command: "operator-agent", args: [] }));
+  configureJournalRunner({ command: process.execPath, args: [script],
+    env: { PATH: process.env.PATH || "" } });
+  t.after(() => configureJournalRunner({ command: "operator-agent", args: [],
+    env: { PATH: process.env.PATH || "" } }));
   return kind => existsSync(log)
     ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean)
         .map(line => JSON.parse(line)).filter(event => event.kind === kind)
@@ -650,6 +682,7 @@ test("closing a task submits exactly one task_closed through the Python entry", 
   host.native({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
   host.native({ type: "turn/start", data: { turn: 2 } });
   await host.dispatch(provider().next);
+  await drainJournal();
   const closed = submitted("task_closed");
   assert.equal(closed.length, 1, "封账只提交一次");
   assert.match(closed[0].reason, /^host_closed/);
@@ -666,6 +699,7 @@ test("a directory with no journal fails closed instead of being re-interpreted",
   const host = fakeHost(); t.after(host.dispose);
   await host.emitTool(task.body).catch(() => {});
   await assert.rejects(() => host.dispatch(provider().next), /host_model_journal/);
+  await drainJournal();
   assert.equal(submitted("task_closed").length, 0);
   assert.equal(submitted("budget_settled").length, 0);
 });
@@ -676,6 +710,7 @@ test("each model reservation and settlement lands as a budget snapshot", async t
   const host = fakeHost(); t.after(host.dispose);
   await host.emitTool(task.body);
   await host.dispatch(provider().next);
+  await drainJournal();
   const reserved = submitted("budget_reserved"), settled = submitted("budget_settled");
   assert.equal(reserved.length, 1, "一次派发一条预留");
   assert.equal(settled.length, 1, "一次结算一条");

@@ -6,7 +6,7 @@ import { performance } from "node:perf_hooks";
 import { MANIFEST } from "./manifest.mjs";
 import { HostModelLedger, HostModelBudgetError } from "./host-model-ledger.mjs";
 import { recoverHostSession, newTaskReceipt, canAutoStartTask } from "./host-session-lifecycle.mjs";
-import { appendJournal, readHostTask, readJournal } from "./journal.mjs";
+import { appendJournal, drainJournal, readHostTask, readJournal } from "./journal.mjs";
 
 const PREFIX = "mcp__operator__";
 
@@ -119,11 +119,15 @@ export function installHostModelBudget(ctx, config = {}) {
   // 且 Python 入口可用。失败只记一行，不打断宿主 —— 账本写不进去是证据问题，
   // 不是「现在该停下来」的理由。
   function journalAppend(runDir, event) {
-    if (!existsSync(resolve(runDir, "journal.jsonl"))) return { ok: false, error: "journal_absent" };
-    const receipt = appendJournal(runDir, event);
-    if (!receipt.ok && receipt.error !== "journal_closed") {
-      ctx.logger?.error?.(`operator-tools: 任务账本追加 ${event.kind} 失败 ${receipt.error} ${receipt.detail ?? ""}`);
+    if (!existsSync(resolve(runDir, "journal.jsonl"))) {
+      return Promise.resolve({ ok: false, error: "journal_absent" });
     }
+    const receipt = appendJournal(runDir, event);
+    receipt.then(result => {
+      if (!result.ok && result.error !== "journal_closed") {
+        ctx.logger?.error?.(`operator-tools: 任务账本追加 ${event.kind} 失败 ${result.error} ${result.detail ?? ""}`);
+      }
+    });
     return receipt;
   }
   /**
@@ -141,7 +145,7 @@ export function installHostModelBudget(ctx, config = {}) {
       if (final && final.status === "completed" && final.full_l2_passed === true) outcome = "completed";
     } catch { outcome = "failed"; }
     const reason = why || (final ? "host_closed_final_verification" : "host_closed");
-    journalAppend(binding.runDir, { kind: "task_closed", outcome, reason });
+    return journalAppend(binding.runDir, { kind: "task_closed", outcome, reason });
   }
   function attach(id, body, restoring, execute) {
     const facts = boundFacts(body), old = sessions.get(id)?.binding;
@@ -207,23 +211,40 @@ export function installHostModelBudget(ctx, config = {}) {
     // 截止到点、会话生命周期在 turn/end 判定）都会走到这里，所以「一次任务只封一次账」
     // 只需要记一个 taskId。
     if (next.phase === "discussion" && data.binding && data.journalClosed !== data.binding.taskId) {
-      closeTaskJournal(data.binding, data.closeReason);
+      data.journalClose = closeTaskJournal(data.binding, data.closeReason);
       data.journalClosed = data.binding.taskId;
     }
     return previous;
   }
   async function restore(agent, signal) {
     const id = agent.session.id;
-    if (!restores.has(id)) restores.set(id, (async () => {
-      const observation = await ctx.sessionQuery.observeSession(id, { signal, projectionMode: "none" });
-      try {
-        if (observation.header?.origin === "subagent" || observation.header?.parentSession !== undefined) childSessions.add(id);
-        const data = { events: [...observation.events], inherited: observation.inheritedEventCount ?? 0,
-          state: null, binding: null, previousBinding: null, closed: null };
-        sessions.set(id, data); replay(id, data, true);
-      } finally { observation[Symbol.dispose](); }
-    })().catch(error => { throw fail(id, error); }));
-    await restores.get(id);
+    if (!restores.has(id)) {
+      const attempt = (async () => {
+        let observation;
+        try {
+          observation = await ctx.sessionQuery.observeSession(id, { signal, projectionMode: "none" });
+        } catch (error) {
+          ctx.logger?.warn?.(`operator-tools: 会话观察失败，下次请求可重试：${error.message}`);
+          throw error;
+        }
+        try {
+          if (observation.header?.origin === "subagent" || observation.header?.parentSession !== undefined) childSessions.add(id);
+          const data = { events: [...observation.events], inherited: observation.inheritedEventCount ?? 0,
+            state: null, binding: null, previousBinding: null, closed: null };
+          sessions.set(id, data); replay(id, data, true);
+        } catch (error) { throw fail(id, error); }
+        finally { observation[Symbol.dispose](); }
+      })();
+      restores.set(id, attempt);
+      attempt.catch(() => {}).finally(() => {
+        if (restores.get(id) === attempt && !sessions.has(id)) restores.delete(id);
+      });
+    }
+    try { await restores.get(id); }
+    catch (error) {
+      if (!sessions.has(id)) restores.delete(id);
+      throw error;
+    }
     return sessions.get(id);
   }
   function remainingTime(binding) {
@@ -381,7 +402,10 @@ export function installHostModelBudget(ctx, config = {}) {
     if (b) lines.push(`上次任务：${b.runDir}`, `结果与预算：/op status ${b.runDir}`);
     return lines.join("\n");
   };
-  const dispose = () => { for (const fn of disposers.reverse()) if (typeof fn === "function") fn(); };
+  const dispose = async () => {
+    for (const fn of disposers.reverse()) if (typeof fn === "function") await fn();
+    await Promise.all([drainJournal(), ...[...sessions.values()].map(data => data.journalClose).filter(Boolean)]);
+  };
   dispose.newTask = newTask; dispose.sessionStatus = sessionStatus;
   return dispose;
 }

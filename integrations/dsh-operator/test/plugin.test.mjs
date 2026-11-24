@@ -3,11 +3,12 @@
 // 用替身 ctx 与一个假 CLI，不依赖 DSH、不跑 Python 判定。
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { apply, formatCapabilities, formatStatus, normalizeConfig, runCli, scrubEnv }
   from "../index.mjs";
+import { bootIdentity } from "../host-model-ledger.mjs";
 
 /** 真 CLI 的输出：reshape 判定层 payload 时，这两个 fixture 先红。 */
 const fixture = (name) =>
@@ -160,9 +161,32 @@ test("未知子命令回 error 并带上用法", async () => {
 test("runCli 把非零退出折成结构化结果（不抛）", async () => {
   const cli = fakeCli("echo 'boom' >&2; exit 2");
   const out = await runCli(cli, []);
-  assert.equal(out.ok, true);
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, "exit_2");
   assert.equal(out.code, 2);
   assert.equal(out.stderr, "boom");
+  assert.match(out.detail, /退出码 2：boom/);
+});
+
+test("/op repair-lock removes only an explicitly verified stale task lock", async t => {
+  const dir = mkdtempSync(join(tmpdir(), "op-repair-lock-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const task = "a".repeat(32), contract = "b".repeat(64);
+  const events = [
+    { schema: "operator-task-journal-v2", rev: 1, kind: "task_prepared", task_id: task },
+    { schema: "operator-task-journal-v2", rev: 2, kind: "budget_opened", task_id: task,
+      budget: { host_task: { task_id: task, contract_hash: contract } } },
+  ];
+  writeFileSync(join(dir, "journal.jsonl"), events.map(row => JSON.stringify(row)).join("\n") + "\n");
+  const lock = join(dir, ".host-model-budget.lock");
+  mkdirSync(lock, { mode: 0o700 });
+  writeFileSync(join(lock, "owner.json"), JSON.stringify({ boot_id: bootIdentity(),
+    contract_hash: contract, nonce: "stale", pid: 99999999, task_id: task }) + "\n", { mode: 0o600 });
+  const ctx = fakeCtx();
+  apply(ctx, { command: "operator-agent" });
+  const out = await ctx.commandDefs[0].handler({ rawInput: `repair-lock ${dir} 99999999`, agent: fakeAgent });
+  assert.equal(out.kind, "success");
+  assert.equal(existsSync(lock), false);
 });
 
 test("失败在宿主日志里留痕，且同类只记一次（不刷屏）", async () => {

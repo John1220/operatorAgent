@@ -203,10 +203,11 @@ except HostTaskBudgetError as error:
         stdout,stderr=process.communicate(timeout=45)
         assert process.returncode==0,stderr
         outputs.append(stdout.strip())
-    assert outputs.count('reserved')==3
-    assert outputs.count('host_verification_budget')==5
+    assert outputs.count('reserved')==1
+    assert outputs.count('host_gpu_busy')==7
     snap=budget.snapshot()
-    assert snap['reserved']==3 and snap['remaining_exploration']==0 and snap['remaining_final']==1
+    assert snap['reserved']==1 and snap['remaining_final']==1
+    assert snap['remaining_exploration']==2
 
 
 def test_legacy_prepared_run_is_not_implicitly_enabled(tmp_path):
@@ -354,22 +355,33 @@ def test_settlement_only_touches_matching_unfinished_owner_and_never_refunds(tmp
     checked(budget)
     owner_a,owner_b='a'*32,'b'*32
     first=budget.reserve(code_hash(WRONG),owner_invocation_id=owner_a)
+    with pytest.raises(hb.HostTaskBudgetError) as error:
+        budget.reserve(code_hash(WRONG),owner_invocation_id=owner_b)
+    assert error.value.code=='host_gpu_busy'
+    budget.settle_owner(owner_a)
     other=budget.reserve(code_hash(WRONG),owner_invocation_id=owner_b)
+    with pytest.raises(hb.HostTaskBudgetError) as error:
+        budget.reserve(code_hash(WRONG))
+    assert error.value.code=='host_gpu_busy'
+    budget.settle_owner(owner_b)
     unbound=budget.reserve(code_hash(WRONG))
+    with pytest.raises(hb.HostTaskBudgetError) as error:
+        budget.reserve(code_hash(CORRECT),owner_invocation_id=owner_a)
+    assert error.value.code=='host_gpu_busy'
+    budget.finish(unbound['id'],outcome='failed')
     second=budget.reserve(code_hash(CORRECT),owner_invocation_id=owner_a)
     before=budget.snapshot()
     settled=hb.HostTaskBudget(budget.run,budget.contract_hash).settle_owner(owner_a)
-    assert settled['settled_reservation_ids']==[first['id'],second['id']]
+    assert settled['settled_reservation_ids']==[second['id']]
     assert settled['reserved']==before['reserved']==5
     assert settled['remaining_verifications']==before['remaining_verifications']
     rows={r['id']:r for r in settled['records']}
     assert rows[first['id']]['status']==rows[second['id']]['status']=='cancelled'
-    assert rows[other['id']]['status']==rows[unbound['id']]['status']=='reserved'
-    assert settled['unfinished']==2
+    assert rows[other['id']]['status']=='cancelled'
+    assert rows[unbound['id']]['status']=='failed'
+    assert settled['unfinished']==0
     assert budget.settle_owner(owner_a,outcome='failed')['settled_reservation_ids']==[]
     assert budget.snapshot()['records'][first['id']-1]['status']=='cancelled'
-    budget.settle_owner(owner_b,outcome='failed')
-    budget.finish(unbound['id'],outcome='failed')
     final=budget.reserve(code_hash(CORRECT),purpose='final',owner_invocation_id='c'*32)
     assert final['id']==6 and budget.snapshot()['phase']=='finalizing'
 
@@ -402,23 +414,37 @@ def test_l2_completed_after_deadline_is_not_a_final_source(tmp_path,monkeypatch)
 
 
 @pytest.mark.skipif(os.name!='posix',reason='host workflow requires POSIX locking')
-def test_parallel_owner_reservations_are_settled_independently(tmp_path):
+def test_competing_owner_reservations_are_serialized_then_settled(tmp_path):
     run,budget=prepared(tmp_path)
     owners=['a'*32,'b'*32]
     script='''
 import sys
-from operator_agent.execute.host_task_budget import HostTaskBudget
-HostTaskBudget(sys.argv[1],sys.argv[2]).reserve(sys.argv[3],owner_invocation_id=sys.argv[4])
+from operator_agent.execute.host_task_budget import HostTaskBudget,HostTaskBudgetError
+try:
+ HostTaskBudget(sys.argv[1],sys.argv[2]).reserve(sys.argv[3],owner_invocation_id=sys.argv[4])
+ print('reserved')
+except HostTaskBudgetError as error:
+ print(error.code)
 '''
     processes=[subprocess.Popen([sys.executable,'-c',script,str(run),budget.contract_hash,
         code_hash(CORRECT),owner],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for owner in owners]
-    for process in processes:
+    results=[]
+    for owner,process in zip(owners,processes):
         stdout,stderr=process.communicate(timeout=45)
         assert process.returncode==0,stderr
-    snap=budget.settle_owner(owners[0])
+        results.append((owner,stdout.strip()))
+    assert sorted(output for _,output in results)==['host_gpu_busy','reserved']
+    reserved_owner=next(owner for owner,output in results if output=='reserved')
+    blocked_owner=next(owner for owner,output in results if output=='host_gpu_busy')
+    snap=budget.settle_owner(reserved_owner)
     rows={r['owner_invocation_id']:r for r in snap['records']}
-    assert rows[owners[0]]['status']=='cancelled' and rows[owners[1]]['status']=='reserved'
-    assert snap['reserved']==2 and snap['unfinished']==1
+    assert rows[reserved_owner]['status']=='cancelled'
+    assert blocked_owner not in rows
+    assert snap['reserved']==1 and snap['unfinished']==0
+    second=budget.reserve(code_hash(CORRECT),owner_invocation_id=blocked_owner)
+    snap=budget.settle_owner(blocked_owner)
+    assert snap['records'][second['id']-1]['status']=='cancelled'
+    assert snap['reserved']==2 and snap['unfinished']==0
 
 
 def test_supervisor_cancel_race_revokes_only_rejected_owners_completed_credit(tmp_path):

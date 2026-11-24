@@ -14,13 +14,15 @@
  */
 
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { startModelRelay } from "./model-relay.mjs";
 import { installHostModelBudget } from "./host-model-budget.mjs";
+import { HostModelLedger } from "./host-model-ledger.mjs";
 import { MANIFEST } from "./manifest.mjs";
-import { configureJournalRunner } from "./journal.mjs";
+import { configureJournalRunner, readHostTask } from "./journal.mjs";
 
 /** 插件自身版本（package.json）；doctor 用它说明"配对的是哪一版". */
 const PLUGIN_VERSION = (() => {
@@ -40,6 +42,7 @@ const USAGE = [
   "  /op status                  查本会话的任务/讨论状态",
   "  /op status <run_dir> [invocation_id]  查任务/工具调用（含 cancelled）",
   "  /op cancel <run_dir> <invocation_id>  请求取消，再查 status 确认",
+  "  /op repair-lock <run_dir> <dead_pid> 显式修复已核实的宿主模型锁",
   "  /op help                    这段说明",
   "",
   "run_dir 可以相对写（按**会话工作区**解析），也可以绝对写；含空格请加引号。",
@@ -158,7 +161,8 @@ export function runCli(command, argv, timeoutMs = 60_000, env = undefined, signa
         return;
       }
       const code = err && typeof err.code === "number" ? err.code : (err ? -1 : 0);
-      resolve({ ok: true, reason: "", code, text, stderr: errText, detail: "" });
+      resolve({ ok: !err, reason: err ? `exit_${code}` : "", code, text, stderr: errText,
+        detail: err ? `退出码 ${code}${errText ? `：${errText}` : ""}` : "" });
     };
     try {
       execFile(command, argv, { timeout: timeoutMs, maxBuffer: 8 << 20, env, signal }, done);
@@ -199,16 +203,66 @@ function processNote(phase, alive) {
 export const PAIRED_PYTHON = MANIFEST.package_version;
 export const EXPECTED_TOOL_VERSION = MANIFEST.tool_version;
 
-/** 按 PATH 找可执行文件；绝对路径直接判存在。找不到返回 null（不抛）。 */
+function executable(path) {
+  try { accessSync(path, constants.X_OK); return statSync(path).isFile(); }
+  catch { return false; }
+}
+
+/** 按 PATH 找可执行文件；绝对路径也必须可执行。找不到返回 null。 */
 export function locate(command, pathValue = process.env.PATH || "") {
   if (!command) return null;
-  if (command.includes("/")) return existsSync(command) ? command : null;
+  if (command.includes("/")) return executable(command) ? command : null;
   for (const dir of String(pathValue).split(delimiter)) {
     if (!dir) continue;
     const candidate = join(dir, command);
-    if (existsSync(candidate)) return candidate;
+    if (executable(candidate)) return candidate;
   }
   return null;
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.keys(value).sort()
+    .map(key => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
+  return JSON.stringify(value);
+}
+function schemaHash(value) {
+  return createHash("sha256").update(canonical(value)).digest("hex");
+}
+
+function mcpHandshake(command, env, timeoutMs, signal) {
+  return new Promise(resolve => {
+    const requests = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-11-25",
+        capabilities: {}, clientInfo: { name: "operator-doctor", version: "1" } } },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    ].map(row => JSON.stringify(row)).join("\n") + "\n";
+    let child;
+    try {
+      child = execFile(command, [], { env, timeout: timeoutMs, signal, maxBuffer: 8 << 20 },
+        (error, stdout, stderr) => {
+          if (error) {
+            resolve({ ok: false, error: "mcp_handshake", detail:
+              `退出码 ${typeof error.code === "number" ? error.code : "?"}${stderr ? `：${stderr.trim()}` : ""}` });
+            return;
+          }
+          try {
+            const replies = String(stdout).split("\n").filter(Boolean).map(JSON.parse);
+            const init = replies.find(row => row.id === 1), listed = replies.find(row => row.id === 2);
+            if (!init?.result?.serverInfo || !Array.isArray(listed?.result?.tools)) throw new Error("握手回包不完整");
+            resolve({ ok: true, version: init.result.serverInfo.version, tools: listed.result.tools });
+          } catch (parseError) {
+            resolve({ ok: false, error: "mcp_handshake", detail: String(parseError.message) });
+          }
+        });
+    } catch (error) {
+      resolve({ ok: false, error: "mcp_handshake", detail: String(error?.message ?? error) });
+      return;
+    }
+    child.stdin.on("error", () => {});
+    child.stdin.end(requests);
+  });
 }
 
 /**
@@ -254,6 +308,25 @@ export function formatDoctor(facts) {
       else bad(`运行时 python ${python} 低于 3.9`, "换 Python 3.12 建 venv 后重跑 setup");
       const backends = Object.keys(cap.backends || {}).filter((name) => cap.backends[name] && cap.backends[name].wired);
       if (backends.length) ok(`已接线后端：${backends.join(" / ")}`);
+    }
+
+    if (!facts.mcpOk) {
+      bad(`MCP 握手失败 · ${facts.mcpError || "未知原因"}`,
+          `${facts.mcpPath || facts.command}  # 直接运行 MCP server 查看 stderr`);
+    } else {
+      if (facts.mcpVersion === PAIRED_PYTHON) ok(`MCP 判定层：${facts.mcpVersion}`);
+      else bad(`MCP 判定层 ${facts.mcpVersion || "?"} ≠ 配对版本 ${PAIRED_PYTHON}`,
+               `重装 manifest 配对的 Python ${PAIRED_PYTHON}`);
+      const names = [...(facts.mcpTools || [])].map(tool => tool.name).sort();
+      if (JSON.stringify(names) !== JSON.stringify(MANIFEST.host_tools)) {
+        bad(`MCP 工具面与 manifest 不一致 · ${names.join(", ") || "无"}`,
+            "重新生成 manifest 并成对升级 Python 与插件");
+      } else {
+        const changed = facts.mcpSchemaDrift || [];
+        if (changed.length) bad(`MCP schema 与 manifest 不一致 · ${changed.join(", ")}`,
+          "重新生成 manifest 并成对升级 Python 与插件");
+        else ok(`MCP 工具面：${names.length} 个 host 工具`);
+      }
     }
   }
 
@@ -381,16 +454,16 @@ export function formatStatus(payload, runDir = undefined) {
 }
 
 export function apply(ctx, config = {}) {
-  // 账本提交用与 `/op` 命令同一套 CLI 配置：换过 command/args 的安装，两条路一起换。
-  const journal = normalizeConfig(config, () => {});
-  configureJournalRunner({ command: journal.command, args: journal.args, timeoutMs: journal.timeoutMs });
   let hostBudget;
   if (config?.hostModelBudget !== undefined && config.hostModelBudget !== false) {
     ctx.inject(["llm", "tools", "agents", "sessionQuery"], async function operatorHostBudget(hostCtx) {
       await hostCtx.effect(() => {
         const controller = installHostModelBudget(hostCtx, config.hostModelBudget);
         hostBudget = controller;
-        return () => { if (hostBudget === controller) hostBudget = undefined; controller(); };
+        return () => {
+          if (hostBudget === controller) hostBudget = undefined;
+          return controller();
+        };
       }, "operator-tools.hostModelBudget");
     });
   }
@@ -416,6 +489,7 @@ export function apply(ctx, config = {}) {
   // 清洗在**前**、显式 `env` 在**后**：默认不把宿主密钥交给子进程，但配置里写了就照传。
   // `env` 也用于「没 pip install、直接从源码树跑」的形态（PYTHONPATH 指到仓库）。
   const env = { ...scrubEnv(process.env), ...(extraEnv || {}) };
+  configureJournalRunner({ command, args: prefix, timeoutMs, env });
   const run = (argv, signal) => runCli(command, [...prefix, ...argv], timeoutMs, env, signal);
 
   // 取消是人的正常操作，不进日志；「命令不存在」是插件根本没接线，按 error 记。
@@ -458,14 +532,34 @@ export function apply(ctx, config = {}) {
         return { kind: "success", text };
       } catch (error) { return { kind: "error", text: `✗ 未切换任务 · ${error.message}` }; }
     }
+    if (sub === "repair-lock") {
+      const match = /^(.*)\s+(\d+)$/.exec(rest);
+      if (!match) return { kind: "error", text: "✗ 缺参数 · 用法：/op repair-lock <run_dir> <dead_pid>" };
+      const runDir = resolveRunDir(stripQuotes(match[1]), agent);
+      try {
+        if (!isAbsolute(runDir)) throw new Error("任务目录必须是绝对路径");
+        const task = readHostTask(runDir);
+        const ledger = new HostModelLedger(runDir,
+          { taskId: task.task_id, contractHash: task.contract_hash });
+        const receipt = ledger.repairStaleLock({ checkedDeadPid: Number(match[2]) });
+        return { kind: "success", text: `✓ 已移除任务 ${receipt.task_id} 的陈旧锁（dead PID ${receipt.checked_dead_pid}）` };
+      } catch (error) {
+        return { kind: "error", text: `✗ 未修复锁 · ${error.message}` };
+      }
+    }
     if (sub === "doctor") {
-      const cliPath = locate(command);
-      const mcpPath = cliPath ? join(dirname(cliPath), "operator-agent-mcp") : locate("operator-agent-mcp");
+      const pathValue = extraEnv?.PATH ?? process.env.PATH ?? "";
+      const cliPath = locate(command, pathValue);
+      const mcpCandidate = cliPath ? join(dirname(cliPath), "operator-agent-mcp")
+        : locate("operator-agent-mcp", pathValue);
+      const mcpPath = mcpCandidate ? locate(mcpCandidate) : null;
+      const workflow = (extraEnv && extraEnv.OPERATOR_AGENT_WORKFLOW)
+        || process.env.OPERATOR_AGENT_WORKFLOW || "";
       const facts = {
         command, cliFound: Boolean(cliPath), cliPath: cliPath || command,
-        mcpFound: Boolean(mcpPath && existsSync(mcpPath)), mcpPath: mcpPath || "",
-        workflow: (extraEnv && extraEnv.OPERATOR_AGENT_WORKFLOW) || process.env.OPERATOR_AGENT_WORKFLOW || "",
+        mcpFound: Boolean(mcpPath), mcpPath: mcpCandidate || "", workflow,
         pluginVersion: PLUGIN_VERSION, capabilitiesOk: false, capabilities: null, capabilitiesError: "",
+        mcpOk: false, mcpVersion: "", mcpTools: [], mcpError: "",
       };
       if (cliPath) {
         const out = await run(["capabilities"], signal);
@@ -478,7 +572,19 @@ export function apply(ctx, config = {}) {
           } catch { facts.capabilitiesError = "返回的不是 JSON"; }
         }
       }
-      const healthy = facts.cliFound && facts.mcpFound && facts.capabilitiesOk;
+      if (mcpPath) {
+        const probe = await mcpHandshake(mcpPath,
+          { ...env, OPERATOR_AGENT_WORKFLOW: workflow || "host" }, timeoutMs, signal);
+        facts.mcpOk = probe.ok;
+        facts.mcpVersion = probe.version || "";
+        facts.mcpTools = probe.tools || [];
+        facts.mcpSchemaDrift = facts.mcpTools.filter(tool => {
+          const expected = MANIFEST.tools.find(row => row.name === tool.name);
+          return !expected || schemaHash(tool.inputSchema) !== expected.schema_hash;
+        }).map(tool => tool.name);
+        facts.mcpError = probe.detail || "";
+      }
+      const healthy = facts.cliFound && facts.mcpFound && facts.capabilitiesOk && facts.mcpOk;
       return { kind: healthy ? "success" : "error", text: formatDoctor(facts) };
     }
     if (sub === "capabilities") {
@@ -525,7 +631,7 @@ export function apply(ctx, config = {}) {
     definitionId: "dsh-operator-agent",
     name: "op",
     description: "算子判定层：查能力 / 查无人值守状态（不经过模型）",
-    input: { hint: "new [run_dir] | capabilities | doctor | status [run_dir] [invocation_id] | cancel <run_dir> <invocation_id> | help" },
+    input: { hint: "new [run_dir] | capabilities | doctor | status [run_dir] [invocation_id] | cancel <run_dir> <invocation_id> | repair-lock <run_dir> <dead_pid> | help" },
     // `agent` 是宿主给的（invocation = {commandId, agent, rawInput, attachments, signal}），
     // 只有它带着会话工作区，相对路径要靠它才能落到人想去的地方。
     handler: async ({ rawInput, signal, agent, commandId }) => handle(rawInput, signal, agent, commandId),

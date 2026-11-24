@@ -41,14 +41,15 @@ def archive_identity(path):
                 raise ValueError('plugin archive must contain regular package-relative files')
             if member.isfile():
                 files[str(Path(*parts[1:]))] = hashlib.sha256(archive.extractfile(member).read()).hexdigest()
-        member = archive.extractfile('package/package.json')
-        package = json.load(member)
+        for required in ('index.mjs', 'cordis.patch.yml', 'LICENSE', 'NOTICE', 'manifest.json'):
+            if required not in files:
+                raise ValueError('plugin archive missing '+required)
+        package = json.load(archive.extractfile('package/package.json'))
+        manifest = json.load(archive.extractfile('package/manifest.json'))
     if package.get('name') != NAME:
         raise ValueError('unexpected plugin package name')
-    for required in ('index.mjs', 'cordis.patch.yml', 'LICENSE', 'NOTICE'):
-        if required not in files:
-            raise ValueError('plugin archive missing '+required)
-    return dict(path=str(path), sha256=sha(path), name=NAME, version=package['version'], files=files)
+    return dict(path=str(path), sha256=sha(path), name=NAME, version=package['version'],
+                files=files, manifest=manifest)
 
 
 def invoke(argv, label, root, env, commands, *, timeout=180):

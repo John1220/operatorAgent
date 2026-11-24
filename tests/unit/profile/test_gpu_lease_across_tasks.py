@@ -7,9 +7,6 @@
 这一组不碰 GPU、不碰网络：租约是控制端的事，键取自**声明**（`REQUIRED_GPU_UUID` 与
 目标主机），所以能在 prepare/reserve 阶段就判出来。
 """
-import inspect
-import json
-
 import pytest
 
 from operator_agent.app import hitl_tools as ht
@@ -39,16 +36,6 @@ def leases(tmp_path, monkeypatch):
     return tmp_path/'leases'
 
 
-
-#: L3 一侧的租约集成**尚未**搬到本分支：v0.8.2 的 eb0eda5 把它接进
-#: `HostTaskBudget.reserve`，而那段与 seed baseline、profile in-flight 等预算特性
-#: 缠在一起，半搬会留下更糟的状态。所以这里先 skip，而且判据是**看源码**：
-#: 一旦 `reserve` 里出现租约，这些用例自动开始跑 —— 不需要有人记得回来删 skip。
-_LEASE_WIRED = 'gpu_lease' in inspect.getsource(HostTaskBudget.reserve)
-requires_lease_integration = pytest.mark.skipif(
-    not _LEASE_WIRED,
-    reason='L3 侧 GPU 租约尚未移植（v0.8.2 eb0eda5）；本分支只搬了 gpu_lease 模块本身')
-
 def task(root, name):
     run = root/name
     # 这里只需要一个已 prepare 的任务来挂租约；`seed_source` 是 v0.8.2 另一项
@@ -58,7 +45,6 @@ def task(root, name):
     return run, HostTaskBudget(run, contract.hash)
 
 
-@requires_lease_integration
 def test_two_tasks_on_the_same_card_cannot_both_enter_measurement(leases, monkeypatch):
     monkeypatch.setenv('OPERATOR_AGENT_REQUIRED_GPU_UUID', GPU_A)
     first_run, first = task(leases, 'task-a')
@@ -75,7 +61,6 @@ def test_two_tasks_on_the_same_card_cannot_both_enter_measurement(leases, monkey
     second.reserve(code_hash(SEED))
 
 
-@requires_lease_integration
 def test_two_tasks_on_different_cards_run_in_parallel(leases, monkeypatch):
     first_run, first = task(leases, 'task-a')
     monkeypatch.setenv('OPERATOR_AGENT_REQUIRED_GPU_UUID', GPU_A)
@@ -90,7 +75,6 @@ def test_two_tasks_on_different_cards_run_in_parallel(leases, monkeypatch):
         [f'{HOST}|{GPU_A}', f'{HOST}|{GPU_B}'])
 
 
-@requires_lease_integration
 def test_profile_and_l3_are_exclusive_across_task_directories(leases, monkeypatch):
     """NCU 与 L3 不许同卡并行 —— 跨任务目录也一样。"""
     monkeypatch.setenv('OPERATOR_AGENT_REQUIRED_GPU_UUID', GPU_A)
@@ -107,7 +91,6 @@ def test_profile_and_l3_are_exclusive_across_task_directories(leases, monkeypatc
     other.reserve(code_hash(SEED))
 
 
-@requires_lease_integration
 def test_an_undeclared_card_blocks_every_card_on_that_host(leases, monkeypatch):
     """"不知道是哪张卡"不能当成"大概是别的卡"：未声明的一侧与任何同机租约冲突。"""
     _, declared = task(leases, 'task-declared')

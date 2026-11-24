@@ -47,7 +47,7 @@ function canonical(value) {
 function digest(value) { return createHash("sha256").update(canonical(value)).digest("hex"); }
 function bytesHash(value) { return createHash("sha256").update(value).digest("hex"); }
 
-function bootIdentity() {
+export function bootIdentity() {
   if (processBootId) return processBootId;
   let value;
   try {
@@ -157,8 +157,11 @@ export class HostModelLedger {
     try {
       const fd = openSync(owner, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL
         | constants.O_NOFOLLOW, 0o600);
-      try { writeFileSync(fd, canonical({ nonce, pid: process.pid }) + "\n"); fsyncSync(fd); }
-      finally { closeSync(fd); }
+      try {
+        writeFileSync(fd, canonical({ nonce, pid: process.pid, task_id: this.taskId,
+          contract_hash: this.contractHash, boot_id: bootIdentity() }) + "\n");
+        fsyncSync(fd);
+      } finally { closeSync(fd); }
       return action();
     } finally {
       // Never remove a replaced lock or a lock whose owner cannot be established.
@@ -167,6 +170,34 @@ export class HostModelLedger {
       unlinkSync(owner);
       rmdirSync(lock);
     }
+  }
+
+  repairStaleLock({ checkedDeadPid } = {}) {
+    if (!integer(checkedDeadPid, 1)) refuse("host_model_locked", "A checked dead PID is required.");
+    ordinary(this.runDir, { directory: true });
+    const lock = join(this.runDir, LOCK);
+    let owner;
+    try {
+      ordinary(lock, { directory: true, mutable: true });
+      owner = readObject(join(lock, "owner.json"), { mutable: true }).value;
+    } catch { refuse("host_model_locked", "Stale lock ownership cannot be established."); }
+    if (typeof owner.nonce === "string" && owner.nonce && owner.pid === checkedDeadPid
+        && owner.task_id === this.taskId && owner.contract_hash === this.contractHash
+        && owner.boot_id === bootIdentity()) {
+      let alive = true;
+      try { process.kill(checkedDeadPid, 0); }
+      catch (error) {
+        if (error.code !== "ESRCH") refuse("host_model_locked", "Dead PID cannot be verified.");
+        alive = false;
+      }
+      if (alive) refuse("host_model_locked", "PID is still alive; lock was not removed.");
+      const current = readObject(join(lock, "owner.json"), { mutable: true }).value;
+      if (current.nonce !== owner.nonce) refuse("host_model_locked", "Lock owner changed during repair.");
+      unlinkSync(join(lock, "owner.json"));
+      rmdirSync(lock);
+      return { removed: true, task_id: this.taskId, checked_dead_pid: checkedDeadPid };
+    }
+    refuse("host_model_locked", "Lock owner, boot identity or task identity differs; lock was not removed.");
   }
 
   _hostTask() {

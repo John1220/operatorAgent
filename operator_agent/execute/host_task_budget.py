@@ -475,14 +475,29 @@ class HostTaskBudget:
                     raise HostTaskBudgetError('host_final_budget', 'independent final reservation already spent')
                 if not any(r['source_hash']==source_hash and _timely_l2(r) for r in state['records']):
                     raise HostTaskBudgetError('host_final_source', 'final requires a prior complete L2 pass of this source')
-            record = dict(id=len(state['records'])+1, source_hash=source_hash, purpose=purpose,
-                          status='reserved', reserved_epoch=time.time(),
-                          reserved_monotonic=monotonic(), evidence=evidence,
-                          full_l2_passed=None, owner_invocation_id=owner_invocation_id)
-            state['records'].append(record)
-            state['max_elapsed_s'] = elapsed
-            _write_state(self.run, state, 'budget_reserved')
-            return dict(record, remaining_s=snapshot['remaining_s'])
+            from .gpu_lease import GpuLeaseBusy, acquire as acquire_lease
+            lease_owner = owner_invocation_id or 'verify-' + uuid.uuid4().hex
+            try:
+                acquire_lease(self.run, owner=lease_owner, tool='verify',
+                              deadline=time.time() + float(snapshot['remaining_s']))
+            except GpuLeaseBusy as error:
+                raise HostTaskBudgetError(
+                    'host_gpu_busy',
+                    f'{error}; verification and NCU replay must not share the GPU') from error
+            try:
+                record = dict(id=len(state['records'])+1, source_hash=source_hash, purpose=purpose,
+                              status='reserved', reserved_epoch=time.time(),
+                              reserved_monotonic=monotonic(), evidence=evidence,
+                              full_l2_passed=None, owner_invocation_id=owner_invocation_id,
+                              gpu_lease_owner=lease_owner)
+                state['records'].append(record)
+                state['max_elapsed_s'] = elapsed
+                _write_state(self.run, state, 'budget_reserved')
+                return dict(record, remaining_s=snapshot['remaining_s'])
+            except BaseException:
+                from .gpu_lease import release as release_lease
+                release_lease(self.run, lease_owner)
+                raise
 
     def _evidence_path(self, value):
         original = Path(value).absolute()
@@ -557,6 +572,8 @@ class HostTaskBudget:
             record.update(status=outcome, finished_epoch=time.time(),
                 finished_after_deadline=state['max_elapsed_s'] >= policy['limits']['wall_clock_s'])
             _write_state(self.run, state, 'budget_settled')
+            from .gpu_lease import release as release_lease
+            release_lease(self.run, record.get('gpu_lease_owner') or '')
             return self._snapshot(policy,state)
 
     def settle_owner(self, invocation_id, *, outcome='cancelled', reject_completed=False):
@@ -598,5 +615,9 @@ class HostTaskBudget:
                     settled.append(record['id'])
             state['max_elapsed_s']=elapsed
             _write_state(self.run, state, 'budget_settled')
+            from .gpu_lease import release as release_lease
+            for record in state['records']:
+                if record['id'] in settled:
+                    release_lease(self.run, record.get('gpu_lease_owner') or '')
             return dict(self._snapshot(policy,state), settled_owner_invocation_id=invocation_id,
                         settled_reservation_ids=settled)
