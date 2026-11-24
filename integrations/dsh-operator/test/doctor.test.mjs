@@ -28,7 +28,7 @@ test("healthy install reports every fact and no problem", () => {
   const text = formatDoctor(healthy());
   assert.match(text.split("\n")[0], /^✓ 安装自检通过/);
   assert.match(text, /dsh-operator-agent 0\.2\.3/);
-  assert.match(text, /工具契约：12/);
+  assert.ok(text.includes(`工具契约：${EXPECTED_TOOL_VERSION}`), text);
   assert.match(text, /判定层：0\.7\.2/);
   assert.match(text, /python 3\.12\.16/);
   assert.match(text, /已接线后端：mock \/ fake/);
@@ -45,7 +45,9 @@ test("contract mismatch is a failure, not a warning", () => {
   const facts = healthy();
   facts.capabilities.tool_version = 11;
   const text = formatDoctor(facts);
-  assert.match(text, /工具契约 11 ≠ 期望 12/);
+  // 期望值来自构建期清单，这里跟着它走：写死数字会让下一次升契约时这条用例
+  // 自己也变成「过期的判据」。
+  assert.ok(text.includes(`工具契约 11 ≠ 期望 ${EXPECTED_TOOL_VERSION}`), text);
   assert.match(text, /pip install --upgrade dsh-operator-agent==0\.7\.2/);
 });
 

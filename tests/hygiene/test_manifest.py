@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "integrations" / "dsh-operator"
 MANIFEST = PLUGIN / "manifest.json"
 
+from operator_agent import __version__ as package_version                  # noqa: E402
 from operator_agent.app import mcp_server                                  # noqa: E402
 
 REGENERATE = ("重新生成：python -m operator_agent.app.mcp_server --emit-manifest"
@@ -72,6 +73,24 @@ class TestTheManifestDoesNotRot:
         committed = json.loads(MANIFEST.read_text(encoding="utf-8"))
         assert committed["legacy_tools"] == ["operator_bench", "operator_repair", "operator_run"]
         assert set(committed["legacy_tools"]) & set(committed["host_tools"]) == set()
+
+    def test_the_plugin_reads_its_versions_from_the_manifest(self):
+        """doctor 的「配对版本 / 工具契约」也**不许手抄** —— 清单里两个数都有。
+
+        手抄的失效方向是反的，所以更难发现：Python 把契约 12 → 13（`operator` /
+        `precision` 变必填、`operator_normalize` 出现），手抄的 12 不会让任何东西
+        编译失败，只会让 `/op doctor` 在真机上报「工具契约 13 ≠ 期望 12」——
+        用过期数字否掉了当场的正确工具面。
+        """
+        source = (PLUGIN / "index.mjs").read_text(encoding="utf-8")
+        assert re.search(r'EXPECTED_TOOL_VERSION\s*=\s*\d+', source) is None, (
+            "index.mjs 里又出现了手抄的工具契约号；从 MANIFEST.tool_version 取")
+        assert re.search(r'PAIRED_PYTHON\s*=\s*"\d+\.\d+\.\d+"', source) is None, (
+            "index.mjs 里又出现了手抄的配对版本；从 MANIFEST.package_version 取")
+        assert "MANIFEST.tool_version" in source and "MANIFEST.package_version" in source
+        committed = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        assert committed["tool_version"] == mcp_server.TOOL_VERSION
+        assert committed["package_version"] == package_version
 
     def test_the_read_only_list_is_in_the_manifest(self):
         """只读集合也随清单发 —— 它是 JS 模型门的第三个手抄副本。"""

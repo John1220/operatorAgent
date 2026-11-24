@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { startModelRelay } from "./model-relay.mjs";
 import { installHostModelBudget } from "./host-model-budget.mjs";
+import { MANIFEST } from "./manifest.mjs";
 
 /** 插件自身版本（package.json）；doctor 用它说明"配对的是哪一版". */
 const PLUGIN_VERSION = (() => {
@@ -186,9 +187,16 @@ function processNote(phase, alive) {
   return "进程状态未知";
 }
 
-/** 本插件配对的 Python 判定层版本与工具契约号；升级时两处一起改。 */
-export const PAIRED_PYTHON = "0.7.2";
-export const EXPECTED_TOOL_VERSION = 12;
+/**
+ * 本插件配对的 Python 判定层版本与工具契约号。
+ *
+ * **两个数都来自构建期清单**，不在这里手抄。手抄的失效方向比它看起来更难发现：
+ * Python 把契约从 12 提到 13（`operator` / `precision` 变必填、`operator_normalize`
+ * 出现），手抄的 12 不会编译失败，只会让 `/op doctor` 在真机上把**正确**的工具面
+ * 判成「工具契约 13 ≠ 期望 12」—— 一个过期的数字否掉了当场的正确事实。
+ */
+export const PAIRED_PYTHON = MANIFEST.package_version;
+export const EXPECTED_TOOL_VERSION = MANIFEST.tool_version;
 
 /** 按 PATH 找可执行文件；绝对路径直接判存在。找不到返回 null（不抛）。 */
 export function locate(command, pathValue = process.env.PATH || "") {
