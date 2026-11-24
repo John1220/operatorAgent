@@ -51,7 +51,8 @@ def compare(committed, fresh, package):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('--fresh', required=True, help='run_all_replays.sh 写回执的目录')
+    parser.add_argument('--fresh', required=True, type=Path,
+                        help='run_all_replays.sh 写回执的目录')
     parser.add_argument('--cases', nargs='*', default=list(PACKAGES))
     arguments = parser.parse_args(argv)
     problems = []

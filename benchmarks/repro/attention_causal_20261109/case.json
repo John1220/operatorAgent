@@ -24,7 +24,8 @@
     "precision": "fp16",
     "dsl": "triton",
     "hardware": "nvidia_gpu",
-    "min_speedup": 1.0
+    "min_speedup": 1.0,
+    "operator": "attention"
   },
   "contract_hash": "e9f75d60cf1c2b35372cf87e3c77d8b63e69514e426a558733363d0e2f96bfe5",
   "correctness_profile": "builtin-attention-fp16-cuda-v1",
@@ -73,5 +74,12 @@
     "max_model_calls": 1,
     "max_output_tokens_per_call": 8192,
     "total_output_token_reservations": 8192
+  },
+  "declaration_amendment": {
+    "added": {
+      "operator": "attention"
+    },
+    "why": "这一包冻结在 `operator` 变成必填之前。补上的是**同一个**算子类型 —— 它当时由 `request` 推断得到；契约哈希未变（重算后与 case.json 记录的相同），所以被评判的东西没有变，变的只是写法。",
+    "contract_hash_unchanged": "e9f75d60cf1c2b35372cf87e3c77d8b63e69514e426a558733363d0e2f96bfe5"
   }
 }

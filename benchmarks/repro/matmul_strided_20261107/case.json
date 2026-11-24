@@ -23,7 +23,8 @@
     "precision": "fp16",
     "dsl": "triton",
     "hardware": "nvidia_gpu",
-    "min_speedup": 1.0
+    "min_speedup": 1.0,
+    "operator": "matmul"
   },
   "contract_hash": "6e337b0f1be605919844d29c0200178c9bf281b3214ef2bf2b32288f3894df97",
   "correctness_profile": "builtin-layernorm-fp16-cuda-v2",
@@ -53,5 +54,12 @@
     "max_model_calls": 1,
     "max_output_tokens_per_call": 8192,
     "total_output_token_reservations": 8192
+  },
+  "declaration_amendment": {
+    "added": {
+      "operator": "matmul"
+    },
+    "why": "这一包冻结在 `operator` 变成必填之前。补上的是**同一个**算子类型 —— 它当时由 `request` 推断得到；契约哈希未变（重算后与 case.json 记录的相同），所以被评判的东西没有变，变的只是写法。",
+    "contract_hash_unchanged": "6e337b0f1be605919844d29c0200178c9bf281b3214ef2bf2b32288f3894df97"
   }
 }

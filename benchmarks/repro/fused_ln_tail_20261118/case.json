@@ -12,19 +12,30 @@
   },
   "declaration": {
     "request": "fp16 32768x6144 residual add layernorm",
-    "shapes": [[32768, 6144]],
+    "shapes": [
+      [
+        32768,
+        6144
+      ]
+    ],
     "precision": "fp16",
     "dsl": "triton",
     "hardware": "nvidia_gpu",
-    "min_speedup": 1.5
+    "min_speedup": 1.5,
+    "operator": "fused_layernorm_residual"
   },
   "contract_hash": "093339587d8c462c8af2328095b00fd471575ed26e2630c2ef81a6925ebdc44a",
   "correctness_profile": "builtin-fused-layernorm-residual-fp16-cuda-v1",
   "suite_digest": "652f65b16440864795cf60bd75bd3e93146dd26dfce3b0e6b6d2ccf195cf4aa7",
   "expected": {
-    "levels": {"L1": true, "L2": false},
+    "levels": {
+      "L1": true,
+      "L2": false
+    },
     "failure_kind": "numeric_tail_block",
-    "passing_cases": ["fused-ln-residual-1x1-random-contiguous"],
+    "passing_cases": [
+      "fused-ln-residual-1x1-random-contiguous"
+    ],
     "failing_cases": [
       {
         "case_id": "fused-ln-residual-1x33-random-contiguous",
@@ -43,5 +54,12 @@
     "max_model_calls": 1,
     "max_output_tokens_per_call": 8192,
     "total_output_token_reservations": 8192
+  },
+  "declaration_amendment": {
+    "added": {
+      "operator": "fused_layernorm_residual"
+    },
+    "why": "这一包冻结在 `operator` 变成必填之前。补上的是**同一个**算子类型 —— 它当时由 `request` 推断得到；契约哈希未变（重算后与 case.json 记录的相同），所以被评判的东西没有变，变的只是写法。",
+    "contract_hash_unchanged": "093339587d8c462c8af2328095b00fd471575ed26e2630c2ef81a6925ebdc44a"
   }
 }

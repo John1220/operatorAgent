@@ -310,7 +310,23 @@ operator-agent journal-migrate --run-dir <旧任务目录> [--dry-run]
 `benchmarks/experiments/s4/s4_case_bundle.py` 的那个读点改成读投影：没迁移的目录
 直接报错并给出上面那条命令，不回去读那个已经没人写的文件。
 
-**还没做的**：4 个包的真机 replay 与对账要 H20 窗口（纯 GPU 验证时间、零模型调用）。
+**真机 replay 与对账：2026-11-24 在 H20 上跑通。** `sh benchmarks/repro/run_all_replays.sh`
+八个回放 8/8 绿：四个「修前」都按冻结预期复现（契约哈希 + 源码身份 + 级别 + 具名用例及误差），
+四个补丁都过完整 L2（32/32、32/32、15/15、8/8）。随后
+`python -m benchmarks.repro.compare_replays --fresh logs/replays.ekmrZv` → `ok: true`，
+`problems: []`：重跑的回执与仓里那份逐字段相同。
+
+跑之前遇到一件必须先修的事：**四份 `case.json` 的 `declaration` 都冻结在 `operator`
+变成必填之前**，所以 `prepare` 当场拒绝（`explicit_declaration_required`）。补上的
+`operator` 是各包**当年推断出的同一个**算子类型（`fused_layernorm_residual` / `matmul`
+/ `attention`），并且用重算契约哈希证明被评判的东西没变：四份重算值分别等于
+`case.json` 里记录的 `093339587d8c…` / `093339587d8c…` / `6e337b0f1be6…` / `e9f75d60cf1c…`。
+每份 `case.json` 里加了 `declaration_amendment`，把「补了什么、为什么、契约哈希未变」
+写在证据旁边 —— 改的是写法，不是判据。
+
+顺带一个观测（**未改**）：`matmul_strided_20261107/case.json` 的 `correctness_profile`
+写着 `builtin-layernorm-fp16-cuda-v2`，而它冻结契约重算出来是 `builtin-l2-v1`。
+回放不比较这个字段（判据是契约），所以它不影响结论，但那个值本身是错的。
 
 ## 逐文件：直接构造 `ToolCall` 的测试
 
