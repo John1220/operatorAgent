@@ -18,6 +18,7 @@
 | `7d0ff8d` | 工具契约的**插件侧**补齐：`EXPECTED_TOOL_VERSION` / `PAIRED_PYTHON` 改从构建期清单取（此前手抄 `12`，真机上 doctor 反着误报） |
 | `243f5de` | journal 的**重试**行为钉住（被拒不留痕、不占号、终态不被同事件覆盖、并发重试只进一条） |
 | `124c058` | **落地顺序第 3 步**：读者一律读投影；autonomous 那条路一起切（最后一个写者消失） |
+| `6e2aae4` | **落地顺序第 2 步**：`journal-append` 入口；宿主提交 `task_closed` 与 `budget_*` 快照 |
 
 状态对照（三条计划的收口情况）：
 
@@ -35,9 +36,9 @@
 
 接下来两件事，按此顺序：
 
-1. **接 journal 的写入方**（本文下面的五步）。**第 1、3 步已做完**；剩第 2、4、5 步。
-   第 3 步顺带把 autonomous 那条路一起切了 —— 它是 `grep run-status.json` 归零的
-   最后一道门，绕不开。
+1. **接 journal 的写入方**（本文下面的五步）。**第 1、2、3 步已做完**；剩第 4、5 步。
+   封账现在有写入方了（宿主在相位落定 `discussion` 时发 `task_closed`），
+   所以 `is_open` 第一次有了「真」的答案。
 2. **profile 搬完**：`ncu_profile` / `gpu_lease` / `profile_budget` 已搬；
    还差把租约接进 `HostTaskBudget.reserve`，判据是
    `tests/unit/profile/test_gpu_lease_across_tasks.py` 里那 4 条 skip
