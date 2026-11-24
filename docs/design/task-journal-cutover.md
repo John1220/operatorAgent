@@ -14,6 +14,23 @@
 | `091f813` | journal 状态转换：`admit()` 让 `append` 与 `fold` 共用顺序判据（终态不可回退、Job 事件要求 active） |
 | `8e8f9c0` | 旧任务只读恢复：`legacy_task_view()` 按各自身份读回契约 / 两本账 / 交付源码，A4 真实产物做回归 |
 | `cefe7f9` | **落地顺序第 1 步**：`ToolCall` 接 journal（详见下面第 1 步的「已完成」） |
+| `d00193c` | 文档：把上面的行指向它 |
+| `7d0ff8d` | 工具契约的**插件侧**补齐：`EXPECTED_TOOL_VERSION` / `PAIRED_PYTHON` 改从构建期清单取（此前手抄 `12`，真机上 doctor 反着误报） |
+| `243f5de` | journal 的**重试**行为钉住（被拒不留痕、不占号、终态不被同事件覆盖、并发重试只进一条） |
+
+状态对照（三条计划的收口情况）：
+
+1. **工具契约收齐** —— **已完成**（`48f3bd2` + `7d0ff8d`）。注意后者是补齐：
+   前者把 Python 侧与清单提到 13，插件那份手抄的 12 落下了，真机 `/op doctor`
+   会把正确的工具面判成「13 ≠ 期望 12」。
+2. **恢复语义** —— A4 真实产物的回归件在 `tests/unit/resume/`（7 条，本机跑真产物，
+   缺产物时 skip）；journal 的乱序与重试用例齐了。**状态读写方的切换只做完 tool-call
+   那一条**，autonomous 未切。
+3. **迁移 0.8.2 完整优化流程** —— **未开始**。`operator_profile` 在本分支 0 处；
+   `HostTaskBudget.reserve` 里没有租约（4 条 L3 用例仍按源码探针 skip）；
+   `reserve` 也还没有 v0.8.2 的 `final_selection` 参数。搬运源在
+   `codex/v0.8.2-profile-optimize`（`reserve` 里 `acquire_lease`／`finish`、`settle`
+   里 `release_lease`，`hitl_tools` 的 `operator_profile` 在 `HOST_TOOLS` 内）。
 
 接下来两件事，按此顺序：
 
