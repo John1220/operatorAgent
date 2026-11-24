@@ -1,9 +1,12 @@
 #!/bin/sh
 # 跑全部四个回放包：修前必须失败（且与冻结预期一致）、补丁必须过完整 L2。
 # 零模型调用；只花 GPU 验证时间。用法：sh benchmarks/repro/run_all_replays.sh [host] [work_dir]
+#
+# 工作目录在 **/data3** 下（`/` 只剩个位数 GB，见 docs/testing/remote-workdir.md）；
+# 远端会自己 mkdir + uv init + 上传脚本，所以换目录不需要预先准备什么。
 set -eu
 HOST="${1:-h20}"
-WORKDIR="${2:-/root/operator-p2-seed-20261116}"
+WORKDIR="${2:-${OPERATOR_REMOTE_WORK_DIR:-/data3/operator-work}}"
 PY="${PY:-.venv/bin/python}"
 mkdir -p logs
 receipts=$(mktemp -d logs/replays.XXXXXX)

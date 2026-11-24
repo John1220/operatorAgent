@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import uuid
 from pathlib import Path
 
@@ -260,7 +261,9 @@ def main(argv=None):
     parser.add_argument("--expect", default=None, choices=["fail", "pass"],
                         help="default: case.json's expected levels decide it")
     parser.add_argument("--host", default="h20")
-    parser.add_argument("--work-dir", default="/root/operator-p2-seed-20261116")
+    # 远端工作目录默认落在 /data3：H20 的 / 只有个位数 GB（见 docs/testing/remote-workdir.md）。
+    parser.add_argument("--work-dir",
+                        default=os.environ.get("OPERATOR_REMOTE_WORK_DIR", "/data3/operator-work"))
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--final", action="store_true",

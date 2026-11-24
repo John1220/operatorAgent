@@ -73,7 +73,10 @@ final 级别与 purpose）必须相等。
 
 ## 运行前提
 
-- H20 上有可用的 SSH（`~/.ssh/config` 的 `h20` 别名）与已 provision 的远端工作目录；
+- H20 上有可用的 SSH（`~/.ssh/config` 的 `h20` 别名）；
+- 远端工作目录在 **`/data3/operator-work`**（`/root` 所在根分区只剩个位数 GB）。远端会自己
+  `mkdir` + `uv init` + 上传脚本，换目录不用预先准备；覆盖它用 `OPERATOR_REMOTE_WORK_DIR`
+  或第二个参数（见 `docs/testing/remote-workdir.md`）；
 - 回放**不需要模型**：全程零模型调用，只花 GPU 验证时间；
 - 回放格目录必须在仓库之外（本仓 `output/` 符号链接即可），否则 DSH 沙箱会挡 `realpath`。
 
