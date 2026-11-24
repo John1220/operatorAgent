@@ -273,6 +273,41 @@ JS 不再自己 append。理由：`rev` = 「读当前最大值 + 1」，两侧�
 
 验收：4 个包依次 replay 全绿；脚本对「无法归属的旧流」显式拒绝而不是猜。
 
+#### 本地已完成（2026-11-24）；replay 那一步要 H20
+
+先把一件事说清：**这四个包里没有旧相位文件**。它们进的是 `hitl_tools.prepare/verify`
+的进程内路径，从来只写过 `worker-result.json` 与产物目录；`failure_replay.py` 里
+一个 `status` 都不提。所以对它们来说，第 5 步不是「转换」，而是**证明没变**：
+
+```
+python -m benchmarks.repro.compare_replays --fresh logs/replays.XXXXXX
+```
+
+逐字段对账（只放过 `evidence` / `run_dir` / `final_evidence` 三个「这一次落在哪」的
+字段）。这个工具自己也有守卫：改判据要红、少一份回执要红、只改路径不算漂移 ——
+否则它会替「重放不成立」签下「成立」。
+
+真正需要转换的是**旧证据目录**，脚本是新的 CLI 子命令：
+
+```
+operator-agent journal-migrate --run-dir <旧任务目录> [--dry-run]
+```
+
+四条纪律，全部落成了测试（`tests/unit/job/test_legacy_migration.py`）：
+
+* **能归属才搬**：`declaration.json` + `contract.json` 缺一个就拒绝（`not_migratable`），
+  不从孤零零的相位文件反推任务身份；
+* **不覆盖已有流**（`already_migrated`），也不改旧文件（它们原地不动，是那一年运行的记录）；
+* **未知相位拒绝**（`unknown_phase` / `unattributable_status`），不猜；
+* **旧文件里没有的东西不补**：`result` 这一格旧相位里根本不存在 —— 能确定的写
+  `received`，不能确定的写 `unknown` + `receipt_absent` / `stopped_before_receipt`。
+  旧相位里的 `lost` 只搬成「激活过」，读者用同一条判据重新得出 lost。
+
+`benchmarks/experiments/s4/s4_case_bundle.py` 的那个读点改成读投影：没迁移的目录
+直接报错并给出上面那条命令，不回去读那个已经没人写的文件。
+
+**还没做的**：4 个包的真机 replay 与对账要 H20 窗口（纯 GPU 验证时间、零模型调用）。
+
 ## 逐文件：直接构造 `ToolCall` 的测试
 
 ```

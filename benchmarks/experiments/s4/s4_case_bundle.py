@@ -15,6 +15,23 @@ EXPECTED_TASKS=('matmul-aligned','matmul-tail','softmax-tail','layernorm-tail')
 EXPECTED_PLAN='cd661a10229d8461e116eb9d41b161541e443f76496657d196781fb7769778b3'
 
 
+def migrated_status(directory):
+    """旧证据的相位：**从任务账本的投影读**，不再读旧相位文件。
+
+    这些目录是「账本之前」的产物，所以先要迁移一次：
+        operator-agent journal-migrate --run-dir <该任务目录>
+    没有账本就直接报错并给出命令 —— 不回去读那个已经没人写的文件。
+    """
+    from operator_agent.core import task_journal
+    directory=Path(directory)
+    view=(task_journal.invocation_view(directory) if directory.parent.name=='tool-calls'
+          else task_journal.task_view(directory))
+    if view is None:
+        raise ValueError(f'{directory}: 没有任务账本。先跑 '
+                         f'`operator-agent journal-migrate --run-dir <任务目录>`，再重建 bundle')
+    return view
+
+
 def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
 def load(p): return json.loads(p.read_text(encoding='utf-8'))
 def write(p,data):
@@ -81,7 +98,7 @@ def main():
                 evidence=run/'repair-1'; event_dir=evidence/'phase-events'; journal=evidence/'model-journal'; initial=load(evidence/'result.json')['initial_full_l2_passed']; status_dir=next((run/'tool-calls').iterdir())
             else:
                 event_dir=run/'measurements'; journal=run/'model-journal'; initial=None; status_dir=run
-            status=load(status_dir/'run-status.json')
+            status=migrated_status(status_dir)
             if status.get('phase')!='done' or (status.get('cleanup') or {}).get('remote_execution')!='quiescent': raise ValueError('unproven cleanup: '+name)
             selected=source_row['selected_source_sha256']; paths=list(event_dir.glob('verification-event-*.json'))
             events=[(p,load(p)) for p in paths]

@@ -46,6 +46,19 @@ python -m benchmarks.experiments.v08.failure_replay \
 
 各个步骤的回执在 `$receipts`，详细的验证产物在样本目录的 `run/`。
 
+## 对账（迁移/判据改动之后必须做）
+
+重跑的回执要与**提交进仓的那份**逐字段相同，否则「重放成立」这句话就不再成立：
+
+```bash
+python -m benchmarks.repro.compare_replays --fresh logs/replays.XXXXXX
+# → {"ok": true, ...} / 非零 + 每条差异
+```
+
+不比较的只有三个「运行身份」字段（`evidence` / `run_dir` / `final_evidence`）——
+它们描述这一次的产物落在哪；其余字段（契约哈希、源码哈希、级别、判定、编译失败、
+final 级别与 purpose）必须相等。
+
 ## 回放器判什么
 
 `benchmarks/experiments/v08/failure_replay.py`：

@@ -201,6 +201,12 @@ def _parser() -> argparse.ArgumentParser:
     cancel.add_argument('--invocation-id', required=True)
     cancel.add_argument('--json-out')
 
+    jmig = sub.add_parser('journal-migrate',
+                          help='把「账本之前」的旧相位文件搬进任务账本（只搬已发生的事实）')
+    jmig.add_argument('--run-dir', required=True)
+    jmig.add_argument('--dry-run', action='store_true', help='只报要搬什么，不写')
+    jmig.add_argument('--json-out')
+
     japp = sub.add_parser('journal-append',
                           help='（插件用）往任务账本追加一条事件：stdin 给 JSON，回一条已写入的事件')
     japp.add_argument('--run-dir', required=True)
@@ -397,6 +403,13 @@ def main(argv=None) -> int:
             payload = cancel_task(args.run_dir, args.invocation_id)
         elif args.action == 'journal-append':
             payload = _journal_append(args)
+        elif args.action == 'journal-migrate':
+            from ..execute.legacy_migration import MigrationRefused, migrate
+            try:
+                payload = migrate(args.run_dir, dry_run=args.dry_run)
+            except MigrationRefused as exc:
+                payload = dict(ok=False, error=exc.code, detail=exc.detail,
+                               run_dir=str(args.run_dir))
         elif args.action in ("ledger-new", "ledger-fill", "ledger-report"):
             payload = _ledger(args)
         else:
