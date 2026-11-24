@@ -6,7 +6,8 @@
 
 ## 进度（2026-11-24，接手先读这一节）
 
-三提交计划里**前两个已合并**，第三个（迁移 0.8.2 完整优化流程）未开始。
+三提交计划里**前两个已合并**；第三个（迁移 0.8.2 完整优化流程）未开始。
+**journal 切流的五步已全部落地**（第 5 步的真机 replay 对账待 H20）。
 
 | 提交 | 内容 |
 |---|---|
@@ -19,6 +20,8 @@
 | `243f5de` | journal 的**重试**行为钉住（被拒不留痕、不占号、终态不被同事件覆盖、并发重试只进一条） |
 | `124c058` | **落地顺序第 3 步**：读者一律读投影；autonomous 那条路一起切（最后一个写者消失） |
 | `6e2aae4` | **落地顺序第 2 步**：`journal-append` 入口；宿主提交 `task_closed` 与 `budget_*` 快照 |
+| `8d91ab4` | **落地顺序第 4 步**：预算状态搬进账本（`budget_opened` / `budget_reserved` / `budget_settled`） |
+| `b490d2a` | **落地顺序第 5 步**：`journal-migrate` 迁移脚本 + 回执对账工具 |
 
 状态对照（三条计划的收口情况）：
 
@@ -36,9 +39,10 @@
 
 接下来两件事，按此顺序：
 
-1. **接 journal 的写入方**（本文下面的五步）。**第 1、2、3 步已做完**；剩第 4、5 步。
-   封账现在有写入方了（宿主在相位落定 `discussion` 时发 `task_closed`），
-   所以 `is_open` 第一次有了「真」的答案。
+1. **接 journal 的写入方**（本文下面的五步）—— **五步全部落地**。写入方只有两处
+   （`prepare` 的任务层、`ToolCall` 的 Job 层）加宿主经 CLI 提交的两类事件；
+   读者一律读投影；预算状态、封账、迁移都有了归属。
+   剩下的只有第 5 步的**真机 replay 对账**（要 H20 窗口）。
 2. **profile 搬完**：`ncu_profile` / `gpu_lease` / `profile_budget` 已搬；
    还差把租约接进 `HostTaskBudget.reserve`，判据是
    `tests/unit/profile/test_gpu_lease_across_tasks.py` 里那 4 条 skip
