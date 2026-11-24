@@ -574,13 +574,13 @@ test("formatStatus 不把无效计数或仍在运行的任务猜成预算停止"
 
 test("/op status 对 ok:false 的回包回 error，不伪装成成功", async () => {
   const cli = fakeCli(`cat <<'JSON'
-{"ok":false,"error":"run_not_started","detail":"run-status.json 不存在（还没调用 operator_run）"}
+{"ok":false,"error":"run_not_started","detail":"journal.jsonl 不存在（这个目录还没被 prepare 过）"}
 JSON`);
   const ctx = fakeCtx();
   apply(ctx, { command: cli });
   const out = await ctx.commandDefs[0].handler({ rawInput: "status /tmp/never" });
   assert.equal(out.kind, "error");
-  assert.ok(out.text.includes("run-status.json 不存在"), out.text);
+  assert.ok(out.text.includes("journal.jsonl 不存在"), out.text);
 });
 
 test("/op capabilities 对 ok:false 的回包回 error（不打一排「?」）", async () => {

@@ -56,7 +56,10 @@ python -m operator_agent.cli run --request 'matmul fp32' --shapes '8,8,8' \
 
 S2 起阶段为 `running / done / failed / cancelled / lost`。`done` 只表示本次流程结束，可能是 `budget_llm_calls`、`budget_wall_clock`、验证额度耗尽等；必须同时查看 `stopped_reason`、`all_passed` 和验证证据。任务预算停止不会被摘要报成全部完成验证；原候选验证是否通过另外保留在 `verification_all_passed` 中。
 
-`operator_status` 返回 `task_budget`、`budget`、`stopped_reason`、生成证据路径及清理状态。缺少账本的旧状态文件不补造用量或上限。运行期间定期刷新，终态保存在 `run-status.json` 和 `conductor.json`；worker 自身结果单独写入 `worker-result.json`，避免多个进程竞争写状态文件。
+`operator_status` 返回 `task_budget`、`budget`、`stopped_reason`、生成证据路径及清理状态。缺少账本的目录不补造用量或上限。相位、终态与清理证据保存在任务账本 `journal.jsonl`
+（任务层：`task_prepared → task_activated → task_closed`；调用层：`job_*`）；
+`conductor.json` 是完成摘要，worker 自身结果单独写入 `worker-result.json`。
+2026-11-24 起仓库里不再有第二个相位文件 —— 下面各节提到它的地方都是历史。
 
 本机超时终止不证明服务商停止推理或远端 GPU 已取消执行；远端行为仍受后端自身的执行保护约束。报告明确保留 `remote_cancellation_proven=false`、`provider_billing_cap=false`、`gpu_seconds=null`。监督时限不包含 MCP 的前置契约准备和 Python 启动开销，退出后的进程发现/清理也可能有短暂开销。
 

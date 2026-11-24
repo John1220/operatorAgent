@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from operator_agent.app import cli, hitl_tools as ht, mcp_server
+from operator_agent.core import task_journal
 
 
 DEFAULT = dict(wall_clock_s=1800.0, max_llm_calls=24, oracle_total=20)
@@ -103,23 +104,33 @@ def test_cli_nonfinite_budget_is_a_structured_refusal(tmp_path, capsys):
     assert not (tmp_path/'run').exists()
 
 
-@pytest.mark.parametrize('owner', ['status', 'summary'])
+@pytest.mark.parametrize('owner', ['task_closed', 'summary'])
 def test_status_returns_budget_usage_and_stop_reason(tmp_path, owner):
+    """预算用量与停因来自**账本**；`conductor.json` 只是同一件事的摘要副本。"""
     budget = dict(reserved_calls=7, remaining_calls=0, oracle_spent=2)
-    audit = dict(task_budget=EXPLICIT, budget=budget, stopped_reason='budget_llm_calls')
-    status = dict(phase='done', pid=12345)
-    if owner == 'status':
-        status.update(audit)
+    audit = dict(task_budget=EXPLICIT, budget=budget)
+    task_journal.append(tmp_path, 'task_prepared', task_id='fixture-task')
+    task_journal.append(tmp_path, 'task_activated', invocation='a' * 32, pid=12345)
+    if owner == 'task_closed':
+        task_journal.append(tmp_path, 'task_closed', invocation='a' * 32, outcome='completed',
+                            reason='budget_llm_calls', **audit)
     else:
-        (tmp_path/'conductor.json').write_text(json.dumps(dict(phase='done', **audit)))
-    (tmp_path/'run-status.json').write_text(json.dumps(status))
+        task_journal.append(tmp_path, 'task_closed', invocation='a' * 32, outcome='completed',
+                            reason='budget_llm_calls')
+        (tmp_path/'conductor.json').write_text(json.dumps(
+            dict(phase='done', stopped_reason='budget_llm_calls', **audit)))
     result = ht.autonomous_status(tmp_path)
     assert result['phase'] == 'done'
     assert result['task_budget'] == EXPLICIT and result['budget'] == budget
     assert result['stopped_reason'] == 'budget_llm_calls'
 
 
-def test_legacy_status_does_not_invent_task_limits(tmp_path):
-    (tmp_path/'run-status.json').write_text(json.dumps(dict(phase='done', pid=12345)))
+def test_a_task_without_budget_facts_does_not_invent_limits(tmp_path):
+    """账本没记预算就不报预算 —— 不拿默认值凑一个看起来完整的读数。"""
+    task_journal.append(tmp_path, 'task_prepared', task_id='fixture-task')
+    task_journal.append(tmp_path, 'task_activated', invocation='a' * 32, pid=12345)
+    task_journal.append(tmp_path, 'task_closed', invocation='a' * 32, outcome='completed')
     result = ht.autonomous_status(tmp_path)
-    assert result['task_budget'] is result['budget'] is result['stopped_reason'] is None
+    assert result['task_budget'] is None
+    assert result['stopped_reason'] is None      # 没写停因 = 没记录，不是空字符串
+    assert result['budget'] is None              # 没有冻结的预算策略就不报预算

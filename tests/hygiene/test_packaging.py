@@ -166,10 +166,13 @@ class TestTheDshShim(unittest.TestCase):
         # 终态下 process_alive 是 None（不是 False）—— 壳必须按 phase 判死活，
         # 否则一个跑完的 run 会显示成「进程 在跑」（JS 侧有对应回归测试）。
         import tempfile
+        from operator_agent.core import task_journal
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "run-status.json").write_text(
-                json.dumps({"phase": "done", "pid": 999999, "started_at": 1760000000.0}),
-                encoding="utf-8")
+            task_journal.append(tmp, 'task_prepared', task_id='fixture-task')
+            task_journal.append(tmp, 'task_activated', invocation='a' * 32,
+                                pid=999999, started_at=1760000000.0)
+            task_journal.append(tmp, 'task_closed', invocation='a' * 32,
+                                outcome='completed', finished_at=1760000010.0)
             status = autonomous_status(tmp)
         self.assertEqual(status["phase"], "done")
         self.assertIsNone(status["process_alive"])

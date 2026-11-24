@@ -427,7 +427,7 @@ export function apply(ctx, config = {}) {
 
   /**
    * 相对路径按**会话工作区**解析。宿主进程的 cwd 不是人的工作区（GUI 进程多半在 `/`），
-   * 不解析就会报「run-status.json 不存在」，看着像 run 丢了。
+   * 不解析就会报「目录不存在」，看着像 run 丢了。
    * `workingDirectory` 没装/查不到时原样传下去——不因为可选依赖把整条命令变成不可用。
    */
   const resolveRunDir = (raw, agent) => {

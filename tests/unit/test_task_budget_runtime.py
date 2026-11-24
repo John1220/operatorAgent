@@ -14,6 +14,7 @@ import pytest
 pytestmark = pytest.mark.serial
 
 from operator_agent.app import autonomous, hitl_tools as ht
+from operator_agent.core import task_journal
 from operator_agent.execute.task_budget import TaskBudgetConfig, snapshot
 from tests.unit.test_autonomous import SKETCH, CODE
 
@@ -115,6 +116,7 @@ def test_remaining_deadline_interrupts_blocked_model_request(tmp_path, monkeypat
 def test_supervisor_kills_blocked_worker_and_separate_session_descendant(tmp_path, monkeypatch):
     run = tmp_path/'run'
     run.mkdir()
+    task_journal.append(run, 'task_prepared', task_id='fixture-task')
     (run/'autonomous.json').write_text(json.dumps(dict(task_budget=dict(wall_clock_s=.5))))
     marker = tmp_path/'escaped-descendant'
     child = 'import time;from pathlib import Path;time.sleep(1);Path('+repr(str(marker))+').write_text("survived")'
@@ -125,8 +127,8 @@ def test_supervisor_kills_blocked_worker_and_separate_session_descendant(tmp_pat
     started = time.monotonic()
     assert autonomous.main([str(run)]) == 0
     assert time.monotonic()-started < 2
-    status = json.loads((run/'run-status.json').read_text())
-    assert status['stopped_reason'] == 'budget_wall_clock'
+    status = task_journal.task_view(run)
+    assert status['reason'] == 'budget_wall_clock'
     time.sleep(.7)
     assert not marker.exists()
 
@@ -165,6 +167,7 @@ def test_deleted_reservation_is_unknown_instead_of_zero(tmp_path):
 def test_late_supervisor_observation_preserves_earlier_worker_failure(tmp_path, monkeypatch):
     run = tmp_path/'run'
     run.mkdir()
+    task_journal.append(run, 'task_prepared', task_id='fixture-task')
     (run/'autonomous.json').write_text(json.dumps(dict(task_budget=dict(wall_clock_s=.1))))
     class Finished:
         pid = 123456789
@@ -179,7 +182,7 @@ def test_late_supervisor_observation_preserves_earlier_worker_failure(tmp_path, 
     monkeypatch.setattr(autonomous, '_start_worker', start)
     monkeypatch.setattr(autonomous, '_stop_worker', lambda *a: dict(status='fixture'))
     assert autonomous.main([str(run)]) == 1
-    status = json.loads((run/'run-status.json').read_text())
+    status = task_journal.task_view(run)
     assert status['phase'] == 'failed' and status['error'] == 'OriginalFailure'
     assert not status['budget']['wall_clock']['expired']
 

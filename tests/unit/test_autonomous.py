@@ -4,7 +4,7 @@
 
 1. **没配内层 LLM 就拒绝**（`llm_not_configured`）—— 不许起一个跑不出结论的进程；
 2. **起得来、跑得完**：用一个本地假的 OpenAI 兼容端点把 `Conductor` 那整段跑完
-   （零 GPU、零真实凭据、不联网），并检查 `run-status.json` / `conductor.json` / 报告；
+   （零 GPU、零真实凭据、不联网），并检查任务账本 / `conductor.json` / 报告；
 3. **相位四态**：`running` / `done` / `failed` / **`lost`**（进程没了但没写终态 ——
    这一档最容易被读成"还在跑"）；
 4. 子进程的落点收在 run 目录里（不写仓库、不写 home 的默认位置）。
@@ -22,6 +22,7 @@ from pathlib import Path
 import tempfile
 
 from operator_agent.app import hitl_tools as ht
+from operator_agent.core import task_journal
 
 SKETCH = {"algorithm": "matmul",
           "tiling": {"block_m": 64, "block_n": 64, "block_k": 32},
@@ -81,7 +82,8 @@ class TestItRefusesWithoutAnInnerLlm(unittest.TestCase):
             with self.assertRaises(ht.ToolError) as ctx:
                 ht.run_autonomous(declaration(), run)
             self.assertEqual(ctx.exception.code, "llm_not_configured")
-            self.assertFalse((run / ht.STATUS_FILE).exists())
+            # 没有任务就没有账本：拒绝发生在 prepare 之前，不留下任何「已准备」。
+            self.assertFalse((run / 'journal.jsonl').exists())
         finally:
             for k, v in saved.items():
                 if v is not None:
@@ -129,11 +131,11 @@ class TestItRunsTheWholeThing(unittest.TestCase):
             else:
                 os.environ[k] = v
 
-    def test_it_returns_immediately_with_a_pid_and_a_status_path(self):
+    def test_it_returns_immediately_with_a_pid_and_a_journal_path(self):
         self.assertTrue(self.started["ok"])
         self.assertEqual(self.started["phase"], "running")
         self.assertIsInstance(self.started["pid"], int)
-        self.assertTrue(Path(self.started["status"]).name == ht.STATUS_FILE)
+        self.assertEqual(Path(self.started["journal"]).name, 'journal.jsonl')
 
     def test_the_round_finishes_and_the_summary_is_written(self):
         self.assertEqual(self.status["phase"], "done", self.status)
@@ -162,11 +164,11 @@ class TestItRunsTheWholeThing(unittest.TestCase):
     def test_nothing_is_written_outside_the_run_dir(self):
         for child in (self.round_dir / "output", self.round_dir / "log"):
             self.assertTrue(child.exists(), child)
-        status = json.loads((self.round_dir / ht.STATUS_FILE).read_text(encoding="utf-8"))
+        view = task_journal.task_view(self.round_dir)
         # ⚠️ `OPERATOR_AGENT_*_DB=off` **关不掉持久化**（2026-10-08 起普通环境变量只能
         # 重定向）；写 "off" 会被解析回仓库里那份语料。所以验的是「重定向进 run 目录」。
-        self.assertEqual(status["corpus"], {"kernel_db": "run-local",
-                                            "failure_db": "run-local"})
+        self.assertEqual(view["corpus"], {"kernel_db": "run-local",
+                                          "failure_db": "run-local"})
 
     def test_the_repo_corpus_is_untouched(self):
         repo_output = Path(__file__).resolve().parents[2] / "output"
@@ -191,20 +193,23 @@ class TestThePhaseMachine(unittest.TestCase):
     def test_a_dead_pid_without_final_state_is_lost_not_running(self):
         """这一档最危险：进程没了、终态没写。读成 running 会让人一直等。"""
         run = Path(tempfile.mkdtemp(prefix="auto-lost-"))
-        (run / ht.STATUS_FILE).write_text(json.dumps({
-            "phase": "running", "pid": 999999, "started_at": time.time(),
-            "backend": "mock", "max_rounds": 1}), encoding="utf-8")
+        task_journal.append(run, 'task_prepared', task_id='fixture-task')
+        task_journal.append(run, 'task_activated', invocation='a' * 32, pid=999999,
+                            started_at=time.time(), backend='mock', max_rounds=1)
         out = ht.autonomous_status(run)
         self.assertEqual(out["phase"], "lost")
         self.assertFalse(out["process_alive"])
 
     def test_a_finished_run_is_left_alone(self):
         run = Path(tempfile.mkdtemp(prefix="auto-done-"))
-        (run / ht.STATUS_FILE).write_text(json.dumps({
-            "phase": "done", "pid": 1, "started_at": 1, "finished_at": 2,
-            "duration_s": 1}), encoding="utf-8")
+        task_journal.append(run, 'task_prepared', task_id='fixture-task')
+        task_journal.append(run, 'task_activated', invocation='a' * 32, pid=1,
+                            started_at=1, backend='mock')
+        task_journal.append(run, 'task_closed', invocation='a' * 32, outcome='completed',
+                            reason='passed', finished_at=2, duration_s=1)
         out = ht.autonomous_status(run)
         self.assertEqual(out["phase"], "done")
+        # 封账之后不再谈「在不在跑」：那不是一个能用 pid 回答的问题。
         self.assertIsNone(out["process_alive"])
 
 

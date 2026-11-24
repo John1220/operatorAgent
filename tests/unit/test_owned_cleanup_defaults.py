@@ -129,6 +129,7 @@ def test_autonomous_defaults_close_owned_sessions_on_cancel_and_deadline(
         tmp_path, monkeypatch, event):
     monkeypatch.delenv('OPERATOR_AGENT_S4_GRACEFUL_CLEANUP', raising=False)
     launch_identity(tmp_path, INVOCATION, kind='autonomous')
+    seed_task(tmp_path)          # 账本由 prepare 建立；这里只要一次运行的现场
     (tmp_path / 'autonomous.json').write_text(json.dumps(dict(
         invocation_id=INVOCATION, backend='ssh', persistent=True,
         task_budget=dict(wall_clock_s=3))))
@@ -148,9 +149,9 @@ sys.exit(autonomous.main(['--worker', *sys.argv[1:]]))
         cancellation.start()
     try:
         assert autonomous.main([str(tmp_path)]) == (1 if event == 'cancel' else 0)
-        status = json.loads((tmp_path / 'run-status.json').read_text())
+        status = task_journal.task_view(tmp_path)      # 终态在账本的任务层
         expected = 'user_cancelled' if event == 'cancel' else 'budget_wall_clock'
-        assert status['stopped_reason'] == expected
+        assert status['reason'] == expected
         assert status['cleanup']['worker_reaped'] is True
         assert status['cleanup']['remote_execution'] == 'quiescent'
         assert status['cleanup']['provider_call'] == 'unknown'

@@ -52,6 +52,8 @@ def run_identity(tmp_path, **budget):
     launch_identity(run, identity, kind='autonomous')
     (run/'autonomous.json').write_text(json.dumps(dict(invocation_id=identity,
         task_budget=dict(wall_clock_s=10, **budget))))
+    # 这个目录的账本由 prepare 建立；这里只要一次运行的现场，所以直接落一条。
+    task_journal.append(run, 'task_prepared', task_id='fixture-task')
     return run, identity
 
 
@@ -67,10 +69,12 @@ def test_cancel_identity_idempotence_and_terminal_no_signal(tmp_path, monkeypatc
     original = (run/'cancel-request.json').read_bytes()
     assert request_cancel(run, identity)['requested_at'] == first['requested_at']
     assert (run/'cancel-request.json').read_bytes() == original
-    (run/'run-status.json').write_text(json.dumps(dict(phase='done', invocation_id=identity)))
+    task_journal.append(run, 'task_activated', invocation=identity, pid=None)
+    task_journal.append(run, 'task_closed', invocation=identity, outcome='completed')
+    # 账本里的 reason 是字符串：没写原因就是空串，不是一个缺键。
     assert request_cancel(run, identity) == dict(ok=True, accepted=False, phase='done',
         invocation_id=identity, run_dir=str(run), reason='already_terminal', cleanup=None,
-        stopped_reason=None)
+        stopped_reason='')
     legacy = tmp_path/'legacy'
     legacy.mkdir()
     with pytest.raises(ValueError, match='legacy'):
@@ -191,8 +195,8 @@ def test_stale_pgid_identity_is_not_signalled(monkeypatch):
 
 def test_lost_owner_and_reused_status_pid_are_explicit_unknown(tmp_path, monkeypatch):
     run, identity = run_identity(tmp_path)
-    (run/'run-status.json').write_text(json.dumps(dict(phase='running', invocation_id=identity,
-        pid=os.getpid(), pid_identity='old-owner-start')))
+    task_journal.append(run, 'task_activated', invocation=identity, pid=os.getpid(),
+                        pid_identity='old-owner-start')
     monkeypatch.setattr(exec_guard, 'process_identity', lambda pid: 'different-process-start')
     monkeypatch.setattr(os, 'killpg', lambda *a: pytest.fail('unrelated process must survive'))
     response = request_cancel(run, identity)
@@ -347,7 +351,8 @@ def test_explicit_mcp_cancel_and_status_use_the_same_invocation(tmp_path):
     run, identity = run_identity(tmp_path)
     result = mcp_server._call_tool('operator_cancel', dict(run_dir=str(run), invocation_id=identity))
     assert json.loads(result['content'][0]['text'])['accepted']
-    (run/'run-status.json').write_text(json.dumps(dict(phase='cancelled', invocation_id=identity)))
+    task_journal.append(run, 'task_activated', invocation=identity, pid=None)
+    task_journal.append(run, 'task_closed', invocation=identity, outcome='cancelled')
     status = mcp_server._call_tool('operator_status', dict(run_dir=str(run), invocation_id=identity))
     assert json.loads(status['content'][0]['text'])['phase'] == 'cancelled'
     with pytest.raises(ht.ToolError, match='cancellation_refused'):

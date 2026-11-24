@@ -50,29 +50,35 @@ def cancellation(run, invocation):
 
 
 def call_status(directory, invocation):
-    """一次调用现在是什么状态：**任务账本优先**，旧状态文件只在账本里没有它时兜底。
+    """一次 invocation 现在是什么状态：**只从任务账本读**。
 
-    旧文件是这次切流要消灭的那个形状（多个写者各自维护一份状态）。读者仍要能看懂
-    已经存在的旧运行，所以兜底留着；但新调用不写它，所以账本有答案时必须用账本 ——
-    否则「用的是哪份」又变成一个取决于目录年龄的问题。
+    两层都要看，因为两条路的调用者都问这一个问题：
+      * `tool-calls/<inv>/` 是**一次调用**（Job 层）；
+      * 运行根是**整段运行**（任务层），autonomous 的 invocation 记在任务事件上。
+    账本里没有它 ⇒ 空（没有状态可报，让调用方去问存活证据），不猜、也不去翻旧文件。
     """
     directory = Path(directory)
     from ..core import task_journal
     try:
         view = task_journal.invocation_view(directory, invocation)
+        if view is not None:
+            return dict(invocation_id=invocation, phase=view['phase'],
+                        stopped_reason=view.get('stopped_reason') or '',
+                        cleanup=view.get('cleanup'), pid=view.get('pid'),
+                        pid_identity=view.get('pid_identity'), source='task_journal',
+                        journal_phase=view['journal_phase'], result=view.get('result'),
+                        result_reason=view.get('result_reason') or '',
+                        terminal=view['terminal'])
+        task = task_journal.task_view(directory)
     except task_journal.JournalError:
-        view = None          # 账本读不动：当作没有状态，让调用方去问存活证据
-    if view is not None:
-        return dict(invocation_id=invocation, phase=view['phase'],
-                    stopped_reason=view.get('stopped_reason') or '',
-                    cleanup=view.get('cleanup'), pid=view.get('pid'),
-                    pid_identity=view.get('pid_identity'), source='task_journal',
-                    journal_phase=view['journal_phase'], result=view.get('result'),
-                    result_reason=view.get('result_reason') or '')
-    legacy = read_json(directory/'run-status.json') or {}
-    if legacy.get('invocation_id') not in (None, invocation):
-        raise ValueError('status invocation mismatch')
-    return dict(legacy, source='legacy_status_file') if legacy else {}
+        return dict(phase='unknown', source='task_journal_unusable')  # 读不动 ≠ 没有
+    if task is None or task.get('invocation') not in (None, '', invocation):
+        return {}
+    return dict(invocation_id=invocation, phase=task['phase'],
+                stopped_reason=task.get('reason') or '', cleanup=task.get('cleanup'),
+                pid=task.get('pid'), pid_identity=task.get('pid_identity'),
+                source='task_journal', journal_phase=task['journal_phase'],
+                terminal=task['terminal'])
 
 
 def request_cancel(run_dir, invocation):

@@ -90,8 +90,11 @@ def test_cancel_lost_owner_retains_launch_provenance(tmp_path, monkeypatch):
     identity = 'a'*32
     context = tool_context('fake')
     task_cancellation.launch_identity(tmp_path, identity, kind='tool_call', **context)
-    task_cancellation.publish_json(tmp_path/'run-status.json', dict(
-        invocation_id=identity, phase='running', pid=os.getpid()))
+    from operator_agent.core import task_journal
+    task_journal.append(tmp_path, 'task_prepared', task_id='fixture-task')
+    task_journal.append(tmp_path, 'task_activated')
+    task_journal.append(tmp_path, 'job_queued', job_id=identity, invocation=identity,
+                        operation='verify', pid=os.getpid())
     monkeypatch.setattr(ht, '_pid_alive', lambda pid: False)
     result = task_cancellation.request_cancel(tmp_path, identity)
     assert result['reason'] == 'owner_unavailable'

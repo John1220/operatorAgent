@@ -97,8 +97,8 @@ export function installHostModelBudget(ctx, config = {}) {
     const final = task.records.find(r => r.purpose === "final");
     return { model, task, cleanupPending, terminal: !!final && final.status !== "reserved" };
   }
-  // 每次调用的终态只从任务账本读。`run-status.json` 已不再由任何写入方维护；
-  // 只剩「账本之前的老目录」还看它当年写下的那份（只读，迁移完就删）。
+  // 每次调用的终态只从任务账本读。账本之前的老目录不再被解释：它们没有这条记录，
+  // 于是「还有调用没结算」—— 对旧任务，这是唯一不靠猜的答案。
   function callJournal(runDir) {
     const path = resolve(runDir, "journal.jsonl");
     const states = new Map();
@@ -114,13 +114,9 @@ export function installHostModelBudget(ctx, config = {}) {
     return states;
   }
   function callSettled(directory, event) {
-    if (!event) {                                   // 老目录：没有账本时看它自己的状态文件
-      const legacy = resolve(directory, "run-status.json");
-      if (!existsSync(legacy)) return false;
-      const status = read(legacy);
-      return ["done", "failed", "cancelled"].includes(status.phase)
-        && status.cleanup?.worker_reaped === true;
-    }
+    // 账本里没有这次调用 ⇒ 未结算。旧目录（账本之前）也没有，于是同样未结算：
+    // 「没有记录」不能被读成「已经收干净」。
+    if (!event) return false;
     // 账本里的终态是在 worker 回收之后写的；`worker_not_started` 是没有 worker 要收。
     return event.kind === "job_finished"
       && (event.cleanup?.worker_reaped === true || event.cleanup?.status === "worker_not_started");

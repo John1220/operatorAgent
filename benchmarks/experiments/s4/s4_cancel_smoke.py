@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 
+from operator_agent.core import task_journal
+
 ROOT = Path(__file__).resolve().parents[3]
 GPU_UUID = 'GPU-52ca6155-d8bc-a416-847a-6f0c71db1552'
 FIXTURE = ROOT/'tests/fixtures/layernorm_missing_column_stride.txt'
@@ -91,7 +93,8 @@ def main(destination):
             (dest/'result.json').write_text(json.dumps(dict(state='unknown', reason='CLI did not exit',
                 invocation_id=invocation, ready=readiness), indent=2)+'\n')
             return 1
-    status = read(run/'tool-calls'/str(invocation)/'run-status.json') if invocation else None
+    status = (task_journal.invocation_view(run/'tool-calls'/str(invocation))
+              if invocation else None)
     cleanup = (status or {}).get('cleanup') or {}
     ok = bool(readiness and cancel is not None and cancel.returncode == 0 and
               (status or {}).get('phase') == 'cancelled' and

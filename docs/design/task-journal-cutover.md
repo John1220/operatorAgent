@@ -24,8 +24,8 @@
    前者把 Python 侧与清单提到 13，插件那份手抄的 12 落下了，真机 `/op doctor`
    会把正确的工具面判成「13 ≠ 期望 12」。
 2. **恢复语义** —— A4 真实产物的回归件在 `tests/unit/resume/`（7 条，本机跑真产物，
-   缺产物时 skip）；journal 的乱序与重试用例齐了。**状态读写方的切换只做完 tool-call
-   那一条**，autonomous 未切。
+   缺产物时 skip）；journal 的乱序与重试用例齐了。**状态读写方两条路都切完了**
+   （tool-call 见 `cefe7f9`；autonomous 见下面第 3 步的「已完成」）。
 3. **迁移 0.8.2 完整优化流程** —— **未开始**。`operator_profile` 在本分支 0 处；
    `HostTaskBudget.reserve` 里没有租约（4 条 L3 用例仍按源码探针 skip）；
    `reserve` 也还没有 v0.8.2 的 `final_selection` 参数。搬运源在
@@ -34,7 +34,9 @@
 
 接下来两件事，按此顺序：
 
-1. **接 journal 的写入方**（本文下面的五步）。**第 1 步已做完**；剩第 2–5 步。
+1. **接 journal 的写入方**（本文下面的五步）。**第 1、3 步已做完**；剩第 2、4、5 步。
+   第 3 步顺带把 autonomous 那条路一起切了 —— 它是 `grep run-status.json` 归零的
+   最后一道门，绕不开。
 2. **profile 搬完**：`ncu_profile` / `gpu_lease` / `profile_budget` 已搬；
    还差把租约接进 `HostTaskBudget.reserve`，判据是
    `tests/unit/profile/test_gpu_lease_across_tasks.py` 里那 4 条 skip
@@ -98,11 +100,11 @@ job_finished(outcome='failed', result='unknown', result_reason='receipt_absent')
 
 | 面 | 数量 | 位置 |
 |---|---|---|
-| Python 状态写入方 | **1 条路径**（原 4） | `autonomous`（含 `hitl_tools.run_autonomous` 的启动态）—— `tool_calls` 已切走 |
-| Python 状态读取方 | 2 | `hitl_tools.autonomous_status`（跑旧目录时）、`task_cancellation.call_status`（兜底） |
-| JS 状态读取方 | 1 | `host-model-budget.mjs` 的 `cleanupPending`（只在目录没有账本时读旧文件） |
-| 直接构造 `ToolCall` 的测试 | 6 个文件 | 见下「逐文件」；本轮只改了 `test_owned_cleanup_defaults.py` |
-| 引用这两个状态文件的测试/脚本 | 8 单测 + 2 JS + 5 benchmark | benchmark 那 5 处等第 3 步一起搬 |
+| Python 状态写入方 | **0** | 两条路（tool-call / autonomous）都写 `journal.jsonl` |
+| Python 状态读取方 | 0 | `autonomous_status` / `call_status` / `resume` 一律读投影 |
+| JS 状态读取方 | 0 | `cleanupPending` 读账本；没有记录 = 未结算 |
+| 直接构造 `ToolCall` 的测试 | 6 个文件 | 见下「逐文件」 |
+| 引用旧状态文件的测试/脚本 | 8 单测 + 2 JS + 5 benchmark | 单测与 JS 已改完；benchmark 4 处改读账本，剩 `s4_case_bundle` 一处读**已发布**的旧证据（第 5 步的迁移脚本负责） |
 
 ## 落地顺序（每步独立可绿）
 
@@ -170,6 +172,34 @@ JS 不再自己 append。理由：`rev` = 「读当前最大值 + 1」，两侧�
 `status` / `best` / `resume` 一律 `fold(journal)`，不再拼多个文件。
 
 验收：`grep -rn "run-status.json" operator_agent/ integrations/` 为空。
+
+#### 已完成（2026-11-24）
+
+验收达成：`grep -rn "run-status" operator_agent/ integrations/` **无命中**（两条路都算）。
+剩下的两处命中都是「断言这个文件**不存在**」的用例，不是读它。
+
+两层的读者各有入口，都只是 `fold` 的投影：
+
+| 入口 | 回答 | 谁在用 |
+|---|---|---|
+| `task_journal.invocation_view(dir)` | 一次调用（Job 层） | `autonomous_status`（tool-call 目录）、`call_status`、4 个 benchmark |
+| `task_journal.task_view(dir)` | 整段运行（任务层） | `autonomous_status`（运行根）、`call_status` |
+
+**autonomous 那条路也切了**（这一步绕不开它：它是「仓库里不再有人写这个文件」的最后
+一道门）。换的时候有三件事值得记：
+
+1. **每秒一次的 ticker 没有了**。那个文件里跳的是预算的**现值**，不是转移；把现值
+   写进 append-only 流等于把「现场」当成「状态」，几十秒就是几百条同义事件。现在
+   读者从预算账本现算：事件里带 `started_monotonic`（监督者那侧）与 `started_at`
+   （epoch），`now = started_monotonic + (epoch 至今)` —— 两个时钟各自都不可跨进程
+   比较，这个组合可以。
+2. **停因/错误/清理进 `task_closed`**，读的时候原样取出。所以「这次运行怎么结束的」
+   只有一个来源，`conductor.json` 回到它本来的身份：**产物摘要**，不是状态。
+3. **旧目录不再被解释**。没有账本但有 `autonomous.json` / `conductor.json` /
+   `worker-result.json` 的目录，回答 `legacy_run_directory`（只读）：它能读回的是
+   契约、两本账、交付源码（`operator_resume`），不是「它当时在不在跑」。
+   `prepare` 失败时同样没有账本 —— 没有任务就没有可记的转移，不伪造一条
+   「已准备然后失败」。
 
 ### 4. `host_task_budget` 的 `host-task.json` 汇入 journal
 

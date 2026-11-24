@@ -1576,7 +1576,6 @@ def repair(run_dir: str | Path, code: str, *, max_rounds: int = 2,
 
 
 # ── 动作 3: 整段自动化（Phase 3）───────────────────────────────────────────
-STATUS_FILE = "run-status.json"
 SUMMARY_FILE = "conductor.json"
 CONFIG_FILE = "autonomous.json"
 
@@ -1656,7 +1655,7 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
         raise ToolError("llm_not_configured", problem)
     from ..execute.task_cancellation import launch_identity
     run = Path(run_dir).resolve()
-    if any((run/name).exists() for name in (CONFIG_FILE, STATUS_FILE, SUMMARY_FILE,
+    if any((run/name).exists() for name in (CONFIG_FILE, SUMMARY_FILE,
                                            'worker-result.json', 'launch.json')):
         raise ToolError('run_already_started', 'Use a fresh run directory; existing runs are preserved.')
     run.mkdir(parents=True, exist_ok=True)
@@ -1669,8 +1668,8 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
     try:
         prepared = prepare(declaration, run)
     except Exception:
-        _write_json(run / STATUS_FILE, dict(phase='failed', invocation_id=invocation_id,
-            stopped_reason='prepare_failed', pid=None, finished_at=time.time(), **context))
+        # prepare 失败时**没有任务**：账本不存在，就没有可以记下的转移。
+        # 伪造一条「已准备然后失败」的流，会让这个目录以后永远说不清自己是什么。
         raise
     config = {
         "backend": backend, "max_rounds": int(max_rounds),
@@ -1687,16 +1686,16 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
     _write_json(run / CONFIG_FILE, config)
     log_path = run / "autonomous.log"
     from ..execute.exec_guard import start_background_worker
-    _write_json(run / STATUS_FILE, dict(phase='running', stage='starting', pid=None,
-        invocation_id=invocation_id, started_at=config['started_at'], task_budget=task_budget, **context))
+    # 这里**不再**预先写一条「running / starting」：账本里的 `task_prepared` 已经回答
+    # 了「准备好了、还没开跑」，监督者一起来就会自己接上 `task_activated`。
     try:
         proc = start_background_worker(
             [sys.executable, "-m", "operator_agent.app.autonomous", str(run)],
             cwd=str(Path(__file__).resolve().parents[2]), log_path=log_path,
         )
-    except OSError:
-        _write_json(run / STATUS_FILE, dict(phase='failed', invocation_id=invocation_id,
-            stopped_reason='supervisor_start_failed', pid=None, finished_at=time.time(), **context))
+    except OSError as error:
+        _record_task_end(run, invocation_id, 'failed', reason='supervisor_start_failed',
+                         error='worker_start_failed', detail=str(error))
         raise
     from ..execute.task_cancellation import publish_json
     from ..execute.exec_guard import process_identity
@@ -1708,7 +1707,7 @@ def run_autonomous(declaration: dict, run_dir: str | Path, *, max_rounds: int = 
         "backend": backend, "max_rounds": int(max_rounds),
         "task_budget": task_budget,
         "invocation_id": invocation_id,
-        "status": str(run / STATUS_FILE), "log": str(log_path),
+        "journal": str(run/'journal.jsonl'), "log": str(log_path),
         "hint": "用 operator_status 轮询；不要用 verify 的 run_dir 混用",
         **context,
     }
@@ -1752,6 +1751,87 @@ def _journal_call_status(directory: Path) -> Optional[dict]:
     return status
 
 
+def _record_task_end(run, invocation_id, outcome, *, reason='', **facts):
+    """记下这次运行的终态。**不抛给调用方**：调用方正在报它自己的错。"""
+    from ..core import task_journal as journal
+    try:
+        if not journal.read_events(run):
+            return None
+        return journal.append(run, 'task_closed', invocation=invocation_id,
+                             outcome=outcome, reason=reason,
+                             **{key: value for key, value in facts.items() if value is not None})
+    except (journal.JournalError, ValueError, OSError):
+        return None
+
+
+def _live_budget(run: Path, view: dict):
+    """预算的**现值**：从预算账本现算，不从任何状态文件抄。
+
+    墙钟要跨进程算：事件里带着 `started_monotonic`（监督者那一侧的单调钟）与
+    `started_at`（epoch）。两个时钟各自都不能跨进程比较，这个组合可以。
+    """
+    from ..execute.task_budget import TaskBudgetConfig, snapshot
+    from ..execute.task_cancellation import read_json
+    try:
+        config = read_json(run/'autonomous.json') or {}
+        if 'task_budget' not in config:
+            return None          # 没有冻结的预算策略 ⇒ 没有可报的预算（不拿默认值凑）
+        policy = TaskBudgetConfig.from_dict(config['task_budget'])
+        started_monotonic = view.get('started_monotonic')
+        started_at = view.get('started_at')
+        if type(started_monotonic) not in (int, float) or type(started_at) not in (int, float):
+            return None
+        now = started_monotonic + max(0.0, time.time() - started_at)
+        return snapshot(run, policy, started_monotonic, now=now)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _journal_task_status(run: Path) -> Optional[dict]:
+    """整段运行（autonomous）在任务账本里的样子，拼成与旧状态文件同形的 dict。
+
+    账本里没有这次运行就返回 None —— 那要么是账本之前的老目录，要么根本没开始过。
+    """
+    from ..core import task_journal
+    view = task_journal.task_view(run)
+    if view is None:
+        return None
+    status = dict(kind=None, phase=view['phase'], stage=view.get('stage'),
+                  invocation_id=view.get('invocation') or '',
+                  pid=view.get('pid'), pid_identity=view.get('pid_identity'),
+                  started_at=view.get('started_at'), finished_at=view.get('finished_at'),
+                  duration_s=view.get('duration_s'),
+                  backend=view.get('backend'), max_rounds=view.get('max_rounds'),
+                  task_budget=view.get('task_budget'),
+                  stopped_reason=view.get('reason') or '',
+                  error=view.get('error'), detail=view.get('detail'),
+                  cleanup=view.get('cleanup'),
+                  generation_evidence=view.get('generation_evidence'),
+                  execution_context=view.get('execution_context'))
+    if view['terminal'] and isinstance(view.get('budget'), dict):
+        # 结束时的现值**冻在事件里**（监督者收工那一刻算的），读的人不重算。
+        status['budget'] = view['budget']
+    else:
+        status['budget'] = _live_budget(run, view)
+    if (status['duration_s'] is None and status['finished_at'] is not None
+            and status['started_at'] is not None):
+        status['duration_s'] = round(status['finished_at'] - status['started_at'], 3)
+    return status
+
+
+def _no_journal_answer(run: Path) -> dict:
+    """没有任务账本时怎么回答：**两种都不是「还在跑」**，而且都不猜。"""
+    legacy = [name for name in ('autonomous.json', 'conductor.json', 'worker-result.json')
+              if (run/name).exists()]
+    if legacy:
+        return dict(ok=False, error='legacy_run_directory', run_dir=str(run), read_only=True,
+                    detail=('这个目录没有任务账本（journal.jsonl）—— 它在账本之前创建。'
+                            '用产生它的那个版本查它的运行状态；本版本能读回的是契约、'
+                            '两本账和交付源码（见 operator_resume）。'))
+    return dict(ok=False, error='run_not_started',
+                detail=f"{run/'journal.jsonl'} 不存在（这个目录还没被 prepare 过）")
+
+
 def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) -> dict:
     """Query autonomous/foreground invocation; missing owners are explicitly lost."""
     run = Path(run_dir)
@@ -1778,26 +1858,25 @@ def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) 
             run = run/'tool-calls'/str(invocation_id)
             if (read_json(run/'launch.json') or {}).get('invocation_id') != invocation_id:
                 return dict(ok=False, error='invocation_mismatch', detail='No matching invocation.')
-    status_path = run / STATUS_FILE
+    from ..core.task_journal import JournalError
     status = None
-    if (read_json(run/'launch.json') or {}).get('kind') == 'tool_call':
-        # 一次调用的状态来自任务账本的投影。旧目录（账本之前）没有这条记录，
-        # 仍然读它当年写下的状态文件 —— 只读，不当权威。
-        from ..core.task_journal import JournalError
-        try:
-            status = _journal_call_status(run)
-        except JournalError as error:
-            return dict(ok=False, error='task_journal_unusable',
-                        detail=f'{error.code}: {error.detail}', run_dir=str(run))
-    if status is None:
-        if not status_path.is_file():
+    try:
+        if invocation_id is None:
+            # 没点名要看哪一次：这里是一个装着多次调用的运行目录。列出来，不去
+            # 冒充「整段运行」的相位 —— 那两个问题不一样。
             calls = _call_directories(run)
-            if calls and invocation_id is None:
+            if calls:
                 return dict(ok=True, phase='tool_calls',
                             calls=[autonomous_status(p) for p in calls])
-            return {"ok": False, "error": "run_not_started",
-                    "detail": f"{status_path} 不存在（还没调用 operator_run）"}
-        status = json.loads(status_path.read_text(encoding="utf-8"))
+        if (read_json(run/'launch.json') or {}).get('kind') == 'tool_call':
+            status = _journal_call_status(run)      # 一次调用：Job 层
+        if status is None:
+            status = _journal_task_status(run)      # 整段运行：任务层
+    except JournalError as error:
+        return dict(ok=False, error='task_journal_unusable',
+                    detail=f'{error.code}: {error.detail}', run_dir=str(run))
+    if status is None:
+        return _no_journal_answer(run)
     if not status.get('pid'):
         owner = read_json(run/'supervisor.json') or {}
         if owner.get('invocation_id') == status.get('invocation_id'):

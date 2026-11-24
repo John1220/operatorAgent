@@ -5,11 +5,14 @@
     declaration.json / contract.json / run.json   ← prepare
     host-task.json / host-task-policy.json        ← host_task_budget
     host-model-budget.json                        ← JS 侧账本
-    run-status.json                               ← tool_calls 或 autonomous
+    那个「相位文件」                                ← tool_calls 或 autonomous
 
 于是「终态变化时谁先写」这个问题，**每个写者按自己的理解回答**；`resume` 要同时看
-几个文件才能拼出「现在到底是什么状态」；而父进程若在写之前崩掉，`run-status.json`
+几个文件才能拼出「现在到底是什么状态」；而父进程若在写之前崩掉，那个相位文件
 就永远停在 `running` —— 既不能说它还在跑，也不能说它跑完了。
+
+（最后一个已经在切流里拆掉了：2026-11-24 起 tool-call 与 autonomous 两条路都写这条
+事件流，仓库里不再有任何代码提到它的文件名 —— 剩下的是历史，不是接口。）
 
 现在的形状：**`journal.jsonl` 是唯一权威，其余全部是它的投影**。
 
@@ -45,8 +48,9 @@ Job A 写 `completed` 之后，Job B 的 `job_queued` 被拒，`rev` 停在 4。
     ToolCall 监督者     → task_activated + job_*   （verify / bench / repair 共用这一处）
 
 `task_closed` 还没有写入方：把它交给「谁有权断言整段工作结束了」这个问题，
-在那之前任务保持打开是正确的默认。autonomous 那条路仍只写它自己的 `run-status.json`
-—— 那不是双写，因为它还没接进这条流；接它的时候必须**整条**换掉，不能并存。
+在那之前任务保持打开是正确的默认。autonomous 那条路写出同样的一条任务流
+（`task_prepared → task_activated → task_closed`），它的 `phase` 由封账事件折出来，
+不再有第二个相位文件。
 """
 from __future__ import annotations
 
@@ -303,12 +307,20 @@ def _job_row(event: dict) -> dict:
     return row
 
 
+#: 任务事件上携带的现场字段。与 `_job_row` 同一条规则：事件里有才进投影。
+#: 它们回答的是「这次运行在哪儿跑的、跑完留下了什么」，不是第二个相位。
+TASK_FACTS = ('invocation', 'pid', 'pid_identity', 'worker_pid', 'stage', 'started_at',
+              'started_epoch', 'started_monotonic', 'finished_at', 'duration_s', 'backend',
+              'max_rounds', 'task_budget', 'budget', 'corpus', 'execution_context',
+              'cleanup', 'error', 'detail', 'summary', 'generation_evidence')
+
+
 def fold(events: Iterable) -> dict:
     """事件流 → 现在是什么状态。**唯一**的投影函数。
 
     返回的每个键都是「问题 → 答案」，而不是某个文件的镜像：
 
-        task   {phase, task_id, outcome, reason}      任务走到哪、怎么结束的
+        task   {phase, task_id, outcome, reason, …}   任务走到哪、怎么结束的
         jobs   {job_id: {phase, outcome, result, ...}} 单次调用各自的账
         budget {…}                                     预算
         rev                                           最后一条的编号
@@ -332,6 +344,10 @@ def fold(events: Iterable) -> dict:
         admit(task['phase'], jobs, event)
         kind = event['kind']
         task['task_id'] = event.get('task_id') or task['task_id']
+        if kind in TASK_EVENTS:
+            for key in TASK_FACTS:
+                if key in event:
+                    task[key] = dict(event[key]) if isinstance(event[key], dict) else event[key]
         if kind == 'task_prepared':
             task['phase'] = 'prepared'
         elif kind == 'task_activated':
@@ -385,6 +401,29 @@ def task_root(directory) -> Path:
     """
     directory = Path(directory)
     return directory.parent.parent if directory.parent.name == 'tool-calls' else directory
+
+
+#: 任务相位 → 监督者状态词表。同一个问题在任务层与 Job 层的回答口径必须一致。
+TASK_STATES = {'prepared': ('running', 'starting'), 'active': ('running', 'executing'),
+               'closed': (None, None)}
+
+
+def task_view(directory) -> dict | None:
+    """整段运行（autonomous）在账本里的样子；账本里没有它就返回 None。
+
+    `phase` 同样用监督者的旧词：prepared/active 都是 `running`（靠 `stage` 分
+    `starting` / `executing`），closed 折成 `done` / `failed` / `cancelled`。
+    """
+    events = read_events(Path(directory))
+    if not events:
+        return None
+    projection = fold(events)
+    task = dict(projection['task'])
+    phase, stage = TASK_STATES[task['phase']]
+    task.update(phase=phase or {'completed': 'done'}.get(task['outcome'], task['outcome']),
+                stage=stage, journal_phase=projection['task']['phase'],
+                terminal=projection['task']['phase'] == 'closed', rev=projection['rev'])
+    return task
 
 
 def invocation_view(directory, invocation: str = '') -> dict | None:

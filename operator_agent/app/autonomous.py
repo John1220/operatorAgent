@@ -7,13 +7,13 @@
 * 崩了要能看出「是这一轮失败」还是「进程没了」—— 两件事分开报；
 * 宿主重启不该杀掉已经跑起来的实验。
 
-它只做三件事：**读 `declaration.json` → 跑 `Conductor` → 把结论写进 `run-status.json`**。
+它只做三件事：**读 `declaration.json` → 跑 `Conductor` → 把结论写进任务账本**。
 判据一行都不在这里（契约冻结、L1/L2/L3、资格、入库门全在既有模块里），这一层只负责
 「把一次无人值守运行装进一个目录」。
 
 身份与状态：
     <run>/autonomous.json   启动参数（backend / max_rounds / target_gflops）
-    <run>/run-status.json   相位机：running → done | failed | cancelled
+    <run>/journal.jsonl     任务账本：task_prepared → task_activated → task_closed
     <run>/conductor.json    完成时的摘要（artifact / 停因 / 最好读数 / 报告路径）
     <run>/autonomous.log    子进程的 stdout+stderr
 """
@@ -31,7 +31,6 @@ import uuid
 import signal
 from pathlib import Path
 
-STATUS = "run-status.json"
 SUMMARY = "conductor.json"
 CONFIG = "autonomous.json"
 WORKER_RESULT = "worker-result.json"
@@ -202,6 +201,50 @@ def _start_worker(run, deadline, started_monotonic, invocation_id):
         cwd=str(Path(__file__).resolve().parents[2]))
 
 
+def _record(run, kind, **fields):
+    """把这次运行的转移写进任务账本。**写不进去也不让运行失败。**
+
+    两条边界与 `ToolCall` 同一套：目录没有账本（它在账本之前准备）就什么都不写，
+    绝不替它补 `task_prepared`；账本拒绝（封账、损坏、字段不可序列化）就报到 stderr，
+    运行继续 —— `worker-result.json` 仍然带全它自己的事实，那才是这次执行的凭据。
+
+    为什么不再每秒把状态落一次盘：预算是**现值**，可以从预算账本现算；而账本是
+    「转移」的记录，把 ticker 写进去等于把「现场」当成「转移」，几十秒就跑出几百条
+    同义事件。
+    """
+    from ..core import task_journal as journal
+    try:
+        if not journal.read_events(run):
+            return None
+        return journal.append(run, kind, **{key: value for key, value in fields.items()
+                                            if value is not None})
+    except (journal.JournalError, ValueError, OSError) as exc:
+        print(f'[autonomous] 任务账本拒绝 {kind}: {exc}', file=sys.stderr)
+        return None
+
+
+def _activate(run, invocation_id, status, started_monotonic):
+    """这次运行开始了：现场的每一个事实都在这一条里。"""
+    facts = {key: status.get(key) for key in
+             ('pid', 'pid_identity', 'started_at', 'backend', 'max_rounds',
+              'task_budget', 'budget', 'corpus', 'execution_context')}
+    facts.update(invocation=invocation_id, started_monotonic=started_monotonic,
+                 stage='executing')
+    _record(run, 'task_activated', **facts)
+
+
+def _close(run, invocation_id, status):
+    """这次运行结束了。终态**只有一个出口**：任务账本的任务层，不是某个状态文件。"""
+    outcome = {'done': 'completed', 'failed': 'failed', 'cancelled': 'cancelled'}.get(
+        str(status.get('phase')), 'failed')
+    facts = {key: status.get(key) for key in
+             ('error', 'detail', 'cleanup', 'budget', 'finished_at', 'duration_s',
+              'generation_evidence', 'cancellation')}
+    facts.update(invocation=invocation_id, outcome=outcome,
+                 reason=status.get('stopped_reason') or '')
+    _record(run, 'task_closed', **facts)
+
+
 def _main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if len(argv) == 5 and argv[0] == '--worker':
@@ -226,9 +269,9 @@ def _main(argv=None) -> int:
         cfg = json.loads((run / CONFIG).read_text(encoding='utf-8'))
         policy = TaskBudgetConfig.from_dict(cfg.get('task_budget'))
     except (OSError, ValueError, TypeError) as exc:
-        _atomic_json(run / STATUS, dict(phase='failed', pid=os.getpid(),
-            error=type(exc).__name__, detail=str(exc), stopped_reason='invalid_task_budget',
-            finished_at=time.time(), started_at=started))
+        _record(run, 'task_closed', outcome='failed', reason='invalid_task_budget',
+                error=type(exc).__name__, detail=str(exc),
+                finished_at=time.time(), started_at=started)
         return 1
     deadline = started_monotonic + policy.wall_clock_s
     invocation_id = cfg.get('invocation_id')
@@ -246,7 +289,7 @@ def _main(argv=None) -> int:
     status.update(context)
     status['pid_identity'] = process_identity(os.getpid())
     status['budget'] = snapshot(run, policy, started_monotonic)
-    _atomic_json(run / STATUS, status)
+    _activate(run, invocation_id, status, started_monotonic)
     reason, event_at = stop_event(run, invocation_id, deadline)
     if reason == 'user_cancelled':
         status.update(phase='cancelled', stopped_reason=reason, finished_at=time.time(),
@@ -255,7 +298,8 @@ def _main(argv=None) -> int:
                          remote_execution='unknown', provider_call='unknown'))
         _atomic_json(run / SUMMARY, dict(phase='cancelled', all_passed=False,
             stopped_reason=reason, task_budget=policy.as_dict(), budget=status['budget'], **context))
-        _atomic_json(run / STATUS, status)
+        status['duration_s'] = round(time.time() - started, 3)
+        _close(run, invocation_id, status)
         return 1
     def interrupted(signum, frame):
         request_cancel(run, invocation_id)
@@ -265,12 +309,12 @@ def _main(argv=None) -> int:
     except OSError as exc:
         status.update(phase='failed', error=type(exc).__name__, detail=str(exc),
             finished_at=time.time(), stopped_reason='worker_start_failed')
-        _atomic_json(run / STATUS, status)
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+        status['duration_s'] = round(time.time() - started, 3)
+        _close(run, invocation_id, status)
         return 1
     status['worker_pid'] = process.pid
-    last_update = 0.
     from ..execute.exec_guard import OwnedGroups
     observed_groups = OwnedGroups([process.pid])
     reason = event_at = None
@@ -285,10 +329,6 @@ def _main(argv=None) -> int:
             groups, discovered = _owned_groups(process.pid)
             observed_groups.update(groups)
             observed_groups.discovery_complete &= discovered
-            if monotonic()-last_update >= 1.:
-                status['budget'] = snapshot(run, policy, started_monotonic)
-                _atomic_json(run / STATUS, status)
-                last_update = monotonic()
             try:
                 process.wait(timeout=min(.25, max(.001, remaining)))
             except subprocess.TimeoutExpired:
@@ -326,7 +366,7 @@ def _main(argv=None) -> int:
         cancellation=cancellation(run, invocation_id), partial_artifacts=partial_artifacts(run))
     if (run/'generation-records.json').is_file():
         status['generation_evidence'] = str(run/'generation-records.json')
-    _atomic_json(run / STATUS, status)
+    _close(run, invocation_id, status)
     for sig, handler in previous.items():
         signal.signal(sig, handler)
     return 0 if status['phase'] == 'done' else 1

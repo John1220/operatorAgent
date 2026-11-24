@@ -171,14 +171,14 @@ def evaluate(events, ledger, observations, *, task_id, run_dir, expected_tool_na
         tool_dir=run/'tool-calls'/invocation
         if Path(compact.get('tool_call_dir','')).resolve()!=tool_dir or tool_dir.is_symlink():
             return unknown('MCP worker path mismatch')
-        req=_read(tool_dir/'request.json'); status=_read(tool_dir/'run-status.json')
+        req=_read(tool_dir/'request.json'); status=task_journal.invocation_view(tool_dir) or {}
         worker=_read(tool_dir/'worker-result.json'); tool_output=_read(tool_dir/'result.json')
         recorded_args=req.get('arguments')
         if (req.get('name')!='operator_verify' or not isinstance(recorded_args,dict)
                 or set(recorded_args)!=set(args) or Path(recorded_args['run_dir']).resolve()!=run
                 or any(recorded_args[k]!=args[k] for k in ('code','backend','stop_after'))
                 or status.get('phase')!='done' or status.get('tool')!='operator_verify'
-                or status.get('invocation_id')!=invocation or worker.get('invocation_id')!=invocation
+                or status.get('invocation')!=invocation or worker.get('invocation_id')!=invocation
                 or not _number(worker.get('finished_monotonic'))
                 or not calls[0]['completed_monotonic']<=worker['finished_monotonic']<=calls[1]['reserved_monotonic']
                 or not isinstance(tool_output.get('content'),list) or len(tool_output['content'])!=1

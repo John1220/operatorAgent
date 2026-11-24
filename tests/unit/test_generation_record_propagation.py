@@ -162,12 +162,15 @@ def test_pipeline_failure_receipts_reach_coder_wrapper():
 @pytest.mark.parametrize('phase', ['done', 'failed'])
 def test_status_exposes_generation_evidence_after_success_or_failure(tmp_path, phase):
     from operator_agent.app import hitl_tools
+    from operator_agent.core import task_journal
     evidence = str(tmp_path/'generation-records.json')
-    status = dict(phase=phase, pid=1)
+    task_journal.append(tmp_path, 'task_prepared', task_id='fixture-task')
+    task_journal.append(tmp_path, 'task_activated', invocation='a' * 32, pid=1)
+    closed = dict(invocation='a' * 32, outcome='completed' if phase == 'done' else 'failed')
     if phase == 'failed':
-        status['generation_evidence'] = evidence
+        task_journal.append(tmp_path, 'task_closed', generation_evidence=evidence, **closed)
     else:
+        task_journal.append(tmp_path, 'task_closed', **closed)
         (tmp_path/'conductor.json').write_text(json.dumps(dict(generation_evidence=evidence)))
-    (tmp_path/'run-status.json').write_text(json.dumps(status))
     result = hitl_tools.autonomous_status(tmp_path)
     assert result['generation_evidence'] == evidence and result['phase'] == phase

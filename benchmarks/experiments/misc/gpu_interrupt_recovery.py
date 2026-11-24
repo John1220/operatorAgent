@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 
 from benchmarks.drivers.input_fidelity_h20 import AcceptanceSSH, GOOD, gpu_evidence
+from operator_agent.core import task_journal
 from operator_agent.decide.anticheat import static_audit
 from operator_agent.decide.measurement import TRANSPORT_UNKNOWN
 
@@ -200,8 +201,8 @@ def trial(root, name, backend, env, gpu, gpu_uuid, *, mode=None):
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait(timeout=5)
-    calls = list((run / "tool-calls").glob("*/run-status.json"))
-    status = read(calls[0]) if len(calls) == 1 else None
+    calls = sorted(p for p in (run / "tool-calls").glob("*") if p.is_dir())
+    status = task_journal.invocation_view(calls[0]) if len(calls) == 1 else None
     body = read(dest / "stdout.json")
     result = read(run / "verify-1/result.json")
     remaining = observe(backend, gpu, gpu_uuid)

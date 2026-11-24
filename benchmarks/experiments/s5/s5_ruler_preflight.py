@@ -19,6 +19,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
+from operator_agent.core import task_journal
 from operator_agent.core.contract import freeze_from_task
 from operator_agent.decide.correctness import as_suite
 from operator_agent.app.hitl_tools import build_task
@@ -213,7 +214,7 @@ def _execute_inner(out, plan_sha):
         finally:
             for s,h in old.items(): signal.signal(s,h)
         calls=list((run/'tool-calls').iterdir()) if (run/'tool-calls').is_dir() else []
-        status=read(calls[0]/'run-status.json') if len(calls)==1 else None
+        status=task_journal.invocation_view(calls[0]) if len(calls)==1 else None
         cleanup=((status or {}).get('cleanup') or {}).get('remote_execution')
         payload=read(result_dir/'verify.stdout.json')
         item=dict(task=row['name'], cli_exit=proc.poll(), stopped_reason=reason,
