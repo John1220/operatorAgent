@@ -203,6 +203,13 @@ def _sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+
+def _budget_records(evaluation):
+    """预算记录**只从任务账本读**：最后一条带 `budget.host_task` 的事件就是现值。"""
+    from operator_agent.core import task_journal
+    state = task_journal.fold(task_journal.read_events(evaluation))['budget'].get('host_task') or {}
+    return state.get('records') or []
+
 def _read(path):
     return json.loads(path.read_text(encoding='utf-8'))
 
@@ -263,7 +270,7 @@ def replay_sweep(path, plan):
     finals = {}
     for name, expected_hash in (('best', best['source_hash']), ('seed', SEED_SOURCE_HASH)):
         evaluation = root / name / 'evaluation'
-        budget_records = _read(evaluation / 'host-task.json')['records']
+        budget_records = _budget_records(evaluation)
         # host 契约：终评 task 内 explore(L2) 先行（verify-1）+ 独立 final(L3)（verify-2）。
         explores = [r for r in budget_records if r.get('purpose') == 'explore']
         final_records = [r for r in budget_records if r.get('purpose') == 'final']
@@ -296,7 +303,7 @@ def replay_sweep(path, plan):
                 or receipt['created_at'] <= gate_time):
             raise ValueError(f'{name}: final evaluation GPU/backend/window differs')
         finals[name] = receipt
-        for member in (evaluation / 'host-task.json', candidate_path, final_path,
+        for member in (evaluation / 'journal.jsonl', candidate_path, final_path,
                        final_path.with_name('complete.json')):
             hashes[str(member.relative_to(root))] = _sha(member)
     judgement = judge_sweep(gate=gate, seed_receipt=finals['seed'], best_receipt=finals['best'],

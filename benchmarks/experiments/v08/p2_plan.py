@@ -177,6 +177,13 @@ def _sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+
+def _budget_records(evaluation):
+    """预算记录**只从任务账本读**：最后一条带 `budget.host_task` 的事件就是现值。"""
+    from operator_agent.core import task_journal
+    state = task_journal.fold(task_journal.read_events(evaluation))['budget'].get('host_task') or {}
+    return state.get('records') or []
+
 def _read(path):
     return json.loads(path.read_text(encoding='utf-8'))
 
@@ -194,14 +201,13 @@ def _replay_pair(path, *, gpu_index, after=None, endpoint=None):
     finals, sources, endpoints = {}, {}, set()
     for arm in ('seed', 'off', 'on'):
         evaluation = root / arm / 'evaluation'
-        budget_path = evaluation / 'host-task.json'
         final_path = evaluation / 'verify-2' / 'result.json'
         candidate_path = final_path.with_name('candidate.py')
         manifest = _read(final_path.with_name('complete.json'))
         receipt = _read(final_path)
         source_hash = _sha(candidate_path)
         result_hash = _sha(final_path)
-        records = _read(budget_path)['records']
+        records = _budget_records(evaluation)
         if len(records) != BUDGET['max_verifications_per_candidate']:
             raise ValueError(f'{arm}: requires one explore and one final evaluation')
         terminal = records[-1]
@@ -227,7 +233,8 @@ def _replay_pair(path, *, gpu_index, after=None, endpoint=None):
             raise ValueError(f'{arm}: final evaluation predates the pair window gate')
         finals[arm] = receipt
         sources[arm] = source_hash
-        for member in (budget_path, candidate_path, final_path, final_path.with_name('complete.json')):
+        for member in (evaluation / 'journal.jsonl', candidate_path, final_path,
+                       final_path.with_name('complete.json')):
             hashes[str(member.relative_to(root))] = _sha(member)
         if arm == 'seed':
             continue

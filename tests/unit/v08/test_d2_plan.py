@@ -160,6 +160,15 @@ def test_judge_refuses_unregistered_source_and_shared_evidence(plan):
     assert 'distinct final evaluations' in same['reasons'][0]
 
 
+def seed_budget(evaluation, state):
+    """预算记录住在任务账本里：落一条 `budget_opened`（形状与 Python 写的相同）。"""
+    import json as _json
+    (evaluation / 'journal.jsonl').write_text(_json.dumps(dict(
+        schema='operator-task-journal-v2', rev=1, kind='budget_opened',
+        task_id='fixture-task', budget=dict(host_task=dict(state, records=state['records'])))) + '\n',
+        encoding='utf-8')
+
+
 def _store(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding='utf-8')
@@ -212,7 +221,7 @@ def _archive_sweep(root, plan, *, medians, started=None, gate_time=None):
         _store(verification / 'complete.json', dict(
             evidence_complete=True, binding=receipt['binding'],
             files_sha256={'candidate.py': digest, 'result.json': d2_plan._sha(path)}))
-        _store(verification.parent / 'host-task.json', dict(records=[
+        seed_budget(verification.parent, dict(records=[
             dict(id=1, purpose='explore', status='completed', full_l2_passed=True,
                  source_hash=digest),
             dict(id=2, purpose='final', status='completed', full_l2_passed=True,

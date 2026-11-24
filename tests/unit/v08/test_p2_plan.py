@@ -83,6 +83,15 @@ def test_pair_refuses_shared_final_evidence():
     assert 'distinct final evaluations' in result['reasons'][0]
 
 
+def seed_budget(evaluation, state):
+    """预算记录住在任务账本里：落一条 `budget_opened`（形状与 Python 写的相同）。"""
+    import json as _json
+    (evaluation / 'journal.jsonl').write_text(_json.dumps(dict(
+        schema='operator-task-journal-v2', rev=1, kind='budget_opened',
+        task_id='fixture-task', budget=dict(host_task=dict(state, records=state['records'])))) + '\n',
+        encoding='utf-8')
+
+
 def _archive_pair(root, *, seed_code, order, started, plan=None, pair_id=None):
     import json
 
@@ -109,7 +118,7 @@ def _archive_pair(root, *, seed_code, order, started, plan=None, pair_id=None):
         store(verification / 'complete.json', dict(
             evidence_complete=True, binding=receipt['binding'],
             files_sha256={'candidate.py': digest, 'result.json': p2_plan._sha(path)}))
-        store(verification.parent / 'host-task.json', dict(records=[
+        seed_budget(verification.parent, dict(records=[
             dict(purpose='explore'), dict(purpose='final', status='completed', full_l2_passed=True,
                 finished_after_deadline=False, evidence=str(path), source_hash=digest),
         ]))
