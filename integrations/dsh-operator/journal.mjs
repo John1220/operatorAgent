@@ -10,6 +10,58 @@
  * 报出来 —— 静默吞掉和崩溃都不可接受。
  */
 import { execFileSync } from "node:child_process";
+import { lstatSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+export const JOURNAL_FILE = "journal.jsonl";
+export const JOURNAL_SCHEMA = "operator-task-journal-v2";
+const BOUND_BYTES = 4 * 1024 * 1024;
+
+/** 读整条流。没有账本 ⇒ 空流（那是状态，不是错误）；坏账本 ⇒ 抛。 */
+export function readJournal(runDir) {
+  const path = join(runDir, JOURNAL_FILE);
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw new Error(`journal_unusable: ${error.message}`);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error("journal_unusable: 账本必须是普通文件，不是软链或目录");
+  }
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error("journal_unusable: 账本属主不是本进程用户");
+  }
+  if (stat.size > BOUND_BYTES) throw new Error("journal_unusable: 账本超过大小上限");
+  const text = readFileSync(path, "utf8");
+  return text.split("\n").filter(line => line.trim()).map((line, index) => {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      throw new Error(`journal_corrupt: 第 ${index + 1} 行不是合法 JSON`);
+    }
+    if (event?.schema !== JOURNAL_SCHEMA) {
+      throw new Error(`journal_schema_mismatch: 第 ${index + 1} 行 schema=${event?.schema}`);
+    }
+    return event;
+  });
+}
+
+/**
+ * 预算状态：**只从任务账本读**（最后一条带 `budget.host_task` 的事件）。
+ *
+ * 宿主侧要的是 `task_id` / `policy_hash` / `started_*` / `max_elapsed_s` 这几个数，
+ * 它们和 Python 的 `HostTaskBudget` 读的是同一条事件 —— 不存在第二份状态文件。
+ */
+export function readHostTask(runDir) {
+  const state = readJournal(runDir).filter(event => event.budget?.host_task).pop()?.budget.host_task;
+  if (!state || typeof state !== "object") {
+    throw new Error("host_task_missing: 账本里没有预算状态（budget_opened 之后才有）");
+  }
+  return state;
+}
 
 let runner = {
   command: process.env.OPERATOR_AGENT_CLI || "operator-agent",

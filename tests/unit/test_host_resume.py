@@ -24,7 +24,7 @@ def test_fresh_task_resume_is_read_only_and_keeps_host_owned_user_context(tmp_pa
     from operator_agent.execute import llm_client
     run,first=prepared(tmp_path)
     monkeypatch.setattr(llm_client,'LLMClient',lambda **kwargs:pytest.fail('resume called a model'))
-    before={name:(run/name).read_bytes() for name in (hb.POLICY,hb.STATE,'declaration.json','contract.json','run.json')}
+    before={name:(run/name).read_bytes() for name in (hb.POLICY,'journal.jsonl','declaration.json','contract.json','run.json')}
     value=resume(run,backend='fake')
     assert value['task_id']==first['host_task']['task_id'] and value['next_action']=='generate'
     assert value['host_task']['reserved']==0 and value['model_calls']==0
@@ -39,12 +39,12 @@ def test_fresh_task_resume_is_read_only_and_keeps_host_owned_user_context(tmp_pa
 def test_resume_failed_candidate_returns_bound_repair_material_without_refund(tmp_path):
     run,_=prepared(tmp_path)
     result=ht.verify(run,WRONG,backend='fake',stop_after='L2',candidate_origin='outer')
-    before=(run/hb.STATE).read_bytes()
+    before=(run/'journal.jsonl').read_bytes()
     value=resume(run,backend='fake')
     assert value['next_action']=='repair' and value['selected_verification']==result['round']
     assert value['next_context']==dict(run_dir=str(run),backend='fake',phase='repair',verification_round=result['round'])
     assert value['candidate']['source_hash']==code_hash(WRONG)
-    assert value['host_task']['reserved']==1 and (run/hb.STATE).read_bytes()==before
+    assert value['host_task']['reserved']==1 and (run/'journal.jsonl').read_bytes()==before
     assert value['latest_completed_verification']==result['round']
 
 
@@ -68,11 +68,11 @@ def test_resume_preserves_unknown_inflight_owner_without_stealing_it(tmp_path):
     run,first=prepared(tmp_path)
     budget=hb.HostTaskBudget(run,first['contract_hash'])
     budget.reserve(code_hash(CORRECT),owner_invocation_id='a'*32)
-    before=(run/hb.STATE).read_bytes()
+    before=(run/'journal.jsonl').read_bytes()
     value=resume(run,backend='fake')
     assert value['next_action']=='inspect_in_flight' and value['next_context'] is None
     assert value['host_task']['unfinished']==1 and value['unfinished_owners'][0]['owner_invocation_id']=='a'*32
-    assert (run/hb.STATE).read_bytes()==before
+    assert (run/'journal.jsonl').read_bytes()==before
 
 
 def test_resume_refuses_contract_evidence_and_backend_drift(tmp_path):

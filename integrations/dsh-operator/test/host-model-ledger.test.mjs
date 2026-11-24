@@ -25,6 +25,24 @@ function canonical(value) {
 const hash = text => createHash("sha256").update(text).digest("hex");
 const code = expected => error => error instanceof HostModelBudgetError && error.code === expected;
 
+/** 预算状态住在任务账本里：落一条 `budget_opened`，形状与 Python 写的相同。 */
+function seedBudget(dir, state) {
+  writeFileSync(join(dir, "journal.jsonl"), JSON.stringify({
+    schema: "operator-task-journal-v2", rev: 1, kind: "budget_opened",
+    task_id: state.task_id, budget: { host_task: state } }) + "\n", { mode: 0o600 });
+}
+
+/** 改写预算状态 = 追加一条新快照（账本只追加，不改历史）。 */
+function patchBudget(dir, change) {
+  const path = join(dir, "journal.jsonl");
+  const events = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  const state = { ...events.filter(event => event.budget?.host_task).pop().budget.host_task };
+  change(state);
+  writeFileSync(path, readFileSync(path, "utf8") + JSON.stringify({
+    schema: "operator-task-journal-v2", rev: events.length + 1, kind: "budget_reserved",
+    task_id: state.task_id, budget: { host_task: state } }) + "\n");
+}
+
 function fixture(t, overrides = {}) {
   const dir = mkdtempSync(join(tmpdir(), "operator-host-model-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -35,9 +53,9 @@ function fixture(t, overrides = {}) {
   const policyText = canonical(policy);
   const started = Date.now() / 1000;
   writeFileSync(join(dir, "host-task-policy.json"), policyText + "\n", { mode: 0o400 });
-  writeFileSync(join(dir, "host-task.json"), JSON.stringify({ task_id: TASK,
+  seedBudget(dir, { schema: policy.schema, task_id: TASK, contract_hash: CONTRACT,
     policy_hash: hash(policyText), records: [], started_epoch: started,
-    started_monotonic: 0, max_elapsed_s: 0 }) + "\n", { mode: 0o600 });
+    started_monotonic: 0, max_elapsed_s: 0 });
   const rawLedger = () => new HostModelLedger(dir, { taskId: TASK, contractHash: CONTRACT });
   const ledger = () => {
     const value = rawLedger();
@@ -63,7 +81,8 @@ function clockSetup(dir) {
     const originalBind=ledger.bind.bind(ledger);
     ledger.bind=(...args)=>{
       originalBind(...args);
-      const host=JSON.parse(readFileSync(${JSON.stringify(join(dir, "host-task.json"))},'utf8'));
+      const events=readFileSync(${JSON.stringify(join(dir, "journal.jsonl"))},'utf8').trim().split('\\n').map(line=>JSON.parse(line));
+      const host=events.filter(event=>event.budget?.host_task).pop().budget.host_task;
       const policy=JSON.parse(readFileSync(${JSON.stringify(join(dir, "host-task-policy.json"))},'utf8'));
       ledger.clock({remainingSeconds:Math.max(0,host.started_epoch+policy.limits.wall_clock_s-Date.now()/1000),
         deadlineEpoch:host.started_epoch+policy.limits.wall_clock_s});
@@ -267,7 +286,7 @@ test("old policies without model limits are unsupported rather than granted defa
   const text = canonical(policy);
   chmodSync(join(dir, "host-task-policy.json"), 0o600);
   writeFileSync(join(dir, "host-task-policy.json"), text + "\n");
-  writeFileSync(join(dir, "host-task.json"), JSON.stringify({ task_id: TASK, policy_hash: hash(text) }));
+  patchBudget(dir, state => { state.policy_hash = hash(text); });
   assert.throws(() => ledger().bind("s"), code("host_model_policy_missing"));
   assert.ok(!existsSync(join(dir, MODEL_BUDGET_FILE)));
 });
@@ -283,8 +302,7 @@ print(json.dumps({'text':text,'hash':hashlib.sha256(text.encode()).hexdigest()})
   const written = JSON.parse(output.stdout);
   chmodSync(join(dir, "host-task-policy.json"), 0o600);
   writeFileSync(join(dir, "host-task-policy.json"), written.text + "\n");
-  writeFileSync(join(dir, "host-task.json"), JSON.stringify({
-    ...JSON.parse(readFileSync(join(dir, "host-task.json"))), task_id: TASK, policy_hash: written.hash }));
+  patchBudget(dir, state => { state.task_id = TASK; state.policy_hash = written.hash; });
   assert.equal(ledger().bind("s").policy_hash, written.hash);
 });
 
@@ -444,13 +462,11 @@ test("live Python elapsed high-water mark may shorten time but never restore it"
   const { dir, ledger } = fixture(t);
   const budget = ledger();
   budget.bind("s");
-  const path = join(dir, "host-task.json");
-  const state = JSON.parse(readFileSync(path, "utf8"));
-  writeFileSync(path, JSON.stringify({ ...state, max_elapsed_s: 601 }));
+  patchBudget(dir, state => { state.max_elapsed_s = 601; });
   assert.equal(budget.clock().remaining_ms, 0);
-  writeFileSync(path, JSON.stringify(state));
+  patchBudget(dir, state => { state.max_elapsed_s = 0; });   // 想把时间要回来
   assert.equal(budget.clock().remaining_ms, 0);
-  writeFileSync(path, JSON.stringify({ ...state, started_epoch: state.started_epoch + 1 }));
+  patchBudget(dir, state => { state.started_epoch = state.started_epoch + 1; });
   assert.throws(() => budget.clock(), code("host_model_clock"));
 });
 

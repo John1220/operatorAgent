@@ -26,6 +26,9 @@ import time
 
 
 POLICY = 'host-task-policy.json'
+#: 旧任务的预算状态文件。**新任务不再写它**：预算状态住在任务账本里
+#: （`budget_opened` / `budget_reserved` / `budget_settled` 携带整份快照）。
+#: 这个常量只剩一个用处：认出「账本之前的老目录」，那条路只读。
 STATE = 'host-task.json'
 LOCK = '.host-task.lock'
 SCHEMA = 'operator-host-task-budget-v1'
@@ -155,14 +158,46 @@ def _locked(run):
 
 
 def host_task_enabled(run):
-    """An incomplete journal is enabled too: it must fail closed, never reset."""
+    """An incomplete journal is enabled too: it must fail closed, never reset.
+
+    两种目录都算「有宿主任务」：账本里已经有预算事件的（新任务），以及只剩旧状态文件的
+    老任务。后者**只读** —— 读不出来就报错，不重建额度。
+    """
     run = Path(run)
-    return any((run/name).exists() or (run/name).is_symlink() for name in (POLICY, STATE))
+    if any((run/name).exists() or (run/name).is_symlink() for name in (POLICY, STATE)):
+        return True
+    try:
+        return _budget_state(run) is not None
+    except HostTaskBudgetError:
+        # 账本读不动也算「有宿主任务」：那条路会**拒绝**，不会静默重建额度。
+        return True
 
 
-def _write_state(run, state):
-    state['state_hash'] = digest({k:v for k,v in state.items() if k!='state_hash'})
-    atomic_json(run/STATE,state)
+def _budget_state(run):
+    """预算状态**只从任务账本读**：最后一条带 `budget.host_task` 的事件就是现值。
+
+    账本被换成软链 ⇒ 拒绝：那意味着「写下去的额度落在别处」，量出来的和记下来的
+    就不是同一条流了。
+    """
+    from ..core import task_journal
+    if (Path(run)/task_journal.JOURNAL).is_symlink():
+        raise HostTaskBudgetError('host_task_journal', 'task journal must not be a symlink')
+    try:
+        state = task_journal.fold(task_journal.read_events(run))['budget'].get('host_task')
+    except task_journal.JournalError as exc:
+        raise HostTaskBudgetError('host_task_journal', f'账本读不动: {exc.code}') from exc
+    return dict(state) if isinstance(state, dict) else None
+
+
+def _write_state(run, state, kind):
+    """把整份快照写进账本。**快照，不是增量**：与 `fold` 对 `budget` 的合并语义一致。
+
+    调用方必须已经在 `_locked(run)` 里 —— 预算的读-改-写要整段串行，
+    否则两个预留者会各自读到「还剩 2」，然后都占掉。
+    """
+    from ..core import task_journal
+    body = {key: value for key, value in state.items() if key != 'state_hash'}
+    task_journal.append(run, kind, budget={'host_task': body})
 
 
 def _contract_cases(run, contract_hash):
@@ -194,7 +229,8 @@ def initialize_host_task(run, contract_hash, limits=None):
             write_once_artifact(run/POLICY, body)
             _write_state(run, dict(schema=SCHEMA, policy_hash=digest(policy),
                 task_id=uuid.uuid4().hex, started_epoch=time.time(),
-                started_monotonic=monotonic(), max_elapsed_s=0.0, records=[]))
+                started_monotonic=monotonic(), max_elapsed_s=0.0, records=[]),
+                'budget_opened')
         budget = HostTaskBudget(run, contract_hash)
         policy, state = budget._load()
         if policy['limits'] != limits.as_dict() or policy['required_case_ids'] != cases:
@@ -208,11 +244,14 @@ class HostTaskBudget:
         self.contract_hash = _hash(contract_hash, 'contract_hash')
 
     def _load(self):
-        policy, state = _read(self.run/POLICY), _read(self.run/STATE)
+        policy, state = _read(self.run/POLICY), _budget_state(self.run)
+        if state is None:
+            # 没有预算事件就是没有这张账。**不补**：额度是冻结出来的，不是推出来的。
+            raise HostTaskBudgetError('host_task_journal',
+                                      'missing budget events in the task journal')
         if (policy.get('schema') != SCHEMA or state.get('schema') != SCHEMA
                 or policy.get('contract_hash') != self.contract_hash
-                or state.get('policy_hash') != digest(policy)
-                or state.get('state_hash') != digest({k:v for k,v in state.items() if k!='state_hash'})):
+                or state.get('policy_hash') != digest(policy)):
             raise HostTaskBudgetError('host_task_binding', 'host task journal binding differs')
         try:
             HostTaskLimits.from_dict(policy['limits'])
@@ -307,11 +346,15 @@ class HostTaskBudget:
             reservation_unit='verification_dispatches_no_refund_not_gpu_seconds')
 
     def snapshot(self, *, readonly=False):
+        """现值。**不写**：预算状态只在真正的转移（开账/预占/结算）时落账。
+
+        以前这里每次查询都把 `max_elapsed_s` 写一次文件。账本是只追加的，「查一下」
+        不是一次转移；写进去就是把现场当历史。反悔不了的保证不靠它：
+        `_elapsed` 取 `max(已落账的 max_elapsed_s, 单调钟走过的, 墙钟走过的)`，
+        而落账的那一条发生在每一次真正的转移上。
+        """
         with _locked(self.run):
             policy, state = self._load()
-            if not readonly:
-                state['max_elapsed_s'] = self._elapsed(state)
-                _write_state(self.run,state)
             return self._snapshot(policy, state)
 
     def _model_budget(self, policy, state):
@@ -438,7 +481,7 @@ class HostTaskBudget:
                           full_l2_passed=None, owner_invocation_id=owner_invocation_id)
             state['records'].append(record)
             state['max_elapsed_s'] = elapsed
-            _write_state(self.run,state)
+            _write_state(self.run, state, 'budget_reserved')
             return dict(record, remaining_s=snapshot['remaining_s'])
 
     def _evidence_path(self, value):
@@ -513,7 +556,7 @@ class HostTaskBudget:
             state['max_elapsed_s'] = self._elapsed(state)
             record.update(status=outcome, finished_epoch=time.time(),
                 finished_after_deadline=state['max_elapsed_s'] >= policy['limits']['wall_clock_s'])
-            _write_state(self.run,state)
+            _write_state(self.run, state, 'budget_settled')
             return self._snapshot(policy,state)
 
     def settle_owner(self, invocation_id, *, outcome='cancelled', reject_completed=False):
@@ -554,6 +597,6 @@ class HostTaskBudget:
                         settlement_basis='worker_reaped_response_rejected' if reject_completed else 'worker_reaped')
                     settled.append(record['id'])
             state['max_elapsed_s']=elapsed
-            _write_state(self.run,state)
+            _write_state(self.run, state, 'budget_settled')
             return dict(self._snapshot(policy,state), settled_owner_invocation_id=invocation_id,
                         settled_reservation_ids=settled)

@@ -231,6 +231,41 @@ JS 不再自己 append。理由：`rev` = 「读当前最大值 + 1」，两侧�
 
 验收：同一份预算在 journal 投影里与旧 `host-task.json` 的每个数字一致。
 
+#### 已完成（2026-11-24）
+
+预算状态**搬到账本里**，`host-task.json` 不再写（只剩「认旧目录」这一个用处）。
+每条事件带的是**整份快照**（`budget={'host_task': state}`），与 `fold` 对 `budget`
+的合并语义一致：读的人拿最后一条就是现值，不存在「增量要不要重放」的问题。
+
+四种转移各有自己的事件：
+
+| 时机 | 事件 |
+|---|---|
+| 开账（`initialize_host_task`） | `budget_opened` |
+| 预占一个验证名额（`reserve`） | `budget_reserved` |
+| 结算（`finish` / `settle_owner`） | `budget_settled` |
+
+**一处与原文不一致**：新增了 `budget_opened`。把开账写成一次 `budget_reserved`
+会让「有人预占了一个名额」凭空出现一次，而开账时一个名额都没占；词表是闭合的，
+多一个词比多一个谎言便宜。schema 仍是 `operator-task-journal-v2`。
+
+三件顺手必须一起做的事：
+
+1. **`snapshot()` 不再落盘**。以前每次查询都把 `max_elapsed_s` 写一次文件；账本只追加，
+   「查一下」不是一次转移。反悔不了的保证不靠它：`_elapsed` 取
+   `max(已落账的 max_elapsed_s, 单调钟走过的, 墙钟走过的)`，而落账发生在**每一次真正的
+   转移**上。`max_elapsed_s` 仍是高水位，`reserve`/`finish`/`settle` 都会把它推上去。
+2. **JS 侧改读同一条事件**（`journal.mjs` 的 `readJournal` / `readHostTask`）：
+   `task_id` / `policy_hash` / `started_*` / `max_elapsed_s` / `records` 全在
+   `budget_opened` 之后的最新快照里。旧目录（没有账本）**失败即关闭**：
+   `host_model_journal`，不重建额度、不解释旧文件。
+3. **软链账本一律拒绝**（Python 与 JS 各一处）：账本被换掉意味着「写下去的额度落在别处」。
+
+验收口径落成了测试：`test_host_task_budget.py` 的 52 条全绿（含「手写一条快照不进额度」——
+账本的连续性是那条链），`test_host_resume.py` 里「resume 只读」改成对 `journal.jsonl`
+字节不变，插件侧 168 条全绿（其中 `test_real_javascript_ledger_roundtrips_to_python_receipt`
+仍是跨语言往返：JS 写、Python 校验回执）。
+
 ### 5. 迁移脚本 + 4 个 repro 包
 
 `benchmarks/repro/` 下 4 个包是**已发布证据**。转换脚本必须能证明转换后重放结果不变：

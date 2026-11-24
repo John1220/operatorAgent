@@ -75,8 +75,10 @@ TASK_EVENTS = frozenset({'task_prepared', 'task_activated', 'task_closed'})
 #: 单次调用的事件。`job_finished` 携带 `outcome` 与 `result`。
 JOB_EVENTS = frozenset({'job_queued', 'job_started', 'job_finished'})
 
-#: 预算写者接入时再用。这里先承认它们的合法性，免得届时又改一次词表。
-BUDGET_EVENTS = frozenset({'budget_reserved', 'budget_settled'})
+#: 预算的三种转移。`budget_opened` 是「这张账开出来了」——它必须是一条**自己的**事件：
+#: 把开局写成一次 `budget_reserved` 会让「有人预占了一个验证名额」这件事凭空出现一次，
+#: 而那张账开局时一个名额都没占。词的闭合只为挡住拼错，不为省一条词汇。
+BUDGET_EVENTS = frozenset({'budget_opened', 'budget_reserved', 'budget_settled'})
 
 KINDS = TASK_EVENTS | JOB_EVENTS | BUDGET_EVENTS
 

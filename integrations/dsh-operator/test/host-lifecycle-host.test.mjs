@@ -275,7 +275,10 @@ test("real DSH stops the exhausted turn then permits discussion while keeping ol
     assert.equal(readFileSync(path, "utf8"), bytes);
     await f.launch("forbidden-old-verify", "Try to verify the stopped old task.");
     assert.equal(readFileSync(path, "utf8"), bytes);
-    assert.equal(load(join(dir, "host-task.json")).records.length, 0, "old execution may not resume in discussion mode");
+    // 预算记录住在任务账本里（最后一条带 budget.host_task 的事件）。
+    const journalLines = readFileSync(join(dir, "journal.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const budgetState = journalLines.filter(event => event.budget?.host_task).pop().budget.host_task;
+    assert.equal(budgetState.records.length, 0, "old execution may not resume in discussion mode");
     assert.equal(existsSync(join(dir, "verify-1/result.json")), false);
     f.pass();
   } finally { await f.close(); }

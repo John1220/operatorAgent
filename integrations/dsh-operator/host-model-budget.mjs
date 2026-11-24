@@ -6,7 +6,7 @@ import { performance } from "node:perf_hooks";
 import { MANIFEST } from "./manifest.mjs";
 import { HostModelLedger, HostModelBudgetError } from "./host-model-ledger.mjs";
 import { recoverHostSession, newTaskReceipt, canAutoStartTask } from "./host-session-lifecycle.mjs";
-import { appendJournal } from "./journal.mjs";
+import { appendJournal, readHostTask, readJournal } from "./journal.mjs";
 
 const PREFIX = "mcp__operator__";
 
@@ -79,7 +79,7 @@ export function installHostModelBudget(ctx, config = {}) {
     blocked.set(id, err); ctx.logger?.error?.(`operator-tools: ${err.message}`); return err;
   };
   function taskState(binding) {
-    const model = binding.ledger.summary(), task = read(resolve(binding.runDir, "host-task.json"));
+    const model = binding.ledger.summary(), task = readHostTask(binding.runDir);
     if (task.task_id !== binding.taskId || task.policy_hash !== model.policy_hash || !Array.isArray(task.records)) {
       throw new Error("The task identity or verification journal cannot be established.");
     }
@@ -101,15 +101,8 @@ export function installHostModelBudget(ctx, config = {}) {
   // 每次调用的终态只从任务账本读。账本之前的老目录不再被解释：它们没有这条记录，
   // 于是「还有调用没结算」—— 对旧任务，这是唯一不靠猜的答案。
   function callJournal(runDir) {
-    const path = resolve(runDir, "journal.jsonl");
     const states = new Map();
-    if (!existsSync(path)) return states;
-    for (const line of readFileSync(path, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      let event;
-      try { event = JSON.parse(line); }
-      catch { throw new Error("The task journal is not readable."); }
-      if (event?.schema !== "operator-task-journal-v2") throw new Error("The task journal schema is not recognised.");
+    for (const event of readJournal(runDir)) {
       if (event.invocation || event.job_id) states.set(event.invocation || event.job_id, event);
     }
     return states;
@@ -137,13 +130,13 @@ export function installHostModelBudget(ctx, config = {}) {
    * 宿主封账：任务账本里**唯一**有权说「整段工作结束了」的事件。
    *
    * 什么时候是「结束」由宿主决定（终评完成 / 额度用尽 / 截止到点 / 这一轮结束了），
-   * 而**怎么结束的**只用 `host-task.json` 与模型账本回答 —— 不去猜，也不读散文。
+   * 而**怎么结束的**只用任务账本里的预算状态与模型账本回答 —— 不去猜，也不读散文。
    */
   function closeTaskJournal(binding, why) {
     if (!binding?.runDir) return;
     let outcome = "failed", final = null;
     try {
-      const task = read(resolve(binding.runDir, "host-task.json"));
+      const task = readHostTask(binding.runDir);
       final = Array.isArray(task.records) ? task.records.find(r => r.purpose === "final") : null;
       if (final && final.status === "completed" && final.full_l2_passed === true) outcome = "completed";
     } catch { outcome = "failed"; }

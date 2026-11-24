@@ -183,6 +183,8 @@ def legacy_task_view(run_dir):
     except (KeyError, TypeError, ValueError):
         recomputed = None
     claimed = recorded_run.get('contract_hash')
+    # 旧任务的账本在**它当年那个状态文件**里（账本之前没有 journal）。这是一次只读的
+    # 历史回读，不是第二个权威：新任务的记录不在这里。
     ledger = json.loads((run/'host-task.json').read_text(encoding='utf-8')) if (run/'host-task.json').is_file() else {}
     records = ledger.get('records') or []
     purposes = [row.get('purpose') for row in records]
@@ -307,7 +309,7 @@ def resume(run_dir, *, backend='ssh', verification_round=None):
         if next_action=='repair':
             next_context['verification_round']=selected
     compact_budget = {key:value for key,value in budget.items() if key!='records'}
-    compact_budget['records_evidence']=str(run/'host-task.json')
+    compact_budget['records_evidence']=str(run/'journal.jsonl')
     unfinished = [dict(id=record['id'],owner_invocation_id=record.get('owner_invocation_id'),
                        source_hash=record['source_hash'],purpose=record['purpose'])
                   for record in budget['records'] if record['status']=='reserved']

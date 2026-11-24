@@ -6,6 +6,7 @@ import {
   readFileSync, realpathSync, renameSync, rmdirSync, unlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { readHostTask } from "./journal.mjs";
 
 export const MODEL_BUDGET_SCHEMA = "operator-host-model-budget-v1";
 export const MODEL_BUDGET_FILE = "host-model-budget.json";
@@ -168,9 +169,16 @@ export class HostModelLedger {
     }
   }
 
+  _hostTask() {
+    // 预算状态住在任务账本里。读不动就**拒绝**：那是「额度从哪来」的凭据，
+    // 不是可以降级成默认值的东西。
+    try { return readHostTask(this.runDir); }
+    catch (error) { refuse("host_model_journal", String(error?.message ?? error)); }
+  }
+
   _policy() {
     const policy = readObject(join(this.runDir, "host-task-policy.json"));
-    const host = readObject(join(this.runDir, "host-task.json")).value;
+    const host = this._hostTask();
     if (policy.value.schema !== "operator-host-task-budget-v1"
         || policy.value.contract_hash !== this.contractHash || host.task_id !== this.taskId
         || !HASH.test(host.policy_hash ?? "")) {
@@ -194,7 +202,7 @@ export class HostModelLedger {
 
   _hostClock() {
     const policy = readObject(join(this.runDir, "host-task-policy.json")).value;
-    const state = readObject(join(this.runDir, "host-task.json")).value;
+    const state = this._hostTask();
     if (!Number.isFinite(policy.limits?.wall_clock_s) || policy.limits.wall_clock_s <= 0
         || !Number.isFinite(state.started_epoch) || state.started_epoch <= 0
         || !Number.isFinite(state.started_monotonic) || state.started_monotonic < 0

@@ -17,6 +17,24 @@ const canonical = value => Array.isArray(value) ? "[" + value.map(canonical).joi
     : JSON.stringify(value);
 const hash = value => createHash("sha256").update(value).digest("hex");
 
+/** 预算状态住在任务账本里：落一条 `budget_opened`，与 Python 写的形状一致。 */
+function seedBudget(dir, state) {
+  writeFileSync(join(dir, "journal.jsonl"), JSON.stringify({
+    schema: "operator-task-journal-v2", rev: 1, kind: "budget_opened",
+    task_id: state.task_id, budget: { host_task: state } }) + "\n");
+}
+
+/** 改写预算状态 = 追加一条新快照（账本只追加，不改历史）。 */
+function patchBudget(dir, change) {
+  const path = join(dir, "journal.jsonl");
+  const events = readFileSync(path, "utf8").trim().split("\n").map(line => JSON.parse(line));
+  const state = { ...events.filter(event => event.budget?.host_task).pop().budget.host_task };
+  change(state);
+  writeFileSync(path, readFileSync(path, "utf8") + JSON.stringify({
+    schema: "operator-task-journal-v2", rev: events.length + 1, kind: "budget_reserved",
+    task_id: state.task_id, budget: { host_task: state } }) + "\n");
+}
+
 function fixture(t, overrides = {}, taskId = TASK, directory) {
   const dir = directory ?? mkdtempSync(join(tmpdir(), "operator-host-hook-"));
   if (directory) mkdirSync(dir, { mode: 0o700 });
@@ -33,9 +51,7 @@ function fixture(t, overrides = {}, taskId = TASK, directory) {
     policy_hash: hash(bytes), started_epoch: started, started_monotonic: 0,
     max_elapsed_s: 0, records: [],
   };
-  writeFileSync(join(dir, "host-task.json"), JSON.stringify({
-    ...hostState, state_hash: hash(canonical(hostState)),
-  }) + "\n", { mode: 0o600 });
+  seedBudget(dir, hostState);
   const body = { ok: true, workflow: "host", run_dir: dir, contract_hash: CONTRACT,
     host_task: { task_id: taskId, contract_hash: CONTRACT, run_dir: dir,
       remaining_s: policy.limits.wall_clock_s,
@@ -452,9 +468,9 @@ test("new task refuses a running turn, unfinished model record, and unknown veri
     { requestId: "unfinished", maxTokens: 32, provider: "fixture", model: "model" });
   await assert.rejects(() => host.newTask(), /未结算模型|未清理/);
   ledger.finish(host.agent.session.id, state.lease.id, reservation.id, { status: "cancelled" });
-  const path = join(task.dir, "host-task.json"), taskState = JSON.parse(readFileSync(path, "utf8"));
-  taskState.records.push({ status: "reserved", owner_invocation_id: "f".repeat(32) });
-  writeFileSync(path, JSON.stringify(taskState));
+  patchBudget(task.dir, state => {
+    state.records.push({ status: "reserved", owner_invocation_id: "f".repeat(32) });
+  });
   await assert.rejects(() => host.newTask(), /未清理/);
   assert.equal(task.state().records.length, 1);
   assert.equal(task.state().records[0].status, "cancelled");
@@ -562,9 +578,12 @@ function seedCall(dir, invocation, events) {
   const call = join(dir, "tool-calls", invocation);
   mkdirSync(call, { recursive: true, mode: 0o700 });
   writeFileSync(join(call, "launch.json"), JSON.stringify({ invocation_id: invocation, kind: "tool_call" }));
-  writeFileSync(join(dir, "journal.jsonl"), events.map((event, index) => JSON.stringify({
-    schema: "operator-task-journal-v2", rev: index + 1, task_id: "a".repeat(32),
-    job_id: invocation, invocation, operation: "verify", ...event })).join("\n") + "\n");
+  const path = join(dir, "journal.jsonl");
+  const existing = existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean) : [];
+  const appended = events.map((event, index) => JSON.stringify({
+    schema: "operator-task-journal-v2", rev: existing.length + index + 1, task_id: "a".repeat(32),
+    job_id: invocation, invocation, operation: "verify", ...event }));
+  writeFileSync(path, [...existing, ...appended].join("\n") + "\n");
 }
 
 test("a settled tool call lets the closed task release its directory", async t => {
@@ -623,9 +642,6 @@ process.stdout.write(JSON.stringify({ ok: true, event: { rev: 1 } }));
 
 test("closing a task submits exactly one task_closed through the Python entry", async t => {
   const task = fixture(t);
-  writeFileSync(join(task.dir, "journal.jsonl"), JSON.stringify({
-    schema: "operator-task-journal-v2", rev: 1, kind: "task_prepared",
-    task_id: task.body.host_task.task_id }) + "\n");
   const submitted = journalStub(t);
   const host = fakeHost(); t.after(host.dispose);
   await host.emitTool(task.body);
@@ -640,25 +656,22 @@ test("closing a task submits exactly one task_closed through the Python entry", 
   assert.ok(["completed", "failed"].includes(closed[0].outcome), closed[0].outcome);
 });
 
-test("a run directory without a journal is never opened by the CLI", async t => {
+test("a directory with no journal fails closed instead of being re-interpreted", async t => {
+  // 老目录（账本之前）：预算状态只在旧文件里。宿主**不**去解释它 —— 读不到就拦住，
+  // 并且**不调** CLI 提交任何东西。
   const task = fixture(t);
+  rmSync(join(task.dir, "journal.jsonl"));
+  writeFileSync(join(task.dir, "host-task.json"), JSON.stringify({ task_id: TASK }));
   const submitted = journalStub(t);
   const host = fakeHost(); t.after(host.dispose);
-  await host.emitTool(task.body);
-  await host.dispatch(provider().next);
-  await host.emitTool({ ...task.body, host_task: { ...task.body.host_task, terminal: true } }, "operator_verify");
-  host.native({ type: "turn/end", data: { turn: 1, reason: { kind: "completed" } } });
-  host.native({ type: "turn/start", data: { turn: 2 } });
-  await host.dispatch(provider().next);
-  assert.equal(submitted("task_closed").length, 0, "没有账本就不提交，也不伪造一条");
+  await host.emitTool(task.body).catch(() => {});
+  await assert.rejects(() => host.dispatch(provider().next), /host_model_journal/);
+  assert.equal(submitted("task_closed").length, 0);
   assert.equal(submitted("budget_settled").length, 0);
 });
 
 test("each model reservation and settlement lands as a budget snapshot", async t => {
   const task = fixture(t);
-  writeFileSync(join(task.dir, "journal.jsonl"), JSON.stringify({
-    schema: "operator-task-journal-v2", rev: 1, kind: "task_prepared",
-    task_id: task.body.host_task.task_id }) + "\n");
   const submitted = journalStub(t);
   const host = fakeHost(); t.after(host.dispose);
   await host.emitTool(task.body);

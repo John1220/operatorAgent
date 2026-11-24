@@ -18,6 +18,26 @@ CORRECT = 'import numpy as np\ndef kernel(X):\n    return np.maximum(X, 0)\n'
 WRONG = 'import numpy as np\ndef kernel(X):\n    return X.copy()\n'
 
 
+def budget_state(run):
+    """预算现值：**只从任务账本读**（最后一条带 `budget.host_task` 的事件）。"""
+    from operator_agent.core import task_journal
+    return task_journal.fold(task_journal.read_events(run))['budget']['host_task']
+
+
+def rewrite_budget_state(run, change):
+    """改写预算状态：账本只追加，所以这里写一条**新快照**，不是改历史。
+
+    `change` 拿到的是现值副本；写下去的那条仍要过 `_load` 的全部判据 ——
+    能写进去不等于能被接受。
+    """
+    from operator_agent.core import task_journal
+    state = dict(budget_state(run))
+    change(state)
+    task_journal.append(run, 'budget_reserved',
+                        budget={'host_task': {key: value for key, value in state.items()
+                                              if key != 'state_hash'}})
+
+
 def prepared(tmp_path, limits=None):
     run = tmp_path/'task'
     value = ht.prepare(dict(operator='relu', request='relu fp32', shapes=[[4, 8]], precision='fp32'), run)
@@ -154,9 +174,12 @@ def test_idle_time_counts_and_next_dispatch_stops_at_deadline(tmp_path,monkeypat
 
 
 def test_partial_initialization_and_policy_drift_fail_closed(tmp_path):
+    """策略文件在、账本里没有预算事件 ⇒ 半初始化，**拒绝重开**而不是重建额度。"""
     run,budget=prepared(tmp_path)
-    (run/hb.STATE).unlink()
+    (run/'journal.jsonl').unlink()          # 账本没了：策略文件孤零零留着
     assert hb.host_task_enabled(run) is True
+    with pytest.raises(hb.HostTaskBudgetError):
+        budget.snapshot()
     with pytest.raises(hb.HostTaskBudgetError):
         hb.initialize_host_task(run,budget.contract_hash)
 
@@ -207,27 +230,33 @@ def test_parent_directory_alias_does_not_break_evidence_binding(tmp_path):
     assert snap['last_correct_candidate']['source_hash']==code_hash(CORRECT)
 
 
-def test_symlink_state_is_refused_instead_of_reset(tmp_path):
+def test_symlink_journal_is_refused_instead_of_followed(tmp_path):
+    """账本被换成软链 ⇒ 拒绝：那意味着「写下去的东西落在别处」。"""
     run,budget=prepared(tmp_path)
-    copy=run/'copied-state.json'
-    copy.write_bytes((run/hb.STATE).read_bytes())
-    (run/hb.STATE).unlink()
-    (run/hb.STATE).symlink_to(copy)
+    copy=run/'copied-journal.jsonl'
+    copy.write_bytes((run/'journal.jsonl').read_bytes())
+    (run/'journal.jsonl').unlink()
+    (run/'journal.jsonl').symlink_to(copy)
     with pytest.raises(hb.HostTaskBudgetError) as error:
         budget.snapshot()
     assert error.value.code=='host_task_journal'
 
 
-def test_rewritten_credit_without_journal_checksum_is_refused(tmp_path):
+def test_rewritten_credit_without_the_journal_chain_is_refused(tmp_path):
+    """绕过 `append` 手写的快照不许变成额度：账本的连续性就是那条链。"""
     run,budget=prepared(tmp_path)
     budget.reserve(code_hash(CORRECT))
-    path=run/hb.STATE
-    value=json.loads(path.read_text())
-    value['records']=[]
-    path.write_text(json.dumps(value))
+    before = budget.snapshot()['reserved']
+    state = dict(budget_state(run)); state['records'] = []
+    target = run/'journal.jsonl'
+    with target.open('a', encoding='utf-8') as handle:      # 跳过 append：不分配 rev
+        handle.write(json.dumps(dict(schema='operator-task-journal-v2', rev=999,
+                                     kind='budget_reserved', task_id='forged',
+                                     budget={'host_task': state})) + '\n')
     with pytest.raises(hb.HostTaskBudgetError) as error:
         budget.reserve(code_hash(CORRECT))
-    assert error.value.code=='host_task_binding'
+    assert error.value.code=='host_task_journal'      # 断号 = 损坏，不是「多了一条」
+    assert before == 1
 
 
 @pytest.mark.parametrize('outcome,phase',[
@@ -480,7 +509,7 @@ def test_model_policy_is_frozen_without_inventing_host_receipts(tmp_path):
 
 def model_receipt(run,budget):
     policy=json.loads((run/hb.POLICY).read_text())
-    state=json.loads((run/hb.STATE).read_text())
+    state=budget_state(run)
     lease=dict(id='lease-one',session_id='会话-one',owner_pid=os.getpid(),generation=1,bound_at=1000)
     receipt=dict(schema='operator-host-model-budget-v1',task_id=state['task_id'],
         contract_hash=budget.contract_hash,policy_hash=state['policy_hash'],
@@ -522,7 +551,8 @@ const{HostModelLedger}=await import(pathToFileURL(process.argv[1]).href);
 const ledger=new HostModelLedger(process.argv[2],{taskId:process.argv[3],contractHash:process.argv[4]});
 const bound=ledger.bind('python-wire-session');
 const fs=await import('node:fs');
-const host=JSON.parse(fs.readFileSync(process.argv[2]+'/host-task.json','utf8'));
+const events=fs.readFileSync(process.argv[2]+'/journal.jsonl','utf8').trim().split('\\n').map(line=>JSON.parse(line));
+const host=events.filter(event=>event.budget?.host_task).pop().budget.host_task;
 const policy=JSON.parse(fs.readFileSync(process.argv[2]+'/host-task-policy.json','utf8'));
 ledger.clock({remainingSeconds:Math.max(0,host.started_epoch+policy.limits.wall_clock_s-Date.now()/1000),
   deadlineEpoch:host.started_epoch+policy.limits.wall_clock_s});
@@ -575,8 +605,7 @@ def test_legacy_policy_keeps_verification_credit_without_minting_model_limits(tm
     for name in hb.MODEL_LIMIT_FIELDS:policy['limits'].pop(name)
     (run/hb.POLICY).chmod(0o600)
     hb.atomic_json(run/hb.POLICY,policy)
-    state=json.loads((run/hb.STATE).read_text());state['policy_hash']=hb.digest(policy)
-    hb._write_state(run,state)
+    rewrite_budget_state(run, lambda state: state.update(policy_hash=hb.digest(policy)))
     before=(run/hb.POLICY).read_bytes()
     value=budget.snapshot(readonly=True)
     assert value['model_budget']['enforcement']=='legacy_policy_without_model_limits'
