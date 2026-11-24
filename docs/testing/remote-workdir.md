@@ -27,7 +27,8 @@ H20 的根分区（`/`）只剩个位数 GB，`/data3` 还有 3.3T：
 
 ## 2026-11-24 清理记录
 
-删除了 `/root` 下已经跑完的任务工作目录（远端无相关进程在跑、证据已回收到仓里）：
+删除了 `/root` 下已经跑完的任务工作目录（远端无相关进程在跑、证据已回收到仓里；
+删前逐个核对路径前缀、拒绝软链，删后 `/` 从 95%/9.2 G 变成 92%/15 G）：
 
 ```
 5.3G  /root/operator-d2-gpu7-20261117
@@ -41,6 +42,8 @@ H20 的根分区（`/`）只剩个位数 GB，`/data3` 还有 3.3T：
 480K  /root/operator-v08-fp32-ieee.5qkJCW
 380K  /root/operator-v082-spike-20261119
 ```
+
+`/data3/operator-work` 已建好并验证可写。
 
 **`/root/operator_agent` 保留**：它不是某个任务的产物，而是 `REMOTE_WORK_DIR` 的旧默认值
 （`~/operator_agent`）—— 一个 5.3 G 的 uv 环境加 19 个 `profile-profile-*` 目录。
