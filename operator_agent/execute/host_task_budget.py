@@ -852,6 +852,27 @@ class HostTaskBudget:
         formal_delivery = _delivery_formal(records, final, band, self._min_speedup())
         best = selection['best']
         baseline = selection['active_baseline']
+        seed_manifest = _optional_json(self.run/SEED)
+        baseline_attempts = [r for r in records if r.get('role') == 'baseline']
+        if baseline is None:
+            baseline = next((r for r in baseline_attempts if _timely_l2(r)
+                             and _eligible_performance(r.get('performance'))), None)
+        seed = None
+        if (type(seed_manifest) is dict and seed_manifest.get('schema') == 'operator-seed-v1'
+                and type(seed_manifest.get('source_hash')) is str):
+            seed_path = Path(seed_manifest.get('source') or (self.run/'seed.py'))
+            if (seed_path.is_symlink() or not seed_path.is_file()
+                    or hashlib.sha256(seed_path.read_bytes()).hexdigest()
+                    != seed_manifest['source_hash']):
+                raise HostTaskBudgetError('host_task_binding', 'sealed seed source changed')
+            status = ('established' if baseline is not None else
+                      'l2_failed' if any(r.get('status') == 'completed'
+                                        and r.get('full_l2_passed') is not True
+                                        for r in baseline_attempts) else 'pending')
+            seed = dict(sealed=True, source=str(seed_path),
+                        source_hash=seed_manifest['source_hash'],
+                        contract_hash=seed_manifest.get('contract_hash'), status=status)
+        seed_ready = seed is None or seed['status'] == 'established'
         pending = sum(r['status']=='reserved' for r in records)
         remaining_exploration = limits['max_verifications']-1-sum(r['purpose']=='explore' for r in records)
         expired = elapsed >= limits['wall_clock_s']
@@ -881,7 +902,7 @@ class HostTaskBudget:
             terminal=phase in ('final_complete','final_failed','exhausted'),
             terminal_scope='task_budget_only_not_worker_or_provider_stop',
             can_reserve_exploration=not development_closed,
-            can_reserve_final=final is None and not expired and bool(correct) and not pending,
+            can_reserve_final=final is None and not expired and bool(correct) and not pending and seed_ready,
             limits=limits, elapsed_s=elapsed, remaining_s=max(0.0, limits['wall_clock_s']-elapsed),
             deadline_epoch=state['started_epoch']+limits['wall_clock_s'],
             expired=expired, reserved=len(records),
@@ -895,7 +916,7 @@ class HostTaskBudget:
                 source=last.get('source'), report=last.get('report'), verification_id=last['id'],
                 scope='latest_complete_l2_only_not_performance_best') if last else None),
             noise_band=band, selection=selection['formal'],
-            formal_delivery=formal_delivery,
+            formal_delivery=formal_delivery, seed=seed,
             baseline=(dict(source_hash=baseline['source_hash'],
                 round=_verification_round(baseline), evidence=baseline.get('evidence'),
                 source=baseline.get('source'), report=baseline.get('report'),
@@ -1018,7 +1039,7 @@ class HostTaskBudget:
                         receipt_error='host_model_receipt_invalid')
 
     def reserve(self, source_hash, *, purpose='explore', evidence=None, owner_invocation_id=None,
-                final_selection=None):
+                final_selection=None, lease_host=None, lease_gpu_uuid=None):
         _hash(source_hash, 'source_hash')
         owner_invocation_id = _owner(owner_invocation_id)
         if purpose not in ('explore','final'):
@@ -1052,21 +1073,35 @@ class HostTaskBudget:
                     raise HostTaskBudgetError('host_final_budget', 'independent final reservation already spent')
                 if not any(r['source_hash']==source_hash and _timely_l2(r) for r in state['records']):
                     raise HostTaskBudgetError('host_final_source', 'final requires a prior complete L2 pass of this source')
+            seed = _optional_json(self.run/SEED)
+            seed_hash = seed.get('source_hash') if type(seed) is dict else None
+            established = any(r.get('role') == 'baseline' and _timely_l2(r)
+                              and _eligible_performance(r.get('performance'))
+                              for r in state['records'])
+            if seed_hash is not None and not established and (
+                    purpose != 'explore' or source_hash != seed_hash):
+                raise HostTaskBudgetError(
+                    'host_seed_baseline_required',
+                    'establish the sealed seed baseline (full L2 + eligible L3) before '
+                    'dispatching other sources or the independent final')
+            role = ('baseline' if purpose == 'explore' and seed_hash == source_hash
+                    and not established else 'candidate')
             from .gpu_lease import GpuLeaseBusy, acquire as acquire_lease
             lease_owner = owner_invocation_id or 'verify-' + uuid.uuid4().hex
             try:
-                acquire_lease(self.run, owner=lease_owner, tool='verify',
-                              deadline=time.time() + float(snapshot['remaining_s']))
+                lease = acquire_lease(self.run, owner=lease_owner, tool='verify',
+                                      deadline=time.time() + float(snapshot['remaining_s']),
+                                      host=lease_host, gpu_uuid=lease_gpu_uuid)
             except GpuLeaseBusy as error:
                 raise HostTaskBudgetError(
                     'host_gpu_busy',
                     f'{error}; verification and NCU replay must not share the GPU') from error
             try:
                 record = dict(id=len(state['records'])+1, source_hash=source_hash, purpose=purpose,
-                              status='reserved', reserved_epoch=time.time(),
+                              role=role, status='reserved', reserved_epoch=time.time(),
                               reserved_monotonic=monotonic(), evidence=evidence,
                               full_l2_passed=None, owner_invocation_id=owner_invocation_id,
-                              gpu_lease_owner=lease_owner)
+                              gpu_lease_owner=lease_owner, gpu_lease_key=lease.get('machine_key'))
                 state['records'].append(record)
                 if final_selection is not None:
                     state['final_selection'] = dict(final_selection)

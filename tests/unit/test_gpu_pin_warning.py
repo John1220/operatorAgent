@@ -12,9 +12,12 @@
 
 from operator_agent.execute.remote_executor import SSHExecutor
 
-#: nvidia-smi csv 的真实形状 (index, memory.free, utilization.gpu)。
+#: nvidia-smi csv 的真实形状 (index, memory.free, utilization.gpu, uuid, name)。
 #: 两张卡里选 1 —— util 最低优先 (利用率优先于显存余量)。
-_SMI_OUTPUT = "0, 80000, 95\n1, 90000, 5\n"
+_SMI_OUTPUT = (
+    "0, 80000, 95, GPU-00000000-0000-0000-0000-000000000000, NVIDIA H20\n"
+    "1, 90000, 5, GPU-11111111-1111-1111-1111-111111111111, NVIDIA H20\n"
+)
 
 
 def _ssh(monkeypatch, smi_output=_SMI_OUTPUT, env_gpu=None):

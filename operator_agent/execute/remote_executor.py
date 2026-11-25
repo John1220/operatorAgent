@@ -675,6 +675,8 @@ class SSHExecutor(Backend):
         self._gpu_info_cache: Optional[dict] = None
         # 固定的 GPU 卡号: None=未解析, -1=解析过但不固定, >=0=固定该卡
         self._gpu_pin: Optional[int] = None
+        self._gpu_uuid: Optional[str] = None
+        self._gpu_name: Optional[str] = None
         self._absolute_work_dir: Optional[str] = None
         self._profile_deadline: Optional[float] = None
         self._uv_path = "~/.local/bin/uv"   # ensure_environment 复用
@@ -811,8 +813,7 @@ class SSHExecutor(Backend):
         if self.platform != "nvidia":
             return None
         try:
-            fields = ('index,memory.free,utilization.gpu,uuid,name' if required else
-                      'index,memory.free,utilization.gpu')
+            fields = 'index,memory.free,utilization.gpu,uuid,name'
             out = self._ssh_exec(
                 f"nvidia-smi --query-gpu={fields} "
                 "--format=csv,noheader,nounits"
@@ -833,14 +834,17 @@ class SSHExecutor(Backend):
                 if required:
                     if (idx == int(required) and len(parts) >= 5 and parts[3] == required_uuid
                             and parts[4] == required_name and free >= 1024 and 0 <= util <= 5):
-                        best = ((-util, free), idx, util, free)
+                        best = ((-util, free), idx, util, free, parts[3], parts[4])
+                    continue
+                if len(parts) < 5:
                     continue
                 # 利用率优先: 显存余量大但被跑满的卡测不出可信加速比
                 key = (-util, free)
                 if best is None or key > best[0]:
-                    best = (key, idx, util, free)
+                    best = (key, idx, util, free, parts[3], parts[4])
             if best:
                 self._gpu_pin = best[1]
+                self._gpu_uuid, self._gpu_name = best[4], best[5]
                 print(f"  [SSHExecutor] 固定使用 GPU {best[1]} "
                       f"(util={best[2]}%, free={best[3] / 1024:.1f}GB)")
                 # P2-3 (generation-side-review): 本地设的 OPERATOR_AGENT_GPU 只会被
@@ -1594,6 +1598,10 @@ class SSHExecutor(Backend):
         pin = self._gpu_pin
         return pin if pin is not None and pin >= 0 else None
 
+    @property
+    def selected_gpu_uuid(self) -> Optional[str]:
+        return self._gpu_uuid if self._gpu_pin is not None and self._gpu_pin >= 0 else None
+
     def lock_identity(self) -> str:
         """按**目标机器**取键, 不带 platform: 锁保护的是那张卡, 不是那份配置"""
         return f"ssh:{self._ssh_target()}"
@@ -2346,6 +2354,10 @@ class RemoteExecutor(Backend):
         于是「记录」与「事实」不同源。与 `capabilities` 一样会触发延迟初始化。
         """
         return self.backend.selected_gpu
+
+    @property
+    def selected_gpu_uuid(self) -> Optional[str]:
+        return self.backend.selected_gpu_uuid
 
     def get_hardware_info(self) -> dict:
         return self.backend.get_hardware_info()

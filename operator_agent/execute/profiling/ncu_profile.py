@@ -173,10 +173,18 @@ def compare(original, reexport, *, rel_tol=1e-9, abs_tol=1.0):
     for index, (left, right) in enumerate(zip(original, reexport)):
         if left['kernel'] != right['kernel']:
             reasons.append(f'{index}: kernel {left["kernel"]!r} != {right["kernel"]!r}')
-        for key in ('dram_read_bytes', 'dram_write_bytes', 'duration_ns'):
+        for key in ('dram_read_bytes', 'dram_write_bytes', 'duration_ns',
+                    'l2_read_bytes', 'l2_write_bytes'):
             a, b = left.get(key), right.get(key)
             if a is None or b is None or not math.isclose(
                     a, b, rel_tol=rel_tol, abs_tol=abs_tol):
+                reasons.append(f'{index}: {key} {a} != {b}')
+        for key in ('l2_hit_pct', 'warps_pct', 'long_scoreboard_pct'):
+            a, b = left.get(key), right.get(key)
+            if a is None and b is None:
+                continue
+            if a is None or b is None or not math.isclose(
+                    a, b, rel_tol=rel_tol, abs_tol=0.01):
                 reasons.append(f'{index}: {key} {a} != {b}')
         for key in ('registers_per_thread', 'shared_memory_bytes_per_block',
                     'registers_limit_blocks_per_sm', 'shared_memory_limit_blocks_per_sm',

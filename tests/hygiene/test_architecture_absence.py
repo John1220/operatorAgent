@@ -113,6 +113,16 @@ class TestTheRequestTextCannotMoveTheContract:
         assert not plain.source.semantic_parameters.get("unresolved_request")
         assert marked.source.semantic_parameters.get("unresolved_request")
 
+    def test_explicit_builtin_layernorm_epsilon_is_not_a_new_semantic(self):
+        plain = self._hash(request="layernorm fp32")
+        explicit = self._hash(request="layernorm fp32, eps=1e-5")
+        assert explicit == plain
+        changed = ht.build_task(dict(self.BASE, request="layernorm fp32, eps=1e-3"))
+        assert changed.source.semantic_parameters.get("unresolved_request")
+        with_affine = ht.build_task(dict(
+            self.BASE, request="layernorm fp32, eps=1e-5 affine=True"))
+        assert with_affine.source.semantic_parameters.get("unresolved_request")
+
 
 class TestSemanticFieldsMustBeExplicit:
     """`operator` / `precision` 没有默认值：缺了就拒绝，不猜。"""

@@ -7,6 +7,10 @@
 这一组不碰 GPU、不碰网络：租约是控制端的事，键取自**声明**（`REQUIRED_GPU_UUID` 与
 目标主机），所以能在 prepare/reserve 阶段就判出来。
 """
+import json
+import threading
+import time
+
 import pytest
 
 from operator_agent.app import hitl_tools as ht
@@ -128,3 +132,107 @@ def test_an_expired_machine_lease_does_not_block(leases, monkeypatch):
     gl.acquire_machine(key, owner='stale', tool='verify', deadline=1.0)   # 早已过期
     _, budget = task(leases, 'task-a')
     budget.reserve(code_hash(SEED))
+
+
+def test_explicit_ssh_host_locks_without_environment_declarations(leases, monkeypatch):
+    monkeypatch.delenv('OPERATOR_AGENT_GPU_LEASE_HOST', raising=False)
+    monkeypatch.delenv('REMOTE_SSH_HOST', raising=False)
+    monkeypatch.delenv('REMOTE_SSH_HOST_KL', raising=False)
+    monkeypatch.delenv('OPERATOR_AGENT_REQUIRED_GPU_UUID', raising=False)
+    _, first = task(leases, 'task-a')
+    _, second = task(leases, 'task-b')
+    first.reserve(code_hash(SEED), lease_host=HOST)
+    with pytest.raises(HostTaskBudgetError) as error:
+        second.reserve(code_hash(SEED), lease_host=HOST)
+    assert error.value.code == 'host_gpu_busy'
+    assert gl.machine_status()[f'{HOST}|*']['tool'] == 'verify'
+
+
+def test_explicit_card_identity_allows_different_cards_in_parallel(leases):
+    _, first = task(leases, 'task-a')
+    _, second = task(leases, 'task-b')
+    first.reserve(code_hash(SEED), lease_host=HOST, lease_gpu_uuid=GPU_A)
+    second.reserve(code_hash(SEED), lease_host=HOST, lease_gpu_uuid=GPU_B)
+    assert sorted(value['key'] for value in gl.machine_status().values()) == sorted(
+        [f'{HOST}|{GPU_A}', f'{HOST}|{GPU_B}'])
+
+
+def test_host_verify_uses_its_ssh_argument_for_the_lease(leases, monkeypatch):
+    monkeypatch.delenv('OPERATOR_AGENT_GPU_LEASE_HOST', raising=False)
+    monkeypatch.delenv('REMOTE_SSH_HOST', raising=False)
+    monkeypatch.delenv('REMOTE_SSH_HOST_KL', raising=False)
+    first_run, _ = task(leases, 'task-a')
+    second_run, _ = task(leases, 'task-b')
+    entered = threading.Event()
+    release = threading.Event()
+    errors = []
+
+    def blocked(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        raise RuntimeError('probe complete')
+
+    monkeypatch.setattr(ht, '_verify_candidate', blocked)
+
+    def first_call():
+        try:
+            ht.verify(first_run, SEED, backend='ssh', host=HOST)
+        except Exception as error:  # noqa: BLE001 - asserted below
+            errors.append(error)
+
+    thread = threading.Thread(target=first_call)
+    thread.start()
+    assert entered.wait(5), errors
+    try:
+        with pytest.raises(ht.ToolError) as error:
+            ht.verify(second_run, SEED, backend='ssh', host=HOST)
+        assert error.value.code == 'host_gpu_busy'
+    finally:
+        release.set()
+        thread.join(5)
+    assert len(errors) == 1 and isinstance(errors[0], RuntimeError)
+    assert gl.machine_status() == {}
+
+
+def test_wildcard_lease_upgrades_to_the_observed_gpu_and_releases(leases):
+    run, budget = task(leases, 'task-a')
+    reservation = budget.reserve(code_hash(SEED), lease_host=HOST)
+    upgraded = gl.upgrade(run, reservation['gpu_lease_owner'], GPU_A)
+    assert upgraded['machine_key'] == f'{HOST}|{GPU_A}'
+    assert sorted(gl.machine_status()) == [f'{HOST}|{GPU_A}']
+    _, other = task(leases, 'task-b')
+    with pytest.raises(HostTaskBudgetError) as error:
+        other.reserve(code_hash(SEED), lease_host=HOST, lease_gpu_uuid=GPU_A)
+    assert error.value.code == 'host_gpu_busy'
+    budget.finish(reservation['id'], outcome='failed')
+    assert gl.machine_status() == {}
+    other.reserve(code_hash(SEED), lease_host=HOST, lease_gpu_uuid=GPU_A)
+
+
+def test_wildcard_upgrade_conflict_keeps_the_original_lease(leases):
+    run, budget = task(leases, 'task-a')
+    reservation = budget.reserve(code_hash(SEED), lease_host=HOST)
+    task(leases, 'task-b')
+    target = gl._machine_file(leases, f'{HOST}|{GPU_A}', '.json')
+    target.write_text(json.dumps(dict(
+        schema=gl.MACHINE_SCHEMA, key=f'{HOST}|{GPU_A}', owner='external', tool='verify',
+        deadline=time.time() + 60)))
+    with pytest.raises(gl.GpuLeaseBusy):
+        gl.upgrade(run, reservation['gpu_lease_owner'], GPU_A)
+    assert gl.machine_status()[f'{HOST}|*']['owner'] == reservation['gpu_lease_owner']
+    budget.finish(reservation['id'], outcome='failed')
+    assert list(gl.machine_status()) == [f'{HOST}|{GPU_A}']
+    gl.release_machine(f'{HOST}|{GPU_A}', 'external')
+
+
+def test_explicit_profile_and_verify_hosts_remain_exclusive(leases):
+    profile_run, _ = task(leases, 'task-profile')
+    _, verify = task(leases, 'task-verify')
+    owner = 'a' * 32
+    pb.ProfileBudget(profile_run).reserve(
+        timeout_s=60, owner_invocation_id=owner, lease_host=HOST, lease_gpu_uuid=GPU_A)
+    with pytest.raises(HostTaskBudgetError) as error:
+        verify.reserve(code_hash(SEED), lease_host=HOST, lease_gpu_uuid=GPU_A)
+    assert error.value.code == 'host_gpu_busy'
+    pb.ProfileBudget(profile_run).settle_owner(owner, outcome='cancelled')
+    verify.reserve(code_hash(SEED), lease_host=HOST, lease_gpu_uuid=GPU_A)

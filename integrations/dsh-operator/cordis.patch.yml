@@ -1,5 +1,5 @@
 # DSH 侧接线：两条记录。
-#   1) mcp-operator   —— MCP stdio server（host 七工具；legacy 保留内层入口，
+#   1) mcp-operator   —— MCP stdio server（host 九工具；legacy 保留内层入口，
 #                        给模型的说明也在它这里：server 的 `initialize.instructions`）
 #   2) operator-tools —— 斜杠命令 `/op` 和原生主模型预算硬门，不注册提示段
 #
@@ -14,8 +14,8 @@
         command: operator-agent-mcp
         # 真机一次**完整**判定（L1→L3、15 个边界 case）实测 866.8 s
         # （docs/dsh-plugin-evaluation.md §9.8）；repair 默认 2 轮 ⇒ 约 30 min。
-        # 取 60 min 留余量：**超时不是优雅退出** —— server 是同步逐行读，
-        # 客户端 abort 后它仍会算完再写一个没人认领的响应。宁可给足，别让它超时。
+        # 取 60 min 留余量。长工具由独立 supervisor worker 执行；客户端 abort 会请求取消，
+        # supervisor 回收 worker 后结算，远端清理结果以 status 回执为准。
         toolCallTimeoutMs: 3600000
         failOnStartupError: false
         env:

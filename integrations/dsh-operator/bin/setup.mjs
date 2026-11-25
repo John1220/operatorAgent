@@ -21,7 +21,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, copyFil
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 /** 本插件配套的 Python 版本；与 package.json 的 version 一起决定安装目录。 */
@@ -150,7 +150,38 @@ function pythonBin(python) {
   return join(dirname(python), "operator-agent-mcp");
 }
 
-/** 起一次真实 MCP 握手：能列出 manifest 里的 host 工具才算环境可用。 */
+function canonical(value) {
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.keys(value).sort()
+    .map(key => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}";
+  return JSON.stringify(value);
+}
+
+function schemaHash(value) {
+  return createHash("sha256").update(canonical(value)).digest("hex");
+}
+
+export function validatePythonReplies(replies) {
+  const listed = replies.find((reply) => reply.id === 2);
+  const tools = listed?.result?.tools || [];
+  const names = tools.map((tool) => tool.name).sort();
+  if (JSON.stringify(names) !== JSON.stringify(TOOLS)) {
+    throw new Error(`Python 侧暴露的工具不是 manifest 的 host 工具面（实际：${names.join(", ") || "无"}）`);
+  }
+  const init = replies.find((reply) => reply.id === 1);
+  const version = init?.result?.serverInfo?.version;
+  if (version !== MANIFEST.package_version) {
+    throw new Error(`Python 侧版本 ${version || "?"} ≠ 配对版本 ${MANIFEST.package_version}`);
+  }
+  const drift = tools.filter((tool) => {
+    const expected = MANIFEST.tools.find((row) => row.name === tool.name);
+    return !expected || schemaHash(tool.inputSchema) !== expected.schema_hash;
+  }).map((tool) => tool.name);
+  if (drift.length) throw new Error(`Python 侧工具 schema 与 manifest 不一致：${drift.join(", ")}`);
+  return version;
+}
+
+/** 起一次真实 MCP 握手：版本与每个 schema 都对上才算环境可用。 */
 export function checkPython(python) {
   for (const name of ["operator-agent", "operator-agent-mcp"]) {
     const path = join(dirname(python), name);
@@ -166,13 +197,7 @@ export function checkPython(python) {
   });
   if (result.status !== 0) throw new Error(`MCP 自检失败（退出码 ${result.status}）：${(result.stderr || "").trim().slice(0, 400)}`);
   const replies = String(result.stdout).split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  const listed = replies.find((reply) => reply.id === 2);
-  const names = (listed?.result?.tools || []).map((tool) => tool.name).sort();
-  if (JSON.stringify(names) !== JSON.stringify(TOOLS)) {
-    throw new Error(`Python 侧暴露的工具不是 manifest 的 host 工具面（实际：${names.join(", ") || "无"}）`);
-  }
-  const init = replies.find((reply) => reply.id === 1);
-  return init?.result?.serverInfo?.version || "unknown";
+  return validatePythonReplies(replies);
 }
 
 function receiptDir(dshHome) {

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import time
 import uuid
 from contextlib import contextmanager
 
@@ -124,11 +125,76 @@ def _verification_materials(run, contract, backend, verification_round):
     return source, verification, directory
 
 
-def context(run_dir, *, phase='generate', backend='ssh', verification_round=None):
+def _profile_evidence(run, verification_round, source_hash):
+    from .hitl_tools import ToolError
+    from ..execute.profile_budget import ProfileBudget, ProfileBudgetError
+    try:
+        ledger = ProfileBudget(run).snapshot()
+    except ProfileBudgetError as error:
+        raise ToolError(error.code, error.detail) from error
+    evidence = []
+    for entry in ledger['entries']:
+        if entry['status'] != 'completed' or not entry.get('receipt'):
+            continue
+        receipt_path = Path(entry['receipt'])
+        if receipt_path.parent.parent != run or receipt_path.name != 'receipt.json':
+            raise ToolError('profile_evidence_refused', 'profile receipt is outside the owned run')
+        try:
+            receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+            complete = json.loads((receipt_path.parent/'complete.json').read_text(encoding='utf-8'))
+            if (receipt.get('schema') != 'operator-profile-v1'
+                    or complete.get('schema') != 'operator-profile-complete-v1'
+                    or complete.get('evidence_complete') is not True
+                    or complete.get('binding', {}).get('profile_id') != receipt.get('profile_id')):
+                raise ValueError('profile evidence envelope differs')
+            for name, expected in complete['files_sha256'].items():
+                path = receipt_path.parent/name
+                if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                    raise ValueError('profile evidence member drift')
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise ToolError('profile_evidence_refused', 'completed profile evidence is unreadable') from error
+        if (receipt.get('verification_round') != verification_round
+                or receipt.get('source_hash') != source_hash):
+            continue
+        evidence.append(dict(
+            profile_id=receipt['profile_id'], verification_round=verification_round,
+            source_hash=source_hash, gpu=receipt.get('gpu'), totals=receipt.get('totals'),
+            launches=receipt.get('launches'), range_ok=receipt.get('range_ok'),
+            decoy_seen=receipt.get('decoy_seen'), reexport=receipt.get('reexport'),
+            cache_conditions=receipt.get('cache_conditions'), ncu=receipt.get('ncu'),
+            wall_s=receipt.get('wall_s'), evidence=str(receipt_path.parent/'complete.json')))
+    return evidence
+
+
+def _experiment_history(run):
+    records = []
+    for path in sorted((run/'contexts').glob('*.json')) if (run/'contexts').is_dir() else []:
+        try:
+            if path.is_symlink() or path.stat().st_size > 4 * 1024 * 1024:
+                continue
+            payload = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        experiment = (payload.get('optimization') or {}).get('experiment')
+        if isinstance(experiment, dict) and experiment.get('schema') == 'operator-ncu-experiment-v1':
+            records.append(experiment)
+    return records[-32:]
+
+
+def context(run_dir, *, phase='generate', backend='ssh', verification_round=None,
+            hypothesis=None, expected_metric_change=None):
     from .hitl_tools import ToolError
     from ..generate.host_context import build_host_context
     from ..execute.host_task_budget import HostTaskBudget, host_task_enabled
     run, task, contract = prepared_task(run_dir)
+    if phase != 'optimize' and (hypothesis is not None or expected_metric_change is not None):
+        raise ToolError('unexpected_experiment', 'experiment hypotheses are only valid for optimize context')
+    if phase == 'optimize':
+        if (hypothesis is None) != (expected_metric_change is None):
+            raise ToolError('experiment_incomplete', 'provide both hypothesis and expected_metric_change')
+        for name, value in (('hypothesis', hypothesis), ('expected_metric_change', expected_metric_change)):
+            if value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 1000):
+                raise ToolError('experiment_invalid', name+' must be non-empty text up to 1000 characters')
     source = verification = None
     if phase in ('repair', 'optimize'):
         if type(verification_round) is not int or verification_round < 1:
@@ -141,9 +207,27 @@ def context(run_dir, *, phase='generate', backend='ssh', verification_round=None
                                        source=source, verification=verification)
     except ValueError as error:
         raise ToolError('context_refused', str(error)) from error
+    if phase == 'optimize':
+        profiles = _profile_evidence(run, verification_round, code_hash(source))
+        record_id = uuid.uuid4().hex
+        materials['optimization']['profile_evidence'] = profiles
+        materials['optimization']['experiment_history'] = _experiment_history(run)
+        materials['optimization']['experiment'] = dict(
+            schema='operator-ncu-experiment-v1', id=record_id, created_at=time.time(),
+            source_hash=code_hash(source), verification_round=verification_round,
+            bottleneck_hypothesis=hypothesis, expected_metric_change=expected_metric_change,
+            observed_result=profiles, status='observed' if profiles else 'planned',
+            next_action='host_review_then_independent_l3')
+        materials['optimization']['experiment_protocol'] = dict(
+            required_fields=['source_hash', 'bottleneck_hypothesis', 'expected_metric_change',
+                             'observed_result', 'next_action'],
+            rule='Use the bound NCU facts as observations, not verdicts; state a falsifiable '
+                 'next hypothesis and confirm it with independent L3.')
+    else:
+        record_id = uuid.uuid4().hex
     directory = run/'contexts'
     directory.mkdir(exist_ok=True)
-    evidence = directory/(uuid.uuid4().hex+'.json')
+    evidence = directory/(record_id+'.json')
     write_once_artifact(evidence, json.dumps(materials, ensure_ascii=False, sort_keys=True).encode())
     budget = HostTaskBudget(run, contract.hash).snapshot() if host_task_enabled(run) else None
     return dict(ok=True, workflow='host', run_dir=str(run), contract_hash=contract.hash,
@@ -231,6 +315,37 @@ def legacy_task_view(run_dir):
     }
 
 
+def _seed_attempt_is_infra_hold(record):
+    """True when a seed attempt ended in an infra hold, not a numeric L2 failure.
+
+    The remote reference-identity handshake can end with a transport outcome of
+    ``unknown`` (cold environment, SSH hiccup). The host task still records
+    ``full_l2_passed=False``; retrying the seed once within the same budget is
+    safe, and must not be reported as ``seed_not_correct_for_contract``.
+    """
+    evidence = record.get('evidence')
+    if not evidence:
+        return False
+    try:
+        payload = json.loads(Path(evidence).read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    route = payload.get('route')
+    if isinstance(route, dict) and route.get('route') == 'hold' and (
+            route.get('kind') == 'infra' or route.get('counts_as_iteration') is False):
+        return True
+    for verdict in payload.get('verdicts') or ():
+        metrics = verdict.get('metrics') if isinstance(verdict, dict) else None
+        if not isinstance(metrics, dict):
+            continue
+        if (metrics.get('reference_identity_unknown') is True
+                or metrics.get('transport_outcome') == 'outcome_unknown'):
+            return True
+    return False
+
+
 def resume(run_dir, *, backend='ssh', verification_round=None):
     """Read the existing task without resetting policy, time or reservations.
 
@@ -240,7 +355,8 @@ def resume(run_dir, *, backend='ssh', verification_round=None):
     new task, and model-session attachment is left to the DSH adapter.
     """
     from .hitl_tools import ToolError
-    from ..execute.host_task_budget import HostTaskBudget, host_task_enabled
+    from ..execute.host_task_budget import (HostTaskBudget, _verification_round,
+                                            host_task_enabled)
     if Path(run_dir).is_symlink():
         raise ToolError('host_task_required', 'Resume an ordinary prepared host task directory.')
     try:
@@ -263,16 +379,18 @@ def resume(run_dir, *, backend='ssh', verification_round=None):
         number = int(directory.name[7:])
         (completed if (directory/'complete.json').exists() else incomplete).append(number)
     completed.sort()
+    best = budget.get('best_candidate')
+    final_record = next((record for record in budget['records']
+                         if record.get('purpose') == 'final'
+                         and record.get('status') == 'completed'), None)
     if verification_round is not None:
         if type(verification_round) is not int or verification_round not in completed:
             raise ToolError('verification_required', 'Resume needs a completed verification_round.')
         selected = verification_round
-    elif budget.get('final_verification') and not budget['unfinished']:
-        final_evidence = budget['final_verification'].get('evidence')
-        if final_evidence:
-            evidence = Path(final_evidence)
-            if evidence.parent.parent == run and evidence.parent.name.startswith('verify-'):
-                selected = int(evidence.parent.name[7:])
+    elif final_record is not None and type(_verification_round(final_record)) is int:
+        selected = _verification_round(final_record)
+    elif best is not None and type(best.get('round')) is int:
+        selected = best['round']
     elif budget['can_reserve_final'] and not budget['can_reserve_exploration']:
         recommended = budget.get('best_candidate') or budget['last_correct_candidate']
         evidence = Path(recommended['evidence'])
@@ -294,24 +412,63 @@ def resume(run_dir, *, backend='ssh', verification_round=None):
     accepted_source = source is not None and any(record['source_hash']==code_hash(source) for record in accepted)
     model_calls = budget['model_budget'].get('calls')
     model_unfinished = model_calls.get('unfinished') if isinstance(model_calls,dict) else None
+    seed = budget.get('seed')
+    baseline = budget.get('baseline')
+    baseline_attempts = [r for r in budget['records'] if r.get('role') == 'baseline']
+    stop_reason = None
+    next_context = None
     if budget['terminal']:
         next_action = 'report_final' if budget['phase']=='final_complete' else 'report_stopped'
+        stop_reason = budget.get('stop_reason')
     elif budget['unfinished']:
         next_action = 'inspect_in_flight'
     elif model_unfinished:
         next_action = 'inspect_model_in_flight'
+    elif seed is not None and baseline is None:
+        last_attempt = baseline_attempts[-1] if baseline_attempts else None
+        infra_holds = sum(
+            1 for record in baseline_attempts
+            if record.get('status') == 'completed'
+            and record.get('full_l2_passed') is not True
+            and _seed_attempt_is_infra_hold(record))
+        if last_attempt is None:
+            next_action = 'verify_seed'
+        elif (last_attempt.get('status') == 'completed'
+              and last_attempt.get('full_l2_passed') is not True
+              and _seed_attempt_is_infra_hold(last_attempt)
+              and infra_holds <= 1
+              and budget.get('can_reserve_exploration')
+              and budget.get('remaining_verifications', 0) > 0
+              and not budget.get('expired')):
+            next_action = 'verify_seed'
+        elif last_attempt.get('status') == 'completed' and last_attempt.get('full_l2_passed') is not True:
+            next_action = 'report_stopped'
+            stop_reason = 'seed_not_correct_for_contract'
+        elif last_attempt.get('status') == 'completed':
+            if budget['can_reserve_exploration']:
+                next_action = 'verify_seed'
+            else:
+                next_action = 'report_stopped'
+                stop_reason = 'baseline_unavailable'
+        else:
+            next_action = 'verify_seed'
+        if next_action == 'verify_seed':
+            next_context = dict(run_dir=str(run), backend=backend, phase='verify_seed',
+                                seed_source=(seed.get('source') or ''))
+    elif seed is not None and baseline is not None and budget['can_reserve_exploration']:
+        next_action = 'optimize'
     elif accepted_source and budget['can_reserve_final']:
         next_action = 'final_verify'
     elif not budget['can_reserve_exploration']:
         next_action = 'select_accepted_candidate' if budget['can_reserve_final'] else 'report_stopped'
+        stop_reason = stop_reason or budget.get('stop_reason')
     else:
         next_action = ('verify_candidate' if verification is not None and verification.get('levels',{}).get('L2') is True
                        else 'repair' if verification is not None else 'generate')
-    next_context = None
-    if next_action in ('generate','repair'):
+    if next_context is None and next_action in ('generate','repair','optimize'):
         next_context = dict(run_dir=str(run),backend=backend,
-                            phase='repair' if next_action=='repair' else 'generate')
-        if next_action=='repair':
+                            phase=('optimize' if next_action=='optimize' else 'repair' if next_action=='repair' else 'generate'))
+        if next_action in ('repair','optimize'):
             next_context['verification_round']=selected
     compact_budget = {key:value for key,value in budget.items() if key!='records'}
     compact_budget['records_evidence']=str(run/'journal.jsonl')
@@ -320,11 +477,11 @@ def resume(run_dir, *, backend='ssh', verification_round=None):
                   for record in budget['records'] if record['status']=='reserved']
     return dict(ok=True, workflow='host', resumed=True, run_dir=str(run),
         task_id=budget['task_id'], contract_hash=contract.hash, phase=budget['phase'],
-        stop_reason=budget['stop_reason'], host_task=compact_budget,
+        stop_reason=stop_reason or budget['stop_reason'], host_task=compact_budget,
         latest_completed_verification=completed[-1] if completed else None,
         selected_verification=selected, incomplete_verifications=sorted(incomplete),
         candidate=candidate, last_correct_candidate=budget['last_correct_candidate'],
-        baseline=budget.get('baseline'), best_candidate=budget.get('best_candidate'),
+        seed=seed, baseline=baseline, best_candidate=budget.get('best_candidate'),
         final_selection=budget.get('final_selection'),
         candidates=budget.get('candidates'), noise_band=budget.get('noise_band'),
         selection=budget.get('selection'), formal_delivery=budget.get('formal_delivery'),

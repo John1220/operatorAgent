@@ -29,6 +29,17 @@ def test_reexport_reproduces_the_same_values():
     assert np.compare(original, reexport) == dict(match=True, reasons=[])
 
 
+def test_reexport_compares_attribution_metrics():
+    original = np.parse_raw_csv((SPIKE/'dual-seed.csv').read_text())
+    reexport = np.parse_raw_csv((SPIKE/'dual-seed.reimport.csv').read_text())
+    for key in ('l2_hit_pct', 'warps_pct', 'long_scoreboard_pct'):
+        changed = [dict(row) for row in reexport]
+        changed[0][key] = (changed[0][key] or 0.0) + 1.0
+        result = np.compare(original, changed)
+        assert result['match'] is False
+        assert any(key in reason for reason in result['reasons'])
+
+
 def test_decoy_and_out_of_range_are_visible():
     launches = np.parse_raw_csv((SPIKE/'dual-seed.csv').read_text())
     decoy = dict(launches[0], kernel='vectorized_elementwise_kernel')

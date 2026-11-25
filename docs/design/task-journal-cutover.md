@@ -35,11 +35,13 @@
    `HostTaskBudget.reserve` 在预留时取每 run + 机器级 GPU 租约，`finish` / `settle_owner`
    在结算后按 owner 释放；跨任务同卡、不同卡、profile/L3 互斥与未声明卡冲突的 4 条用例
    已直接运行并通过。远端 runner 的 `action=profile`、SSHExecutor 的 NCU 采集/清理、
-   `hitl_tools.profile`、`ToolCall` 监督和 host 工具清单（`tool_version=15`）均已接线。
+   `hitl_tools.profile`、`ToolCall` 监督和 host 工具清单（`tool_version=17`）均已接线。
    `final_selection` 也已迁移：L3 性能事实、噪声带、可比窗口与最快合格候选由预算账本
    投影；final 默认送评推荐源码，只有显式 `override_reason` 才覆盖。选择回执与预留
    原子写入同一条 `budget_reserved` 快照，`status`/`resume` 只读该投影，不再写
-   `best.json` 或 `final-selection.json`。搬运源在 `codex/v0.8.2-profile-optimize`。
+   `best.json` 或 `final-selection.json`。宿主 L3 现在验证全部声明形状；SSH 调用参数
+   参与机器级租约；`seed_source`/`preflight_receipt`、baseline 门与 optimize/final
+   恢复状态机也已接入。搬运源在 `codex/v0.8.2-profile-optimize`。
 
    **2026-11-24 H20 验收**：在 GPU3 上对 `relu fp16 128x128` 的 round 2（完整 L2
    12/12）实跑 NCU 2025.3。回执只含 1 个 `_relu_kernel`，位于 `candidate` NVTX 范围，
@@ -53,10 +55,10 @@
 
 接下来一件事：
 
-**v0.8.2 执行链迁移已完成**：`operator_profile` 真机验收与 `final_selection` 均已落地。
-journal 的真机 replay 对账已在本文第 5 步完成。尚未迁移的是源分支的 `seed_source` /
-`preflight_receipt` 封存及其专属 resume 状态机；当前无 seed 任务以首个合格 L3 作为
-窗口基线，正式增益在缺少 preflight 时仍明确返回 pending。
+**v0.8.2 执行链迁移已完成**：`operator_profile` 真机验收、`final_selection`、全形状 L3、
+调用感知 GPU 租约、seed/preflight 与跨轮 NCU 实验记录均已落地；主机通配租约会在
+取得实测 UUID 后原子升级。journal 的真机 replay 对账已在本文第 5 步完成。当前剩余
+边界是真实模型 `forward` 验收与正式 A/B 成本对照。
 
 ### 已知噪声，别当回归
 
@@ -66,8 +68,6 @@ journal 的真机 replay 对账已在本文第 5 步完成。尚未迁移的是�
 - `tests/acceptance/phase1/test_rehearsal.py` 在**与别的套件同进程连跑**时偶发一次
   `result['phase'] == 'failed'`（八格 worker 里有格子超时）；单跑与第二次连跑都不复现。
   断它之前先单跑一遍。
-- `tests/hygiene/.../test_no_credential_shaped_content` 是**真红**：`tests/unit/resume/
-  test_legacy_resume.py:16` 里写死了本机 A4 产物的绝对路径。与本次切流无关。
 - `tests/acceptance` 已改成按能力探针跳过；跑之前先 `python -m benchmarks.experiments.s5.s5_rebuild_deps`
   重建依赖树，否则 118 条会 skip。
 

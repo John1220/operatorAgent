@@ -119,6 +119,21 @@ def test_cleanup_profile_transport_kills_the_remote_group(tmp_path, monkeypatch)
     assert json.loads(transport.read_text())['cleanup'] == 'attempted'
 
 
+def test_pinned_gpu_reports_its_observed_uuid(monkeypatch):
+    executor = SSHExecutor(host='fixture', work_dir='/root/x')
+    queries = []
+
+    def reply(command, **kwargs):
+        queries.append(command)
+        return '3, 57467, 0, GPU-634bbc76-9ab6-220a-48a8-27247d7acbe2, NVIDIA H20\n'
+
+    monkeypatch.setattr(executor, '_ssh_exec', reply)
+    monkeypatch.delenv('OPERATOR_AGENT_REQUIRED_GPU', raising=False)
+    assert executor._pinned_gpu() == 3
+    assert executor.selected_gpu_uuid == 'GPU-634bbc76-9ab6-220a-48a8-27247d7acbe2'
+    assert 'uuid,name' in queries[0]
+
+
 def test_profile_refuses_non_nvidia_runner(tmp_path):
     executor = SSHExecutor(host='fixture', work_dir='/root/x', platform='kunlunxin')
     result = executor.profile('code', {}, artifact_dir=tmp_path / 'profile')

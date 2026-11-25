@@ -7,7 +7,7 @@
 （`Verifier` / `measurement` / `eligibility` / `anticheat` / `failure_route`），
 这个包提供 DSH 侧的安装配置、`/op` 命令与原生主模型预算 hook。
 
-首次试用 v0.7.2，请从[自助试跑指南](../../docs/testing/v072-quickstart.md)开始：先用自然语言描述 CPU ReLU 需求，再按需查看安装、证据和可选验收步骤。正式本地版为 Python **0.7.2** / 插件 **0.2.2** / 工具契约 **12**，未向 PyPI/npm 公开发布。
+当前开发树为 Python **0.7.2** / 插件 **0.2.7** / 工具契约 **17**。首次试用可从[自助试跑指南](../../docs/testing/v072-quickstart.md)开始：先用自然语言描述 CPU ReLU 需求，再按需查看安装、证据和可选验收步骤。
 
 ---
 
@@ -33,7 +33,7 @@ cd /path/to/operatorAgent && pip install .
 
 ### 2.2 从本地正式工件安装
 
-正式交付为 Python `0.7.2`（PyPI 分布名 `dsh-operator-agent`）/ 插件 `0.2.5`，工具契约 **12**，npm 与 PyPI 均已发布。本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`；实际完成状态以正式安装回执和 UI 核对为准，不沿用候选回执。
+正式交付为 Python `0.7.2`（PyPI 分布名 `dsh-operator-agent`）/ 插件 `0.2.7`，工具契约 **17**。本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`；实际完成状态以正式安装回执和 UI 核对为准，不沿用候选回执。
 
 先把 wheel 装入 DSH 启动时可访问的 Python 3.12 环境：
 
@@ -76,10 +76,10 @@ npx dsh-operator-agent-setup --runtime uvx
 自定义非 desktop profile 可以通过[安装助手](../../benchmarks/delivery/install_dsh.py)的 `--profile <profile>` 一次安装并配置，或使用普通 CLI：
 
 ```bash
-dsh plugin --profile <非desktop的profile> add /path/to/dsh-operator-agent-0.2.2.tgz
+dsh plugin --profile <非desktop的profile> add /path/to/dsh-operator-agent-0.2.7.tgz
 ```
 
-GUI 通常不继承 venv 的 `PATH`，因此 `mcp-operator` 与 `operator-tools` 均需使用相应 Python 环境中的绝对命令路径。配置助手检查不代替实际加载：重开 DSH，确认插件页 `0.2.2` 的两个组件运行中，并用 `/op doctor` 核对（CLI/MCP 是否可执行、工具契约与版本配对、已接线后端；失败项直接给修复命令）。卸载见 §2.4。
+GUI 通常不继承 venv 的 `PATH`，因此 `mcp-operator` 与 `operator-tools` 均需使用相应 Python 环境中的绝对命令路径。配置助手检查不代替实际加载：重开 DSH，确认插件页 `0.2.7` 的两个组件运行中，并用 `/op doctor` 核对（CLI/MCP 是否可执行、工具契约与版本配对、已接线后端；失败项直接给修复命令）。卸载见 §2.4。
 
 当前边界见 [v0.7.2 支持清单](../../docs/testing/v072-support.md)。历史候选的[生命周期验收](../../docs/status/v072-session-lifecycle-acceptance-20261106.md)与[自动入口验收](../../docs/status/v072-auto-task-acceptance-20261106.md)保留原版本和安装身份。前版边界与回退见 [v0.7.1 支持清单](../../docs/testing/v071-support.md)及[交付记录 §12](../../docs/testing/v07-delivery.md#12-v071-本地封版)。legacy 离线示例随包位于 `examples/v07/`。旧 [S6 验收记录](../../docs/status/dsh-operator-s6-acceptance-20261030.md)仅覆盖当时工件；其 NumPy wheel 面向 CPython 3.9，Python 3.12 应使用匹配的平台依赖。
 
@@ -247,7 +247,7 @@ compat:
 dsh --profile <非desktop的profile> --dump-config | rg mcp-operator
 ```
 
-Desktop 重开后应在插件页核对插件 `0.2.2` 启用且两个组件运行中，再直接 `/op capabilities` 核对 Python `0.7.2` / 工具契约 `12`。在会话中让模型调用 `operator_capabilities` 可进一步核对 MCP 链路；`backends.{mock,local,ssh}.wired` 只说明接线，不证明已通过 GPU/SSH 验收。
+Desktop 重开后应在插件页核对插件 `0.2.7` 启用且两个组件运行中，再直接 `/op capabilities` 核对 Python `0.7.2` / 工具契约 `16`。在会话中让模型调用 `operator_capabilities` 可进一步核对 MCP 链路；`backends.{mock,local,ssh}.wired` 只说明接线，不证明已通过 GPU/SSH 验收。
 
 ## 5. 工具与工作流
 
@@ -441,7 +441,7 @@ python -m pip wheel . --no-deps -w dist/
 - 从干净导出构建：`rsync -a --exclude output --exclude logs --exclude triton --exclude .git ./ /tmp/oa-src/`
   然后在 `/tmp/oa-src` 里构建。
 
-当前正式交付身份为 Python **0.7.2**（PyPI `dsh-operator-agent`）/ 插件 **0.2.5** / 工具契约 **12**，已在 PyPI 与 npm 公开发布；封版时的 0.2.2 工件身份保留在交付目录。正式工件从保留源码快照构建并核对包内身份；本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`，安装成功需另有回执及 UI 版本核对。
+当前正式交付身份为 Python **0.7.2**（PyPI `dsh-operator-agent`）/ 插件 **0.2.7** / 工具契约 **17**；封版时的 0.2.2 工件身份保留在交付目录。正式工件从保留源码快照构建并核对包内身份；本机安装目标为 `~/.local/share/operator-agent/v0.7.2/`，安装成功需另有回执及 UI 版本核对。
 
 历史 `0.1.16` 插件 / Python `0.6.7` 的换号原因仍见[身份重绑定记录](../../docs/phase1/delivery-identity-rebind-20261031.md)，不作为当前版本说明。`private: false` 及随包 `LICENSE`/`NOTICE` 说明发布形态，不代表已上架。逐字节副本与发版形态由
 `tests/hygiene/test_packaging.py::TestTheDshReleaseShape` 和 CI 的 `release-shape` 作业守住

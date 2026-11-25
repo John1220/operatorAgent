@@ -27,6 +27,24 @@ test("host 状态呈现验证预算和终评，不推测后台进程或性能最
   assert.ok(!output.includes("进程"));
 });
 
+test("host 状态展示性能推荐、实际送评与清理事实", () => {
+  const output = formatStatus({ workflow: "host", phase: "final_complete",
+    host_task: { reserved: 3, limits: { max_verifications: 6 }, remaining_exploration: 0,
+      remaining_final: 0, remaining_s: 20, development_closed: true },
+    best_candidate: { source_hash: "b".repeat(64), round: 2 },
+    final_selection: { actual_source: "c".repeat(64), override: true,
+      override_reason: "host accepted the tradeoff" },
+    formal_delivery: { pending: false, gain: true, delta_pct: 12.5, reasons: [] },
+    calls: [{ invocation_id: "d".repeat(32), phase: "cancelling",
+      cleanup: { status: "attempted" } }],
+  });
+  assert.ok(output.includes(`性能推荐：${"b".repeat(64)} · round 2`));
+  assert.ok(output.includes(`实际送评：${"c".repeat(64)} · 显式覆盖`));
+  assert.ok(output.includes("host accepted the tradeoff"));
+  assert.ok(output.includes("正式增益成立 · Δ 12.50%"));
+  assert.ok(output.includes("清理：attempted"));
+});
+
 test("host 模型额度耗尽时旁路状态仍给出失败源码、报告和在飞取消身份", () => {
   const output = formatStatus({ workflow: "host", phase: "awaiting_host",
     host_task: { model_budget: { receipt_verified: true, enforcement: "host_enforced_receipt",

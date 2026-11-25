@@ -93,7 +93,9 @@ def test_host_prepare_cannot_reset_or_rewrite_task_and_legacy_cannot_bypass(tmp_
     run = tmp_path/'task'
     first = ht.prepare(DECL, run, host_budget=dict(max_verifications=2))
     ht.verify(run, CORRECT, backend='fake', stop_after='L2')
+    identity = (run/'run.json').read_bytes()
     repeated = ht.prepare(DECL, run)
+    assert (run/'run.json').read_bytes() == identity
     assert repeated['host_task']['task_id'] == first['host_task']['task_id']
     assert repeated['host_task']['reserved'] == 1
     original = (run/'contract.json').read_bytes()

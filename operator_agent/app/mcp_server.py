@@ -519,6 +519,10 @@ def _tool_definitions(host_mode=None) -> list[dict]:
                 'backend': {'type': 'string', 'enum': ['mock', 'local', 'ssh', 'fake']},
                 'phase': {'type': 'string', 'enum': ['generate', 'repair', 'optimize'], 'default': 'generate'},
                 'verification_round': {'type': 'integer', 'minimum': 1},
+                'hypothesis': {'type': 'string', 'maxLength': 1000,
+                    'description': 'phase=optimize：本轮可证伪的瓶颈假设；与 expected_metric_change 同时提供'},
+                'expected_metric_change': {'type': 'string', 'maxLength': 1000,
+                    'description': 'phase=optimize：预期指标变化；用于下一轮独立 L3 检验'},
             }},
     })
     verify_tool = next(tool for tool in definitions if tool['name'] == 'operator_verify')
@@ -583,6 +587,11 @@ def _tool_definitions(host_mode=None) -> list[dict]:
         })
         selected = [tool for tool in definitions if tool['name'] in HOST_TOOLS]
         prepared = next(tool for tool in selected if tool['name'] == 'operator_prepare')
+        prepared['inputSchema']['properties']['seed_source'] = {
+            'type': 'string', 'description': '优化已有算子时封存起点源码文本；host workflow 专用'}
+        prepared['inputSchema']['properties']['preflight_receipt'] = {
+            'description': 'noise-preflight-v1 回执对象或普通文件路径；封存当前 GPU 窗口噪声带',
+            'anyOf': [{'type': 'object'}, {'type': 'string'}]}
         prepared['inputSchema']['properties']['host_budget'] = {
             'type': 'object', 'additionalProperties': False,
             'properties': {
@@ -742,9 +751,12 @@ def _call_tool(name: str, arguments: dict) -> dict:
         if not run_dir:
             raise ToolError("run_dir_required", "prepare 需要 run_dir")
         host_budget = args.pop('host_budget', {} if _host_mode() else None)
+        seed_source = args.pop('seed_source', None)
+        preflight_receipt = args.pop('preflight_receipt', None)
         if _host_mode() and type(host_budget) is not dict:
             raise ToolError('invalid_host_budget', 'host_budget must be an object in host workflow.')
-        return _text_result(prepare(args, run_dir, host_budget=host_budget))
+        return _text_result(prepare(args, run_dir, host_budget=host_budget,
+                                    seed_source=seed_source, preflight_receipt=preflight_receipt))
     if name == "operator_verify":
         args = dict(arguments or {})
         # wait 只由 stdio server 的长工具提交层兑现；同步路径（worker/CLI）永远等待。

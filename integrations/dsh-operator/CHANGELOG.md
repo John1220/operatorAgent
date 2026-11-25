@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.7
+
+配套 Python `0.7.2` / 工具契约 **17**。GPU 主机通配租约在取得实测 UUID 后原子升级；
+`operator_context(phase=optimize)` 固化瓶颈假设、预期指标、NCU 观察与后续实验历史。
+旧 `0.2.6` tarball 保留为历史工件。
+
+## 0.2.6
+
+配套 Python `0.7.2` / 工具契约 **16**。安装助手在写 profile 前核对 Python 版本与每个 host
+工具的 schema hash；`/op status` 展示性能推荐、实际送评、正式交付结论和在飞清理状态。
+随包包含 journal、profile 与 final-selection 接线；旧 `0.2.5` tarball 保留为历史工件。
+
 ## 0.2.5
 
 新增 **uvx 安装形态**（配合 `operator-agent` 上架 PyPI）：`dsh-operator-agent-setup --runtime uvx`

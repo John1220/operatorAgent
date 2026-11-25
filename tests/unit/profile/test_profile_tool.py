@@ -100,11 +100,19 @@ def test_profile_writes_a_bound_receipt_without_consuming_verification_budget(
     monkeypatch.setattr(hw, '_verification_materials',
                         lambda *args, **kwargs: (SEED, verification(contract), run / 'verify-1'))
     from operator_agent.execute.host_task_budget import HostTaskBudget
-    before = HostTaskBudget(run, contract.hash).snapshot()
-    (run / 'baseline.json').write_text(json.dumps(dict(performance=dict(
+    from operator_agent.core import task_journal
+    state = task_journal.fold(task_journal.read_events(run))['budget']['host_task']
+    baseline_performance = dict(
         l2_flush_bytes=268435456,
         timing_channel='production-cuda-events-interleaved-l2-flush',
-        timing_protocol='native-cuda-ruler-v1'))))
+        timing_protocol='native-cuda-ruler-v1', median_time_ms=0.2,
+        measurement_validity='valid', measurement_can_persist=True)
+    state['records'].append(dict(
+        id=1, source_hash=code_hash(SEED), purpose='explore', role='baseline',
+        status='completed', full_l2_passed=True, finished_after_deadline=False,
+        evidence=str(run/'verify-1'/'result.json'), performance=baseline_performance))
+    task_journal.append(run, 'budget_reserved', budget={'host_task': state})
+    before = HostTaskBudget(run, contract.hash).snapshot()
 
     result = ht.profile(run, 1, backend='ssh', host='h20', timeout=30)
 

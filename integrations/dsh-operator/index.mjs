@@ -379,6 +379,19 @@ export function formatStatus(payload, runDir = undefined) {
     if (budget.development_closed) lines.push("开发已关闭，以独立终评证据确认结果");
     const correct = payload.last_correct_candidate;
     if (correct) lines.push(`最近完整 L2 候选：${correct.source_hash}（不代表性能最佳）`);
+    const best = payload.best_candidate;
+    if (best) lines.push(`性能推荐：${best.source_hash} · round ${best.round ?? "?"}`);
+    const selection = payload.final_selection;
+    if (selection) {
+      lines.push(`实际送评：${selection.actual_source} · ${selection.override ? "显式覆盖" : "账本默认"}`);
+      if (selection.override_reason) lines.push(`覆盖理由：${selection.override_reason}`);
+    }
+    const formal = payload.formal_delivery;
+    if (formal) {
+      const state = formal.pending ? "待确认" : formal.gain ? "正式增益成立" : "无正式增益";
+      lines.push(`交付结论：${state}${formal.delta_pct == null ? "" : ` · Δ ${formal.delta_pct.toFixed(2)}%`}`);
+      if (formal.reasons?.length) lines.push(`交付原因：${formal.reasons.join("；")}`);
+    }
     const model = budget.model_budget;
     if (model?.receipt_verified && model.enforcement === "host_enforced_receipt") {
       lines.push(`模型派发：${count(model.calls?.reserved)} / ${count(model.calls?.limit)} · 剩余 ${count(model.calls?.remaining)}`);
@@ -397,6 +410,7 @@ export function formatStatus(payload, runDir = undefined) {
     for (const call of payload.calls || []) {
       if (["running", "cancelling", "lost"].includes(call.phase) && call.invocation_id) {
         lines.push(`工具实例：${call.invocation_id} · ${call.phase}`);
+        if (call.cleanup) lines.push(`清理：${call.cleanup.status ?? "未知"}`);
       }
     }
     return lines.join("\n");

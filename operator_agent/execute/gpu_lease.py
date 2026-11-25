@@ -73,19 +73,11 @@ def _read(run):
 
 # ── 机器级（跨任务目录）─────────────────────────────────────────────────────
 
-def machine_key(environ=None):
-    """`host|<gpu_uuid>`；声明了机器但没声明卡时是 `host|*`；都没有时返回 None。
-
-    键只来自**声明**：运行期选卡是远端的事，拿它当键会让两个任务在选卡**之后**才
-    发现撞车（那时已经准备好要测了）。
-
-    `None` 表示"这次不涉及某台真机的某张卡"（mock/fake/local、以及不声明目标机器的
-    单元测试）：那时机器级互斥无键可依，只保留每 run 一层。刻意不拿"默认主机名"当
-    兜底 —— 那会让所有本地任务排成一队，却挡不住真正的撞车。
-    """
+def machine_key(environ=None, *, host=None, gpu_uuid=None):
+    """`host|<gpu_uuid>`；显式调用参数优先于环境声明。"""
     env = os.environ if environ is None else environ
-    gpu = (env.get('OPERATOR_AGENT_REQUIRED_GPU_UUID') or '').strip()
-    host = (env.get('OPERATOR_AGENT_GPU_LEASE_HOST') or env.get('REMOTE_SSH_HOST')
+    gpu = (gpu_uuid or env.get('OPERATOR_AGENT_REQUIRED_GPU_UUID') or '').strip()
+    host = (host or env.get('OPERATOR_AGENT_GPU_LEASE_HOST') or env.get('REMOTE_SSH_HOST')
             or env.get('REMOTE_SSH_HOST_KL') or '').strip()
     if not gpu and not host:
         return None
@@ -188,11 +180,11 @@ def machine_status(key=None):
 
 # ── 每 run 一层（保留原语义，外加机器级互斥）────────────────────────────────
 
-def acquire(run, *, owner, tool, deadline=None):
+def acquire(run, *, owner, tool, deadline=None, host=None, gpu_uuid=None):
     """Atomically take the run's GPU lease **and** the machine-level one."""
     owner = str(owner)
     deadline = float(deadline) if type(deadline) in (int, float) else None
-    key = machine_key()
+    key = machine_key(host=host, gpu_uuid=gpu_uuid)
     with _locked(run):
         current = _read(run)
         if current is not None:
@@ -228,3 +220,47 @@ def release(run, owner):
         if key is not None:
             release_machine(key, owner)
         return True
+
+
+def upgrade(run, owner, gpu_uuid):
+    """Narrow an owned host wildcard lease to the observed physical GPU UUID."""
+    owner = str(owner)
+    if type(gpu_uuid) is not str or not gpu_uuid.strip():
+        raise ValueError('GPU UUID is required for lease upgrade')
+    with _locked(run):
+        current = _read(run)
+        if current is None or current.get('owner') != owner:
+            return False
+        old_key = current.get('machine_key')
+        if not old_key or not old_key.endswith('|' + UNPINNED):
+            return current
+        host = old_key.partition('|')[0]
+        new_key = f'{host}|{gpu_uuid.strip()}'
+        directory = _machine_dir()
+        with _machine_locked(directory):
+            for key, value in _machine_live(directory).items():
+                if value.get('owner') != owner and _clashes(new_key, key or ''):
+                    raise GpuLeaseBusy(value.get('owner'), value.get('tool'), key=key)
+            upgraded = dict(current, key=new_key, machine_key=new_key)
+            machine_value = dict(schema=MACHINE_SCHEMA, key=new_key,
+                                 owner=owner, tool=current.get('tool'),
+                                 pid=current.get('pid'), host=os.uname().nodename,
+                                 started_at=current.get('started_at'),
+                                 deadline=current.get('deadline'),
+                                 lease_id=current.get('lease_id'))
+            target = _machine_file(directory, new_key, '.json')
+            temporary = target.with_suffix('.json.tmp')
+            temporary.write_text(json.dumps(machine_value, ensure_ascii=False, sort_keys=True),
+                                 encoding='utf-8')
+            os.replace(temporary, target)
+            path = Path(run)/LEASE_FILE
+            run_temporary = path.with_suffix('.json.tmp')
+            try:
+                run_temporary.write_text(json.dumps(
+                    upgraded, ensure_ascii=False, sort_keys=True), encoding='utf-8')
+                os.replace(run_temporary, path)
+            except BaseException:
+                target.unlink(missing_ok=True)
+                raise
+            _machine_file(directory, old_key, '.json').unlink(missing_ok=True)
+        return upgraded

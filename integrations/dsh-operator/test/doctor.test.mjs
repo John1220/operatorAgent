@@ -9,11 +9,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync, readFile
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { formatDoctor, locate, PAIRED_PYTHON, EXPECTED_TOOL_VERSION } from "../index.mjs";
 import { MANIFEST } from "../manifest.mjs";
-import { patchText, entries, entriesUvx, parseArgs, writeProfile, BEGIN, END } from "../bin/setup.mjs";
+import { patchText, entries, entriesUvx, parseArgs, validatePythonReplies, writeProfile, BEGIN, END } from "../bin/setup.mjs";
 
 const healthy = () => ({
   pluginVersion: "0.2.3", command: "operator-agent", cliFound: true, cliPath: "/opt/venv/bin/operator-agent",
@@ -132,6 +133,31 @@ test("uvx 形态把版本钉死，并同时配置 MCP 与 /op 两条记录", () 
   assert.deepEqual(rows[1].config.args, ["--from", "dsh-operator-agent==0.7.2", "operator-agent"]);
   assert.equal(rows[0].config.env.OPERATOR_AGENT_WORKFLOW, "host");
   assert.equal(rows[1].config.hostModelBudget && Object.keys(rows[1].config.hostModelBudget).length, 0);
+});
+
+test("setup rejects an unpaired Python version or schema drift", t => {
+  const original = MANIFEST.tools;
+  const canonical = value => Array.isArray(value) ? `[${value.map(canonical).join(",")}]`
+    : value && typeof value === "object" ? `{${Object.keys(value).sort()
+      .map(key => JSON.stringify(key) + ":" + canonical(value[key])).join(",")}}`
+    : JSON.stringify(value);
+  const hash = value => createHash("sha256").update(canonical(value)).digest("hex");
+  const rows = MANIFEST.host_tools.map(name => ({
+    name, inputSchema: { type: "object", row: name } }));
+  MANIFEST.tools = rows.map(row => ({
+    name: row.name, schema_hash: hash(row.inputSchema) }));
+  t.after(() => { MANIFEST.tools = original; });
+  const valid = [
+    { id: 1, result: { serverInfo: { version: PAIRED_PYTHON } } },
+    { id: 2, result: { tools: rows } },
+  ];
+  assert.equal(validatePythonReplies(valid), PAIRED_PYTHON);
+  const wrongVersion = valid.map(row => JSON.parse(JSON.stringify(row)));
+  wrongVersion[0].result.serverInfo.version = "0.0.1";
+  assert.throws(() => validatePythonReplies(wrongVersion), /配对版本/);
+  const changed = valid.map(row => JSON.parse(JSON.stringify(row)));
+  changed[1].result.tools[0].inputSchema.extra = true;
+  assert.throws(() => validatePythonReplies(changed), /schema/);
 });
 
 test("uvx 与 --python/--wheel 互斥", () => {

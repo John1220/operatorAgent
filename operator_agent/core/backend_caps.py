@@ -199,6 +199,11 @@ class Backend(ABC):
         """
         return None
 
+    @property
+    def selected_gpu_uuid(self) -> Optional[str]:
+        """实际固定 GPU 的 UUID；没有设备身份时保持未知。"""
+        return None
+
     def param_space(self, contract: object = None) -> "Optional[ParamSpace]":
         """§12 的参数空间: **返回 None 的后端是代码型** —— 基类默认就是它
 

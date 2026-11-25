@@ -28,7 +28,7 @@
     "operator_status"
   ],
   "schema": "dsh-operator-manifest-v1",
-  "tool_version": 15,
+  "tool_version": 17,
   "tools": [
     {
       "host": true,
@@ -43,7 +43,7 @@
     {
       "host": true,
       "name": "operator_context",
-      "schema_hash": "711e1ce74c9813b0eb7841e2c4ab92d4d98dfbf3943d35f21d5e840f447843fa"
+      "schema_hash": "d1bc8a1be13173ce686415da38134084c100887737127001a563f433520f41d9"
     },
     {
       "host": true,
@@ -53,7 +53,7 @@
     {
       "host": true,
       "name": "operator_prepare",
-      "schema_hash": "f7d5c927fc3324fd6ca9bb5fe3909d60118bec94bd585085063c13641a8c353b"
+      "schema_hash": "61a669f791466b7809a2bd90b6e15861d4b5f5066af1334fb139407d27b8d900"
     },
     {
       "host": true,
@@ -76,5 +76,5 @@
       "schema_hash": "55e574329497dcdebf0bf077702ae0ffff1e57e11882d555d109b74b847c7f0e"
     }
   ],
-  "tools_hash": "7b99768c67141a1a238284494f8d0c31b7e0f1a16514b975360ad0444dcc6fc2"
+  "tools_hash": "1b2f8a9ba977c35c95d9a174cb163f2060fa588f305cb8948cdb4455f298c4ac"
 }

@@ -80,14 +80,16 @@ class ProfileBudget:
                         in_flight=sum(entry['status'] == 'reserved' for entry in entries),
                         max_wall_s=MAX_WALL_S, entries=entries)
 
-    def reserve(self, *, timeout_s, owner_invocation_id=None):
+    def reserve(self, *, timeout_s, owner_invocation_id=None, lease_host=None,
+                lease_gpu_uuid=None):
         if owner_invocation_id is not None and not valid_invocation(owner_invocation_id):
             raise ProfileBudgetError('profile_reservation', 'invalid owner invocation')
         timeout_s = min(MAX_WALL_S, max(1.0, float(timeout_s)))
         lease_owner = owner_invocation_id or 'profile-' + os.urandom(16).hex()
         try:
-            acquire_lease(self.run, owner=lease_owner, tool='profile',
-                          deadline=time.time() + timeout_s)
+            lease = acquire_lease(self.run, owner=lease_owner, tool='profile',
+                                  deadline=time.time() + timeout_s,
+                                  host=lease_host, gpu_uuid=lease_gpu_uuid)
         except GpuLeaseBusy as error:
             raise ProfileBudgetError(
                 'profile_gpu_busy',
@@ -105,7 +107,7 @@ class ProfileBudget:
                 entry = dict(id=len(entries) + 1, status='reserved', timeout_s=timeout_s,
                              started_epoch=time.time(), receipt=None, error=None, wall_s=None,
                              owner_invocation_id=owner_invocation_id, lease_owner=lease_owner,
-                             cleanup=None)
+                             lease_key=lease.get('machine_key'), cleanup=None)
                 entries.append(entry)
                 self._write(value)
                 return dict(entry)

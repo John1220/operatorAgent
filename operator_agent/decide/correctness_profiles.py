@@ -49,10 +49,16 @@ def unresolved_semantics(request: str, kernel_type: str) -> tuple:
     """
     fused = []
     parameters = {}
+    request = request or ""
+    if kernel_type == 'layernorm':
+        explicit_default = re.sub(
+            r'\beps\s*[:=]\s*(?:1e-5|0\.00001)\b', '', request, flags=re.I)
+        if explicit_default != request and not re.search(_SEMANTIC_MARKER, explicit_default, re.I):
+            return fused, parameters
     if (kernel_type not in REGISTERED_FUSED_KERNEL_TYPES
-            and re.search(_FUSION_MARKER, request or "", re.I)):
+            and re.search(_FUSION_MARKER, request, re.I)):
         fused = ["unresolved_fusion"]
-    if re.search(_SEMANTIC_MARKER, request or "", re.I):
+    if re.search(_SEMANTIC_MARKER, request, re.I):
         parameters["unresolved_request"] = request
     return fused, parameters
 

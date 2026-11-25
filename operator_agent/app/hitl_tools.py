@@ -33,7 +33,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -84,7 +86,16 @@ from ..execute.host_task_budget import FINAL_SELECTION_SCHEMA
 #:     `request` 推关键词）；新增 `operator_normalize`；`request` 降级为审计字段。
 #: 14: host 模式新增 `operator_profile`：有界 NCU 采集、独立预算与 GPU 租约互斥。
 #: 15: final 默认采用账本推荐源码；显式 override 与选择/交付投影随 journal 快照落账。
-TOOL_VERSION = 15
+#: 16: 宿主支持 seed_source/preflight_receipt、全形状 L3 与调用感知 GPU 租约。
+#: 17: GPU 通配租约升级为实测 UUID；optimize 上下文固化跨轮实验记录。
+TOOL_VERSION = 17
+
+SEED_SCHEMA = 'operator-seed-v1'
+SEED_MAX_BYTES = 256 * 1024
+PREFLIGHT_SCHEMA = 'noise-preflight-v1'
+PREFLIGHT_MAX_BYTES = 64 * 1024
+PREFLIGHT_GPU_UUID = re.compile(
+    r'^(?:MIG-)?GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$')
 
 #: 允许进 `declaration` 的键（§6.3 的白名单）。**没列在这里的一律拒绝** ——
 #: 「先收下、以后再判断」是这一层最不能有的形状：它等于给未来开了一个没说出口的口子。
@@ -545,15 +556,150 @@ def _conflict(route: Route, eligibility: Optional[dict], validity: Optional[str]
     }
 
 
+def _read_optional_json(path):
+    try:
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _read_seed_manifest(run):
+    value = _read_optional_json(Path(run)/'seed.json')
+    if not isinstance(value, dict) or value.get('schema') != SEED_SCHEMA:
+        return None
+    source_hash = value.get('source_hash')
+    if not isinstance(source_hash, str) or len(source_hash) != 64:
+        return None
+    code_path = Path(run)/'seed.py'
+    if code_path.is_symlink() or not code_path.is_file():
+        return None
+    if hashlib.sha256(code_path.read_bytes()).hexdigest() != source_hash:
+        raise ToolError('seed_source_binding', 'The sealed seed source changed after prepare.')
+    return value
+
+
+def _seal_seed(run, source, contract_hash):
+    """Seal the starting source once. A seed is source text, never a live path."""
+    run = Path(run)
+    code_path, manifest_path = run/'seed.py', run/'seed.json'
+    if source is None:
+        return _read_seed_manifest(run) if manifest_path.exists() else None
+    if not isinstance(source, str) or not source.strip():
+        raise ToolError('seed_source_required', 'seed_source must be non-empty source text')
+    data = source.encode('utf-8')
+    if len(data) > SEED_MAX_BYTES:
+        raise ToolError('seed_source_too_large', f'seed_source exceeds {SEED_MAX_BYTES} bytes')
+    digest = hashlib.sha256(data).hexdigest()
+    if manifest_path.exists() or code_path.exists():
+        existing = _read_seed_manifest(run)
+        if existing is None:
+            raise ToolError('seed_source_binding', 'seed.py exists without a usable seed.json')
+        if existing.get('source_hash') != digest or existing.get('contract_hash') != contract_hash:
+            raise ToolError('seed_source_binding', 'This run already sealed a different seed source.')
+        return existing
+    write_once_artifact(code_path, data)
+    manifest = dict(schema=SEED_SCHEMA, source=str(code_path), source_hash=digest,
+                    contract_hash=contract_hash, sealed_at=time.time(), bytes=len(data))
+    write_once_artifact(manifest_path,
+                        json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode('utf-8'))
+    return manifest
+
+
+def _seal_preflight(run, receipt, contract_hash, task):
+    """Validate and seal one window-noise receipt; no receipt means the nominal band."""
+    run = Path(run)
+    path = run/'preflight.json'
+    if receipt is None and not path.exists():
+        return None
+    if receipt is None:
+        value = _read_optional_json(path)
+        if value is None:
+            raise ToolError('preflight_refused', 'preflight.json is not a valid JSON receipt')
+    elif isinstance(receipt, (str, Path)):
+        candidate = Path(receipt)
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ToolError('preflight_refused', 'preflight receipt must be an ordinary file')
+        data = candidate.read_bytes()
+        if len(data) > PREFLIGHT_MAX_BYTES:
+            raise ToolError('preflight_refused', f'preflight receipt exceeds {PREFLIGHT_MAX_BYTES} bytes')
+        try:
+            value = json.loads(data)
+        except ValueError as error:
+            raise ToolError('preflight_refused', 'preflight receipt is not JSON') from error
+    elif isinstance(receipt, dict):
+        value = receipt
+    else:
+        raise ToolError('preflight_refused', 'preflight receipt must be an object or a path')
+    if not isinstance(value, dict) or value.get('schema') != PREFLIGHT_SCHEMA:
+        raise ToolError('preflight_refused', 'a noise-preflight-v1 receipt is required')
+    if value.get('ok') is not True or value.get('action') != 'start' or value.get('test_only') is True:
+        raise ToolError('preflight_refused',
+                        'preflight must be a real-device action=start receipt; re-measure the window')
+    identity = value.get('identity') or {}
+    if identity.get('backend') != 'ssh':
+        raise ToolError('preflight_refused', 'preflight must come from the ssh backend')
+    shape = identity.get('shape')
+    wanted = [list(item) for item in task.constraints.shapes]
+    if not isinstance(shape, list) or shape not in wanted:
+        raise ToolError('preflight_refused', 'preflight shape differs from the frozen task declaration')
+    # GPU 身份是**封存的前提**，不是事后补的备注：没有 UUID 的回执只能证明「某台机器
+    # 在某个窗口安静」，不能证明「**这张卡**安静」。而正式验收要拿 L3/NCU 的读数与它
+    # 配对 —— 卡没写下来，配对就只剩一句"应该是同一张"。2026-11-20 的正式任务就是这样
+    # 封了一份缺 device 的回执（identity 里只有 backend/shape），事后无法复核。
+    device = identity.get('device')
+    device_uuid = str((device or {}).get('uuid') or '').strip() if isinstance(device, dict) else ''
+    if not device_uuid:
+        unavailable = str(identity.get('device_unavailable') or '').strip()
+        raise ToolError(
+            'preflight_device_identity',
+            'preflight has no GPU UUID (identity.device.uuid): this receipt does not bind a '
+            'physical GPU, so a later L3/NCU reading cannot be paired with it'
+            + (f' (preflight said: {unavailable})' if unavailable else '')
+            + '. Re-run noise_preflight with backend=ssh and OPERATOR_AGENT_REQUIRED_GPU / '
+              'OPERATOR_AGENT_REQUIRED_GPU_UUID / OPERATOR_AGENT_REQUIRED_GPU_NAME declared.')
+    if not PREFLIGHT_GPU_UUID.match(device_uuid):
+        raise ToolError(
+            'preflight_device_identity',
+            f'preflight identity.device.uuid is not an nvidia-smi UUID: {device_uuid!r}; '
+            f'pass the value nvidia-smi --query-gpu=uuid prints')
+    band = value.get('effective_band_pct')
+    planned = value.get('planned_effect_pct')
+    if type(band) not in (int, float) or not math.isfinite(band) or band <= 0:
+        raise ToolError('preflight_refused', 'preflight effective_band_pct is missing or invalid')
+    if type(planned) not in (int, float) or not math.isfinite(planned) or planned <= band:
+        raise ToolError('preflight_refused', 'preflight planned effect does not clear its own band')
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True).encode('utf-8')
+    digest = hashlib.sha256(canonical).hexdigest()
+    if path.exists():
+        existing = _read_optional_json(path)
+        if existing is None or json.dumps(existing, ensure_ascii=False,
+                                          sort_keys=True).encode('utf-8') != canonical:
+            raise ToolError('preflight_binding', 'This run already sealed a different preflight receipt.')
+    else:
+        write_once_artifact(path, canonical)
+    return dict(schema=value['schema'], action='start', channel=value.get('channel'),
+                effective_band_pct=float(band), empirical_band_pct=value.get('empirical_band_pct'),
+                nominal_band_pct=value.get('nominal_band_pct'),
+                band_consistent=value.get('band_consistent'),
+                planned_effect_pct=float(planned), created_at=value.get('created_at'),
+                device=dict(index=(device or {}).get('index'), uuid=device_uuid,
+                            name=(device or {}).get('name')),
+                sha256=digest)
+
+
 # ── 动作 1: prepare ──────────────────────────────────────────────────────
 def prepare(declaration: dict, run_dir: str | Path, *, now: Optional[float] = None,
-            host_budget: Optional[dict] = None) -> dict:
+            host_budget: Optional[dict] = None, seed_source: Optional[str] = None,
+            preflight_receipt: Optional[dict | str] = None) -> dict:
     from ..decide.correctness_profiles import AttentionScopeError
     from ..execute.host_task_budget import (HostTaskBudget, HostTaskBudgetError,
         HostTaskLimits, host_task_enabled, initialize_host_task)
     run = Path(run_dir)
     managed = host_budget is not None or host_task_enabled(run)
     if not managed:
+        if seed_source is not None or preflight_receipt is not None:
+            raise ToolError('host_seed_requires_host_workflow',
+                            'seed_source/preflight_receipt require a bounded host task.')
         return _prepare_unlocked(declaration, run, now=now)
     from .host_workflow import prepare_lock, prepared_task
     try:
@@ -570,6 +716,11 @@ def prepare(declaration: dict, run_dir: str | Path, *, now: Optional[float] = No
                 if limits is None:
                     HostTaskBudget(run, existing.hash).snapshot()
             result = _prepare_unlocked(declaration, run, now=now)
+            result['seed'] = _seal_seed(run, seed_source, result['contract_hash'])
+            result['preflight'] = _seal_preflight(run, preflight_receipt, result['contract_hash'],
+                                                  build_task(declaration))
+            if result['seed'] is not None:
+                result['next_action'] = 'verify_seed'
             result['host_task'] = (initialize_host_task(run, result['contract_hash'], limits)
                 if limits is not None else HostTaskBudget(run, result['contract_hash']).snapshot())
             result['workflow'] = 'host'
@@ -629,22 +780,28 @@ def _prepare_unlocked(declaration: dict, run_dir: str | Path, *, now: Optional[f
 
     run = Path(run_dir)
     run.mkdir(parents=True, exist_ok=True)
+    identity_path = run/'run.json'
+    identity = json.loads(identity_path.read_text()) if identity_path.is_file() else None
+    task_id = identity.get('task_id') if isinstance(identity, dict) else None
+    task_id = task_id or getattr(task, 'task_id', '')
+    created_at = identity.get('created_at') if isinstance(identity, dict) else None
     payload = {
         "tool_version": TOOL_VERSION,
-        "created_at": now if now is not None else time.time(),
+        "created_at": created_at if created_at is not None else (now if now is not None else time.time()),
         "declaration": declaration,
         "contract": contract.as_dict(),
     }
     _write_json(run / "declaration.json", declaration)
     _write_json(run / "contract.json", {"hash": contract.hash,
                                         "contract": contract.as_dict()})
-    _write_json(run / "run.json", {
-        "tool": "operator_prepare", "tool_version": TOOL_VERSION,
-        "created_at": payload["created_at"],
-        "task_id": getattr(task, "task_id", ""),
-        "contract_hash": contract.hash,
-    })
-    _record_prepared(run, getattr(task, "task_id", ""), contract.hash)
+    if identity is None:
+        _write_json(identity_path, {
+            "tool": "operator_prepare", "tool_version": TOOL_VERSION,
+            "created_at": payload["created_at"],
+            "task_id": task_id,
+            "contract_hash": contract.hash,
+        })
+    _record_prepared(run, task_id, contract.hash)
 
     assumptions = declaration_assumptions(declaration)
     notes = []
@@ -754,7 +911,8 @@ def verify(run_dir: str | Path, code: str, *, verification_purpose='explore',
         owner = host_context(run)
         reservation = budget.reserve(code_hash(code), purpose=verification_purpose,
             owner_invocation_id=owner['invocation_id'] if owner else None,
-            final_selection=final_selection)
+            final_selection=final_selection,
+            lease_host=options.get('host') if options.get('backend') == 'ssh' else None)
         result = _verify_candidate(run_dir, code, verification_purpose=verification_purpose,
                                    **options)
         if final_selection is not None:
@@ -851,14 +1009,7 @@ def profile(run_dir: str | Path, verification_round: int, *, case_index: int = 0
           if isinstance(row, dict) and row.get('level') == 'L3']
     metrics = (l3[0].get('metrics') or {}) if len(l3) == 1 else {}
     gpu = metrics.get('selected_gpu')
-    baseline_performance = {}
-    baseline_path = run / 'baseline.json'
-    if baseline_path.is_file():
-        try:
-            baseline = json.loads(baseline_path.read_text(encoding='utf-8'))
-            baseline_performance = (baseline.get('performance') or {}) if isinstance(baseline, dict) else {}
-        except (OSError, ValueError, TypeError):
-            baseline_performance = {}
+    baseline_performance = (budget.get('baseline') or {}).get('performance') or {}
     cache = ncu_profile.cache_conditions(metrics, baseline_performance)
     if type(gpu) is not int:
         raise ToolError('profile_gpu_unknown',
@@ -887,7 +1038,8 @@ def profile(run_dir: str | Path, verification_round: int, *, case_index: int = 0
     owner_context = _tool_calls.profile_context(run)
     owner = owner_context.get('invocation_id') if isinstance(owner_context, dict) else None
     try:
-        reservation = ledger.reserve(timeout_s=wall_cap, owner_invocation_id=owner)
+        reservation = ledger.reserve(timeout_s=wall_cap, owner_invocation_id=owner,
+                                     lease_host=host, lease_gpu_uuid=gpu_uuid)
     except ProfileBudgetError as error:
         raise ToolError(error.code, error.detail) from error
     profile_id = reservation['id']
@@ -1186,7 +1338,7 @@ def _verify_candidate(run_dir: str | Path, code: str, *, stop_after: Any = None,
         run = evidence.run
         source = evidence.source("candidate.py", code)
         evidence.binding["source_hash"] = source["source_hash"]
-        inputs = contract.cases[0].materialize()
+        inputs = [case.materialize() for case in contract.cases]
         # ⚠️ 后端构造/解析**也会 print**（`[RemoteExecutor] SSH 连接成功: …`）。2026-10-18
         # 第一次真机 L1 就撞上了：那行跑到 stdout，把整份 JSON 变成不可解析（真事）。
         # 所以这里与 verify 同一条纪律：库的 stdout 一律收进日志，不进协议流。
@@ -1197,6 +1349,14 @@ def _verify_candidate(run_dir: str | Path, code: str, *, stop_after: Any = None,
                                                         persistent=persistent)
         environment = _environment_of(backend_obj)
         evidence.binding["environment"] = environment
+        lease_path = run/'gpu-lease.json'
+        if lease_path.is_file() and backend_obj.selected_gpu_uuid:
+            from ..execute.gpu_lease import GpuLeaseBusy, upgrade as upgrade_lease
+            lease = json.loads(lease_path.read_text(encoding='utf-8'))
+            try:
+                upgrade_lease(run, lease['owner'], backend_obj.selected_gpu_uuid)
+            except GpuLeaseBusy as error:
+                raise ToolError('host_gpu_busy', str(error)) from error
         if verification_purpose == 'explore' and level is not None and level.value in ('L1', 'L2'):
             cached = verdict_cache.lookup(
                 run, contract_hash=contract.hash, source_hash=source["source_hash"],
@@ -2194,7 +2354,7 @@ def autonomous_status(run_dir: str | Path, invocation_id: Optional[str] = None) 
         return dict(ok=True, workflow='host', phase=budget['phase'], run_dir=str(run),
             host_task=budget, calls=[autonomous_status(p) for p in calls],
             last_correct_candidate=budget.get('last_correct_candidate'),
-            baseline=budget.get('baseline'), best_candidate=budget.get('best_candidate'),
+            seed=budget.get('seed'), baseline=budget.get('baseline'), best_candidate=budget.get('best_candidate'),
             final_selection=budget.get('final_selection'),
             candidates=budget.get('candidates'), noise_band=budget.get('noise_band'),
             selection=budget.get('selection'), formal_delivery=budget.get('formal_delivery'),
